@@ -23,6 +23,26 @@ for case in cases/*.cs; do
     got=$($PALCS -q -o "out/$name" "$case" 2>&1)
     status=$?
 
+    # An .fst.config.json per case, not one for the directory: every case emits a
+    # module named `TranslationErrors`, so a single config listing all the case
+    # directories would make that name ambiguous. The F* IDE takes the config nearest
+    # the file being edited, so one per output directory resolves it.
+    if [ -d "out/$name" ]; then
+        cat > "out/$name/$name.fst.config.json" <<JSON
+{
+  "fstar_exe": "../../../../tools/run-fstar.sh",
+  "include_dirs": [
+    ".",
+    "../../../../pulse",
+    "../../../../pulse/_cache"
+  ],
+  "options": [
+    "--already_cached", "Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore"
+  ]
+}
+JSON
+    fi
+
     if ! grep -q "$want" <<<"$got"; then
         echo "diagnostics: $name: expected $want, got:"
         sed 's/^/    /' <<<"$got"

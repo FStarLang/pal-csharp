@@ -213,14 +213,16 @@ else in the translator; it belongs in that example's `.cs` file.
 
 ```
 test/
-  <name>/Makefile          `include ../verify.mk`
-  <name>/<Name>.cs         the annotated program
-  <name>/<Name>Variant.cs  the same contract, written differently
-  verify.mk                the shared harness
-  diagnostics/             negative tests: what must be *rejected*
-  pulse_facts/             regression pins for the facts in translation.md §1
-  no-example-names.sh      no test-suite identifier may appear in Pal.Compiler
-  provenance-lint.sh       every generated construct must trace to a C# span
+  <name>/Makefile               `include ../verify.mk`
+  <name>/<Name>.cs              the annotated program
+  <name>/<Name>Variant.cs       the same contract, written differently
+  <name>/<name>.fst.config.json IDE configuration, generated
+  verify.mk                     the shared harness
+  diagnostics/                  negative tests: what must be *rejected*
+  pulse_facts/                  regression pins for the facts in translation.md §1
+  no-example-names.sh           no test-suite identifier may appear in Pal.Compiler
+  provenance-lint.sh            every generated construct must trace to a C# span
+  fst-configs.sh                writes (and `--check`s) the .fst.config.json files
 ```
 
 `verify.mk` is two-phase, and the reason is worth recording: F\*'s dependency graph is not
@@ -236,6 +238,27 @@ reverse-engineered from its own test suite.
 If a test's results look stale after a compiler change, `rm -rf out _cache` in its
 directory.
 
+### Checking generated modules interactively
+
+The F\* IDE looks for a file whose name ends in `.fst.config.json`, searching from the
+directory of the file being edited up to the workspace root and taking the **nearest**
+one. A config in `test/swap/` therefore serves `test/swap/out/Func_Swapping_Swap.fst`
+too, which is the whole reason one config per test directory is enough.
+
+`test/fst-configs.sh` writes them, deriving each directory's include paths from what it
+holds — `.` when there are hand-written `.fst` files, `out` when `palcs` generates
+modules, always `_cache` and the support library — so there is no per-test special case.
+`make -C test` runs it with `--check`: a config that has drifted from the build fails the
+suite, because an IDE that disagrees with `make` about `--include` or `--already_cached`
+produces errors that exist nowhere but the editor.
+
+`test/diagnostics` is the one directory with a config *per case* rather than one for the
+directory, and the reason is instructive: every rejected case emits a module named
+`TranslationErrors`, so a single config listing all the case directories would make that
+name ambiguous and F\* would silently resolve it to a different case's file. `run.sh`
+writes one config into each case's output directory instead, and the nearest-config rule
+does the rest.
+
 ### Adding a test
 
 1. `mkdir test/<name> && echo 'include ../verify.mk' > test/<name>/Makefile`
@@ -245,7 +268,8 @@ directory.
 3. write `<Name>Variant.cs`: the same contract, genuinely differently written — loop form
    swapped, locals renamed and reordered, guard restructured, a helper extracted. It must
    verify with **no translator change**. If it does not, that is the signal §7.2 exists to
-   produce.
+   produce;
+4. `make -C test configs`, so the new directory gets its `.fst.config.json`.
 
 ### When a proof fails
 
