@@ -93,6 +93,10 @@ public sealed class WellKnown
         SymbolEqualityComparer.Default.Equals(n.OriginalDefinition, def);
 
     /// <summary>The C# scalar-to-Pulse mapping of <c>doc/translation.md</c> §3 (R3.1).</summary>
+    /// <summary>Whether a class declares the <c>[Model]</c> member R3.9 requires.</summary>
+    public bool HasModel(INamedTypeSymbol type) =>
+        type.GetMembers().Any(m => Declarations.Has(m, ModelAttribute));
+
     public IrType? MapType(ITypeSymbol? type)
     {
         switch (type)
@@ -105,6 +109,10 @@ public sealed class WellKnown
                 return new IrSeqType(se);
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:
                 return new IrGhostType(ge);
+            // §3.4. A class is translated exactly when it declares a [Model] member: R3.9
+            // makes the model mandatory, so its presence is the same test as "annotated".
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } named when HasModel(named):
+                return new IrClassType(named.Name);
         }
 
         if (SymbolEqualityComparer.Default.Equals(type, SpecInt)) return new IrPrim(PrimKind.SpecInt);

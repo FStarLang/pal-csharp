@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Emit;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
@@ -24,6 +25,25 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// </summary>
     public bool SpecPosition { get; } = specPosition;
 
+    /// <summary>
+    /// §3.4. The members of the class being lowered, which a body inside that class names
+    /// without a receiver: the fields a <c>[Model]</c> abstraction reads, and the
+    /// <c>[Model]</c> member a <c>[Spec]</c> observation reads. Each becomes a simple
+    /// binder, which is the same convention R3.4 already uses for a struct's
+    /// <c>[Refine]</c>, so the emitter binds them and nothing here needs a receiver.
+    /// Empty everywhere else, so an unqualified member reference stays unsupported.
+    /// </summary>
+    public ImmutableHashSet<string> ClassMembers { get; init; } = [];
+
+    /// <summary>
+    /// The instance fields of the class whose method is being lowered (§4.5). Inside that
+    /// method — and only there — a field name denotes the field itself rather than a
+    /// function of the model, because the method holds the representation between the
+    /// opening <c>unfold</c> and the closing <c>fold</c>. Outside, the same name is
+    /// PALCS0523: a caller holds the model and nothing else.
+    /// </summary>
+    public ImmutableHashSet<string> ObjectFields { get; init; } = [];
+
     public IrExpr Lower(ExpressionSyntax node)
     {
         var loc = Locations.From(node);
@@ -39,6 +59,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             LiteralExpressionSyntax l when l.IsKind(SyntaxKind.DefaultLiteralExpression) =>
                 Default(node, loc),
             LiteralExpressionSyntax l => LowerLiteral(l, loc),
+            ThisExpressionSyntax => new IrVar(loc, Names.This),
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
@@ -191,6 +212,10 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         {
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
+            IFieldSymbol or IPropertySymbol when ClassMembers.Contains(node.Identifier.ValueText) =>
+                new IrVar(loc, node.Identifier.ValueText),
+            IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
+                new IrField(loc, new IrVar(loc, Names.This), node.Identifier.ValueText),
             _ => Unsupported(node, loc),
         };
     }
@@ -213,6 +238,35 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         if (symbol is IFieldSymbol or IPropertySymbol && receiverType?.TypeKind == TypeKind.Struct)
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
+
+        // `this.f` and a bare `f` are the same reference, so they must lower to the same
+        // node: writing the receiver out is a style choice, and §7.2 requires that style
+        // choices do not reach the emitter. Which node that is depends on where we are —
+        // a class-level clause binds fields directly, a method body reaches them through
+        // the box — and both cases are decided exactly as they are for the bare name.
+        if (node.Expression is ThisExpressionSyntax && symbol is IFieldSymbol or IPropertySymbol)
+        {
+            var member = node.Name.Identifier.ValueText;
+            if (ClassMembers.Contains(member)) return new IrVar(loc, member);
+            if (symbol is IFieldSymbol { IsStatic: false } && ObjectFields.Contains(member))
+                return new IrField(loc, new IrVar(loc, Names.This), member);
+        }
+
+        // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
+        // a caller holds the model and nothing else; a field read here would be a fact
+        // about the representation, which no caller can see.
+        if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } owner && known.HasModel(owner))
+        {
+            if (symbol is not null && Declarations.Has(symbol, known.SpecAttribute))
+                return new IrObserve(
+                    loc, owner.Name, node.Name.Identifier.ValueText, Lower(node.Expression));
+
+            diagnostics.Error("PALCS0523", loc,
+                $"`{node.Name.Identifier.ValueText}` is not a `[Spec]` member of `{owner.Name}`, so a " +
+                "contract cannot read it. A caller holds the object's model, not its fields — widen the " +
+                "model and expose the quantity as a `[Spec]` member.");
+            return new IrLiteral(loc, null);
+        }
 
         return Unsupported(node, loc);
     }

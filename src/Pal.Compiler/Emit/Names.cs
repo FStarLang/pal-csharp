@@ -52,6 +52,38 @@ public static class Names
     public static string Projection(string structName, string field) =>
         StructModule(structName) + "." + Field(field);
 
+    // §3.4. A class emits five constructs, all in one module: the representation record,
+    // the object-reference type, the refined model type (predicate plus abbreviation),
+    // and the model-indexed invariant. Field names are shared with R3.4 verbatim, so
+    // field access and field update need no class-specific rule.
+    public static string ClassModule(string name) => "Class_" + name;
+    public static string ClassType(string name) => "class_" + name;
+    public static string ClassRaw(string name) => "class_" + name + "__raw";
+    public static string ClassInv(string name) => "class_" + name + "__inv";
+
+    // R3.9d. The refined model type is named after the *class*, not after the model type:
+    // an atomic model such as `SpecInt` has no user-declared struct to refine, and two
+    // classes sharing a model type must not collide.
+    public static string ClassModel(string name) => "class_" + name + "__model";
+    public static string ClassModelPred(string name) => "class_" + name + "__model__pred";
+
+    /// <summary>A <c>[Spec]</c> member of a class: a pure function of the model (R3.9c).</summary>
+    public static string Observation(string className, string member) =>
+        "spec_" + className + "_" + member;
+
+    /// <summary>The class-qualified field projection <c>e.Class_C.fld_f</c> (F10).</summary>
+    public static string ClassProjection(string className, string field) =>
+        ClassModule(className) + "." + Field(field);
+
+    /// <summary>The receiver of an instance method (R4.10a). Spelled <c>@this</c> in C#.</summary>
+    public const string This = "this";
+
+    /// <summary>The ghost model binder threaded through an instance method (R4.10).</summary>
+    public const string Model = "var_model";
+
+    /// <summary>The post-state model an instance method's <c>ensures</c> quantifies (R4.10).</summary>
+    public const string ModelPost = "var_model_post";
+
     public const string Result = "var_result";
 }
 
@@ -111,6 +143,7 @@ public static class Types
         IrSeqType s => $"Seq.seq {Render(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
+        IrClassType c => $"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}",
         IrPulseType p => p.PulseText,
         _ => "unit",
     };

@@ -16,7 +16,10 @@ namespace Pal.Compiler.Emit;
 /// <c>if</c> are always emitted, and no statement is reordered, merged or elided.
 /// </para>
 /// </summary>
-public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
+public sealed class CodeEmitter(
+    SpecEmitter spec,
+    DiagnosticBag diagnostics,
+    IReadOnlyDictionary<string, IrClass>? classes = null)
 {
     private readonly StringBuilder _sb = new();
     private readonly Dictionary<string, Slot> _slots = [];
@@ -34,6 +37,13 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
 
     private Escape? _escape;
 
+    /// <summary>
+    /// R4.10. The objects this method holds, in declaration order. Each is unfolded once
+    /// on entry and re-folded on every exit; between the two the body owns the
+    /// representation and may read and write fields.
+    /// </summary>
+    private ImmutableArray<Slot> _objects = ImmutableArray<Slot>.Empty;
+
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
@@ -42,6 +52,22 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
     public string EmitBody(IrMethod method, MethodPlan plan)
     {
         foreach (var (name, slot) in plan.Slots) _slots[name] = slot;
+
+        if (method is { IsConstructor: true, ReturnType: IrClassType built })
+        {
+            Construct(method, built);
+            return _sb.ToString();
+        }
+
+        _objects = [.. method.Parameters
+            .Select(p => plan.Slots.TryGetValue(p.Name, out var s) ? s : null)
+            .Where(s => s is { Kind: SlotKind.Object })
+            .Select(s => s!)];
+
+        // R4.10. Open every object the contract handed us. The invariant is abstract to
+        // the caller, so the body cannot touch a field until it is unfolded, and the
+        // matching `fold` on each exit path is what re-establishes it.
+        foreach (var obj in _objects) Line(Unfold(obj) + ";");
 
         // R4.2: rebind assigned by-value parameters as cells.
         foreach (var (cell, source) in plan.Prologue) Line($"let mut {cell} = {source};");
@@ -72,7 +98,11 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         }
 
         if (statements.Length > 0) Tail(statements[^1], method, plan);
-        else if (IsVoid(method)) Line("()");
+        else
+        {
+            CloseObjects(method, plan);
+            if (IsVoid(method)) Line("()");
+        }
     }
 
     private static bool IsVoid(IrMethod method) => method.ReturnType is IrPrim { Kind: PrimKind.Void };
@@ -87,12 +117,27 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         switch (stmt)
         {
             case IrReturn { Value: null }:
+                CloseObjects(method, plan);
                 Line("()");
                 return;
 
             case IrReturn ret:
-                Line(Expr(ret.Value!));
+            {
+                // The value is computed *before* the closing `fold`, because computing it
+                // may read a field and so needs the representation still open; it is
+                // let-bound so that the `fold` can be interposed between the read and the
+                // block's value.
+                var text = Expr(ret.Value!);
+                if (_objects.Length > 0)
+                {
+                    var t = Fresh();
+                    Line($"let {t} = {text};");
+                    CloseObjects(method, plan);
+                    Line(t);
+                }
+                else Line(text);
                 return;
+            }
 
             case IrBlock b:
                 EmitSequence(b.Statements, method, plan);
@@ -115,9 +160,129 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
 
             default:
                 Statement(stmt, plan);
+                CloseObjects(method, plan);
                 if (IsVoid(method)) Line("()");
                 return;
         }
+    }
+
+    // =======================================================================
+    // Objects (R4.10-R4.11a)
+    // =======================================================================
+
+    /// <summary>
+    /// R4.12. A constructor allocates the representation, establishes the invariant on it
+    /// and returns the object. Nothing is freed: Pulse slprops are affine and the CLR is
+    /// garbage collected (F15).
+    ///
+    /// <para>The body is required to be a sequence of field initialisations, because that
+    /// is what a record literal can express. A constructor that reads a field it has
+    /// written, or calls a method on the half-built object, is refused rather than
+    /// approximated: two-phase initialisation needs an invariant that holds of a partial
+    /// object, which the scheme does not have.</para>
+    /// </summary>
+    private void Construct(IrMethod method, IrClassType built)
+    {
+        if (classes is null || !classes.TryGetValue(built.Name, out var decl))
+        {
+            diagnostics.Unsupported(method.Loc, $"A constructor of `{built.Name}`");
+            return;
+        }
+
+        var initialisers = new Dictionary<string, string>();
+        foreach (var stmt in method.Body is IrBlock b ? b.Statements : [method.Body!])
+        {
+            if (stmt is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This } } f } a)
+            {
+                initialisers[f.Field] = Expr(a.Value);
+                continue;
+            }
+            if (stmt is IrBlock { Statements.IsEmpty: true }) continue;
+            diagnostics.Unsupported(stmt.Loc, "A constructor statement that is not a field initialisation",
+                "A constructor may only assign its own fields: the object's invariant does " +
+                "not hold until every field has a value, so nothing else can run first.");
+            return;
+        }
+
+        var fields = new List<string>();
+        foreach (var (field, i) in decl.Fields.Select((f, i) => (f, i)))
+        {
+            if (!initialisers.TryGetValue(field.Name, out var value))
+            {
+                diagnostics.Unsupported(method.Loc,
+                    $"A constructor that leaves `{field.Name}` uninitialised",
+                    "Assign every field: the invariant is established over the whole " +
+                    "representation, so a default-valued field would have to satisfy it by luck.");
+                return;
+            }
+            fields.Add((i == 0 ? Names.ClassProjection(decl.Name, field.Name) : Names.Field(field.Name))
+                       + " = " + value);
+        }
+
+        Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
+
+        var slot = new Slot(Names.This, built, SlotKind.Object, Names.Result)
+        {
+            PreModel = null,
+            PostModel = "post_" + Names.This,
+        };
+        Line($"fold {Inv(built)} {Names.Result} {ModelWitness(decl, slot)};");
+        Line(Names.Result);
+    }
+
+    private static string Inv(IrClassType c) =>
+        $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
+
+    private static string Unfold(Slot obj) =>
+        $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PreModel}";
+
+    /// <summary>
+    /// R4.11a — the fold witness. A read-only method re-folds at the binder it was handed:
+    /// its model did not change, and re-folding at a *recomputed* model instead leaves
+    /// Pulse two syntactically different indices to reconcile, which it will not do
+    /// (Error 228). A mutator has no such binder to appeal to, so it re-folds at the
+    /// abstraction function applied to the representation it has just written — the same
+    /// expression the class module puts in the invariant, evaluated at the post-state.
+    /// </summary>
+    private void CloseObjects(IrMethod method, MethodPlan plan)
+    {
+        foreach (var obj in _objects)
+        {
+            var klass = (IrClassType)obj.Type;
+            if (obj.PostModel == obj.PreModel)
+            {
+                Line($"fold {Inv(klass)} {obj.Binder} {obj.PreModel};");
+                continue;
+            }
+
+            if (classes is null || !classes.TryGetValue(klass.Name, out var decl))
+            {
+                diagnostics.Unsupported(method.Loc,
+                    $"Mutating an object of class `{klass.Name}` whose model is not in this translation unit");
+                continue;
+            }
+
+            Line($"fold {Inv(klass)} {obj.Binder} {ModelWitness(decl, obj)};");
+        }
+    }
+
+    /// <summary>
+    /// The abstraction function applied to the object's current representation: the
+    /// <c>[Model]</c> member's body, with each field read through the box.
+    /// </summary>
+    private string ModelWitness(IrClass decl, Slot obj)
+    {
+        var raw = Fresh();
+        Line($"let {raw} = B.op_Bang {obj.Binder};");
+
+        var scope = new SpecScope();
+        foreach (var field in decl.Fields)
+        {
+            scope.Bind(field.Name, new Term(
+                $"{raw}.{Names.ClassProjection(decl.Name, field.Name)}",
+                MethodPlan.KindOf(field.Type), field.Type));
+        }
+        return spec.Math(decl.ModelBody, scope);
     }
 
     // =======================================================================
@@ -275,6 +440,20 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 var index = Expr(el.Index);
                 var value = Expr(a.Value);
                 Line($"write {array} {index} {value};");
+                return;
+            }
+
+            // R3.8. Writing a field of an object is a write through the box: read the
+            // representation, replace one field, write it back. The record update needs a
+            // pure source (F11), which is why the dereference is let-bound first.
+            case IrField { Receiver: IrVar ov } field when
+                _slots.TryGetValue(ov.Name, out var obj) && obj is { Kind: SlotKind.Object, Type: IrClassType oc }:
+            {
+                var value = Expr(a.Value);
+                var current = Fresh();
+                Line($"let {current} = B.op_Bang {obj.Binder};");
+                Line($"B.op_Colon_Equals {obj.Binder} " +
+                     $"({{ {current} with {Names.ClassProjection(oc.Name, field.Field)} = {value} }});");
                 return;
             }
 
@@ -614,6 +793,18 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 var t = Fresh();
                 Line($"let {t} = read {array} {index};");
                 return t;
+            }
+
+            // R3.8. A field of an object lives behind a box, so reading it is a memory
+            // operation, not a projection: the object is dereferenced and the resulting
+            // representation projected. Legal only between the opening `unfold` and the
+            // closing `fold`, which is exactly where a method body lives.
+            case IrField { Receiver: IrVar ov } f when
+                _slots.TryGetValue(ov.Name, out var obj) && obj is { Kind: SlotKind.Object, Type: IrClassType oc }:
+            {
+                var t = Fresh();
+                Line($"let {t} = B.op_Bang {obj.Binder};");
+                return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
             }
 
             case IrField f:

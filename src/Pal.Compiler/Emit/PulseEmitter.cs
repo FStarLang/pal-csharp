@@ -39,16 +39,27 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
 
     private string Perm => Fraction is null ? "" : $"#{Fraction} ";
 
+    /// <summary>For an object slot: the ghost binder holding its model on entry.</summary>
+    public string? PreModel { get; init; }
+
+    /// <summary>
+    /// For an object slot: the binder its invariant is re-folded at on exit. Equal to
+    /// <see cref="PreModel"/> for a read-only method (R4.11a).
+    /// </summary>
+    public string? PostModel { get; init; }
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
         SlotKind.Cell => $"R.pts_to {Binder} {value}",
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
+        SlotKind.Object when Type is IrClassType c =>
+            $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} {Binder} {value}",
         _ => "",
     };
 
-    public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array;
+    public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array or SlotKind.Object;
 }
 
 public enum SlotKind
@@ -61,6 +72,11 @@ public enum SlotKind
     RefParam,
     /// <summary>An array parameter.</summary>
     Array,
+    /// <summary>
+    /// An object: a <c>B.box</c> of the class's representation, owned through
+    /// <c>class_C__inv</c> rather than a <c>pts_to</c> (R3.8, R4.10).
+    /// </summary>
+    Object,
 }
 
 /// <summary>
@@ -72,10 +88,12 @@ public enum SlotKind
 public sealed class PulseEmitter(DiagnosticBag diagnostics)
 {
     private readonly SpecEmitter _spec = new(diagnostics);
+    private Dictionary<string, IrClass> _classes = [];
 
     public ImmutableArray<EmittedModule> Emit(IrProgram program)
     {
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
+        _classes = program.Declarations.OfType<IrClass>().ToDictionary(c => c.Name);
         foreach (var decl in program.Declarations)
         {
             var module = decl switch
@@ -84,6 +102,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrMethod { IsLemma: true } m => EmitLemma(m),
                 IrMethod m => EmitMethod(m),
                 IrStruct s => EmitStruct(s),
+                IrClass c => EmitClass(c),
                 IrIncludePulse i => new EmittedModule(i.Module, i.Text),
                 _ => null,
             };
@@ -95,20 +114,36 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrMethod { IsLemma: true } m => Names.Lemma(m.Name),
                 IrMethod m => Names.Function(m.Name),
                 IrStruct s => Names.StructType(s.Name),
+                IrClass c => Names.ClassType(c.Name),
                 _ => "*",
             };
 
             // R3.4 emits three constructs for one C# declaration — the record, its
             // refinement predicate, and the refined type — so all three are recorded
             // against the same span rather than leaving two of them unaccounted for.
-            ImmutableArray<Provenance> origin = decl is IrStruct st
-                ?
+            ImmutableArray<Provenance> origin = decl switch
+            {
+                IrStruct st =>
                 [
                     new Provenance(Names.StructRaw(st.Name), decl.Loc),
                     new Provenance(Names.StructPred(st.Name), decl.Loc),
                     new Provenance(Names.StructType(st.Name), decl.Loc),
-                ]
-                : [new Provenance(construct, decl.Loc)];
+                ],
+                // §3.4 emits five constructs plus one per [Spec] member for a single C#
+                // class declaration, so each is recorded against the span it came from
+                // rather than leaving five of them unaccounted for.
+                IrClass cl =>
+                [
+                    new Provenance(Names.ClassRaw(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassType(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassModelPred(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassModel(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassInv(cl.Name), decl.Loc),
+                    .. cl.Observations.Select(o =>
+                        new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
+                ],
+                _ => [new Provenance(construct, decl.Loc)],
+            };
 
             modules.Add(module with { Origin = origin });
         }
@@ -290,12 +325,116 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     }
 
     // =======================================================================
+    // Classes (§3.4)
+    // =======================================================================
+
+    /// <summary>
+    /// A C# <c>class</c> is a heap cell with identity, so — unlike a struct (R3.4) — it
+    /// needs a <c>Box</c> and a model-indexed invariant. One module carries the whole
+    /// type: the representation, the object-reference type, the refined model type, the
+    /// invariant, and each <c>[Spec]</c> observation. Method modules open it.
+    /// </summary>
+    private EmittedModule EmitClass(IrClass c)
+    {
+        // R3.7: inside the defining module a field needs no qualifier, and must not have
+        // one, or F*'s dependency scan reads the module as depending on itself.
+        var repScope = new SpecScope();
+        foreach (var f in c.Fields)
+            repScope.Bind(f.Name, new Term(
+                $"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+
+        // R3.9d: the model refinement is stated over the model value, which a [Refine]
+        // on the [Model] member names `Result`, as an [Ensures] does.
+        var modelKind = MethodPlan.KindOf(c.ModelType);
+        var modelScope = new SpecScope { ResultTerm = "m", ResultKind = modelKind };
+        var modelPred = c.ModelRefinements.Length == 0
+            ? "True"
+            : SpecEmitter.Conjunction(
+                c.ModelRefinements.Select(r => _spec.AsProp(_spec.Emit(r, modelScope))));
+
+        // R3.9b: the [Invariant] clauses and the abstraction relation are conjuncts of one
+        // `pure`, and the order is load-bearing. `p1 /\ p2` types `p2` with `p1` in scope,
+        // so the [Invariant] clauses come *first*: they are the bounds that make a partial
+        // abstraction such as `Seq.slice contents 0 top` well-typed where it appears.
+        // The equation is stated at the model's kind: a `SpecInt` model of an `int` field
+        // is that field's mathematical value, so the abstraction carries the `Int32.v` that
+        // §6 puts on every integer in spec position.
+        var abstraction = modelKind == TermKind.Math
+            ? _spec.Math(c.ModelBody, repScope)
+            : _spec.Emit(c.ModelBody, repScope).Text;
+        var conjuncts = new List<string>();
+        conjuncts.AddRange(c.Invariants.Select(i => _spec.AsProp(_spec.Emit(i, repScope))));
+        conjuncts.Add($"m == {abstraction}");
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"module {Names.ClassModule(c.Name)}");
+        sb.AppendLine("#lang-pulse");
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Opens);
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Modules);
+        sb.AppendLine();
+
+        sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).AppendLine(" = {");
+        foreach (var f in c.Fields)
+            sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
+        sb.AppendLine("}");
+        sb.AppendLine();
+
+        // R3.8: a CLR object reference is a `Box.box` of the representation. `Box` is the
+        // sound heap cell (F14); `Reference.alloc` is marked unsound and never emitted.
+        sb.AppendLine($"let {Names.ClassType(c.Name)} = B.box {Names.ClassRaw(c.Name)}");
+        sb.AppendLine();
+
+        // R3.9d. Emitted even when the predicate is `True`, for the same reason
+        // `struct_S__pred` is (§0 rule 2): uniform output beats output whose shape
+        // depends on whether the user happened to write [Refine].
+        var modelType = Types.Render(c.ModelType);
+        sb.AppendLine($"let {Names.ClassModelPred(c.Name)} (m: {modelType}) : prop =");
+        sb.AppendLine($"  {modelPred}");
+        sb.AppendLine();
+        sb.AppendLine($"type {Names.ClassModel(c.Name)} = " +
+                      $"m: {modelType} {{ {Names.ClassModelPred(c.Name)} m }}");
+        sb.AppendLine();
+
+        // R3.10: the invariant is indexed by the model. An un-indexed `inv (x: C)` puts
+        // the object's whole state under an existential, so no postcondition could relate
+        // the post-state to the pre-state — memory safety and nothing more.
+        sb.AppendLine($"let {Names.ClassInv(c.Name)} " +
+                      $"(this: {Names.ClassType(c.Name)}) (m: {Names.ClassModel(c.Name)}) : slprop =");
+        sb.AppendLine($"  exists* (r: {Names.ClassRaw(c.Name)}).");
+        sb.AppendLine("    B.pts_to this r **");
+        sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
+
+        // R3.9c: each [Spec] member is a pure function of the model, never of the
+        // representation — a caller holds only the model, so an observation it cannot
+        // compute from the model is one it cannot use.
+        foreach (var o in c.Observations)
+        {
+            var obsScope = new SpecScope();
+            obsScope.Bind(c.ModelMember, new Term("m", modelKind, c.ModelType));
+            var (ret, text) = o.ReturnType switch
+            {
+                IrPrim { Kind: PrimKind.Bool } => ("prop", _spec.AsProp(_spec.Emit(o.Body, obsScope))),
+                IrPrim { IsMachineInt: true } => ("int", _spec.Math(o.Body, obsScope)),
+                _ => (Types.Render(o.ReturnType), _spec.Emit(o.Body, obsScope).Text),
+            };
+            sb.AppendLine();
+            sb.AppendLine($"let {Names.Observation(c.Name, o.Name)} " +
+                          $"(m: {Names.ClassModel(c.Name)}) : {ret} =");
+            sb.AppendLine($"  {text}");
+        }
+
+        return new EmittedModule(Names.ClassModule(c.Name), sb.ToString());
+    }
+
+    // =======================================================================
     // Methods (R4.1)
     // =======================================================================
 
     private EmittedModule EmitMethod(IrMethod method)
     {
-        var body = new CodeEmitter(_spec, diagnostics);
+        var body = new CodeEmitter(_spec, diagnostics, _classes);
         var plan = new MethodPlan(method, _spec, diagnostics);
 
         var sb = new StringBuilder();
@@ -419,6 +558,7 @@ public static class Preamble
         """
         module R = Pulse.Lib.Reference
         module A = Pulse.Lib.Array
+        module B = Pulse.Lib.Box
         module I8 = FStar.Int8
         module I16 = FStar.Int16
         module I32 = FStar.Int32

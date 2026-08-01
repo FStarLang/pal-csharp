@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Emit;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
@@ -17,16 +18,22 @@ public static class FrontendPass
     {
         var known = WellKnown.For(compilation);
         var candidates = Collect(compilation, known);
-        ReportUncollected(compilation, known, diagnostics);
         var structs = CollectStructs(compilation, known, diagnostics);
+        var classes = CollectClasses(compilation, known, diagnostics);
+        ReportUncollected(compilation, known, classes, diagnostics);
         var sites = BuildSpecSites(compilation, known, candidates)
-            .AddRange(BuildStructSpecSites(structs));
+            .AddRange(BuildStructSpecSites(structs))
+            .AddRange(BuildClassSpecSites(classes));
 
         var bound = SpecBinder.Bind(ref compilation, sites, diagnostics);
 
         var declarations = ImmutableArray.CreateBuilder<IrDecl>();
         foreach (var s in structs)
             declarations.Add(LowerStruct(s, known, bound, diagnostics));
+
+        foreach (var c in classes)
+            declarations.Add(LowerClass(
+                c, known, bound, compilation.GetSemanticModel(c.Syntax.SyntaxTree), diagnostics));
 
         foreach (var candidate in candidates)
         {
@@ -48,9 +55,26 @@ public static class FrontendPass
     // -----------------------------------------------------------------------
 
     private sealed record Candidate(
-        MethodDeclarationSyntax Syntax,
+        BaseMethodDeclarationSyntax Syntax,
         IMethodSymbol Symbol,
-        CalleeKind Kind);
+        CalleeKind Kind)
+    {
+        /// <summary>The name token: a method's identifier, or a constructor's type name.</summary>
+        public SyntaxToken Identifier => Syntax switch
+        {
+            MethodDeclarationSyntax m => m.Identifier,
+            ConstructorDeclarationSyntax c => c.Identifier,
+            _ => Syntax.GetFirstToken(),
+        };
+
+        public ArrowExpressionClauseSyntax? ExpressionBody => Syntax switch
+        {
+            MethodDeclarationSyntax m => m.ExpressionBody,
+            ConstructorDeclarationSyntax c => c.ExpressionBody,
+            _ => null,
+        };
+
+    }
 
     private static ImmutableArray<Candidate> Collect(CSharpCompilation compilation, WellKnown known)
     {
@@ -58,9 +82,9 @@ public static class FrontendPass
         foreach (var tree in compilation.SyntaxTrees)
         {
             var model = compilation.GetSemanticModel(tree);
-            foreach (var method in tree.GetRoot().DescendantNodes().OfType<MethodDeclarationSyntax>())
+            foreach (var method in tree.GetRoot().DescendantNodes().OfType<BaseMethodDeclarationSyntax>())
             {
-                if (model.GetDeclaredSymbol(method) is not { } symbol) continue;
+                if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
                 if (Declarations.KindOf(symbol, known) is not { } kind) continue;
                 result.Add(new Candidate(method, symbol, kind));
             }
@@ -80,8 +104,13 @@ public static class FrontendPass
     /// not yet implemented, so until they are, saying so is the whole job.
     /// </remarks>
     private static void ReportUncollected(
-        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+        CSharpCompilation compilation, WellKnown known,
+        ImmutableArray<ClassCandidate> classes, DiagnosticBag diagnostics)
     {
+        var translated = classes
+            .Select(c => (ISymbol)c.Symbol)
+            .ToImmutableHashSet(SymbolEqualityComparer.Default);
+
         foreach (var tree in compilation.SyntaxTrees)
         {
             var model = compilation.GetSemanticModel(tree);
@@ -105,6 +134,10 @@ public static class FrontendPass
                         : symbol is { IsStatic: false, ContainingType.TypeKind: TypeKind.Class }
                           && Declarations.IsAnnotated(symbol, known);
                 if (!isClassMember) continue;
+
+                // A class the frontend now translates, and its members, are not dropped.
+                var owner = symbol as INamedTypeSymbol ?? symbol.ContainingType;
+                if (owner is not null && translated.Contains(owner)) continue;
 
                 // A [Spec]/[Lemma] member is collected on its own terms; only genuinely
                 // dropped members are reported here.
@@ -304,6 +337,400 @@ public static class FrontendPass
         ];
     }
 
+
+    // -----------------------------------------------------------------------
+    // Classes (§3.4)
+    // -----------------------------------------------------------------------
+
+    /// <summary>A <c>[Spec]</c> member of a class: a pure function of the model (R3.9c).</summary>
+    private sealed record ObservationMember(ISymbol Symbol, string Name, IrType ReturnType, ExpressionSyntax Body);
+
+    private sealed record ClassCandidate(
+        ClassDeclarationSyntax Syntax,
+        INamedTypeSymbol Symbol,
+        ImmutableArray<StructField> Fields,
+        ISymbol ModelSymbol,
+        IrType ModelType,
+        ExpressionSyntax ModelBody,
+        ImmutableArray<ObservationMember> Observations,
+        ImmutableArray<string> Usings);
+
+    /// <summary>
+    /// Collects every annotated <c>sealed class</c>. A class is annotated when it carries
+    /// a <c>[Model]</c> member, which R3.9 makes mandatory: without one there is nothing
+    /// for the invariant to relate the representation to, and every method specification
+    /// would collapse to memory safety.
+    /// </summary>
+    private static ImmutableArray<ClassCandidate> CollectClasses(
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        var result = ImmutableArray.CreateBuilder<ClassCandidate>();
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
+                if (symbol.IsStatic) continue;
+
+                var modelMembers = symbol.GetMembers()
+                    .Where(m => Declarations.Has(m, known.ModelAttribute))
+                    .ToImmutableArray();
+
+                // A class with no [Model] and no annotation at all is an ordinary C#
+                // class the translator has no business touching.
+                if (modelMembers.Length == 0)
+                {
+                    // A specification on an instance member is just as much a request to
+                    // translate the class as an [Invariant] is, and it is the likelier
+                    // mistake: the user wrote the contract and forgot the model. Saying so
+                    // here is much more useful than the PALCS0530 the member would
+                    // otherwise draw, which reports the symptom rather than the cause.
+                    var annotated = Declarations.Has(symbol, known.InvariantAttribute) ||
+                        symbol.GetMembers().OfType<IMethodSymbol>()
+                            .Any(m => !m.IsStatic && SpecAttributes(m, known).Any());
+
+                    if (annotated)
+                        diagnostics.Error("PALCS0524", Locations.From(syntax.Identifier),
+                            $"`{symbol.Name}` is specified but declares no `[Model]` member. " +
+                            "A class needs a model for its invariant and its contracts to relate the " +
+                            "fields to; without one every method specification would say only that the " +
+                            "object is well formed. Add a private `[Model]` member whose expression body " +
+                            "is the abstraction function.");
+                    continue;
+                }
+
+                if (modelMembers.Length > 1)
+                {
+                    diagnostics.Error("PALCS0524", Locations.From(syntax.Identifier),
+                        $"`{symbol.Name}` declares {modelMembers.Length} `[Model]` members. " +
+                        "A class has exactly one abstraction function, because its invariant relates " +
+                        "the representation to exactly one model.");
+                    continue;
+                }
+
+                // R4.13: a per-class invariant cannot express behavioural subtyping, so
+                // M2 is sealed classes only.
+                if (!symbol.IsSealed)
+                {
+                    diagnostics.Error("PALCS0521", Locations.From(syntax.Identifier),
+                        $"`{symbol.Name}` is not `sealed`. pal-csharp translates sealed classes only: " +
+                        "a per-class invariant cannot express what an overriding method would have to " +
+                        "promise, so inheritance has no sound reading in the scheme.");
+                    continue;
+                }
+
+                if (!TryCollectClass(syntax, symbol, modelMembers[0], known, diagnostics, out var candidate))
+                    continue;
+                result.Add(candidate);
+            }
+        }
+        return result.ToImmutable();
+    }
+
+    private static bool TryCollectClass(
+        ClassDeclarationSyntax syntax,
+        INamedTypeSymbol symbol,
+        ISymbol modelSymbol,
+        WellKnown known,
+        DiagnosticBag diagnostics,
+        out ClassCandidate candidate)
+    {
+        candidate = null!;
+        var ok = true;
+
+        var fields = ImmutableArray.CreateBuilder<StructField>();
+        var observations = ImmutableArray.CreateBuilder<ObservationMember>();
+
+        foreach (var member in symbol.GetMembers())
+        {
+            // R4.13: global mutable state is covered by no per-object invariant.
+            if (member is IFieldSymbol { IsStatic: true, IsConst: false } stat)
+            {
+                diagnostics.Error("PALCS0522",
+                    Locations.From(stat.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{stat.Name}` is a static mutable field. No per-object invariant " +
+                    "covers it, so nothing in the scheme can say what it holds.");
+                ok = false;
+                continue;
+            }
+
+            if (Declarations.Has(member, known.SpecAttribute) &&
+                Body(member) is { } observationBody &&
+                ReturnTypeOf(member) is { } observationType)
+            {
+                var mappedReturn = known.MapType(observationType);
+                if (mappedReturn is null)
+                {
+                    diagnostics.Error("PALCS0500",
+                        Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                        $"`{symbol.Name}.{member.Name}` returns `{observationType}`, which has no " +
+                        "translation.");
+                    ok = false;
+                    continue;
+                }
+                observations.Add(new ObservationMember(member, member.Name, mappedReturn, observationBody));
+                continue;
+            }
+
+            if (SymbolEqualityComparer.Default.Equals(member, modelSymbol)) continue;
+            if (member is IMethodSymbol { AssociatedSymbol: not null }) continue;
+
+            var (name, type) = member switch
+            {
+                IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } f => (f.Name, f.Type),
+                IPropertySymbol { IsStatic: false, IsIndexer: false } p when IsAuto(p) => (p.Name, p.Type),
+                _ => (null, null),
+            };
+            if (name is null || type is null) continue;
+
+            var mapped = known.MapType(type);
+            if (mapped is null)
+            {
+                diagnostics.Error("PALCS0500",
+                    Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                    $"The field `{symbol.Name}.{name}` has type `{type}`, which has no translation.");
+                ok = false;
+                continue;
+            }
+
+            // A class may own an array where a struct may not (R3.7), but owning one
+            // means the invariant carries its `A.pts_to` and every method must thread
+            // its contents. That is specified and not yet built, so it is refused
+            // rather than mistranslated.
+            if (mapped is not (IrPrim or IrNamedType))
+            {
+                diagnostics.Error("PALCS0531",
+                    Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                    $"The field `{symbol.Name}.{name}` has type `{type}`. A class may own a resource in " +
+                    "principle (doc/translation.md R3.7), but pal-csharp does not carry one through the " +
+                    "object invariant yet. Fields must be scalars or translated structs for now.");
+                ok = false;
+                continue;
+            }
+
+            fields.Add(new StructField(member, name, type, mapped));
+        }
+
+        if (Body(modelSymbol) is not { } modelBody || ReturnTypeOf(modelSymbol) is not { } modelReturn)
+        {
+            diagnostics.Error("PALCS0524",
+                Locations.From(modelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                $"`{symbol.Name}`'s `[Model]` member has no expression body. The abstraction function " +
+                "must be a single expression over the fields, because it *is* the connection between " +
+                "the representation and the model.");
+            return false;
+        }
+
+        var modelType = known.MapType(modelReturn);
+        if (modelType is null)
+        {
+            diagnostics.Error("PALCS0500",
+                Locations.From(modelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                $"`{symbol.Name}`'s model has type `{modelReturn}`, which has no translation.");
+            return false;
+        }
+
+        if (!ok) return false;
+
+        candidate = new ClassCandidate(
+            syntax, symbol, fields.ToImmutable(), modelSymbol, modelType, modelBody,
+            observations.ToImmutable(), BuildClassUsings(syntax, symbol));
+        return true;
+    }
+
+    /// <summary>The expression body of a <c>[Model]</c> or <c>[Spec]</c> member.</summary>
+    private static ExpressionSyntax? Body(ISymbol member) =>
+        member.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() switch
+        {
+            PropertyDeclarationSyntax { ExpressionBody.Expression: { } e } => e,
+            MethodDeclarationSyntax { ExpressionBody.Expression: { } e } => e,
+            _ => null,
+        };
+
+    private static ITypeSymbol? ReturnTypeOf(ISymbol member) => member switch
+    {
+        IPropertySymbol p => p.Type,
+        IMethodSymbol m => m.ReturnType,
+        _ => null,
+    };
+
+    /// <summary>
+    /// R3.9d: an <c>[Invariant]</c> clause sees the fields as simple names, and a
+    /// <c>[Refine]</c> on the <c>[Model]</c> member sees the model value as
+    /// <c>Result</c> — the two kinds of fact are bound in different scopes precisely
+    /// because they are about different things.
+    /// </summary>
+    private static ImmutableArray<SpecSite> BuildClassSpecSites(ImmutableArray<ClassCandidate> classes)
+    {
+        var sites = ImmutableArray.CreateBuilder<SpecSite>();
+        foreach (var c in classes)
+        {
+            var fieldParams = c.Fields.Select(f => new SpecParam(f.Name, f.Type)).ToImmutableArray();
+            var index = 0;
+            foreach (var (text, location) in ClassInvariants(c))
+                sites.Add(new SpecSite(
+                    Key: $"{c.Symbol.Name}_invariant_{index++}",
+                    Text: text,
+                    Location: location,
+                    Parameters: fieldParams,
+                    Usings: c.Usings));
+
+            index = 0;
+            foreach (var (text, location) in ModelRefinements(c))
+                sites.Add(new SpecSite(
+                    Key: $"{c.Symbol.Name}_model_refine_{index++}",
+                    Text: text,
+                    Location: location,
+                    Parameters: ReturnTypeOf(c.ModelSymbol) is { } mt
+                        ? [new SpecParam(SpecBinder.ResultParameter, mt)]
+                        : ImmutableArray<SpecParam>.Empty,
+                    Usings: c.Usings));
+        }
+        return sites.ToImmutable();
+    }
+
+    private static IEnumerable<(string Text, Location Location)> ClassInvariants(ClassCandidate c)
+    {
+        foreach (var data in c.Symbol.GetAttributes())
+            if (data.AttributeClass?.Name == "InvariantAttribute" &&
+                Declarations.StringArgument(data) is { } text)
+                yield return (text, Declarations.ArgumentLocation(data));
+    }
+
+    /// <summary>Whether a lowered class-level clause reads at least one field (R3.9d).</summary>
+    private static bool MentionsAField(IrExpr expr, ImmutableHashSet<string> fields)
+    {
+        var found = false;
+        Walk(expr);
+        return found;
+
+        void Walk(IrExpr? e)
+        {
+            if (e is null || found) return;
+            switch (e)
+            {
+                case IrVar v when fields.Contains(v.Name): found = true; return;
+                case IrUnary u: Walk(u.Operand); return;
+                case IrBinary b: Walk(b.Left); Walk(b.Right); return;
+                case IrConditional c: Walk(c.Cond); Walk(c.Then); Walk(c.Else); return;
+                case IrElement el: Walk(el.Array); Walk(el.Index); return;
+                case IrLength l: Walk(l.Array); return;
+                case IrField f: Walk(f.Receiver); return;
+                case IrObserve o: Walk(o.Receiver); return;
+                case IrConvert cv: Walk(cv.Operand); return;
+                case IrOld o2: Walk(o2.Operand); return;
+                case IrLive lv: Walk(lv.Operand); return;
+                case IrContents ct: Walk(ct.Array); return;
+                case IrQuantifier q: Walk(q.Body); return;
+                case IrCall call: foreach (var a in call.Args) Walk(a); return;
+                case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
+                case IrNew n: foreach (var f2 in n.Fields) Walk(f2.Value); return;
+                // Raw Pulse is opaque, so it is taken at its word rather than refused.
+                case IrInlinePulse: found = true; return;
+                default: return;
+            }
+        }
+    }
+
+    private static IEnumerable<(string Text, Location Location)> ModelRefinements(ClassCandidate c)
+    {
+        foreach (var data in c.ModelSymbol.GetAttributes())
+            if (data.AttributeClass?.Name is "RefineAttribute" or "RefineAlwaysAttribute" &&
+                Declarations.StringArgument(data) is { } text)
+                yield return (text, Declarations.ArgumentLocation(data));
+    }
+
+    private static IrClass LowerClass(
+        ClassCandidate c,
+        WellKnown known,
+        ImmutableDictionary<string, BoundSpec> bound,
+        SemanticModel classModel,
+        DiagnosticBag diagnostics)
+    {
+        var fields = c.Fields
+            .Select(f => new IrFieldDecl(
+                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped))
+            .ToImmutableArray();
+
+        // The abstraction reads the fields; an observation reads the model. Both are
+        // written unqualified inside the class, which is the same convention R3.4 uses
+        // for a struct's [Refine].
+        var fieldNames = c.Fields.Select(f => f.Name).ToImmutableHashSet();
+        var modelName = ImmutableHashSet.Create(c.ModelSymbol.Name);
+
+        var modelBody = new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+        { ClassMembers = fieldNames }.Lower(c.ModelBody);
+
+        var invariants = ImmutableArray.CreateBuilder<IrExpr>();
+        var invariantTexts = ClassInvariants(c).ToImmutableArray();
+        for (var i = 0; i < invariantTexts.Length; i++)
+        {
+            if (!bound.TryGetValue($"{c.Symbol.Name}_invariant_{i}", out var spec)) continue;
+            var clause = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                .Lower(spec.Expression);
+
+            // R3.9d / F17. A clause that names no field is a fact about the model alone,
+            // and inside the invariant it is unreachable: a caller holds the invariant
+            // opaquely, so the fact is true and useless. It belongs on the model, as a
+            // [Refine], where it becomes part of the model *type* and so travels with
+            // every model the caller ever sees. Refusing it is the only way the user
+            // finds out, because the wrong placement still verifies here and fails much
+            // later, in the client.
+            if (!MentionsAField(clause, fieldNames))
+                diagnostics.Error("PALCS0527",
+                    Locations.From(invariantTexts[i].Location),
+                    $"This `[Invariant]` on `{c.Symbol.Name}` mentions no field, so it says something " +
+                    "about the model alone. Inside the invariant no caller can reach it. Move it to " +
+                    $"`[Refine]` on the `[Model]` member `{c.ModelSymbol.Name}`, writing the model as " +
+                    "`Result`.");
+
+            invariants.Add(clause);
+        }
+
+        var refinements = ImmutableArray.CreateBuilder<IrExpr>();
+        for (var i = 0; i < ModelRefinements(c).Count(); i++)
+            if (bound.TryGetValue($"{c.Symbol.Name}_model_refine_{i}", out var spec))
+                refinements.Add(new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                    .Lower(spec.Expression));
+
+        var observations = c.Observations
+            .Select(o => new IrObservation(
+                Locations.From(o.Symbol.Locations.FirstOrDefault() ?? Location.None),
+                o.Name,
+                o.ReturnType,
+                new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+                { ClassMembers = modelName }.Lower(o.Body)))
+            .ToImmutableArray();
+
+        return new IrClass(
+            Locations.From(c.Syntax.Identifier), c.Symbol.Name, fields,
+            c.ModelSymbol.Name, c.ModelType, modelBody, refinements.ToImmutable(), invariants.ToImmutable(), observations);
+    }
+
+    private static ImmutableArray<string> BuildClassUsings(
+        ClassDeclarationSyntax syntax, INamedTypeSymbol symbol)
+    {
+        var fileUsings = syntax.SyntaxTree.GetRoot()
+            .DescendantNodes()
+            .OfType<UsingDirectiveSyntax>()
+            .Select(u => u.ToString())
+            .ToImmutableArray();
+
+        var ns = symbol.ContainingNamespace;
+        var enclosing = ns is null || ns.IsGlobalNamespace
+            ? ImmutableArray<string>.Empty
+            : ImmutableArray.Create($"using {ns.ToDisplayString()};");
+
+        return
+        [
+            .. fileUsings,
+            .. enclosing,
+            $"using {WellKnown.Namespace};",
+            $"using static {WellKnown.Namespace}.Pal;",
+        ];
+    }
+
     // -----------------------------------------------------------------------
     // Spec sites
     // -----------------------------------------------------------------------
@@ -330,7 +757,7 @@ public static class FrontendPass
                 var text = Declarations.StringArgument(attribute);
                 if (text is null) continue;
                 sites.Add(new SpecSite(
-                    Key: $"{candidate.Symbol.ContainingType.Name}_{candidate.Symbol.Name}_{index}",
+                    Key: $"{Naming.Of(candidate.Symbol)}_{index}",
                     Text: text,
                     Location: Declarations.ArgumentLocation(attribute),
                     Parameters: ShimParameters(candidate.Symbol, known, wantsResult),
@@ -398,6 +825,17 @@ public static class FrontendPass
         IMethodSymbol symbol, WellKnown known, bool wantsResult)
     {
         var result = ImmutableArray.CreateBuilder<SpecParam>();
+
+        // R4.10a. A spec string is compiled as the body of a *static* shim method, where
+        // a bare `this` is C# error CS0026, so the receiver has to be an ordinary
+        // parameter. Naming it `this` makes it render as the verbatim identifier `@this`
+        // (SpecBinder.RenderParam), which is legal C#, binds correctly, and needs no
+        // machinery of its own. A constructor has no receiver in its contract: the object
+        // does not exist until it returns, and R4.12 constrains the *initial model*
+        // through `Result` instead.
+        if (symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary or MethodKind.Constructor })
+            result.Add(new SpecParam(Names.This, symbol.ContainingType));
+
         foreach (var p in symbol.Parameters)
         {
             var type = known.IsGhost(p.Type) ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
@@ -405,6 +843,7 @@ public static class FrontendPass
         }
         if (wantsResult && !symbol.ReturnsVoid)
             result.Add(new SpecParam(SpecBinder.ResultParameter, symbol.ReturnType));
+
         return result.ToImmutable();
     }
 
@@ -420,22 +859,41 @@ public static class FrontendPass
         DiagnosticBag diagnostics)
     {
         var symbol = candidate.Symbol;
-        var loc = Locations.From(candidate.Syntax.Identifier);
+        var loc = Locations.From(candidate.Identifier);
 
         var specs = ReadSpecs(symbol, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, known, diagnostics);
+        if (symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary, ContainingType: { } self } &&
+            known.HasModel(self))
+        {
+            parameters = [new IrParam(loc, Names.This, new IrClassType(self.Name), ParamMode.Value),
+                          .. parameters];
+        }
 
         if (candidate.Kind == CalleeKind.Spec)
             return LowerSpecFunction(candidate, model, known, diagnostics, loc, parameters, specs);
 
-        var returnType = known.MapType(symbol.ReturnType);
+        var returnType = symbol.MethodKind == MethodKind.Constructor
+            ? new IrClassType(symbol.ContainingType.Name)
+            : known.MapType(symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
             return null;
         }
 
-        var lowerer = new StmtLowerer(model, known, diagnostics);
+        var declaringClass = symbol is { IsStatic: false, ContainingType: { } owner } && known.HasModel(owner)
+            ? owner.Name
+            : null;
+
+        var objectFields = symbol.ContainingType is not { } holder || !known.HasModel(holder)
+            ? ImmutableHashSet<string>.Empty
+            : holder.GetMembers().OfType<IFieldSymbol>()
+                .Where(f => !f.IsStatic && !f.IsImplicitlyDeclared)
+                .Select(f => f.Name)
+                .ToImmutableHashSet();
+
+        var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
         var body = LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
@@ -456,7 +914,38 @@ public static class FrontendPass
             PulseBody = pulseBody,
             Admit = Declarations.Has(symbol, known.AdmitAttribute),
             Preserves = specs.Preserves,
+            DeclaringClass = declaringClass,
+            IsConstructor = symbol.MethodKind == MethodKind.Constructor,
+            IsReadOnly = declaringClass is not null &&
+                symbol.MethodKind != MethodKind.Constructor &&
+                !AssignsAField(candidate.Syntax, model),
         };
+    }
+
+    /// <summary>
+    /// R4.11. Read-only is decided by the body, not by an annotation: a method that
+    /// assigns no field of its own class cannot change the model, so its contract is
+    /// <c>preserves</c> and R4.11a folds it at the pre-state model. Deciding it
+    /// syntactically keeps the rule checkable by the reader of the C# and means a method
+    /// never silently loses `preserves` because someone forgot a marker.
+    /// </summary>
+    private static bool AssignsAField(BaseMethodDeclarationSyntax syntax, SemanticModel model)
+    {
+        foreach (var node in syntax.DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression)
+                    || p.IsKind(SyntaxKind.PreDecrementExpression) => p.Operand,
+                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression)
+                    || p.IsKind(SyntaxKind.PostDecrementExpression) => p.Operand,
+                _ => null,
+            };
+            if (target is null) continue;
+            if (model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false }) return true;
+        }
+        return false;
     }
 
     private static IrDecl? LowerSpecFunction(
@@ -470,7 +959,7 @@ public static class FrontendPass
             return null;
         }
 
-        var bodyExpression = candidate.Syntax.ExpressionBody?.Expression
+        var bodyExpression = candidate.ExpressionBody?.Expression
             ?? candidate.Syntax.Body?.Statements
                 .OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression;
 
@@ -493,7 +982,7 @@ public static class FrontendPass
         };
     }
 
-    private static IrStmt? LowerBody(MethodDeclarationSyntax syntax, StmtLowerer lowerer)
+    private static IrStmt? LowerBody(BaseMethodDeclarationSyntax syntax, StmtLowerer lowerer)
     {
         if (syntax.Body is { } block) return lowerer.Lower(block);
         if (syntax.ExpressionBody is { } arrow)
@@ -518,7 +1007,7 @@ public static class FrontendPass
 
         foreach (var (attribute, index, _) in SpecAttributes(symbol, known))
         {
-            var key = $"{symbol.ContainingType.Name}_{symbol.Name}_{index}";
+            var key = $"{Naming.Of(symbol)}_{index}";
             if (!bound.TryGetValue(key, out var spec)) continue;
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true);
@@ -569,7 +1058,7 @@ public static class FrontendPass
     /// </summary>
     private static (ImmutableArray<IrExpr> Requires, ImmutableArray<IrExpr> Ensures, IrStmt? Body)
         ExtractBodyContracts(
-            MethodDeclarationSyntax syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer)
+            BaseMethodDeclarationSyntax syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer)
     {
         if (syntax.Body is not { } block)
             return ([], [], null);

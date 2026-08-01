@@ -12,10 +12,16 @@ namespace Pal.Compiler.Frontend;
 /// (doc/translation.md §5). Loops stay loops, both branches of an <c>if</c> survive,
 /// and statement order is preserved exactly.
 /// </summary>
-public sealed class StmtLowerer(SemanticModel model, WellKnown known, DiagnosticBag diagnostics)
+public sealed class StmtLowerer(
+    SemanticModel model,
+    WellKnown known,
+    DiagnosticBag diagnostics,
+    ImmutableHashSet<string>? objectFields = null)
 {
-    private readonly ExprLowerer _code = new(model, known, diagnostics, specPosition: false);
-    private readonly ExprLowerer _spec = new(model, known, diagnostics, specPosition: true);
+    private readonly ExprLowerer _code =
+        new(model, known, diagnostics, specPosition: false) { ObjectFields = objectFields ?? [] };
+    private readonly ExprLowerer _spec =
+        new(model, known, diagnostics, specPosition: true) { ObjectFields = objectFields ?? [] };
 
     public IrStmt Lower(StatementSyntax node)
     {

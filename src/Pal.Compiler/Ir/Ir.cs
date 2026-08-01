@@ -77,6 +77,15 @@ public sealed record IrGhostType(IrType Inner) : IrType
 }
 
 /// <summary>A named user type (struct) translated to <c>Struct_&lt;name&gt;</c>.</summary>
+/// <summary>
+/// A reference to a translated <c>class</c> (R3.8): a <c>Box.box</c> of the class's
+/// representation, carrying an invariant and a model rather than a value.
+/// </summary>
+public sealed record IrClassType(string Name) : IrType
+{
+    protected override string Describe() => Name;
+}
+
 public sealed record IrNamedType(string Name) : IrType
 {
     protected override string Describe() => Name;
@@ -128,6 +137,14 @@ public sealed record IrLength(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
 /// <summary><c>x.f</c> on a struct.</summary>
 public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc);
+
+/// <summary>
+/// R3.9c. A <c>[Spec]</c> member of a class read off an object: <c>@this.Count</c>.
+/// It is a pure function of the object's <em>model</em>, never of its representation,
+/// which is what lets a caller — who holds only the model — use it at all.
+/// </summary>
+public sealed record IrObserve(
+    IrLoc Loc, string Class, string Member, IrExpr Receiver) : IrExpr(Loc);
 
 public sealed record IrFieldInit(string Field, IrExpr Value);
 
@@ -310,6 +327,23 @@ public sealed record IrMethod(
     public bool Admit { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>
     public ImmutableArray<IrExpr> Preserves { get; init; } = ImmutableArray<IrExpr>.Empty;
+
+    /// <summary>
+    /// The class this is an instance member of, if any (§4.5). A non-null value is what
+    /// makes the emitter thread a model binder and bracket the body with
+    /// <c>unfold</c>/<c>fold</c>.
+    /// </summary>
+    public string? DeclaringClass { get; init; }
+
+    /// <summary>A constructor: it allocates and establishes the invariant (R4.12).</summary>
+    public bool IsConstructor { get; init; }
+
+    /// <summary>
+    /// R4.11: the method assigns no field, so its contract collapses to
+    /// <c>preserves class_C__inv this m</c> and its closing <c>fold</c> names the
+    /// pre-state model binder rather than a recomputed model (R4.11a).
+    /// </summary>
+    public bool IsReadOnly { get; init; }
 }
 
 /// <summary>A <c>[Spec]</c> pure function: emitted as <c>Let_&lt;Name&gt;.fst</c> (R4.6).</summary>
@@ -332,7 +366,55 @@ public sealed record IrStruct(
     IrLoc Loc,
     string Name,
     ImmutableArray<IrFieldDecl> Fields,
-    ImmutableArray<IrExpr> Refinements) : IrDecl(Loc, Name);
+    ImmutableArray<IrExpr> Refinements) : IrDecl(Loc, Name)
+{
+    /// <summary>
+    /// R3.9a. <c>[Spec]</c> on a struct makes it a *spec-only* type: erased, never
+    /// present in executable code, and — unlike an ordinary struct — free to hold
+    /// spec-only field types such as <c>Seq&lt;T&gt;</c> and <c>SpecInt</c>.
+    /// </summary>
+    public bool IsSpecOnly { get; init; }
+}
+
+/// <summary>A <c>[Spec]</c> member of a class: a pure function of the model (R3.9c).</summary>
+public sealed record IrObservation(
+    IrLoc Loc,
+    string Name,
+    IrType ReturnType,
+    IrExpr Body);
+
+/// <summary>
+/// A <c>sealed class</c>: emitted as <c>Class_&lt;Name&gt;.fst</c> (§3.4).
+/// </summary>
+/// <param name="Fields">The representation (R3.7).</param>
+/// <param name="ModelType">
+/// The <c>[Model]</c> member's return type — the model is <em>declared</em> by the user
+/// and never derived by the emitter (R3.9).
+/// </param>
+/// <param name="ModelBody">
+/// The abstraction relation (R3.9b): an expression over the fields, whose value is the
+/// model. Inlined as a conjunct of the invariant rather than factored into a function,
+/// because it is partial and factoring it would force a refinement to be discharged at
+/// every use of the model.
+/// </param>
+/// <param name="ModelRefinements">
+/// <c>[Refine]</c> clauses on the <c>[Model]</c> member: facts about the model alone,
+/// which must live in the model's *type* or no caller can see them (R3.9d, F17).
+/// </param>
+/// <param name="Invariants">
+/// <c>[Invariant]</c> clauses: facts about the fields, which are temporarily false inside
+/// a method and so live inside the predicate, in the <c>unfold</c>/<c>fold</c> window.
+/// </param>
+public sealed record IrClass(
+    IrLoc Loc,
+    string Name,
+    ImmutableArray<IrFieldDecl> Fields,
+    string ModelMember,
+    IrType ModelType,
+    IrExpr ModelBody,
+    ImmutableArray<IrExpr> ModelRefinements,
+    ImmutableArray<IrExpr> Invariants,
+    ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name);
 
 /// <summary>Raw Pulse pulled in via <c>[assembly: IncludePulse]</c>.</summary>
 public sealed record IrIncludePulse(IrLoc Loc, string Module, string Text) : IrDecl(Loc, Module);

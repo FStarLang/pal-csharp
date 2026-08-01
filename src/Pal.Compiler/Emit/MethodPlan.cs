@@ -21,6 +21,13 @@ public sealed class MethodPlan
         var assigned = new HashSet<string>();
         Passes.Normalize.Assigned(method.Body, assigned);
 
+        // R4.11 decides `preserves` from the body: `this` is mutated exactly when the
+        // frontend found a field assignment, and any other object is mutated when the
+        // body assigns through it.
+        var mutatedObjects = new HashSet<string>();
+        if (method.DeclaringClass is not null && !method.IsReadOnly) mutatedObjects.Add(Names.This);
+        foreach (var name in assigned) mutatedObjects.Add(name);
+
         var binders = ImmutableArray.CreateBuilder<string>();
         var ghostBinders = ImmutableArray.CreateBuilder<string>();
         var preResources = ImmutableArray.CreateBuilder<string>();
@@ -84,6 +91,49 @@ public sealed class MethodPlan
                     break;
                 }
 
+                // R4.10. An object parameter is owned through its invariant, not through a
+                // `pts_to`: the ghost binder is the *model*, so a caller reasons about the
+                // object only through the abstraction, and the representation stays
+                // hidden. Structurally it is the `ref` case with `class_C__inv` in place
+                // of `R.pts_to`, which is why the two read alike.
+                case IrClassType klass:
+                {
+                    var preModel = "pre_" + p.Name;
+                    var postModel = "post_" + p.Name;
+                    var modelType = $"{Names.ClassModule(klass.Name)}.{Names.ClassModel(klass.Name)}";
+
+                    binders.Add($"({name}: {Types.Render(p.Type)})");
+                    ghostBinders.Add($"(#{preModel}: erased ({modelType}))");
+
+                    var inv = $"{Names.ClassModule(klass.Name)}.{Names.ClassInv(klass.Name)}";
+                    preResources.Add($"{inv} {name} {preModel}");
+
+                    // R4.11. A method that changes no field cannot change the model, so
+                    // the *same* binder stands for the pre- and the post-state. That is
+                    // literally `preserves`: without it the caller would hold
+                    // `exists* m'. inv this m'` and would have to be told, conjunct by
+                    // conjunct, that nothing moved.
+                    if (mutatedObjects.Contains(p.Name))
+                    {
+                        postResources.Add($"{inv} {name} {postModel}");
+                        postExistentials.Add(postModel);
+                        post.Bind(p.Name, new Term(postModel, TermKind.Math, p.Type));
+                    }
+                    else
+                    {
+                        postResources.Add($"{inv} {name} {preModel}");
+                        post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
+                    }
+
+                    pre.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Object, name)
+                    {
+                        PreModel = preModel,
+                        PostModel = mutatedObjects.Contains(p.Name) ? postModel : preModel,
+                    };
+                    break;
+                }
+
                 case var _ when p.Mode is ParamMode.Ref or ParamMode.Out or ParamMode.In:
                 {
                     var preValue = "pre_" + p.Name;
@@ -130,6 +180,20 @@ public sealed class MethodPlan
                     break;
                 }
             }
+        }
+
+        // R4.12. A constructor takes no object and returns one: there is no invariant to
+        // require, and the postcondition owns the object it has just built. `this` in the
+        // contract names that object, so a constructor's `[Ensures]` reads exactly like
+        // any other method's. Freshness comes free from the frame rule (F15): the caller's
+        // other objects are in the frame, so the new one cannot be any of them.
+        if (method is { IsConstructor: true, ReturnType: IrClassType built })
+        {
+            var postModel = "post_" + Names.This;
+            postResources.Add(
+                $"{Names.ClassModule(built.Name)}.{Names.ClassInv(built.Name)} {Names.Result} {postModel}");
+            postExistentials.Add(postModel);
+            post.Bind(Names.This, new Term(postModel, TermKind.Math, built));
         }
 
         // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method

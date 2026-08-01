@@ -965,6 +965,22 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
+* **The class emitter implements R3.7–R3.13 and R4.10–R4.12, and reproduces
+  `test/objects_probe` from source.** `test/counter_class` translates `Counter.cs` — the
+  probe's own source — and all five generated modules verify: the class module, the
+  constructor, the mutator, the read-only method and the client that observes F17. The
+  emitted output agrees with the hand-derived probe construct for construct.
+  `TallyVariant.cs` is the §7.2 variant detector for objects: the same class with the
+  field renamed, `this.` written out, `++` in place of `x = x + 1`, an expression-bodied
+  reader and the members declared in reverse order. It produces output **byte-identical**
+  to `Counter.cs`'s modulo the names, with no emitter change — the strongest evidence
+  available that the class rules are compositional rather than fitted to one example.
+* **R3.9d is mechanically enforced.** `PALCS0527` refuses an `[Invariant]` clause that
+  mentions no field. Such a clause is a fact about the model alone, and F17 shows it is
+  unreachable from inside the invariant: it verifies where it is written and fails much
+  later, in an unrelated client file. `test/diagnostics/cases/ModelFactInInvariant.cs`
+  pins it. `PALCS0524` likewise refuses a class that carries contracts but declares no
+  `[Model]`, rather than letting its members fall through to the generic `PALCS0530`.
 * **The emitter implements R2–R6 and reproduces the probe from source.** The whole M1
   acceptance suite translates and verifies from annotated C#: `swap`, `abs_max`,
   `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `insertion_sort_sorted`,
@@ -974,7 +990,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — fourteen cases, each
+  `test/diagnostics` is its counterpart to the verification tests — sixteen cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).

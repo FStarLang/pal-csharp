@@ -32,7 +32,15 @@ public static class Declarations
     {
         if (Has(method, known.SpecAttribute)) return CalleeKind.Spec;
         if (Has(method, known.LemmaAttribute)) return CalleeKind.Lemma;
-        return method is { IsStatic: true, MethodKind: MethodKind.Ordinary } ? CalleeKind.Method : null;
+        if (method is { IsStatic: true, MethodKind: MethodKind.Ordinary }) return CalleeKind.Method;
+
+        // §4.5. An instance method or constructor of a translated class: it carries the
+        // object's invariant, which is what makes it translatable at all.
+        return method is { IsStatic: false, MethodKind: MethodKind.Ordinary or MethodKind.Constructor }
+               && method.ContainingType is { TypeKind: TypeKind.Class } owner
+               && known.HasModel(owner)
+            ? CalleeKind.Method
+            : null;
     }
 
     /// <summary>

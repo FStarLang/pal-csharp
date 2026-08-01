@@ -16,6 +16,13 @@ namespace Pal.Compiler.Frontend;
 /// </remarks>
 public static class Naming
 {
-    public static string Of(ISymbol symbol) =>
-        symbol.ContainingType is { } type ? $"{type.Name}_{symbol.Name}" : symbol.Name;
+    public static string Of(ISymbol symbol)
+    {
+        // A constructor's C# name is `.ctor`, which is not an F* identifier. `_ctor` is,
+        // and because the type qualifier already contributes a separating `_`, the
+        // generated module reads `Func_Counter__ctor` — visibly not a method a user could
+        // have declared, since C# forbids a method whose name matches its own type.
+        var name = symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } ? "_ctor" : symbol.Name;
+        return symbol.ContainingType is { } type ? $"{type.Name}_{name}" : name;
+    }
 }

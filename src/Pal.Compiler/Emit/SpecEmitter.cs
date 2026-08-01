@@ -17,6 +17,13 @@ public sealed class SpecScope
     public SpecScope? Pre { get; init; }
     public string? ResultTerm { get; init; }
 
+    /// <summary>
+    /// What kind of value <c>Result</c> denotes. A method's result is a machine value,
+    /// but a <c>[Refine]</c> on a <c>[Model]</c> member names the *model* (R3.9d), which
+    /// is a ghost value and carries no <c>Int32.v</c>.
+    /// </summary>
+    public TermKind ResultKind { get; init; } = TermKind.Machine;
+
     public SpecScope() { }
 
     public SpecScope(SpecScope other)
@@ -24,6 +31,7 @@ public sealed class SpecScope
         _values = new Dictionary<string, Term>(other._values);
         Pre = other.Pre;
         ResultTerm = other.ResultTerm;
+        ResultKind = other.ResultKind;
     }
 
     public void Bind(string name, Term term) => _values[name] = term;
@@ -67,6 +75,17 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     $"`{v.Name}` cannot be mentioned in this specification.");
                 return new Term("()", TermKind.Other);
 
+            // R3.9c: an observation is the class's spec function applied to the *model*
+            // the receiver denotes in this state. `Old(@this.X)` therefore needs no new
+            // machinery: it is this same case emitted in the pre-state scope.
+            case IrObserve ob:
+            {
+                var receiver = Emit(ob.Receiver, scope);
+                return new Term(
+                    $"({Names.ClassModule(ob.Class)}.{Names.Observation(ob.Class, ob.Member)} {receiver.Text})",
+                    MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
+            }
+
             case IrOld o when scope.Pre is { } pre:
                 return Emit(o.Operand, pre);
 
@@ -76,7 +95,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return new Term("()", TermKind.Other);
 
             case IrResult r when scope.ResultTerm is { } result:
-                return new Term(result, TermKind.Machine, r.Type);
+                return new Term(result, scope.ResultKind, r.Type);
 
             case IrResult r:
                 diagnostics.Error("PALCS0302", r.Loc, "`Pal.Result` is only meaningful in a postcondition.");
