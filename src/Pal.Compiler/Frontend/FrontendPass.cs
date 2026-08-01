@@ -918,34 +918,8 @@ public static class FrontendPass
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
             IsReadOnly = declaringClass is not null &&
                 symbol.MethodKind != MethodKind.Constructor &&
-                !AssignsAField(candidate.Syntax, model),
+                !Declarations.Mutates(candidate.Syntax, model),
         };
-    }
-
-    /// <summary>
-    /// R4.11. Read-only is decided by the body, not by an annotation: a method that
-    /// assigns no field of its own class cannot change the model, so its contract is
-    /// <c>preserves</c> and R4.11a folds it at the pre-state model. Deciding it
-    /// syntactically keeps the rule checkable by the reader of the C# and means a method
-    /// never silently loses `preserves` because someone forgot a marker.
-    /// </summary>
-    private static bool AssignsAField(BaseMethodDeclarationSyntax syntax, SemanticModel model)
-    {
-        foreach (var node in syntax.DescendantNodes())
-        {
-            var target = node switch
-            {
-                AssignmentExpressionSyntax a => a.Left,
-                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression)
-                    || p.IsKind(SyntaxKind.PreDecrementExpression) => p.Operand,
-                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression)
-                    || p.IsKind(SyntaxKind.PostDecrementExpression) => p.Operand,
-                _ => null,
-            };
-            if (target is null) continue;
-            if (model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false }) return true;
-        }
-        return false;
     }
 
     private static IrDecl? LowerSpecFunction(

@@ -182,12 +182,10 @@ public sealed class StmtLowerer(
             return new IrGhostStmt(loc, GhostKind.LemmaCall, call, null);
         }
 
-        if (kind == CalleeKind.Method)
-        {
-            return new IrExprStmt(loc,
-                new IrCall(loc, Naming.Of(method), [.. args.Select(_code.LowerArgument)])
-                { Kind = CalleeKind.Method, ResultType = known.MapType(method.ReturnType) });
-        }
+        // A call in statement position is the same call it would be in expression
+        // position, so it is lowered by the same code: the receiver threading of §4.5 and
+        // the `MutatesReceiver` flag of R4.11 are decided in exactly one place.
+        if (kind == CalleeKind.Method) return new IrExprStmt(loc, _code.Lower(node));
 
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");
         return new IrBlock(loc, []);

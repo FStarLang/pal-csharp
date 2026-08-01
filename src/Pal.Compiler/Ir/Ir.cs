@@ -161,6 +161,13 @@ public enum CalleeKind { Method, Spec, Lemma }
 /// <summary>A call to a user method, <c>[Spec]</c> function, or <c>[Lemma]</c>.</summary>
 public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
 {
+    /// <summary>
+    /// R4.11. The callee is an instance method that may move its receiver's model, so the
+    /// caller must existentially quantify the receiver's post-state model rather than
+    /// carry the one it was given.
+    /// </summary>
+    public bool MutatesReceiver { get; init; }
+
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
 

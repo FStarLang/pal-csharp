@@ -44,6 +44,15 @@ public sealed class CodeEmitter(
     /// </summary>
     private ImmutableArray<Slot> _objects = ImmutableArray<Slot>.Empty;
 
+    /// <summary>
+    /// R4.14. Objects allocated by this method. Their invariants are owned here and, unless
+    /// the reference is returned, are still owned when the method ends — so they must be
+    /// dropped. This is where the CLR's garbage collector enters the translation: F15 says
+    /// Pulse slprops are affine, so the resource may simply be discarded, but Pulse still
+    /// requires the discard to be *written*.
+    /// </summary>
+    private readonly List<Slot> _objectLocals = [];
+
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
@@ -59,14 +68,20 @@ public sealed class CodeEmitter(
             return _sb.ToString();
         }
 
-        _objects = [.. method.Parameters
-            .Select(p => plan.Slots.TryGetValue(p.Name, out var s) ? s : null)
-            .Where(s => s is { Kind: SlotKind.Object })
-            .Select(s => s!)];
+        // R4.10. Only the *receiver* of the class's own methods is opened. An object that
+        // merely passes through — a parameter of a static method, or an argument on its
+        // way to a callee — must stay folded, because every function that takes it expects
+        // its invariant, not its representation. The receiver is the one object whose
+        // fields this body may name at all (PALCS0523 refuses the rest), so the bracket
+        // goes exactly where the field accesses are.
+        _objects = method.DeclaringClass is not null &&
+                   plan.Slots.TryGetValue(Names.This, out var self) &&
+                   self.Kind == SlotKind.Object
+            ? [self]
+            : [];
 
-        // R4.10. Open every object the contract handed us. The invariant is abstract to
-        // the caller, so the body cannot touch a field until it is unfolded, and the
-        // matching `fold` on each exit path is what re-establishes it.
+        // The invariant is abstract to the caller, so the body cannot touch a field until
+        // it is unfolded, and the matching `fold` on each exit path re-establishes it.
         foreach (var obj in _objects) Line(Unfold(obj) + ";");
 
         // R4.2: rebind assigned by-value parameters as cells.
@@ -100,7 +115,7 @@ public sealed class CodeEmitter(
         if (statements.Length > 0) Tail(statements[^1], method, plan);
         else
         {
-            CloseObjects(method, plan);
+            if (NeedsEpilogue) CloseObjects(method, plan);
             if (IsVoid(method)) Line("()");
         }
     }
@@ -117,7 +132,7 @@ public sealed class CodeEmitter(
         switch (stmt)
         {
             case IrReturn { Value: null }:
-                CloseObjects(method, plan);
+                if (NeedsEpilogue) CloseObjects(method, plan);
                 Line("()");
                 return;
 
@@ -128,14 +143,18 @@ public sealed class CodeEmitter(
                 // let-bound so that the `fold` can be interposed between the read and the
                 // block's value.
                 var text = Expr(ret.Value!);
-                if (_objects.Length > 0)
-                {
-                    var t = Fresh();
-                    Line($"let {t} = {text};");
-                    CloseObjects(method, plan);
-                    Line(t);
-                }
-                else Line(text);
+                if (!NeedsEpilogue) { Line(text); return; }
+
+                // A returned object must keep the binder the callee produced it under:
+                // re-binding it would leave the context holding its invariant under the
+                // old name, which the frame rule cannot match (Error 228). Everything else
+                // is let-bound so the epilogue can be interposed before the block's value.
+                if (IsObjectBinder(text)) { CloseObjects(method, plan, text); Line(text); return; }
+
+                var t = Fresh();
+                Line($"let {t} = {text};");
+                CloseObjects(method, plan);
+                Line(t);
                 return;
             }
 
@@ -160,7 +179,7 @@ public sealed class CodeEmitter(
 
             default:
                 Statement(stmt, plan);
-                CloseObjects(method, plan);
+                if (NeedsEpilogue) CloseObjects(method, plan);
                 if (IsVoid(method)) Line("()");
                 return;
         }
@@ -230,6 +249,9 @@ public sealed class CodeEmitter(
         Line(Names.Result);
     }
 
+    private bool IsObjectBinder(string text) =>
+        _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text);
+
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
 
@@ -244,8 +266,29 @@ public sealed class CodeEmitter(
     /// abstraction function applied to the representation it has just written — the same
     /// expression the class module puts in the invariant, evaluated at the post-state.
     /// </summary>
-    private void CloseObjects(IrMethod method, MethodPlan plan)
+    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0;
+
+    /// <summary>
+    /// R4.14. Discards the invariant of every object this method allocated and did not
+    /// hand back. <c>with m. assert …</c> names the existential witness the context is
+    /// holding, which <c>drop_</c> needs because it takes an slprop and not a name.
+    /// </summary>
+    private void DropLocals(string? returned)
     {
+        foreach (var local in _objectLocals)
+        {
+            if (local.Binder == returned) continue;
+            var klass = (IrClassType)local.Type;
+            var m = FreshValue(local.Name);
+            Line($"with {m}. assert ({Inv(klass)} {local.Binder} {m});");
+            Line($"drop_ ({Inv(klass)} {local.Binder} {m});");
+        }
+    }
+
+    private void CloseObjects(IrMethod method, MethodPlan plan, string? returned = null)
+    {
+        DropLocals(returned);
+
         foreach (var obj in _objects)
         {
             var klass = (IrClassType)obj.Type;
@@ -293,6 +336,26 @@ public sealed class CodeEmitter(
     {
         switch (stmt)
         {
+            // R3.8. An object local binds a reference. C# can rebind it, but nothing in
+            // the supported subset does, and binding it immutably is what lets it be
+            // handed to a callee that consumes and returns its invariant.
+            case IrLocalDecl { Type: IrClassType oc, Init: not null } d:
+            {
+                var binder = Names.Local(d.Name);
+
+                // The initialiser is emitted *into* the local's binder rather than into a
+                // temporary the local then aliases. Pulse matches resources syntactically:
+                // after `let var_c = t0` the context still holds `inv t0 _`, and no amount
+                // of pure equality will let the frame rule find `inv var_c _` (Error 228).
+                if (d.Init is IrCall { Kind: CalleeKind.Method } call) Call(call, binder);
+                else Line($"let {binder} = {Expr(d.Init)};");
+
+                var local = new Slot(d.Name, oc, SlotKind.Object, binder);
+                _slots[d.Name] = local;
+                _objectLocals.Add(local);
+                return;
+            }
+
             case IrBlock b:
                 Sequence(b.Statements, plan);
                 return;
@@ -842,13 +905,7 @@ public sealed class CodeEmitter(
             }
 
             case IrCall { Kind: CalleeKind.Method } call:
-            {
-                var args = call.Args.Select(Expr).ToImmutableArray();
-                var t = Fresh();
-                Line($"let {t} = {Names.Function(call.Callee)} " +
-                     (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
-                return t;
-            }
+                return Call(call, Fresh());
 
             case IrConvert cv:
                 return Convert(cv);
@@ -857,6 +914,15 @@ public sealed class CodeEmitter(
                 diagnostics.Unsupported(expr.Loc, $"`{expr.GetType().Name}` in executable code");
                 return "()";
         }
+    }
+
+    /// <summary>Emits a call, binding its result to <paramref name="binder"/>.</summary>
+    private string Call(IrCall call, string binder)
+    {
+        var args = call.Args.Select(Expr).ToImmutableArray();
+        Line($"let {binder} = {Names.Function(call.Callee)} " +
+             (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
+        return binder;
     }
 
     private string Unary(IrUnary u)

@@ -69,6 +69,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F14 | `Pulse.Lib.Box` is the **sound** heap cell and the right model of a CLR object. `Pulse.Lib.Reference.alloc` is marked `[@@deprecated "…is unsound; only use for model implementations"]` and may not appear in generated code; `Box.alloc` carries no such marker. `Box` additionally supplies `null`, a *pure* `is_null`, and `pts_to_not_null`, so a nullable object reference needs no new machinery. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Reference.fsti:87` and `Pulse.Lib.Box.fsti:31-53,90-110`; `test/pulse_facts/ObjectFacts.fst:ownership_implies_non_null`, verified. Relied on by R3.8 and R3.11. |
 | F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
+| F18 | F15's affinity is a **permission to discard, not an automatic discard**. A method that allocates an object and does not return it still holds the invariant when it ends: `Error 228: Leftover resources: class_C__inv x _`. Writing the discard needs a name for the model the context holds — an existential witness the emitter never chose — which `with m. assert p;` binds. | `test/pulse_facts/ObjectFacts.fst:allocate_and_discard`, verified; the failure was reproduced by `test/counter_client`'s `FreshIsZero` before R4.14 existed. Relied on by R4.14. |
 | F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
@@ -657,6 +658,26 @@ Freshness is free and needs no emitter work: the frame rule gives every caller
 `frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
 everything that already existed.
 
+**R4.14 (the garbage collector).** An object whose reference does not leave the method is
+**dropped at every exit**:
+
+```
+with m. assert (Class_C.class_C__inv var_x m);
+drop_ (Class_C.class_C__inv var_x m);
+```
+
+This is where the CLR's collector enters the translation. F15 says the resource *may* be
+discarded; F18 says the discard must nonetheless be *written*, and that writing it needs a
+name for a model the emitter never chose — hence the `with`. A returned object is exempt:
+its invariant is in the postcondition.
+
+A returned object also keeps the binder its callee produced it under. Pulse matches
+resources syntactically, so `let var_c = t0` leaves the context holding `inv t0 _` while
+the postcondition asks for `inv var_c _`, and the frame rule cannot bridge the two even
+though the equality is trivially true (`Error 228`). The emitter therefore emits a call
+that initialises an object local *into that local's binder* rather than into a temporary
+the local then aliases.
+
 **R4.13 (rejections).** M2 supports `sealed` classes only. `virtual`, `abstract`,
 `override`, and interface implementations are **PALCS0521**: a per-class `class_C__inv`
 cannot express behavioural subtyping without existential packages, and admitting them
@@ -940,7 +961,7 @@ never a change here that special-cases this loop.
 
 Rules are recorded here as they are validated.
 
-* §1 facts **F1–F16** are verified against the pinned toolchain and
+* §1 facts **F1–F18** are verified against the pinned toolchain and
   regression-pinned in `test/pulse_facts`. F13–F16 were established by probing
   Pulse *before* §3.4 and §4.5 were written, which is the order §0 requires.
 * **`test/objects_probe` is the scheme-adequacy probe for §3.4 and §4.5**, and stands to
@@ -970,6 +991,20 @@ Rules are recorded here as they are validated.
   probe's own source — and all five generated modules verify: the class module, the
   constructor, the mutator, the read-only method and the client that observes F17. The
   emitted output agrees with the hand-derived probe construct for construct.
+  `test/counter_client` covers the other half — using an object from outside it, where
+  the invariant is never unfolded and everything the caller knows comes from a `[Spec]`
+  member applied to the model. It forced two rules. **R4.11's caller side**: a call to a
+  mutator makes the receiver's post-state model an existential, so read-only-ness is
+  computed for *callees* too, from the same syntactic test that decides it for the method
+  in hand. **R4.14**, the garbage collector: an object that is allocated and not returned
+  must be explicitly dropped, which F18 pins.
+
+  Two emitter constraints fell out of the same test, both consequences of Pulse matching
+  resources syntactically. An object local is initialised *into its own binder* rather
+  than aliasing a temporary, and only the *receiver* of a class's own methods is unfolded
+  — an object that merely passes through must stay folded, because every function taking
+  it expects its invariant and not its representation.
+
   `TallyVariant.cs` is the §7.2 variant detector for objects: the same class with the
   field renamed, `this.` written out, `++` in place of `x = x + 1`, an expression-bodied
   reader and the members declared in reverse order. It produces output **byte-identical**

@@ -27,6 +27,7 @@ public sealed class MethodPlan
         var mutatedObjects = new HashSet<string>();
         if (method.DeclaringClass is not null && !method.IsReadOnly) mutatedObjects.Add(Names.This);
         foreach (var name in assigned) mutatedObjects.Add(name);
+        CollectMutatedReceivers(method.Body, mutatedObjects);
 
         var binders = ImmutableArray.CreateBuilder<string>();
         var ghostBinders = ImmutableArray.CreateBuilder<string>();
@@ -216,6 +217,51 @@ public sealed class MethodPlan
             postExistentials.ToImmutable());
 
         _ = diagnostics;
+    }
+
+    /// <summary>
+    /// R4.11. Objects the body hands to a callee that may move their model. A caller of
+    /// such a method holds `exists* m'. inv c m'` afterwards, so this method's own
+    /// postcondition cannot promise the model it was given.
+    /// </summary>
+    private static void CollectMutatedReceivers(IrStmt? stmt, HashSet<string> into)
+    {
+        switch (stmt)
+        {
+            case null: return;
+            case IrBlock b: foreach (var x in b.Statements) CollectMutatedReceivers(x, into); return;
+            case IrLocalDecl d: Expr(d.Init); return;
+            case IrAssign a: Expr(a.Target); Expr(a.Value); return;
+            case IrIf i:
+                Expr(i.Cond);
+                CollectMutatedReceivers(i.Then, into);
+                CollectMutatedReceivers(i.Else, into);
+                return;
+            case IrWhile w: Expr(w.Cond); CollectMutatedReceivers(w.Body, into); return;
+            case IrReturn r: Expr(r.Value); return;
+            case IrExprStmt e: Expr(e.Expr); return;
+            default: return;
+        }
+
+        void Expr(IrExpr? e)
+        {
+            switch (e)
+            {
+                case null: return;
+                case IrCall { MutatesReceiver: true, Args.IsEmpty: false } c:
+                    if (c.Args[0] is IrVar v) into.Add(v.Name);
+                    foreach (var a in c.Args) Expr(a);
+                    return;
+                case IrCall c: foreach (var a in c.Args) Expr(a); return;
+                case IrUnary u: Expr(u.Operand); return;
+                case IrBinary b2: Expr(b2.Left); Expr(b2.Right); return;
+                case IrConditional c2: Expr(c2.Cond); Expr(c2.Then); Expr(c2.Else); return;
+                case IrConvert cv: Expr(cv.Operand); return;
+                case IrRefArg ra: Expr(ra.Operand); return;
+                case IrElement el: Expr(el.Array); Expr(el.Index); return;
+                default: return;
+            }
+        }
     }
 
     public ImmutableArray<string> Binders { get; }

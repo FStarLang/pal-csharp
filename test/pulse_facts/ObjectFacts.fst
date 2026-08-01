@@ -256,3 +256,24 @@ fn ownership_implies_non_null (this: class_Stack) (#m: erased model_StackModel)
   B.pts_to_not_null this;
   fold class_Stack__inv this m;
 }
+
+/// F18: F15's affinity is a *permission* to discard, not an automatic discard. A method
+/// that allocates an object and does not return it still holds the invariant when it
+/// ends, and Pulse reports
+///     Error 228: Leftover resources: class_Stack__inv x _
+/// The discard has to be written, and writing it needs a name for the model the context
+/// is holding -- which is an existential witness the emitter never chose. `with m.
+/// assert p;` binds exactly that name, so the two-line idiom below is the whole of R4.14.
+///
+/// This is what the CLR's garbage collector translates to: not an axiom, and not nothing,
+/// but a `drop_` the emitter must remember to emit at every exit.
+fn allocate_and_discard (capacity: I32.t { I32.v capacity >= 0 })
+  requires emp
+  returns  n : I32.t
+  ensures  pure (I32.v n == I32.v capacity)
+{
+  let x = alloc_without_free capacity;
+  with m. assert (class_Stack__inv x m);
+  drop_ (class_Stack__inv x m);
+  capacity
+}

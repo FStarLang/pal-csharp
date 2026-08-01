@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
@@ -41,6 +43,57 @@ public static class Declarations
                && known.HasModel(owner)
             ? CalleeKind.Method
             : null;
+    }
+
+    /// <summary>
+    /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the
+    /// body rather than from an annotation.
+    /// </summary>
+    /// <remarks>
+    /// The test is deliberately syntactic and one level deep: a method is read-only when
+    /// it assigns no field and calls no instance method. Anything deeper would need a
+    /// fixpoint over the call graph, and getting it wrong in the permissive direction is
+    /// unsound — a caller would be told the model did not move when it did. Getting it
+    /// wrong in the strict direction only costs the caller an existential, which is
+    /// exactly what it would have had without R4.11 at all.
+    /// </remarks>
+    public static bool IsReadOnly(IMethodSymbol method, Compilation compilation)
+    {
+        if (method.MethodKind == MethodKind.Constructor) return false;
+
+        var syntax = method.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        if (syntax is null || !compilation.ContainsSyntaxTree(syntax.SyntaxTree)) return false;
+        var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+
+        return !Mutates(syntax, model);
+    }
+
+    /// <summary>
+    /// Whether a body assigns an instance field or calls an instance method — the two ways
+    /// it can move an object's model.
+    /// </summary>
+    public static bool Mutates(SyntaxNode syntax, SemanticModel model)
+    {
+        foreach (var node in syntax.DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PreIncrementExpression)
+                    || p.IsKind(SyntaxKind.PreDecrementExpression) => p.Operand,
+                PostfixUnaryExpressionSyntax p when p.IsKind(SyntaxKind.PostIncrementExpression)
+                    || p.IsKind(SyntaxKind.PostDecrementExpression) => p.Operand,
+                _ => null,
+            };
+            if (target is not null && model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false })
+                return true;
+
+            if (node is InvocationExpressionSyntax call &&
+                model.GetSymbolInfo(call).Symbol is IMethodSymbol
+                    { IsStatic: false, MethodKind: MethodKind.Ordinary })
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

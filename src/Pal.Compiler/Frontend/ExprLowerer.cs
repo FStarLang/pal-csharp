@@ -85,6 +85,23 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// </summary>
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R4.12. `new C(args)` is a call to the constructor's own emitted function. Unlike
+        // a struct, a class has a constructor *body* — it allocates — so there is a
+        // function to call rather than a record to build.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } klass &&
+            known.HasModel(klass))
+        {
+            if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol ctor)
+                return Unsupported(node, loc);
+
+            return new IrCall(loc, Naming.Of(ctor),
+                [.. (node.ArgumentList?.Arguments ?? default).Select(LowerArgument)])
+            {
+                Kind = CalleeKind.Method,
+                ResultType = new IrClassType(klass.Name),
+            };
+        }
+
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
             return Unsupported(node, loc);
 
@@ -364,10 +381,25 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrLiteral(loc, null);
         }
 
-        return new IrCall(loc, Naming.Of(method), [.. args.Select(LowerArgument)])
+        // §4.5. An instance method is emitted as a function whose first binder is the
+        // object, so the receiver is lowered as the first argument. A method called with
+        // no receiver at all is called on `this`, which is the same node the frontend
+        // synthesised as the enclosing method's first parameter.
+        var receiver = method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+                       known.HasModel(method.ContainingType)
+            ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
+                ? Lower(m.Expression)
+                : new IrVar(loc, Names.This)
+            : null;
+
+        return new IrCall(loc, Naming.Of(method),
+            receiver is null
+                ? [.. args.Select(LowerArgument)]
+                : [receiver, .. args.Select(LowerArgument)])
         {
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
+            MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };
     }
 
