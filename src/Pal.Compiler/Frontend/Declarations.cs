@@ -36,6 +36,19 @@ public static class Declarations
     }
 
     /// <summary>
+    /// Whether the member carries any annotation that only means something to pal-csharp.
+    /// </summary>
+    /// <remarks>
+    /// This is what separates "the user did not ask us to translate this" from "the user
+    /// asked and we cannot yet oblige". Only the second is a diagnostic — but it must be
+    /// one, because a silently dropped contract is a proof that was never attempted and
+    /// looks exactly like a proof that succeeded.
+    /// </remarks>
+    public static bool IsAnnotated(ISymbol symbol, WellKnown known) =>
+        symbol.GetAttributes().Any(a =>
+            a.AttributeClass is { ContainingNamespace.Name: WellKnown.Namespace });
+
+    /// <summary>
     /// The syntactic location an attribute's argument occupies, so that a diagnostic
     /// about a spec string lands on the string rather than on the declaration.
     /// </summary>

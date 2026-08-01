@@ -270,14 +270,15 @@ public sealed class Stack
     [Spec] public SpecInt Capacity => Model.Capacity;
 
     [Requires("0 <= capacity")]
-    [Ensures("Count == 0 && Capacity == capacity")]
+    [Ensures("@this.Count == 0 && @this.Capacity == capacity")]
     public Stack(int capacity) { items = new int[capacity]; top = 0; }
 
-    [Requires("Count < Capacity")]
-    [Ensures("Count == Old(Count) + 1 && Capacity == Old(Capacity)")]
+    [Requires("@this.Count < @this.Capacity")]
+    [Ensures("@this.Count == Old(@this.Count) + 1")]
+    [Ensures("@this.Capacity == Old(@this.Capacity)")]
     public void Push(int v) { items[top] = v; top = top + 1; }
 
-    [Ensures("Result == Count")]
+    [Ensures("Result == @this.Count")]
     public int Size() => top;
 }
 ```
@@ -295,10 +296,17 @@ type of your choosing, so it can be a type you already have a theory about, and 
 state and prove pure lemmas about it without mentioning `Stack` at all. `[Model]` is also
 the *only* member allowed to read the fields.
 
+**The receiver is spelled `@this`, and contracts see only accessible members.** A spec
+string is compiled as the body of a static method, so a bare `this` is a C# error; `@this`
+is the same word as a verbatim identifier, and it binds. Write it once and you will not
+think about it again — and if you forget, the error says so. For the same reason a contract
+may name only `public` or `internal` members; `[Model]` may stay `private`, because only
+the object's own invariant consumes it.
+
 **Your contracts talk about the object through its `[Spec]` members, which are functions of
-the model.** `Count == Old(Count) + 1` means what it says. A `[Spec]` member that reads a
-field directly is rejected (`PALCS0523`) — because a caller holds only the model, so an
-observation it cannot compute from the model is one it cannot use.
+the model.** `@this.Count == Old(@this.Count) + 1` means what it says. A `[Spec]` member
+that reads a field directly is rejected (`PALCS0523`) — because a caller holds only the
+model, so an observation it cannot compute from the model is one it cannot use.
 
 That gives the rule worth remembering: **every quantity a caller needs must be in the
 model.** Had `Capacity` been left out of `StackModel`, `Push`'s

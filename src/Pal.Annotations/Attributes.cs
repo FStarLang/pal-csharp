@@ -95,6 +95,48 @@ public sealed class RefineAlwaysAttribute(string predicate) : Attribute
 }
 
 // ---------------------------------------------------------------------------
+// Objects: the model, and the object invariant.
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// The abstraction function: how this object's representation is understood as a pure
+/// ghost model (translation.md R3.9).
+/// </summary>
+/// <remarks>
+/// The member's return type <em>is</em> the model type, so the model is chosen by the
+/// author rather than derived by the compiler. It may be any spec-only type — a
+/// <c>Seq&lt;T&gt;</c>, or a <c>[Spec]</c> struct for a product model.
+///
+/// This is the one member permitted to read the object's fields; every <c>[Spec]</c>
+/// member is a function of the model instead. It may be <c>private</c>, because only the
+/// object's own invariant consumes it (R4.10b).
+///
+/// Exactly one <c>[Model]</c> member is required per class; a class without one is
+/// PALCS0524, since with no model every method specification collapses to memory safety.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Method)]
+public sealed class ModelAttribute : Attribute;
+
+/// <summary>
+/// A predicate relating an object's fields, which every method may assume on entry and
+/// must re-establish on exit (translation.md R3.10).
+/// </summary>
+/// <remarks>
+/// This is <em>not</em> <see cref="RefineAttribute"/>. A refinement holds of every value
+/// of its type at all times; an object invariant may be <em>temporarily broken</em> inside
+/// a method — between two field writes, say — and is re-established at the exit. That
+/// window is exactly the emitted <c>unfold</c>/<c>fold</c> bracket.
+///
+/// The predicate names fields as simple names, as <see cref="RefineAttribute"/> does on a
+/// struct; contracts, which are written from outside, use <c>@this</c> instead (R4.10a).
+/// </remarks>
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true)]
+public sealed class InvariantAttribute(string predicate) : Attribute
+{
+    public string Predicate { get; } = predicate;
+}
+
+// ---------------------------------------------------------------------------
 // Ghost, spec and lemma methods.
 // ---------------------------------------------------------------------------
 
@@ -102,7 +144,18 @@ public sealed class RefineAlwaysAttribute(string predicate) : Attribute
 /// A pure specification function. Its C# expression body is translated to a
 /// Pulse <c>let</c>, so it is usable in contracts and in ordinary code.
 /// </summary>
-[AttributeUsage(AttributeTargets.Method)]
+/// <remarks>
+/// On a <c>struct</c> this instead marks a <em>spec-only type</em> (translation.md
+/// R3.9a): the struct is erased, never appears in executable code, and — unlike an
+/// ordinary struct (R3.4) — its fields may themselves be spec-only types such as
+/// <c>Seq&lt;T&gt;</c>. That is what makes a product model expressible.
+///
+/// On a property of a class this marks an <em>observation</em>: a pure function of the
+/// object's model (R3.9c). Its body may name the <c>[Model]</c> member and other
+/// <c>[Spec]</c> members, but never a field — a caller holds only the model, so an
+/// observation it cannot compute from the model is one it cannot use.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property | AttributeTargets.Struct)]
 public sealed class SpecAttribute : Attribute
 {
     /// <summary>Emit as a recursive definition (requires <see cref="DecreasesAttribute"/>).</summary>

@@ -39,6 +39,8 @@ public sealed class WellKnown
         RefineAttribute = Type("RefineAttribute");
         RefineAlwaysAttribute = Type("RefineAlwaysAttribute");
         SpecAttribute = Type("SpecAttribute");
+        ModelAttribute = Type("ModelAttribute");
+        InvariantAttribute = Type("InvariantAttribute");
         LemmaAttribute = Type("LemmaAttribute");
         PulseBodyAttribute = Type("PulseBodyAttribute");
         AdmitAttribute = Type("AdmitAttribute");
@@ -55,6 +57,9 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecInt { get; }
     public INamedTypeSymbol SpecNat { get; }
     public INamedTypeSymbol SlProp { get; }
+
+    public INamedTypeSymbol ModelAttribute { get; }
+    public INamedTypeSymbol InvariantAttribute { get; }
 
     public INamedTypeSymbol RequiresAttribute { get; }
     public INamedTypeSymbol EnsuresAttribute { get; }

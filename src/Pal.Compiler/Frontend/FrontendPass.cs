@@ -17,6 +17,7 @@ public static class FrontendPass
     {
         var known = WellKnown.For(compilation);
         var candidates = Collect(compilation, known);
+        ReportUncollected(compilation, known, diagnostics);
         var structs = CollectStructs(compilation, known, diagnostics);
         var sites = BuildSpecSites(compilation, known, candidates)
             .AddRange(BuildStructSpecSites(structs));
@@ -65,6 +66,66 @@ public static class FrontendPass
             }
         }
         return result.ToImmutable();
+    }
+
+    /// <summary>
+    /// Refuse, rather than ignore, an annotated member the frontend cannot collect.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Collect"/> keeps only static ordinary methods plus <c>[Spec]</c> and
+    /// <c>[Lemma]</c> members, and used to drop everything else without a word. For an
+    /// annotated member that silence is the worst possible outcome: `palcs` would report
+    /// "0 error(s)", no module would be emitted, and nothing downstream would notice that
+    /// a contract had simply evaporated. Classes are specified in translation.md §3.4 but
+    /// not yet implemented, so until they are, saying so is the whole job.
+    /// </remarks>
+    private static void ReportUncollected(
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var syntax in tree.GetRoot().DescendantNodes())
+            {
+                var symbol = syntax switch
+                {
+                    MethodDeclarationSyntax m => (ISymbol?)model.GetDeclaredSymbol(m),
+                    ConstructorDeclarationSyntax c => model.GetDeclaredSymbol(c),
+                    PropertyDeclarationSyntax p => model.GetDeclaredSymbol(p),
+                    ClassDeclarationSyntax t => model.GetDeclaredSymbol(t),
+                    _ => null,
+                };
+                if (symbol is null) continue;
+
+                // A class whose own declaration carries [Invariant] or [Model], or an
+                // annotated instance member of one: all of these are §3.4, not yet built.
+                var isClassMember =
+                    symbol is INamedTypeSymbol { TypeKind: TypeKind.Class }
+                        ? Declarations.IsAnnotated(symbol, known)
+                        : symbol is { IsStatic: false, ContainingType.TypeKind: TypeKind.Class }
+                          && Declarations.IsAnnotated(symbol, known);
+                if (!isClassMember) continue;
+
+                // A [Spec]/[Lemma] member is collected on its own terms; only genuinely
+                // dropped members are reported here.
+                if (symbol is IMethodSymbol method && Declarations.KindOf(method, known) is not null)
+                    continue;
+
+                diagnostics.Error("PALCS0530",
+                    Locations.From(syntax switch
+                    {
+                        MethodDeclarationSyntax m => m.Identifier.GetLocation(),
+                        ConstructorDeclarationSyntax c => c.Identifier.GetLocation(),
+                        PropertyDeclarationSyntax p => p.Identifier.GetLocation(),
+                        ClassDeclarationSyntax t => t.Identifier.GetLocation(),
+                        _ => syntax.GetLocation(),
+                    }),
+                    $"`{symbol.Name}` is an annotated class member, and pal-csharp does not translate " +
+                    "classes yet. The scheme is specified in doc/translation.md §3.4 and §4.5. " +
+                    "Until it is implemented, move the state into a struct passed by `ref`, with any " +
+                    "array it describes passed alongside it rather than held inside it.");
+            }
+        }
     }
 
     private static IEnumerable<IrIncludePulse> CollectIncludes(Compilation compilation, WellKnown known)

@@ -513,10 +513,31 @@ also the shape arrays already use — `ensures exists* post_a. A.pts_to var_a po
 machinery: inside ⟦Q⟧ an observation reads as `spec_C_Obs m'`, and `Old(observation)` as
 `spec_C_Obs m`.
 
-`this` is a C# keyword and so cannot be a shim parameter (the same obstacle R3.4 hit for
-`[Refine]`); in a contract the receiver's observations are therefore written as calls to
-the class's `[Spec]` methods, `Count(this)`, which is the spelling a C# programmer expects
-anyway and is what R3.9c interprets as `spec_C_Count m`.
+**R4.10a (the receiver is spelled `@this`).** A contract on an instance member names the
+receiver `@this`, as in `[Requires("@this.Count < @this.Capacity")]`.
+
+This is forced by the shim mechanism (§4 of `internals.md`), and both halves were checked
+against Roslyn rather than assumed:
+
+* A spec string is compiled as the body of a **static** method, so a bare `this` is
+  `CS0026: Keyword 'this' is not valid in a static property, static method, or static
+  field initializer`. The receiver must be an ordinary parameter.
+* `ShimParameters` already renders every parameter with an `@` prefix, so a parameter
+  *named* `this` renders as the verbatim identifier `@this`, which is legal C# and binds.
+  Nothing in the shim machinery changes.
+
+`CS0026` inside a spec string is therefore remapped to **PALCS0526**, whose message is
+"write `@this`" — the one error every user will hit once.
+
+**R4.10b (a contract may only name accessible members).** The shim lives in
+`namespace __PalSpecShims`, so a contract can reference only `public` or `internal` members
+of the class: `@this.Priv` on a private member is `CS0122`, remapped to **PALCS0525**.
+
+A `[Spec]` member intended for use in contracts must accordingly be at least `internal`.
+`[Model]` is exempt and may be `private`, because it is consumed only by R3.10's invariant,
+which the emitter builds from the member's *body* — inside the class, where private fields
+are visible. That asymmetry is the point: the abstraction function sees the representation,
+and nothing else does.
 
 The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken. It is
 emitted unconditionally, for the same reason `struct_S__pred` is emitted even when trivial
@@ -549,7 +570,7 @@ The postcondition **constrains the initial model** through the constructor's `[E
 in the same existential form as R4.10. `ensures class_C__inv x m` alone — for some
 unconstrained `m` — would say the object is well formed without saying what it holds, which
 is R3.10's weak-specification failure relocated to the constructor. A constructor with no
-`[Ensures]` is therefore a warning (`PALCS0902`): it is legal, and almost never what was
+`[Ensures]` is therefore a warning (`PALCS0903`): it is legal, and almost never what was
 meant.
 
 Freshness is free and needs no emitter work: the frame rule gives every caller
