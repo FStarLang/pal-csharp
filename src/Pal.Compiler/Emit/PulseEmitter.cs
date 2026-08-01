@@ -5,10 +5,24 @@ using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Emit;
 
+/// <summary>
+/// R2.2. The C# a generated top-level construct came from. <c>Construct</c> is the
+/// emitted F* name, or <c>"*"</c> for a module whose whole text is the user's own Pulse.
+/// </summary>
+public sealed record Provenance(string Construct, IrLoc Loc);
+
 /// <summary>A generated Pulse module.</summary>
 public sealed record EmittedModule(string Name, string Text)
 {
     public string FileName => Name + ".fst";
+
+    /// <summary>
+    /// R2.2. What this module declares and where each declaration came from. A construct
+    /// absent from here was invented by the emitter, which the provenance lint reports:
+    /// anything the translator produces that no C# asked for has to be justified as a
+    /// numbered rule in doc/translation.md.
+    /// </summary>
+    public ImmutableArray<Provenance> Origin { get; init; } = ImmutableArray<Provenance>.Empty;
 }
 
 /// <summary>
@@ -17,12 +31,20 @@ public sealed record EmittedModule(string Name, string Text)
 /// </summary>
 public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder)
 {
+    /// <summary>
+    /// The permission variable introduced by <c>[Frac("p")]</c>, if any. A slot that has
+    /// one is read-only: it can be observed but not written, here or by a callee.
+    /// </summary>
+    public string? Fraction { get; init; }
+
+    private string Perm => Fraction is null ? "" : $"#{Fraction} ";
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
         SlotKind.Cell => $"R.pts_to {Binder} {value}",
-        SlotKind.RefParam => $"R.pts_to {Binder} {value}",
-        SlotKind.Array => $"A.pts_to {Binder} {value}",
+        SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
+        SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         _ => "",
     };
 
@@ -64,7 +86,16 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrIncludePulse i => new EmittedModule(i.Module, i.Text),
                 _ => null,
             };
-            if (module is not null) modules.Add(module);
+            if (module is null) continue;
+
+            var construct = decl switch
+            {
+                IrSpecFunction s => Names.SpecFunction(s.Name),
+                IrMethod { IsLemma: true } m => Names.Lemma(m.Name),
+                IrMethod m => Names.Function(m.Name),
+                _ => "*",
+            };
+            modules.Add(module with { Origin = [new Provenance(construct, decl.Loc)] });
         }
         return modules.ToImmutable();
     }

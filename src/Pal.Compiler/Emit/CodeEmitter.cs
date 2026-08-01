@@ -259,7 +259,12 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         switch (a.Target)
         {
             case IrVar v when _slots.TryGetValue(v.Name, out var slot) && slot.Kind is SlotKind.Cell or SlotKind.RefParam:
+                if (ReadOnly(slot, a.Loc)) return;
                 Line($"{slot.Binder} := {Expr(a.Value)};");
+                return;
+
+            case IrElement { Array: IrVar av } when
+                _slots.TryGetValue(av.Name, out var arr) && ReadOnly(arr, a.Loc):
                 return;
 
             case IrElement el:
@@ -277,6 +282,19 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 diagnostics.Unsupported(a.Loc, "This assignment target");
                 return;
         }
+    }
+
+    /// <summary>
+    /// R4.9. A slot held at a fractional permission may be observed but not written; the
+    /// permission is precisely the right to read.
+    /// </summary>
+    private bool ReadOnly(Slot slot, IrLoc loc)
+    {
+        if (slot.Fraction is null) return false;
+        diagnostics.Error("PALCS0305", loc,
+            $"`{slot.Name}` is held at the fractional permission `{slot.Fraction}` " +
+            "and so cannot be written. Remove its `[Frac]` to take full ownership.");
+        return true;
     }
 
     /// <summary>R5.4. Both branches are always emitted.</summary>

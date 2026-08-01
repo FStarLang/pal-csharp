@@ -35,6 +35,10 @@ jobs:
       - name: Test
         run: make -C test
 
-      # Anti-contortion checks (doc/translation.md).
+      # Anti-contortion checks (doc/translation.md §7.2). `make -C test` runs both, but
+      # naming them here keeps a failure legible in the CI summary.
       - name: Compiler must not name any example
         run: ./test/no-example-names.sh
+
+      - name: Every generated construct must trace to C#
+        run: bash test/provenance-lint.sh

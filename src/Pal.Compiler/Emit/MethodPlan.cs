@@ -54,12 +54,33 @@ public sealed class MethodPlan
                     var postValue = "post_" + p.Name;
                     binders.Add($"({name}: array {Types.Render(array.Element)})");
                     ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Render(array.Element)}))");
-                    preResources.Add($"A.pts_to {name} {preValue}");
-                    postResources.Add($"A.pts_to {name} {postValue}");
-                    postExistentials.Add(postValue);
+
+                    // R4.9. `[Frac("p")]` introduces a permission variable and makes the
+                    // parameter read-only: the contents cannot change, so the same binder
+                    // stands for the pre- and the post-state and no existential is needed.
+                    // The caller keeps the rest of the permission and so may share the
+                    // array with a second parameter.
+                    var perm = p.Fraction is null ? "" : $"#{p.Fraction} ";
+                    if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");
+
+                    preResources.Add($"A.pts_to {name} {perm}{preValue}");
+                    if (p.Fraction is null)
+                    {
+                        postResources.Add($"A.pts_to {name} {postValue}");
+                        postExistentials.Add(postValue);
+                        post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
+                    }
+                    else
+                    {
+                        postResources.Add($"A.pts_to {name} {perm}{preValue}");
+                        post.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    }
+
                     pre.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
-                    post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
-                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name);
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name)
+                    {
+                        Fraction = p.Fraction,
+                    };
                     break;
                 }
 
@@ -69,12 +90,28 @@ public sealed class MethodPlan
                     var postValue = "post_" + p.Name;
                     binders.Add($"({name}: R.ref {Types.Render(p.Type)})");
                     ghostBinders.Add($"(#{preValue}: erased ({Types.Render(p.Type)}))");
-                    preResources.Add($"R.pts_to {name} {preValue}");
-                    postResources.Add($"R.pts_to {name} {postValue}");
-                    postExistentials.Add(postValue);
+
+                    var refPerm = p.Fraction is null ? "" : $"#{p.Fraction} ";
+                    if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");
+
+                    preResources.Add($"R.pts_to {name} {refPerm}{preValue}");
+                    if (p.Fraction is null)
+                    {
+                        postResources.Add($"R.pts_to {name} {postValue}");
+                        postExistentials.Add(postValue);
+                        post.Bind(p.Name, new Term(postValue, KindOf(p.Type), p.Type));
+                    }
+                    else
+                    {
+                        postResources.Add($"R.pts_to {name} {refPerm}{preValue}");
+                        post.Bind(p.Name, new Term($"(reveal {preValue})", KindOf(p.Type), p.Type));
+                    }
+
                     pre.Bind(p.Name, new Term($"(reveal {preValue})", KindOf(p.Type), p.Type));
-                    post.Bind(p.Name, new Term(postValue, KindOf(p.Type), p.Type));
-                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.RefParam, name);
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.RefParam, name)
+                    {
+                        Fraction = p.Fraction,
+                    };
                     break;
                 }
 

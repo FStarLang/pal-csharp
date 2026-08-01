@@ -1,5 +1,7 @@
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using Microsoft.CodeAnalysis;
 using Pal.Compiler.Diagnostics;
 using Pal.Compiler.Emit;
@@ -83,6 +85,7 @@ public static class Program
         // incomplete, so a broken translation can never look like a passing proof.
         WriteIfChanged(Path.Combine(output, "TranslationErrors.fst"), TranslationErrors(diagnostics));
         WriteIfChanged(Path.Combine(output, "diagnostics.json"), diagnostics.ToJson());
+        WriteIfChanged(Path.Combine(output, "source_range_info.json"), Provenance(modules));
 
         if (diagnostics.Items.Length > 0) Console.Error.Write(diagnostics.Render());
         if (!quiet)
@@ -108,6 +111,29 @@ public static class Program
         File.WriteAllText(path, text);
         return true;
     }
+
+    /// <summary>
+    /// R2.2. Where each generated construct came from. The provenance lint reads this and
+    /// reports anything the emitter produced that no C# asked for.
+    /// </summary>
+    private static string Provenance(ImmutableArray<EmittedModule> modules) =>
+        JsonSerializer.Serialize(
+            modules.SelectMany(m => m.Origin.Select(o => new
+            {
+                module = m.Name,
+                file = m.FileName,
+                construct = o.Construct,
+                source = new
+                {
+                    file = o.Loc.File,
+                    range = new
+                    {
+                        start = new { line = o.Loc.Line - 1, character = o.Loc.Column - 1 },
+                        end = new { line = o.Loc.EndLine - 1, character = o.Loc.EndColumn - 1 },
+                    },
+                },
+            })),
+            new JsonSerializerOptions { WriteIndented = true });
 
     private static string TranslationErrors(DiagnosticBag diagnostics)
     {

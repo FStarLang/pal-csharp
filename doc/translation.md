@@ -107,8 +107,18 @@ declaring type is always part of the name. Always, not only on collision: a prog
 generated module names must not change when an unrelated class is added.
 
 **R2.2 (provenance).** Every emitted construct records the Roslyn `Location` it came from,
-written to `source_range_info.json`. Constructs with no provenance are emitter-invented and
-must be justified as a numbered rule in this document.
+written to `source_range_info.json` as
+`{module, file, construct, source: {file, range}}`. A module whose whole text is the
+user's own Pulse (`[assembly: IncludePulse]`) records the single construct `"*"`.
+
+`test/provenance-lint.sh` reads the generated `.fst` files — not the compiler's account of
+what it did — extracts every top-level `fn`, `let` and `let rec`, and requires each to
+appear in `source_range_info.json` with a span in a C# file that exists. A construct with
+no provenance was invented by the translator, and anything the translator invents must be
+justified as a numbered rule in this document rather than as a response to one example.
+An emitter that *forgets* to record a construct therefore fails exactly as loudly as one
+that invents it. The lint runs in `make -C test` and in CI, alongside
+`test/no-example-names.sh`; together they are §7.2's two mechanical detectors.
 
 ---
 
@@ -243,6 +253,21 @@ It does **not** rescue a postcondition whose well-typedness depends on an *earli
 postcondition*; F\* type-checks each conjunct of `p₁ /\ p₂` with `p₁` in scope, so the
 conjunct that bounds an array must be written before the conjunct that indexes it. That is
 an ordering obligation on the annotations, and it is documented rather than inferred.
+
+**R4.9 (fractional permissions).** `[Frac("p")]` on an array or `ref`/`in` parameter
+introduces a ghost permission binder `(#p: perm)` and weakens the parameter's resource
+from full ownership to `A.pts_to a #p s` (resp. `R.pts_to x #p v`). Two consequences follow
+mechanically, and neither is a choice:
+
+* **The contents cannot change**, so the *same* binder stands for the pre- and the
+  post-state. The `ensures` needs no existential for that parameter and the caller needs no
+  frame reasoning about it. Compare the full-ownership case (R4.1), where every array
+  parameter contributes an existential to every postcondition.
+* **Writing through the parameter is an error** (`PALCS0305`), reported against the
+  assignment. A fractional permission is exactly the right to read.
+
+What this buys, and what nothing else does: the same array may be passed to two parameters
+at once, because the caller splits its permission rather than surrendering it.
 
 ---
 
@@ -490,10 +515,18 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
-* **The emitter now implements R2–R6 and reproduces the probe from source.** Twelve
+* **The emitter now implements R2–R6 and reproduces the probe from source.** Fourteen
   acceptance-test directories translate and verify from annotated C#: `swap`, `abs_max`,
   `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `insertion_sort_sorted`,
-  `binary_search`, `lemma_call`, `ghost_arg` and `pulse_interop`.
+  `binary_search`, `lemma_call`, `ghost_arg`, `pulse_interop`, `break_continue` and
+  `compare_elements`.
+* **Ill-formed C# stops at the C# level.** `Passes/Check.cs` is the standalone
+  well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
+  and never rewrites, and covers the cross-node conditions no single lowering site can see
+  (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
+  `test/diagnostics` is its counterpart to the verification tests — twelve cases, each
+  headed by the diagnostic it must produce, each required to exit non-zero, poison
+  `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
   `test/insertion_sort_sorted` proves, of the ordinary two-nested-loop C# insertion sort:
 
@@ -526,7 +559,10 @@ Rules are recorded here as they are validated.
   an exchanged guard, an index computed rather than carried, an inferred measure against a
   given one. All four verify with **no change to the translator**. `test/no-example-names.sh`
   additionally forbids any acceptance-test directory or method name from appearing anywhere
-  in `Pal.Compiler`.
+  in `Pal.Compiler`, and `test/provenance-lint.sh` (R2.2) requires every top-level
+  construct in every generated module to trace to a C# span. `break_continue` and
+  `compare_elements` ship variants too: six variant directories in all, none of which
+  required a translator change.
 * Every fix demanded by these tests landed where §0 rule 3 requires. `binary_search` needed
   three `Pal.Assert` steps and a measure that decreases on the iteration that finds the key
   — all in the `.cs` file. `sum_array` needed the `SumsFit` precondition and the
@@ -535,11 +571,20 @@ Rules are recorded here as they are validated.
 
 ### Not yet done
 
-* `struct`, `Span<T>`, `break`/`continue`, numeric conversions, and non-tail `return`
-  inside a loop: all currently rejected with a diagnostic rather than mistranslated.
+* `struct` and `Span<T>`. A method mentioning either is rejected with a diagnostic rather
+  than mistranslated, so `test/point_struct` and `test/circular_buffer` of the M1 suite are
+  outstanding. `Struct_<n>.fst` generation and `[Refine]` are designed (§3) but unbuilt.
+* Numeric conversions between machine-integer widths, and a non-tail `return` inside a
+  loop: likewise rejected rather than mistranslated.
 * A ghost argument determined only by the pure part of a contract cannot be passed at a
-  call site (R4.5).
-* `Passes/Check.cs` — the standalone well-formedness validator PAL runs twice. Today the
-  checks are distributed across the lowering passes, so a nonsensical declaration such as a
-  program method returning `SpecInt` produces bad Pulse rather than a diagnostic.
-* The provenance lint over `source_range_info.json` (R2.2).
+  call site (R4.5), because ghost arguments are resolved by unification and there is no
+  zero-cost C# surface for explicit implicit application.
+* **A postcondition cannot say why a loop stopped.** R5.10's break flag is internal to the
+  translation, so an invariant cannot mention it, and a contract that needs "the loop ran
+  to completion" is unstatable — see the note in `test/compare_elements`, whose `Equal`
+  carries its exit condition in the guard for this reason. PAL's answer is a per-`break`
+  `_ensures`, which is the intended fix; the C# surface for it would be a `Pal.Ensures(Q)`
+  leading a `break`.
+* `out` parameters are modelled exactly like `ref` — `pts_to` in both pre- and
+  post-condition — rather than `pts_to_uninit` in the precondition. This is sound but
+  demands more of the caller than C# does.
