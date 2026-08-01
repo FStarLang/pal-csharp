@@ -552,9 +552,31 @@ preserves class_C__inv this m
 
 `preserves p` is a real Pulse spec clause meaning exactly `requires p ensures p`, and it
 composes with `requires`/`ensures` (F13). This is a *specification-strength* rule, not an
-optimisation: `preserves` is right for a read-only method and wrong for a mutating one,
-where it would be true but vacuous. The distinction is decided by the existing write-set
-analysis (Normalize), not by a heuristic.
+optimisation, and it is the read-only case that needs it. Under R4.10's existential form a
+read-only method says only "*some* model holds afterwards"; the caller loses the fact that
+the object is unchanged unless the user writes `[Ensures("@this.X == Old(@this.X)")]` for
+every observation. `preserves` states it once, for all of them. The distinction is decided
+by the existing write-set analysis (Normalize), not by a heuristic.
+
+**R4.11a (fold witness).** R4.10's closing `fold` must name the model it re-establishes,
+and the term to name follows from the same write-set split:
+
+| Method shape | `ensures` clause | `fold class_C__inv this …` at |
+|---|---|---|
+| assigns no field (R4.11) | `preserves class_C__inv this m` | `m` — the pre-state model binder |
+| assigns a field (R4.10) | `exists* m'. class_C__inv this m' ** …` | ⟦*body of* `[Model]`⟧, evaluated at the post-state |
+
+Each is forced, and neither is a search. In the read-only case the representation is
+untouched, so `m` is still a correct index and is the *only* term that discharges
+`preserves` — refolding at a recomputed model fails with `Error 228: Cannot prove:
+class_C__inv this m`, because reconciling two indices is a matching problem the prover does
+not hand to the SMT solver. In the mutating case `m` is stale and the new model is not yet
+named by anything, so the emitter re-reads the representation and applies the abstraction:
+this is not an invented proof step but the *definition* of the model, the one the user
+supplied in `[Model]` (R3.9), transcribed at a second program point.
+
+Both branches, with the constructor and the class module, are hand-executed and verified in
+`test/objects_probe/`.
 
 **R4.12 (constructor).** `new C(args)` emits a function that allocates, establishes the
 invariant, and returns the object:
@@ -863,6 +885,19 @@ Rules are recorded here as they are validated.
 * §1 facts **F1–F16** are verified against the pinned toolchain and
   regression-pinned in `test/pulse_facts`. F13–F16 were established by probing
   Pulse *before* §3.4 and §4.5 were written, which is the order §0 requires.
+* **`test/objects_probe` is the scheme-adequacy probe for §3.4 and §4.5**, and stands to
+  the class emitter as `test/probe_insertion_sort` stood to the M1 emitter. Its
+  `Class_Counter.fst`, `Func_Counter__ctor.fst`, `Func_Counter_Increment.fst` and
+  `Func_Counter_Get.fst` were produced by hand-executing R3.7–R3.13 and R4.10–R4.12 on
+  `Counter.cs`, before any class-emitting code existed, and all four verify. The probe
+  forced exactly one addition — **R4.11a**, the fold witness: refolding a read-only method's
+  invariant at a *recomputed* model fails with `Error 228: Cannot prove: class_C__inv this
+  m`, so the read-only branch must refold at the pre-state binder `m`. It also settled two
+  spellings the emitter must use: box access is written `B.op_Bang` / `B.op_Colon_Equals`
+  rather than `!` / `:=`, so that a method holding both a box receiver and `let mut` locals
+  has no operator ambiguity; and a field of another module's record is projected and updated
+  qualified (`t.Class_C.fld_x`, `{ t with Class_C.fld_x = … }`), as F10 already required for
+  structs.
 * **`test/probe_insertion_sort` was the first end-to-end validation of §2–§6.** Its
   `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing the rules
   above on `InsertionSort.cs` — before any emitter code existed — and verify against

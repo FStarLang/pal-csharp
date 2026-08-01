@@ -221,6 +221,8 @@ test/
   diagnostics/                  negative tests: what must be *rejected*
   pulse_facts/                  regression pins for the facts in translation.md §1
                                 (PulseFacts F1-F12, StructFacts F10-F12, ObjectFacts F13-F16)
+  probe_insertion_sort/         scheme-adequacy probe for §2-§6, hand-derived
+  objects_probe/                scheme-adequacy probe for §3.4/§4.5, hand-derived
   no-example-names.sh           no test-suite identifier may appear in Pal.Compiler
   provenance-lint.sh            every generated construct must trace to a C# span
   fst-configs.sh                writes (and `--check`s) the .fst.config.json files
