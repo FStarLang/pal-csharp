@@ -25,21 +25,34 @@ source rewriting.
 
 ## Status
 
-Early bootstrap. The toolchain and the translation scheme are in place; the translator
-itself is not yet implemented.
+Milestone 1. The translator works end to end: annotated C# in, verified Pulse out.
 
 - [x] Pinned F\*/Pulse toolchain (`make tools`)
-- [x] Test harness and toolchain regression tests
+- [x] Test harness, negative tests, and the two anti-contortion lints
 - [x] [`doc/translation.md`](doc/translation.md) — the compositional translation scheme
-- [ ] `Pal.Annotations` — the annotation surface
-- [ ] `Pulse.Lib.CSharp.*` — the Pulse support library
-- [ ] `Pal.Compiler` — the Roslyn-based translator
+- [x] `Pal.Annotations` — the annotation surface
+- [x] `Pulse.Lib.CSharp.*` — the Pulse support library
+- [x] `Pal.Compiler` / `palcs` — the Roslyn-based translator
+- [x] Scalars, `ref`/`out`/`in`, arrays, loops, `break`/`continue`, fractional
+      permissions, `[Spec]` functions, `[Lemma]` calls, `Ghost<T>` arguments, raw-Pulse
+      interop
+- [x] **Insertion sort proved sorted *and* a permutation of its input**
+- [ ] `struct` support (`point_struct`, `circular_buffer`) — see
+      [`doc/translation.md`](doc/translation.md) §8
+- [ ] `Pal.Analyzers` — in-IDE squiggles on specifications
 
 ## Quick start
 
 ```bash
 make tools        # install the pinned F*/Pulse toolchain into tools/fstar
-make -C test      # verify the toolchain regression tests
+make              # build the translator
+make -C test      # translate and verify every test, then run the lints
+```
+
+To translate and verify one program:
+
+```bash
+palcs -o out MyProgram.cs        # C# ─► Pulse
 ```
 
 The F\* version is pinned in [`tools/fstar-version.txt`](tools/fstar-version.txt) and used
@@ -50,7 +63,9 @@ so no separate Pulse install is needed.
 
 | Document | Covers |
 |----------|--------|
+| [`doc/surface_syntax.md`](doc/surface_syntax.md) | What you write: contracts, loops, ownership, `[Spec]`, `[Lemma]`, `Ghost<T>`, raw Pulse — start here |
 | [`doc/translation.md`](doc/translation.md) | The translation scheme, rule by rule — the specification of the emitter, and the anti-contortion discipline that keeps it compositional |
+| [`doc/internals.md`](doc/internals.md) | How the translator is built: the pipeline, spec-string binding, the IR, the emitters, the test harness |
 
 ## Design in one paragraph
 
