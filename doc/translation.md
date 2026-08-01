@@ -62,6 +62,9 @@ The rules below depend on the following, each **verified against the pinned tool
 | F8 | A **stateful block may appear in term position**, as the scrutinee of a `let`: `let t = if (c) { <stateful block> } else { e };` is well-formed Pulse. This is what makes the short-circuit rule R6.3 compositional — the same lowering serves a loop guard, an `if` condition and an assignment right-hand side, with no context-dependent special case. | `test/pulse_facts/PulseFacts.fst:short_circuit_in_term_position`, verified; relied on by every generated short-circuit. |
 | F9 | A `decreases` measure may dereference a mutable local, but **not underneath an `if`**. `decreases (if !b then 0 else I32.v !r)` is rejected with "Expected type `FStar.Int32.t` but `!r` has type `fn …`", because the `!` sugar is elaborated only outside the branches. A conditional measure must keep its dereferences out of the branches. | `test/pulse_facts/PulseFacts.fst:decreases_conditional_without_deref`, verified; the failing form was reproduced while writing `test/binary_search`. |
 | F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
+| F10 | F\* resolves **module-qualified record syntax** in all three positions — projection `e.M.f`, update `{ e with M.f = v }`, and literal `{ M.f = a; g = b }` — without the defining module being `open`ed. So a generated struct module needs no `open` anywhere, and two structs may share a field name with no ambiguity. | `test/pulse_facts/PulseFacts.fst` + `test/pulse_facts/StructFacts.fst`, verified. |
+| F11 | A record **update's source must be a pure term**: `{ !r with M.f = v }` is rejected ("Ill-typed term … got expression of type `fn … returns …`"), because `!r` is a stateful operation and the update is a term former, not a statement. The deref must be let-bound first. This does not contradict F8: F8 is about a stateful block as the *scrutinee of a `let`*, which is precisely the form that fixes this. | `test/pulse_facts/StructFacts.fst:struct_field_write`, verified; the failing form was reproduced while writing R3.4. |
+| F12 | A Pulse `fn` **must have at least one binder**. A parameterless one fails in the elaborator, not the solver: "Tactic failed — main: FnDefn does not have binders". So a C# method with no parameters takes `()`. | `test/pulse_facts/StructFacts.fst:no_parameters`, verified; the failing form was reproduced by `test/point_struct`'s `Origin()`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -160,6 +163,78 @@ per-example:
   The side condition `Int32.v i >= 0` is discharged by the bounds obligation of R6.4.
 * in *spec* position an index is `Int32.v ⟦e⟧ : nat`, used directly with `Seq.index`.
 
+**R3.4 (structs).** A C# `struct` is a **value**: it has no identity, assignment copies it,
+and — unlike a C `struct` — nothing may hold a pointer into the middle of one. That single
+fact collapses almost all of PAL's struct machinery. Where PAL emits a record, a ghost
+spec type, fold/unfold predicates, per-field pointer projectors and their axioms, a C#
+`struct` needs only an F\* record.
+
+A declaration
+
+```csharp
+[Refine("P₁")] … [Refine("Pₙ")]
+struct S { T₁ f₁; … T_k f_k; }
+```
+
+becomes `Struct_S.fst`:
+
+```fstar
+noeq type struct_S__raw = { fld_f₁: ⟦T₁⟧; … ; fld_f_k: ⟦T_k⟧ }
+let struct_S__pred (this: struct_S__raw) : prop = ⟦P₁⟧ /\ … /\ ⟦Pₙ⟧
+type struct_S = this: struct_S__raw { struct_S__pred this }
+```
+
+and `⟦S⟧ = Struct_S.struct_S`. Notes, each of which is a decision rather than an accident:
+
+* **Fields are prefixed `fld_`** and always referred to module-qualified (`e.Struct_S.fld_f`),
+  so a C# field name can never collide with a Pulse keyword, with another struct's field,
+  or with anything in the preamble. By F10 this needs no `open`, which is why a generated
+  function module's dependency list never mentions a struct module.
+* **The refinement is a refinement type, not a separate obligation to remember.** Anything
+  that *produces* an `S` must prove `struct_S__pred`, and anything that *consumes* one may
+  assume it — which is exactly what `[Refine]` means, and it falls out of F\* subtyping
+  with no work from the emitter.
+* **A refinement is bound with the struct's fields in scope as simple names.** `[Refine("Lo <= Hi")]`,
+  not `[Refine("this.Lo <= this.Hi")]`: inside a C# `struct` declaration an unqualified
+  `Lo` already means "this instance's `Lo`", so this is the reading a C# programmer expects,
+  and it lets the shim of §4 be an ordinary static method whose parameters are the fields.
+  `this` is a C# keyword and cannot be a shim parameter, so PAL's spelling is unavailable
+  even if it were wanted.
+* `struct_S__pred` is emitted even when there are no `[Refine]`s, as `True`. Uniform output
+  beats output with fewer moving parts in one case and more in another (§0 rule 2).
+* **A field's type must itself be translatable and must be a value.** Scalars and other
+  translated structs qualify. A reference-typed field — an array, or a class — does not,
+  because it would make the struct own a resource, and a value carrying a resource needs
+  the separation-logic predicate and fold/unfold discipline this rule exists to avoid.
+  Rejected as PALCS0511; see §8.
+
+**R3.5 (struct expressions).** Three forms, all structure-preserving:
+
+| C# | Pulse |
+|---|---|
+| `e.f` | `⟦e⟧.Struct_S.fld_f` |
+| `new S { f₁ = e₁, … }` | `{ Struct_S.fld_f₁ = ⟦e₁⟧; … }`, every field present |
+| `new S()`, `default(S)` | the same literal with every field at its type's zero |
+
+C# guarantees a `struct` is fully initialized at construction, so the emitted literal is
+always total: a field the user did not mention is filled with its zero, which is what the
+CLR does. `default(S)` on a refined `S` therefore carries a real proof obligation — the
+zero value must satisfy the refinement — and that is correct, since a `default(S)` that
+violates `[Refine]` is a bug the annotation was written to catch.
+
+**R3.6 (struct assignment).** `x.f = e` where `x` is a local or `ref` parameter becomes a
+whole-value update of `x`'s cell, because that is what a C# field assignment on a value
+type *is*:
+
+```
+let t = !var_x;
+var_x := { t with Struct_S.fld_f = ⟦e⟧ };
+```
+
+The deref is let-bound rather than written inline because a record update's source must be
+a pure term (F11). Nested paths compose the same way: `x.f.g = e` updates `f` with an
+update of `g`.
+
 ---
 
 ## 4. Methods and contracts
@@ -183,7 +258,8 @@ ensures  ⟦own'(p₁)⟧ ** … ** pure (⟦Q₁⟧ /\ …)
 
 The ownership conjuncts come from R3.2 and the pure conjuncts from the user's annotations,
 in source order. The emitter contributes **no** additional pure conjuncts beyond the
-obligations of §6.
+obligations of §6. A method with no parameters at all takes the single binder `()`, since
+a Pulse `fn` must have one (F12).
 
 **R4.2 (parameter rebinding).** Every by-value parameter that the body assigns to is
 rebound as `let mut var_p = var_p;`, as PAL does. Parameters that are never assigned are

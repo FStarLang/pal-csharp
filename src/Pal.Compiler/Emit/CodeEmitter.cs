@@ -278,10 +278,62 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 return;
             }
 
+            // R3.6. A C# field assignment on a value type replaces the whole value, so
+            // it becomes an update of the cell the value lives in.
+            case IrField field when Root(field) is { } root &&
+                                    _slots.TryGetValue(root.Name, out var cell) &&
+                                    cell.Kind is SlotKind.Cell or SlotKind.RefParam:
+            {
+                if (ReadOnly(cell, a.Loc)) return;
+                var value = Expr(a.Value);
+                var current = Fresh();
+                Line($"let {current} = !{cell.Binder};");
+                Line($"{cell.Binder} := {Update(current, field, value, a.Loc)};");
+                return;
+            }
+
             default:
                 diagnostics.Unsupported(a.Loc, "This assignment target");
                 return;
         }
+    }
+
+    /// <summary>The local or parameter a field path is rooted at, if it is rooted at one.</summary>
+    private static IrVar? Root(IrExpr expr) => expr switch
+    {
+        IrVar v => v,
+        IrField f => Root(f.Receiver),
+        _ => null,
+    };
+
+    /// <summary>
+    /// R3.6. Rebuilds a value with one field path replaced. Nested paths compose: `x.f.g`
+    /// updates `f` with an update of `g`. The source of a record update must be a pure
+    /// term (F11), which is why the caller let-binds the dereference first.
+    /// </summary>
+    private string Update(string root, IrExpr target, string value, IrLoc loc)
+    {
+        if (target is not IrField field) return value;
+
+        if (field.Receiver.Type is not IrNamedType named)
+        {
+            diagnostics.Unsupported(loc, $"The assignment target `.{field.Field}`");
+            return value;
+        }
+
+        var updated =
+            $"{{ {Path(root, field.Receiver, loc)} with {Names.Projection(named.Name, field.Field)} = {value} }}";
+        return Update(root, field.Receiver, updated, loc);
+    }
+
+    /// <summary>The pure projection path from a root binder down to a field access.</summary>
+    private string Path(string root, IrExpr expr, IrLoc loc)
+    {
+        if (expr is IrVar) return root;
+        if (expr is IrField f && f.Receiver.Type is IrNamedType named)
+            return $"{Path(root, f.Receiver, loc)}.{Names.Projection(named.Name, f.Field)}";
+        diagnostics.Unsupported(loc, "This assignment target");
+        return root;
     }
 
     /// <summary>
@@ -554,9 +606,29 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 return t;
             }
 
+            case IrField f:
+            {
+                // R3.5. A field read of a value type is a pure projection: no memory is
+                // touched beyond whatever reading the receiver already required.
+                var receiver = Expr(f.Receiver);
+                if (f.Receiver.Type is not IrNamedType named)
+                {
+                    diagnostics.Unsupported(f.Loc, $"The field access `.{f.Field}`");
+                    return "()";
+                }
+                return $"{receiver}.{Names.Projection(named.Name, f.Field)}";
+            }
+
+            case IrNew n:
+            {
+                var fields = n.Fields.Select((f, i) =>
+                    (i == 0 ? Names.Projection(n.Struct, f.Field) : Names.Field(f.Field))
+                    + " = " + Expr(f.Value)).ToImmutableArray();
+                return "{ " + string.Join("; ", fields) + " }";
+            }
+
             case IrUnary u:
                 return Unary(u);
-
             case IrBinary b:
                 return Binary(b);
 

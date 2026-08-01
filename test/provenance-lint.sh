@@ -63,7 +63,8 @@ PY
         [ "$base" = "TranslationErrors.fst" ] && continue          # the sentinel, by design
         grep -qxF "$base" <<<"$verbatim" && continue               # the user's own Pulse
 
-        # Top-level F*/Pulse definitions: `fn f`, `let f`, `let rec f`, `ghost fn f`.
+        # Top-level F*/Pulse definitions: `fn f`, `let f`, `let rec f`, `ghost fn f`,
+        # and the type declarations a struct produces (R3.4).
         while read -r name; do
             [ -z "$name" ] && continue
             checked=$((checked + 1))
@@ -71,7 +72,9 @@ PY
                 echo "provenance-lint: $dir/out/$base declares '$name', which no C# asked for"
                 fail=1
             fi
-        done < <(sed -nE 's/^(ghost )?(fn|let)( rec)? ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\4/p' "$fst")
+        done < <(sed -nE \
+            -e 's/^(ghost )?(fn|let)( rec)? ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\4/p' \
+            -e 's/^(noeq |unopteq )?type ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\2/p' "$fst")
     done
 done
 

@@ -246,6 +246,7 @@ public static class Normalize
             case IrElement e: Free(e.Array, into); Free(e.Index, into); return;
             case IrLength l: Free(l.Array, into); return;
             case IrField f: Free(f.Receiver, into); return;
+            case IrNew n: foreach (var f in n.Fields) Free(f.Value, into); return;
             case IrCall call: foreach (var a in call.Args) Free(a, into); return;
             case IrConvert cv: Free(cv.Operand, into); return;
             case IrOld o: Free(o.Operand, into); return;

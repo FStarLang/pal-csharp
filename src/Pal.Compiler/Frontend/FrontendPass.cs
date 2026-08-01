@@ -17,11 +17,16 @@ public static class FrontendPass
     {
         var known = WellKnown.For(compilation);
         var candidates = Collect(compilation, known);
-        var sites = BuildSpecSites(compilation, known, candidates);
+        var structs = CollectStructs(compilation, known, diagnostics);
+        var sites = BuildSpecSites(compilation, known, candidates)
+            .AddRange(BuildStructSpecSites(structs));
 
         var bound = SpecBinder.Bind(ref compilation, sites, diagnostics);
 
         var declarations = ImmutableArray.CreateBuilder<IrDecl>();
+        foreach (var s in structs)
+            declarations.Add(LowerStruct(s, known, bound, diagnostics));
+
         foreach (var candidate in candidates)
         {
             // The semantic model must be re-fetched: adding the shim trees produced a
@@ -72,6 +77,170 @@ public static class FrontendPass
             yield return new IrIncludePulse(
                 Locations.From(Declarations.ArgumentLocation(data)), module, body);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Structs (R3.4)
+    // -----------------------------------------------------------------------
+
+    /// <summary>One field of a struct: a C# field, or an auto-property's storage.</summary>
+    private sealed record StructField(ISymbol Symbol, string Name, ITypeSymbol Type, IrType Mapped);
+
+    private sealed record StructCandidate(
+        StructDeclarationSyntax Syntax,
+        INamedTypeSymbol Symbol,
+        ImmutableArray<StructField> Fields,
+        ImmutableArray<string> Usings);
+
+    private static ImmutableArray<StructCandidate> CollectStructs(
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        var result = ImmutableArray.CreateBuilder<StructCandidate>();
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<StructDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
+                if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
+
+                var loc = Locations.From(syntax.Identifier);
+                var fields = ImmutableArray.CreateBuilder<StructField>();
+                var ok = true;
+
+                foreach (var member in symbol.GetMembers())
+                {
+                    var (name, type) = member switch
+                    {
+                        // An auto-property's backing field is nameless in C# and appears
+                        // in `GetMembers` alongside the property; the property is the
+                        // form the user wrote and the one specifications name.
+                        IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } f
+                            => (f.Name, f.Type),
+                        IPropertySymbol { IsStatic: false, IsIndexer: false } p
+                            when p.GetMethod is not null && IsAuto(p) => (p.Name, p.Type),
+                        _ => (null, null),
+                    };
+                    if (name is null || type is null) continue;
+
+                    var mapped = known.MapType(type);
+                    if (mapped is null || !IsValueField(mapped))
+                    {
+                        // R3.4: a field owning a resource would need the fold/unfold
+                        // predicate discipline this rule exists to avoid.
+                        diagnostics.Error("PALCS0511",
+                            Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                            $"The field `{symbol.Name}.{name}` has type `{type}`, which a struct cannot hold. " +
+                            "A translated struct's fields must be values: scalars, or other translated " +
+                            "structs. Pass an array alongside the struct rather than inside it.");
+                        ok = false;
+                        continue;
+                    }
+                    fields.Add(new StructField(member, name, type, mapped));
+                }
+
+                if (!ok) continue;
+                if (symbol.Name.Length == 0) continue;
+                _ = loc;
+                result.Add(new StructCandidate(
+                    syntax, symbol, fields.ToImmutable(), BuildTypeUsings(syntax, symbol)));
+            }
+        }
+        return result.ToImmutable();
+    }
+
+    private static bool IsAuto(IPropertySymbol p) =>
+        p.ContainingType.GetMembers().OfType<IFieldSymbol>()
+            .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p));
+
+    /// <summary>R3.4: the field types a struct may hold.</summary>
+    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType;
+
+    /// <summary>
+    /// R3.4: a refinement is bound with the struct's fields in scope as simple names,
+    /// so <c>[Refine("Lo &lt;= Hi")]</c> reads as it would inside an instance method.
+    /// </summary>
+    private static ImmutableArray<SpecSite> BuildStructSpecSites(
+        ImmutableArray<StructCandidate> structs)
+    {
+        var sites = ImmutableArray.CreateBuilder<SpecSite>();
+        foreach (var s in structs)
+        {
+            var parameters = s.Fields.Select(f => new SpecParam(f.Name, f.Type)).ToImmutableArray();
+            var index = 0;
+            foreach (var (text, location) in Refinements(s))
+                sites.Add(new SpecSite(
+                    Key: $"{s.Symbol.Name}_refine_{index++}",
+                    Text: text,
+                    Location: location,
+                    Parameters: parameters,
+                    Usings: s.Usings));
+        }
+        return sites.ToImmutable();
+    }
+
+    /// <summary>
+    /// Every <c>[Refine]</c> on the struct and on its fields, in declaration order. Both
+    /// forms mean the same thing and see the same binders, so they share one list: a
+    /// field's refinement is simply one that happens to mention only that field.
+    /// </summary>
+    private static IEnumerable<(string Text, Location Location)> Refinements(StructCandidate s)
+    {
+        foreach (var data in s.Symbol.GetAttributes())
+            if (IsRefine(data) && Declarations.StringArgument(data) is { } text)
+                yield return (text, Declarations.ArgumentLocation(data));
+
+        foreach (var field in s.Fields)
+            foreach (var data in field.Symbol.GetAttributes())
+                if (IsRefine(data) && Declarations.StringArgument(data) is { } text)
+                    yield return (text, Declarations.ArgumentLocation(data));
+
+        static bool IsRefine(AttributeData data) =>
+            data.AttributeClass?.Name is "RefineAttribute" or "RefineAlwaysAttribute";
+    }
+
+    private static IrStruct LowerStruct(
+        StructCandidate s,
+        WellKnown known,
+        ImmutableDictionary<string, BoundSpec> bound,
+        DiagnosticBag diagnostics)
+    {
+        var fields = s.Fields
+            .Select(f => new IrFieldDecl(
+                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped))
+            .ToImmutableArray();
+
+        var refinements = ImmutableArray.CreateBuilder<IrExpr>();
+        for (var i = 0; i < Refinements(s).Count(); i++)
+            if (bound.TryGetValue($"{s.Symbol.Name}_refine_{i}", out var spec))
+                refinements.Add(new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                    .Lower(spec.Expression));
+
+        return new IrStruct(
+            Locations.From(s.Syntax.Identifier), s.Symbol.Name, fields, refinements.ToImmutable());
+    }
+
+    private static ImmutableArray<string> BuildTypeUsings(
+        StructDeclarationSyntax syntax, INamedTypeSymbol symbol)
+    {
+        var fileUsings = syntax.SyntaxTree.GetRoot()
+            .DescendantNodes()
+            .OfType<UsingDirectiveSyntax>()
+            .Select(u => u.ToString())
+            .ToImmutableArray();
+
+        var ns = symbol.ContainingNamespace;
+        var enclosing = ns is null || ns.IsGlobalNamespace
+            ? ImmutableArray<string>.Empty
+            : ImmutableArray.Create($"using {ns.ToDisplayString()};");
+
+        return
+        [
+            .. fileUsings,
+            .. enclosing,
+            $"using {WellKnown.Namespace};",
+            $"using static {WellKnown.Namespace}.Pal;",
+        ];
     }
 
     // -----------------------------------------------------------------------

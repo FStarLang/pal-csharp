@@ -130,6 +130,28 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrSeqOp s:
                 return SeqOp(s, scope);
 
+            case IrField f:
+            {
+                // R3.5. The struct name comes from the receiver's C# type, which is what
+                // makes the projection module-qualified (F10) and so unambiguous.
+                var receiver = Emit(f.Receiver, scope);
+                if ((f.Receiver.Type ?? receiver.Type) is not IrNamedType named)
+                {
+                    diagnostics.Unsupported(f.Loc, $"The field access `.{f.Field}`");
+                    return new Term("()", TermKind.Other);
+                }
+                return new Term(
+                    $"{receiver.Text}.{Names.Projection(named.Name, f.Field)}",
+                    MethodPlan.KindOf(f.Type ?? IrPrim.Int), f.Type);
+            }
+
+            case IrNew n:
+                return new Term(
+                    "({ " + string.Join("; ", n.Fields.Select((f, i) =>
+                        (i == 0 ? Names.Projection(n.Struct, f.Field) : Names.Field(f.Field))
+                        + " = " + FieldValue(f.Value, scope))) + " })",
+                    TermKind.Other, n.Type);
+
             case IrQuantifier q:
                 return Quantifier(q, scope);
 
@@ -316,6 +338,16 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// A spec-position argument: mathematical for integers, the sequence for arrays
     /// (R4.6). This is what makes <c>Sorted(a, 0, a.Length)</c> translate.
     /// </summary>
+    /// <summary>
+    /// R3.5. A struct field holds a machine value, so a literal keeps its width suffix
+    /// rather than becoming the mathematical integer a specification otherwise uses.
+    /// </summary>
+    private string FieldValue(IrExpr expr, SpecScope scope) => expr switch
+    {
+        IrLiteral l => Types.Literal(l.Value, expr.Type),
+        _ => Emit(expr, scope).Text,
+    };
+
     private string Argument(IrExpr arg, SpecScope scope)
     {
         var term = Emit(arg, scope);

@@ -132,7 +132,11 @@ public sealed class MethodPlan
             }
         }
 
-        Binders = [.. binders, .. ghostBinders];
+        // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method
+        // takes the unit argument its Pulse counterpart is called with.
+        Binders = binders.Count == 0 && ghostBinders.Count == 0
+            ? ["()"]
+            : [.. binders, .. ghostBinders];
         Prologue = prologue.ToImmutable();
         PreScope = pre;
         PostScope = post;

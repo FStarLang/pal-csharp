@@ -38,6 +38,20 @@ public static class Names
     public static string Lemma(string name) => "lemma_" + name;
     public static string FunctionModule(string name) => "Func_" + name;
     public static string SpecModule(string name) => "Let_" + name;
+
+    // R3.4. A struct's field names are prefixed and always used module-qualified, so a
+    // C# field can never collide with a Pulse keyword, with the preamble, or with
+    // another struct's field of the same name.
+    public static string StructModule(string name) => "Struct_" + name;
+    public static string StructType(string name) => "struct_" + name;
+    public static string StructRaw(string name) => "struct_" + name + "__raw";
+    public static string StructPred(string name) => "struct_" + name + "__pred";
+    public static string Field(string name) => "fld_" + name;
+
+    /// <summary>The module-qualified projection <c>e.Struct_S.fld_f</c> (F10).</summary>
+    public static string Projection(string structName, string field) =>
+        StructModule(structName) + "." + Field(field);
+
     public const string Result = "var_result";
 }
 
@@ -96,7 +110,7 @@ public static class Types
         IrArrayType a => $"array {Render(a.Element)}",
         IrSeqType s => $"Seq.seq {Render(s.Element)}",
         IrGhostType g => Render(g.Inner),
-        IrNamedType n => "struct_" + n.Name,
+        IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
         IrPulseType p => p.PulseText,
         _ => "unit",
     };

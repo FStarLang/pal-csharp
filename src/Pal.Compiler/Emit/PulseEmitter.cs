@@ -83,6 +83,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrSpecFunction s => EmitSpecFunction(s),
                 IrMethod { IsLemma: true } m => EmitLemma(m),
                 IrMethod m => EmitMethod(m),
+                IrStruct s => EmitStruct(s),
                 IrIncludePulse i => new EmittedModule(i.Module, i.Text),
                 _ => null,
             };
@@ -93,9 +94,23 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrSpecFunction s => Names.SpecFunction(s.Name),
                 IrMethod { IsLemma: true } m => Names.Lemma(m.Name),
                 IrMethod m => Names.Function(m.Name),
+                IrStruct s => Names.StructType(s.Name),
                 _ => "*",
             };
-            modules.Add(module with { Origin = [new Provenance(construct, decl.Loc)] });
+
+            // R3.4 emits three constructs for one C# declaration — the record, its
+            // refinement predicate, and the refined type — so all three are recorded
+            // against the same span rather than leaving two of them unaccounted for.
+            ImmutableArray<Provenance> origin = decl is IrStruct st
+                ?
+                [
+                    new Provenance(Names.StructRaw(st.Name), decl.Loc),
+                    new Provenance(Names.StructPred(st.Name), decl.Loc),
+                    new Provenance(Names.StructType(st.Name), decl.Loc),
+                ]
+                : [new Provenance(construct, decl.Loc)];
+
+            modules.Add(module with { Origin = origin });
         }
         return modules.ToImmutable();
     }
@@ -221,6 +236,52 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"  = {body}");
 
         return new EmittedModule(Names.SpecModule(lemma.Name), sb.ToString());
+    }
+
+    // =======================================================================
+    // Structs (R3.4)
+    // =======================================================================
+
+    /// <summary>
+    /// A C# <c>struct</c> is a value — it has no identity, assignment copies it, and
+    /// nothing can hold a pointer into the middle of one — so it needs an F* record and
+    /// nothing else. Where PAL emits a spec type, fold/unfold predicates and per-field
+    /// pointer projectors, all of that machinery exists to model C's interior pointers,
+    /// which C# does not have.
+    /// </summary>
+    private EmittedModule EmitStruct(IrStruct s)
+    {
+        var scope = new SpecScope();
+        foreach (var f in s.Fields)
+            // Inside the defining module the field name needs no qualifier — and must
+            // not have one, or F*'s dependency scan reads the module as depending on
+            // itself.
+            scope.Bind(f.Name, new Term(
+                $"this.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+
+        var predicate = s.Refinements.Length == 0
+            ? "True"
+            : SpecEmitter.Conjunction(s.Refinements.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"module {Names.StructModule(s.Name)}");
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Modules);
+        sb.AppendLine();
+        sb.Append("noeq type ").Append(Names.StructRaw(s.Name)).AppendLine(" = {");
+        foreach (var f in s.Fields)
+            sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        // The refinement predicate is emitted even when trivial: uniform output beats
+        // output whose shape depends on whether the user happened to write [Refine].
+        sb.AppendLine($"let {Names.StructPred(s.Name)} (this: {Names.StructRaw(s.Name)}) : prop =");
+        sb.AppendLine($"  {predicate}");
+        sb.AppendLine();
+        sb.AppendLine($"type {Names.StructType(s.Name)} = " +
+                      $"this: {Names.StructRaw(s.Name)} {{ {Names.StructPred(s.Name)} this }}");
+
+        return new EmittedModule(Names.StructModule(s.Name), sb.ToString());
     }
 
     // =======================================================================

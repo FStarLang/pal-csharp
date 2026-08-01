@@ -32,6 +32,12 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         IrExpr result = node switch
         {
             ParenthesizedExpressionSyntax p => Lower(p.Expression),
+            // `default` and `default(T)` are the same expression; both must be matched
+            // before the general literal case, which would otherwise see a token with
+            // no value and produce a nonsense constant.
+            DefaultExpressionSyntax => Default(node, loc),
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.DefaultLiteralExpression) =>
+                Default(node, loc),
             LiteralExpressionSyntax l => LowerLiteral(l, loc),
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
@@ -43,11 +49,108 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
-            DefaultExpressionSyntax or LiteralExpressionSyntax => new IrLiteral(loc, null),
+            ObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
+            ImplicitObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             _ => Unsupported(node, loc),
         };
 
         return type is null ? result : result with { Type = type };
+    }
+
+    /// <summary>
+    /// R3.5. <c>new S { f = e, … }</c>. Only object-initializer syntax is translated:
+    /// a user-written constructor has a body, and running that body at every
+    /// construction site is method translation, not expression translation.
+    /// </summary>
+    private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
+    {
+        if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
+            return Unsupported(node, loc);
+
+        if (node.ArgumentList is { Arguments.Count: > 0 })
+        {
+            diagnostics.Unsupported(loc, $"A constructor call on `{named.Name}`",
+                "Use object-initializer syntax: `new " + named.Name + " { Field = value, … }`.");
+            return new IrLiteral(loc, null);
+        }
+
+        var given = new List<IrFieldInit>();
+        foreach (var expr in node.Initializer?.Expressions ?? default)
+        {
+            if (expr is not AssignmentExpressionSyntax { Left: IdentifierNameSyntax name } assign)
+            {
+                diagnostics.Unsupported(Locations.From(expr), $"The initializer `{Trim(expr)}`");
+                continue;
+            }
+            given.Add(new IrFieldInit(name.Identifier.ValueText, Lower(assign.Right)));
+        }
+
+        return Construct(loc, named.Name, named, given);
+    }
+
+    /// <summary>
+    /// R3.5. Builds the complete field list: C# guarantees a value type is fully
+    /// initialized, so a field the source did not mention takes its type's zero.
+    /// </summary>
+    private IrExpr Construct(
+        IrLoc loc, string name, INamedTypeSymbol? symbol,
+        IReadOnlyList<IrFieldInit> given)
+    {
+        if (symbol is null)
+        {
+            diagnostics.Unsupported(loc, $"A value of type `{name}`");
+            return new IrLiteral(loc, null);
+        }
+
+        var fields = ImmutableArray.CreateBuilder<IrFieldInit>();
+        foreach (var (field, type) in StructFields(symbol))
+        {
+            var supplied = given.FirstOrDefault(g => g.Field == field);
+            if (supplied is not null) { fields.Add(supplied); continue; }
+            if (Zero(loc, type) is not { } zero)
+            {
+                diagnostics.Unsupported(loc, $"The default value of `{name}.{field}`");
+                return new IrLiteral(loc, null);
+            }
+            fields.Add(new IrFieldInit(field, zero));
+        }
+
+        foreach (var g in given)
+            if (!fields.Any(f => f.Field == g.Field))
+                diagnostics.Unsupported(loc, $"The initializer for `{name}.{g.Field}`");
+
+        return new IrNew(loc, name, fields.ToImmutable());
+    }
+
+    /// <summary>The fields of a struct, in declaration order; see R3.4.</summary>
+    private static IEnumerable<(string Name, ITypeSymbol Type)> StructFields(INamedTypeSymbol symbol)
+    {
+        foreach (var member in symbol.GetMembers())
+        {
+            switch (member)
+            {
+                case IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } f:
+                    yield return (f.Name, f.Type); break;
+                case IPropertySymbol { IsStatic: false, IsIndexer: false } p
+                    when symbol.GetMembers().OfType<IFieldSymbol>().Any(
+                        f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p)):
+                    yield return (p.Name, p.Type); break;
+            }
+        }
+    }
+
+    private IrExpr? Zero(IrLoc loc, ITypeSymbol type)
+    {
+        var mapped = known.MapType(type);
+        return mapped switch
+        {
+            IrPrim { Kind: PrimKind.Bool } => new IrLiteral(loc, false) { Type = mapped },
+            IrPrim p when p.IsMachineInt || p.Kind is PrimKind.SpecInt or PrimKind.SpecNat =>
+                new IrLiteral(loc, 0) { Type = mapped },
+            IrNamedType n when type is INamedTypeSymbol named =>
+                Construct(loc, n.Name, named, []) is IrNew nested ? nested with { Type = mapped } : null,
+            _ => null,
+        };
     }
 
     private IrExpr Unsupported(ExpressionSyntax node, IrLoc loc)
@@ -64,6 +167,15 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
     private static IrExpr LowerLiteral(LiteralExpressionSyntax node, IrLoc loc) =>
         new IrLiteral(loc, node.Token.Value);
+
+    /// <summary>R3.5. <c>default</c> at any translatable type.</summary>
+    private IrExpr Default(ExpressionSyntax node, IrLoc loc)
+    {
+        if (model.GetTypeInfo(node).Type is not { } type) return Unsupported(node, loc);
+        if (Zero(loc, type) is { } zero) return zero;
+        diagnostics.Unsupported(loc, $"`default` at type `{type}`");
+        return new IrLiteral(loc, null);
+    }
 
     private IrExpr LowerIdentifier(IdentifierNameSyntax node, IrLoc loc)
     {

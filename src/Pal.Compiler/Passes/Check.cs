@@ -262,6 +262,7 @@ public static class Check
             IrElement e => [e.Array, e.Index],
             IrLength l => [l.Array],
             IrField f => [f.Receiver],
+            IrNew n => [.. n.Fields.Select(f => f.Value)],
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrOld o => [o.Operand],

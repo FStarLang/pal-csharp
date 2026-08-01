@@ -129,6 +129,16 @@ public sealed record IrLength(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 /// <summary><c>x.f</c> on a struct.</summary>
 public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc);
 
+public sealed record IrFieldInit(string Field, IrExpr Value);
+
+/// <summary>
+/// <c>new S { … }</c>, <c>new S()</c> or <c>default(S)</c> (R3.5). Every field of the
+/// struct is present: C# guarantees a value type is fully initialized at construction,
+/// so a field the source did not mention carries its type's zero.
+/// </summary>
+public sealed record IrNew(
+    IrLoc Loc, string Struct, ImmutableArray<IrFieldInit> Fields) : IrExpr(Loc);
+
 public enum CalleeKind { Method, Spec, Lemma }
 
 /// <summary>A call to a user method, <c>[Spec]</c> function, or <c>[Lemma]</c>.</summary>
@@ -300,14 +310,14 @@ public sealed record IrSpecFunction(
     public IrExpr? Decreases { get; init; }
 }
 
-public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type, string? Refinement);
+public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type);
 
-/// <summary>A struct: emitted as <c>Struct_&lt;Name&gt;.fst</c>.</summary>
+/// <summary>A struct: emitted as <c>Struct_&lt;Name&gt;.fst</c> (R3.4).</summary>
 public sealed record IrStruct(
     IrLoc Loc,
     string Name,
     ImmutableArray<IrFieldDecl> Fields,
-    ImmutableArray<string> Refinements) : IrDecl(Loc, Name);
+    ImmutableArray<IrExpr> Refinements) : IrDecl(Loc, Name);
 
 /// <summary>Raw Pulse pulled in via <c>[assembly: IncludePulse]</c>.</summary>
 public sealed record IrIncludePulse(IrLoc Loc, string Module, string Text) : IrDecl(Loc, Module);
