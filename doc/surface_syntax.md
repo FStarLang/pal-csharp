@@ -241,21 +241,40 @@ A class is what lets state and the storage it describes finally live together. C
 struct version above:
 
 ```csharp
-[Invariant("0 <= Count && Count <= Capacity")]
+// The model: a pure, ghost description of what a Stack *is*. You write it; pal-csharp
+// does not invent it. `[Spec]` on a struct makes it a spec-only type, so unlike an
+// ordinary struct it may hold `Seq<T>` and other spec-only types. An unbounded stack
+// could just use `Seq<int>` directly and declare no model struct at all.
+[Spec]
+public struct StackModel
+{
+    public Seq<int> Elems;
+    public SpecInt  Capacity;
+}
+
 public sealed class Stack
 {
     private int[] items;      // a class MAY own an array; a struct may not
     private int top;
 
-    [Spec] public int Count    => top;
-    [Spec] public int Capacity => items.Length;
+    // The abstraction function: the ONE member that may read the fields. It says how the
+    // representation is understood as a model.
+    [Model]
+    public StackModel Model => new StackModel {
+        Elems    = Pal.Slice(Pal.Contents(items), 0, top),
+        Capacity = items.Length
+    };
+
+    // [Spec] members are functions of the MODEL, never of the fields.
+    [Spec] public SpecInt Count    => Model.Elems.Length;
+    [Spec] public SpecInt Capacity => Model.Capacity;
 
     [Requires("0 <= capacity")]
     [Ensures("Count == 0 && Capacity == capacity")]
     public Stack(int capacity) { items = new int[capacity]; top = 0; }
 
     [Requires("Count < Capacity")]
-    [Ensures("Count == Old(Count) + 1")]
+    [Ensures("Count == Old(Count) + 1 && Capacity == Old(Capacity)")]
     public void Push(int v) { items[top] = v; top = top + 1; }
 
     [Ensures("Result == Count")]
@@ -263,7 +282,7 @@ public sealed class Stack
 }
 ```
 
-Four things are worth knowing, and each is a consequence of the scheme rather than a
+Five things are worth knowing, and each is a consequence of the scheme rather than a
 convention.
 
 **`[Invariant]` on a class is *not* `[Refine]` on a struct.** A struct's refinement holds of
@@ -271,12 +290,20 @@ every value at all times. A class invariant may be *temporarily broken* inside a
 `Push` above breaks it between the two field writes — and is re-established on exit. That is
 why they are different attributes rather than one.
 
-**Your contracts talk about the object through its `[Spec]` members.** `Count` and
-`Capacity` above are ordinary `[Spec]` properties, and `Count == Old(Count) + 1` means what
-it says. Behind the scenes these are the *model* of the object, and the rule that follows
-from it is the one to remember: **every quantity a caller needs must be a `[Spec]`
-member.** Had `Capacity` been left out, `Push`'s `[Requires("Count < Capacity")]` would be
-unwritable and `Push` would be uncallable — the object would verify and be useless.
+**You choose the model; the compiler does not derive it.** `[Model]` names a pure ghost
+type of your choosing, so it can be a type you already have a theory about, and you can
+state and prove pure lemmas about it without mentioning `Stack` at all. `[Model]` is also
+the *only* member allowed to read the fields.
+
+**Your contracts talk about the object through its `[Spec]` members, which are functions of
+the model.** `Count == Old(Count) + 1` means what it says. A `[Spec]` member that reads a
+field directly is rejected (`PALCS0523`) — because a caller holds only the model, so an
+observation it cannot compute from the model is one it cannot use.
+
+That gives the rule worth remembering: **every quantity a caller needs must be in the
+model.** Had `Capacity` been left out of `StackModel`, `Push`'s
+`[Requires("Count < Capacity")]` would be unwritable and `Push` uncallable — the class would
+verify and be useless. You find this out at the declaration, not at a call site.
 
 **An object is owned, so two parameters are two different objects.** `Merge(Stack a, Stack
 b)` may not be called as `Merge(s, s)`; that is reported as `PALCS0520`. Ownership also

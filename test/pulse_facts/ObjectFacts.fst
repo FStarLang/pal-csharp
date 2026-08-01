@@ -50,13 +50,19 @@ noeq type class_Stack__raw = { fld_items: A.array I32.t; fld_top: I32.t }
 /// R3.8: the object reference type is a `Box.box` of the representation.
 let class_Stack = B.box class_Stack__raw
 
-/// R3.9: the **model** of the object. The critical design constraint is that the model
-/// must expose every observation a *caller* needs in order to establish a precondition
-/// or exploit a postcondition. A bare `Seq.seq I32.t` would be too weak: a client could
-/// not state "the stack is not full", because capacity would be hidden inside the
-/// invariant's existential. So the model is a record of exactly the `[Spec]`-visible
-/// observations of the class.
-noeq type class_Stack__model = { elems: Seq.seq I32.t; cap: nat }
+/// R3.9: the **model** of the object -- a pure ghost type, declared by the *user*, that
+/// the invariant relates the implementation type to.
+///
+/// The model type is not derived by the compiler from the class's members. It is whatever
+/// type the user's `[Model]` member returns, so it can be a type they already have a
+/// theory about (`Seq<T>`, or a spec-only struct like this one), and pure lemmas about it
+/// can be stated and proved without mentioning the implementation at all.
+///
+/// The one constraint is that the model must expose every observation a *caller* needs, to
+/// establish a precondition as well as to exploit a postcondition. A bare `Seq.seq I32.t`
+/// would be too weak here: capacity would stay trapped inside the invariant's existential,
+/// a client could not state "the stack is not full", and `push` would be uncallable.
+noeq type model_StackModel = { elems: Seq.seq I32.t; capacity: nat }
 
 /// R3.10: the object invariant, **indexed by the model**.
 ///
@@ -72,24 +78,47 @@ noeq type class_Stack__model = { elems: Seq.seq I32.t; cap: nat }
 /// method that transiently breaks its invariant between two field writes would be
 /// rejected. Struct refinements are always true; class invariants are temporarily
 /// breakable, and that difference is why they use different mechanisms.
-let class_Stack__inv (this: class_Stack) (m: class_Stack__model) : slprop =
+let class_Stack__inv (this: class_Stack) (m: model_StackModel) : slprop =
   exists* (r: class_Stack__raw) (contents: Seq.seq I32.t).
     B.pts_to this r **
     A.pts_to r.fld_items contents **
-    pure (I32.v r.fld_top == Seq.length m.elems /\
-          Seq.length contents == m.cap /\
-          Seq.length m.elems <= m.cap /\
-          m.cap <= 2147483647 /\
-          m.elems `Seq.equal` Seq.slice contents 0 (Seq.length m.elems))
+    pure (0 <= I32.v r.fld_top /\ I32.v r.fld_top <= Seq.length contents /\
+          Seq.length contents <= 2147483647 /\
+          m.capacity == Seq.length contents /\
+          m.elems == Seq.slice contents 0 (I32.v r.fld_top))
+
+/// R3.9b: the **abstraction relation is inlined as a conjunct, with its bounds stated
+/// first** -- it is not factored out as a separate `abs : raw -> contents -> model`.
+///
+/// This is forced, not stylistic. The abstraction is *partial*: `Seq.slice contents 0 (v
+/// top)` is only well-typed once `0 <= v top <= Seq.length contents` is known. Factoring it
+/// out as a total function would require refining its arguments, and that refinement would
+/// then have to be discharged at *every* use of the model -- the identical trap R4.6 and
+/// `test/insertion_sort_sorted` already recorded for `[Spec]` predicates carrying a
+/// `[Requires]`. Inlining it costs nothing instead, because `p1 /\ p2` type-checks `p2`
+/// with `p1` in scope, so the bounds conjuncts above make the `Seq.slice` well-typed
+/// exactly where it appears. Conjunct order is therefore load-bearing.
+
+/// R3.9c: a `[Spec]` member is a pure function **of the model**, never of the
+/// representation.
+///
+/// This is what makes a contract like `[Requires("Count < Capacity")]` meaningful to a
+/// caller: the caller holds `class_Stack__inv this m` and nothing else, so every spec-level
+/// observation it mentions must be computable from `m` alone. A `[Spec]` member whose body
+/// reads a field directly is therefore rejected (PALCS0523) with the advice to widen the
+/// model -- which is precisely the diagnosis a user hitting the too-weak-model problem
+/// needs, delivered at the declaration rather than as an unprovable call site.
+let spec_Stack_Count    (m: model_StackModel) : int = Seq.length m.elems
+let spec_Stack_Capacity (m: model_StackModel) : int = m.capacity
 
 /// F13: `preserves p` is a real `fn` spec clause in the pinned toolchain, and it composes
 ///      with `requires`/`ensures`. It is exactly `requires p ensures p`, so it is the
 ///      right -- and cheapest -- form for a **read-only** method, and *only* for one: on a
 ///      mutating method `preserves inv this` would be true but vacuous.
-fn count (this: class_Stack) (#m: erased class_Stack__model)
+fn count (this: class_Stack) (#m: erased model_StackModel)
   preserves class_Stack__inv this m
   returns  n : I32.t
-  ensures  pure (I32.v n == Seq.length (reveal m).elems)
+  ensures  pure (I32.v n == spec_Stack_Count m)
 {
   unfold class_Stack__inv this m;
   let r = !this;
@@ -97,19 +126,30 @@ fn count (this: class_Stack) (#m: erased class_Stack__model)
   r.fld_top
 }
 
-/// R4.10: a mutating method threads the model through. The postcondition names the
-/// *new* model as a pure function of the old one, which is what a caller needs; the
-/// precondition may mention the old model, which is how "not full" becomes statable.
-fn push (this: class_Stack) (v: I32.t) (#m: erased class_Stack__model)
-  requires class_Stack__inv this m ** pure (Seq.length (reveal m).elems < (reveal m).cap)
-  ensures  class_Stack__inv this
-             ({ elems = Seq.snoc (reveal m).elems v; cap = (reveal m).cap })
+/// R4.10: a mutating method threads the model through. The postcondition **existentially
+/// quantifies the new model** and constrains it with the user's `[Ensures]` clauses,
+/// interpreted over the new model and the old one.
+///
+/// It does *not* name the new model as a compiler-computed function of the old: the
+/// emitter has no way to compute a model transformer in general, and inventing one would
+/// be exactly the kind of proof step §0 forbids it from making. This is also the shape
+/// arrays already use -- `ensures exists* post_a. A.pts_to var_a post_a ** pure (...)` --
+/// so R4.10 threads a class's model precisely as R4.4 threads an array's, and `Old` needs
+/// no new machinery.
+fn push (this: class_Stack) (v: I32.t) (#m: erased model_StackModel)
+  requires class_Stack__inv this m ** pure (spec_Stack_Count m < spec_Stack_Capacity m)
+  ensures  exists* m'. class_Stack__inv this m' **
+             pure (spec_Stack_Count m' == spec_Stack_Count m + 1 /\
+                   spec_Stack_Capacity m' == spec_Stack_Capacity m /\
+                   (reveal m').elems `Seq.equal` Seq.snoc (reveal m).elems v)
 {
   unfold class_Stack__inv this m;
   let r = !this;
   CA.write r.fld_items r.fld_top v;
   this := { r with fld_top = I32.add r.fld_top 1l };
-  fold class_Stack__inv this ({ elems = Seq.snoc (reveal m).elems v; cap = (reveal m).cap });
+  with contents. assert (A.pts_to r.fld_items contents);
+  fold class_Stack__inv this
+    ({ elems = Seq.slice contents 0 (I32.v r.fld_top + 1); capacity = Seq.length contents });
 }
 
 /// R4.11 and F15: a constructor allocates, establishes the invariant, and returns the
@@ -120,11 +160,12 @@ fn push (this: class_Stack) (v: I32.t) (#m: erased class_Stack__model)
 fn alloc_without_free (capacity: I32.t { I32.v capacity >= 0 })
   requires emp
   returns  x : class_Stack
-  ensures  class_Stack__inv x ({ elems = Seq.empty; cap = I32.v capacity })
+  ensures  exists* m. class_Stack__inv x m **
+             pure (spec_Stack_Count m == 0 /\ spec_Stack_Capacity m == I32.v capacity)
 {
   let items = CA.alloc capacity 0l;
   let x = B.alloc ({ fld_items = items; fld_top = 0l });
-  fold class_Stack__inv x ({ elems = Seq.empty; cap = I32.v capacity });
+  fold class_Stack__inv x ({ elems = Seq.empty; capacity = I32.v capacity });
   x
 }
 
@@ -137,14 +178,14 @@ fn alloc_without_free (capacity: I32.t { I32.v capacity >= 0 })
 /// The negative case is pinned by construction: `merge` below takes two objects, and
 /// `merge a a` does not type-check. Uncomment the call to observe
 ///     Error 228: Tactic failed -- Cannot prove: class_Stack__inv a (*?u*)_
-fn merge (a: class_Stack) (b: class_Stack) (#ma #mb: erased class_Stack__model)
+fn merge (a: class_Stack) (b: class_Stack) (#ma #mb: erased model_StackModel)
   preserves class_Stack__inv a ma
   preserves class_Stack__inv b mb
 {
   ()
 }
 
-fn aliasing_is_unprovable (a: class_Stack) (#ma: erased class_Stack__model)
+fn aliasing_is_unprovable (a: class_Stack) (#ma: erased model_StackModel)
   preserves class_Stack__inv a ma
 {
   // merge a a;   // rejected: needs `inv a ma ** inv a ma`
@@ -165,7 +206,7 @@ fn aliasing_is_unprovable (a: class_Stack) (#ma: erased class_Stack__model)
 ///      A C# `C?` maps to `box` with no non-null obligation; a `C` maps to `box` plus a
 ///      `pure (not (is_null x))` conjunct that `pts_to_not_null` supplies for free.
 ghost
-fn ownership_implies_non_null (this: class_Stack) (#m: erased class_Stack__model)
+fn ownership_implies_non_null (this: class_Stack) (#m: erased model_StackModel)
   preserves class_Stack__inv this m
   ensures  pure (not (B.is_null this))
 {

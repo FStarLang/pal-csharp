@@ -267,22 +267,62 @@ construct.
 not appear in generated code, whereas `Box.alloc` is an ordinary specified operation
 (F14).
 
-**R3.9 (object model).** Each class emits a pure record type `class_C__model` of the
-class's *observations* — one field per `[Spec]`-visible quantity.
+**R3.9 (object model).** Each class has a **pure ghost model type**, and the invariant's
+job is to relate the implementation type to it.
 
-The model must expose everything a **caller** needs, both to establish a precondition and
-to exploit a postcondition. This is a real constraint, not bookkeeping: modelling a stack
-by its element sequence alone leaves capacity trapped inside the invariant's existential,
-so a client could not state "the stack is not full" and `Push` would be uncallable. The
-model of a bounded stack is therefore `{ elems: Seq.seq T; cap: nat }`, not `Seq.seq T`.
+The model type is **declared by the user**, not derived by the emitter. It is whatever type
+the class's `[Model]` member returns — a `Seq<T>`, or a spec-only struct — so it may be a
+type the user already has a theory about, and pure lemmas about the model can be stated and
+proved without mentioning the implementation at all. The emitter names it `model_M` after
+that type; it never invents one.
+
+The one constraint is that the model must expose everything a **caller** needs, both to
+establish a precondition and to exploit a postcondition. This is a real constraint, not
+bookkeeping: modelling a bounded stack by its element sequence alone leaves capacity trapped
+inside the invariant's existential, so a client could not state "the stack is not full" and
+`Push` would be uncallable. That stack's model is `{ elems: Seq.seq T; capacity: nat }`.
+
+**R3.9a (spec-only structs).** `[Spec]` on a `struct` declaration makes it a *spec-only
+type*: it is erased, it never appears in executable code, and — unlike an ordinary struct
+(R3.4) — its fields may be spec-only types such as `Seq<T>` and `SpecInt`.
+
+This is a new requirement that R3.9 forces, not a convenience. The built-in spec-only types
+of §8 are all atomic, so without a way to *declare* one there is no way to write a model
+that is a product — and a bounded container's model is exactly a product of its contents
+and its capacity. `[Spec]` is reused rather than a new attribute introduced because it
+already means "exists only in specifications" on a method, and this is the same meaning on
+a type.
+
+**R3.9b (the abstraction relation is inlined, bounds first).** The relation between
+representation and model is a **conjunct inside the invariant**, not a separate
+`abs : raw → model` function.
+
+This is forced rather than stylistic. The abstraction is *partial*: for the stack,
+`Seq.slice contents 0 (I32.v top)` is well-typed only once `0 <= I32.v top <= Seq.length contents`
+is known. Factoring it out as a total function would mean refining its arguments, and that
+refinement would then have to be discharged at **every** use of the model — the identical
+trap R4.6 and `test/insertion_sort_sorted` already recorded for `[Spec]` predicates
+carrying a `[Requires]`. Inlining costs nothing, because `p₁ /\ p₂` type-checks `p₂` with
+`p₁` in scope, so the bounds conjuncts make the partial operation well-typed exactly where
+it appears. **Conjunct order is load-bearing**, as it already is for `[Ensures]`.
+
+**R3.9c (`[Spec]` members are functions of the model).** A `[Spec]` member of a class
+translates to a pure function of `model_M`, never of `class_C__raw`.
+
+This is what makes `[Requires("Count < Capacity")]` mean anything to a caller: the caller
+holds `class_C__inv this m` and nothing else, so every observation a contract mentions must
+be computable from `m` alone. A `[Spec]` member whose body reads a field directly is
+**PALCS0523**, and its message is "widen the model" — which delivers the diagnosis for the
+too-weak-model problem at the *declaration*, rather than as an unprovable call site much
+later. The `[Model]` member is the sole exception: reading the fields is precisely its job.
 
 **R3.10 (object invariant).** Each class emits
 
 ```fstar
-let class_C__inv (this: class_C) (m: class_C__model) : slprop =
+let class_C__inv (this: class_C) (m: model_M) : slprop =
   exists* (r: class_C__raw) … .
     B.pts_to this r ** <the resource of each reference-typed field> **
-    pure (<the model agrees with the representation> /\ <the [Invariant] clauses>)
+    pure (<bounds> /\ <the model agrees with the representation> /\ <the [Invariant] clauses>)
 ```
 
 Two properties of this shape are load-bearing.
@@ -458,16 +498,25 @@ public void M(T x) { … }
 ```
 ⟶
 ```
-fn method_C_M (this: class_C) (var_x: ⟦T⟧) (#m: erased class_C__model)
+fn method_C_M (this: class_C) (var_x: ⟦T⟧) (#m: erased model_M)
   requires class_C__inv this m ** pure ⟦P⟧
-  ensures  class_C__inv this ⟦M's model transformer⟧ ** pure ⟦Q⟧
-{ unfold class_C__inv this m;  ⟦body⟧;  fold class_C__inv this <new model>; }
+  ensures  exists* m'. class_C__inv this m' ** pure ⟦Q⟧
+{ unfold class_C__inv this m;  ⟦body⟧;  fold class_C__inv this <the new model>; }
 ```
+
+The postcondition **existentially quantifies the new model** `m'` and constrains it with
+the user's `[Ensures]` clauses, read over `m'` and `m`. It does *not* name the new model as
+an emitter-computed function of the old one: there is no way to compute a model transformer
+in general, and inventing one would be exactly the proof step §0 rule 3 forbids. This is
+also the shape arrays already use — `ensures exists* post_a. A.pts_to var_a post_a ** pure (…)`
+— so a class's model is threaded precisely as an array's is (R4.4), and `Old` needs no new
+machinery: inside ⟦Q⟧ an observation reads as `spec_C_Obs m'`, and `Old(observation)` as
+`spec_C_Obs m`.
 
 `this` is a C# keyword and so cannot be a shim parameter (the same obstacle R3.4 hit for
 `[Refine]`); in a contract the receiver's observations are therefore written as calls to
 the class's `[Spec]` methods, `Count(this)`, which is the spelling a C# programmer expects
-anyway and is what R3.9's model exists to interpret.
+anyway and is what R3.9c interprets as `spec_C_Count m`.
 
 The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken. It is
 emitted unconditionally, for the same reason `struct_S__pred` is emitted even when trivial
@@ -493,12 +542,15 @@ invariant, and returns the object:
 fn ctor_C (…args…)
   requires pure ⟦P⟧
   returns  x : class_C
-  ensures  class_C__inv x ⟦the initial model⟧
+  ensures  exists* m. class_C__inv x m ** pure ⟦Q⟧
 ```
 
-The postcondition names the **initial model**, not merely `class_C__inv x`. `ensures inv x`
-alone would say the object is well formed without saying what it holds, which is R3.10's
-weak-specification failure relocated to the constructor.
+The postcondition **constrains the initial model** through the constructor's `[Ensures]`,
+in the same existential form as R4.10. `ensures class_C__inv x m` alone — for some
+unconstrained `m` — would say the object is well formed without saying what it holds, which
+is R3.10's weak-specification failure relocated to the constructor. A constructor with no
+`[Ensures]` is therefore a warning (`PALCS0902`): it is legal, and almost never what was
+meant.
 
 Freshness is free and needs no emitter work: the frame rule gives every caller
 `frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
@@ -509,7 +561,9 @@ everything that already existed.
 cannot express behavioural subtyping without existential packages, and admitting them
 without one would silently produce unsound or unprovable specs. A **static mutable field**
 is **PALCS0522** — it is unowned global mutable state, which no per-object invariant
-covers.
+covers. A `[Spec]` member that reads a field directly is **PALCS0523** (R3.9c), and a class
+with no `[Model]` member is **PALCS0524**: without one there is no model, and without a
+model every method spec collapses to memory safety.
 
 ---
 
@@ -872,13 +926,14 @@ Rules are recorded here as they are validated.
   copy would duplicate ownership of the same memory. Storage therefore travels alongside
   the state it describes, as in `test/circular_buffer`.
 * Classes and objects, generics, interfaces, `string`, and `float`/`double`.
-  **Classes are specified but not yet implemented**: §3.4 (R3.7–R3.13) and §4.5
+  **Classes are specified but not yet implemented**: §3.4 (R3.7–R3.13, including the
+  user-declared ghost model R3.9 and the spec-only structs R3.9a it requires) and §4.5
   (R4.10–R4.13) are the scheme, and `test/pulse_facts/ObjectFacts.fst` pins every Pulse
   shape they name against the pinned toolchain. Generics, interfaces, `string` and floats
   remain unspecified as well as unimplemented.
 * **Object abstraction is deliberately deferred.** `class_C__inv` is specified as a
   *concrete* definition in the class's own module. Hiding it behind an `.fsti`
-  (`val class_C : Type0`, `val class_C__inv : class_C -> class_C__model -> slprop`) works
+  (`val class_C : Type0`, `val class_C__inv : class_C -> model_M -> slprop`) works
   and needs no F\* `friend`, but it requires a module shape the emitter does not have
   today, and C# `private` already hides the representation at the source level. The step is
   available when proof performance or genuine information hiding demands it.
