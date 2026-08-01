@@ -19,7 +19,8 @@ FSTAR_OPTIONS := --cache_checked_modules --cache_dir $(CACHE_DIR) \
                  --include $(CACHE_DIR) \
                  --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR)
 
-METHODS := Func_Counter__ctor Func_Counter_Increment Func_Counter_Get
+METHODS := Func_Counter__ctor Func_Counter_Increment Func_Counter_Get \
+           Func_CounterClient_ValueIsNonNegative
 
 all: cs pulse
 

@@ -8,7 +8,7 @@ module B = Pulse.Lib.Box
 module I32 = FStar.Int32
 module Seq = FStar.Seq
 
-fn func_Counter_Increment (var_this: Class_Counter.class_Counter) (#m: erased int)
+fn func_Counter_Increment (var_this: Class_Counter.class_Counter) (#m: erased Class_Counter.class_Counter__model)
   requires Class_Counter.class_Counter__inv var_this m **
            pure ((Class_Counter.spec_Counter_Value m) < 2147483647)
   ensures  exists* m2. Class_Counter.class_Counter__inv var_this m2 **

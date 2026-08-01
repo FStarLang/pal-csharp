@@ -24,6 +24,15 @@ public sealed class Counter
     /// the compiler. This is the one member allowed to read <c>count</c>, and it is
     /// <c>private</c> because only the object's own invariant consumes it (R4.10b).
     /// </summary>
+    /// <remarks>
+    /// The <c>[Refine]</c> states a fact about the <em>model</em>, and it has to live here
+    /// rather than in <c>[Invariant]</c> (R3.9d, F17). <c>[Invariant("count >= 0")]</c> is a
+    /// fact about the field: it is what makes this refinement provable when the invariant is
+    /// re-folded, but a caller cannot see inside the invariant, so it does not reach them.
+    /// The model of a <c>Counter</c> is <c>SpecInt</c> — an atomic type with no struct to
+    /// refine — which is why the refined model type is emitted per class.
+    /// </remarks>
+    [Refine("Result >= 0")]
     [Model]
     private SpecInt Model => count;
 
@@ -67,4 +76,16 @@ public sealed class Counter
     {
         return count;
     }
+}
+
+/// <summary>
+/// A client of <c>Counter</c>, which is where R3.9d is actually observable: this method
+/// holds the object's invariant opaquely and never looks inside it, yet still concludes a
+/// fact about the model. Move the <c>[Refine]</c> above into <c>[Invariant]</c> and this
+/// stops verifying, which is the whole content of F17.
+/// </summary>
+public static class CounterClient
+{
+    [Ensures("c.Value >= 0")]
+    public static void ValueIsNonNegative(Counter c) { }
 }

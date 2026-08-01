@@ -62,7 +62,37 @@ let class_Stack = B.box class_Stack__raw
 /// establish a precondition as well as to exploit a postcondition. A bare `Seq.seq I32.t`
 /// would be too weak here: capacity would stay trapped inside the invariant's existential,
 /// a client could not state "the stack is not full", and `push` would be uncallable.
-noeq type model_StackModel = { elems: Seq.seq I32.t; capacity: nat }
+noeq type model_StackModel__raw = { elems: Seq.seq I32.t; capacity: nat }
+
+/// F17: a fact about the **model alone** must live in the model's *type*, as a refinement,
+///      and not in the object invariant -- otherwise no caller can use it.
+///
+/// This is the one place where `[Refine]` is right for a class, and it is the exact
+/// complement of R3.10's rule that the *class* invariant must not be a refinement. The two
+/// carry different kinds of fact and are not interchangeable:
+///
+///   * a fact relating the **fields** to each other or to the model (`0 <= top`,
+///     `top <= length contents`, and the abstraction relation itself) is temporarily
+///     breakable -- a method assigns one field, then the other -- so it belongs inside the
+///     predicate, in the window `unfold`/`fold` marks;
+///   * a fact about the **model** (`Count <= Capacity`) is a property of a pure ghost
+///     value, so it is never breakable, and putting it inside the predicate hides it.
+///
+/// "Hides it" is literal, and is pinned by `client_sees_model_invariant` below. A caller
+/// holds `class_Stack__inv this m` and, if the model type is unrefined, simply cannot
+/// derive `Count m <= Capacity m` -- F* reports `Error 19` at the postcondition. It could
+/// only recover the fact by unfolding the invariant, which defeats the abstraction and
+/// would be impossible once R3.9's deferred `.fsti` step makes the predicate opaque.
+/// With the refinement, the fact travels in the type of `m` and the client is free.
+///
+/// The obligation this creates is discharged where it should be: at the `fold` in `push`,
+/// the emitter must show the model it constructs satisfies the refinement. That is a real
+/// proof obligation, and it is the one that ties the two kinds of fact together -- the
+/// representation-level invariant is exactly what makes the model-level one hold.
+let model_StackModel__pred (m: model_StackModel__raw) : prop =
+  Seq.length m.elems <= m.capacity
+
+type model_StackModel = m: model_StackModel__raw { model_StackModel__pred m }
 
 /// R3.10: the object invariant, **indexed by the model**.
 ///
@@ -110,6 +140,18 @@ let class_Stack__inv (this: class_Stack) (m: model_StackModel) : slprop =
 /// needs, delivered at the declaration rather than as an unprovable call site.
 let spec_Stack_Count    (m: model_StackModel) : int = Seq.length m.elems
 let spec_Stack_Capacity (m: model_StackModel) : int = m.capacity
+
+/// F17 (pinned). The client holds `class_Stack__inv this m` and nothing else, does not
+/// unfold it, and still concludes a model-level fact. Weaken `model_StackModel__pred` to
+/// `True` and this fails with
+///     Error 19 at ObjectFacts.fst: (this: class_Stack) (m: erased model_StackModel)
+/// which is what makes the refinement load-bearing rather than decorative.
+fn client_sees_model_invariant (this: class_Stack) (#m: erased model_StackModel)
+  preserves class_Stack__inv this m
+  ensures  pure (spec_Stack_Count m <= spec_Stack_Capacity m)
+{
+  ()
+}
 
 /// F13: `preserves p` is a real `fn` spec clause in the pinned toolchain, and it composes
 ///      with `requires`/`ensures`. It is exactly `requires p ensures p`, so it is the

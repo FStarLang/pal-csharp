@@ -69,6 +69,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F14 | `Pulse.Lib.Box` is the **sound** heap cell and the right model of a CLR object. `Pulse.Lib.Reference.alloc` is marked `[@@deprecated "…is unsound; only use for model implementations"]` and may not appear in generated code; `Box.alloc` carries no such marker. `Box` additionally supplies `null`, a *pure* `is_null`, and `pts_to_not_null`, so a nullable object reference needs no new machinery. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Reference.fsti:87` and `Pulse.Lib.Box.fsti:31-53,90-110`; `test/pulse_facts/ObjectFacts.fst:ownership_implies_non_null`, verified. Relied on by R3.8 and R3.11. |
 | F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
+| F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -316,8 +317,63 @@ be computable from `m` alone. A `[Spec]` member whose body reads a field directl
 too-weak-model problem at the *declaration*, rather than as an unprovable call site much
 later. The `[Model]` member is the sole exception: reading the fields is precisely its job.
 
-**R3.10 (object invariant).** Each class emits
+**R3.9d (where a fact goes: `[Invariant]` or `[Refine]`).** The invariant's abstraction
+conjunct (R3.9b) is what connects the memory-resident fields to the model, and it is
+**mandatory** — it is derived from `[Model]`, and the user does not choose whether to have
+it. There is no decision there. What *is* a decision is where each **additional** fact goes,
+and it is settled by what the fact mentions:
 
+| The fact mentions | It goes in | Because |
+|---|---|---|
+| fields (`0 <= top`, `top <= items.Length`) | `[Invariant]` on the class | it is temporarily false between two field writes, so it needs the `unfold`/`fold` window of R4.10 |
+| only the model (`Count <= Capacity`) | `[Refine]`, on the `[Model]` member or on the model type | it is a property of a pure ghost value, so it is never breakable — and a caller can only ever see it there |
+
+The second row is not a preference; it is forced by **F17**. A caller holds
+`class_C__inv this m` and nothing else. A model-level fact sitting inside that predicate
+cannot be reached without unfolding — and once R3.9's deferred `.fsti` step makes the
+predicate opaque, cannot be reached at all. Stated as a refinement it travels in the *type*
+of `m`, so it arrives with the model, everywhere, for free. This is pinned in both probes:
+weakening the model predicate turns `client_sees_model_invariant` (`test/pulse_facts`) and
+`func_CounterClient_ValueIsNonNegative` (`test/objects_probe`) from verified into `Error 19`,
+while every other module in the probe keeps verifying — which is the precise statement that
+the fact is *unreachable to callers*, not merely absent.
+
+So each class emits a **refined model type**, in R3.5's shape verbatim:
+
+```fstar
+let class_C__model__pred (m: <the [Model] member's return type>) : prop = <the [Refine] clauses>
+type class_C__model = m: <the [Model] member's return type> { class_C__model__pred m }
+```
+
+and `class_C__inv` is indexed by `class_C__model`. Three details are deliberate.
+
+* It is emitted **unconditionally**, with the predicate `True` when there are no clauses —
+  the same reason `struct_S__pred` is emitted when trivial (§0 rule 2).
+* It is named after the **class**, not after the model type. This is what lets an *atomic*
+  model such as `SpecInt` or `Seq<int>` carry a refinement at all: there is no user-declared
+  struct to put one on. Naming it after the model type would also collide whenever two
+  classes share one. Verified for the atomic case by `test/objects_probe`.
+* It **composes with**, rather than replaces, R3.5. When the model is a `[Spec]` struct, a
+  fact intrinsic to the type is better placed on the struct itself, where it is simply an
+  ordinary struct refinement and is shared by everything using that model; `[Refine]` on
+  `[Model]` is for a fact this *class* guarantees. Both shapes are verified — the struct form
+  by `test/pulse_facts/ObjectFacts.fst`, the member form by `test/objects_probe`.
+
+In a `[Refine]` on the `[Model]` member the model value is named `Result`, as it is in an
+`[Ensures]`; in a `[Refine]` on a struct, fields are named directly, as R3.5 already
+specifies.
+
+The obligation this creates is discharged where it belongs: at the `fold` of R4.11a, the
+emitter must show the model it constructs from the post-state satisfies the refinement. That
+is a real proof obligation, and it is what ties the two kinds of fact together — the
+representation-level `[Invariant]` is exactly what makes the model-level `[Refine]` provable.
+
+Consequently an `[Invariant]` clause that mentions no field — only `[Spec]` observations — is
+**PALCS0527**, advising that it move to the model. This is the same shape of diagnosis as
+PALCS0523: a specification-strength mistake reported at the declaration, rather than as an
+unprovable call site much later.
+
+**R3.10 (object invariant).** Each class emits
 ```fstar
 let class_C__inv (this: class_C) (m: model_M) : slprop =
   exists* (r: class_C__raw) … .
@@ -341,7 +397,9 @@ Two properties of this shape are load-bearing.
   per field assignment, so a method that transiently breaks its invariant between two field
   writes would be rejected outright. Struct refinements are always true; class invariants
   are temporarily breakable, and the fold/unfold discipline of R4.10 is what marks the
-  window in which they may be broken. Using one mechanism for both would be wrong.
+  window in which they may be broken. Using one mechanism for both would be wrong. This
+  concerns the **representation** only; a fact about the model alone must go the other way,
+  as a refinement on the model type, for the reason R3.9d and F17 give.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a

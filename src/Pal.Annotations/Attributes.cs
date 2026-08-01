@@ -129,6 +129,11 @@ public sealed class ModelAttribute : Attribute;
 ///
 /// The predicate names fields as simple names, as <see cref="RefineAttribute"/> does on a
 /// struct; contracts, which are written from outside, use <c>@this</c> instead (R4.10a).
+///
+/// It must also <em>mention</em> a field. A fact about the model alone belongs on the model
+/// type as a <see cref="RefineAttribute"/>, not here — placed here it would be true but
+/// unreachable, since a caller holds the invariant as an opaque predicate and cannot see
+/// inside it. That is R3.9d, and it is checked (PALCS0527).
 /// </remarks>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = true)]
 public sealed class InvariantAttribute(string predicate) : Attribute

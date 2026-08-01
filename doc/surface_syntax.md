@@ -245,13 +245,18 @@ struct version above:
 // does not invent it. `[Spec]` on a struct makes it a spec-only type, so unlike an
 // ordinary struct it may hold `Seq<T>` and other spec-only types. An unbounded stack
 // could just use `Seq<int>` directly and declare no model struct at all.
+// A fact about the MODEL is a `[Refine]` here, not an `[Invariant]` on the class — see below.
 [Spec]
+[Refine("Elems.Length <= Capacity")]
 public struct StackModel
 {
     public Seq<int> Elems;
     public SpecInt  Capacity;
 }
 
+// A fact about the FIELDS is an `[Invariant]` here. It may be temporarily false inside a
+// method; the model refinement above never can be.
+[Invariant("0 <= top && top <= items.Length")]
 public sealed class Stack
 {
     private int[] items;      // a class MAY own an array; a struct may not
@@ -286,10 +291,30 @@ public sealed class Stack
 Five things are worth knowing, and each is a consequence of the scheme rather than a
 convention.
 
-**`[Invariant]` on a class is *not* `[Refine]` on a struct.** A struct's refinement holds of
-every value at all times. A class invariant may be *temporarily broken* inside a method —
-`Push` above breaks it between the two field writes — and is re-established on exit. That is
-why they are different attributes rather than one.
+**A fact about the fields goes in `[Invariant]`; a fact about the model goes in `[Refine]`
+on the model type.** This is the one thing worth reading twice, because putting a fact in
+the wrong place produces a class that verifies and is still useless.
+
+`[Invariant]` states how the *memory-resident fields* hang together: `0 <= top` and
+`top <= items.Length`. Such a fact is *temporarily false* inside a method — `Push` above
+breaks it between the two field writes — and is re-established on exit, which is why it
+cannot be a refinement, and why `[Invariant]` and `[Refine]` are different attributes.
+
+`Elems.Length <= Capacity` is a different kind of fact: it mentions no field, only the
+model. Written as `[Invariant]` it would be true and *invisible* — your callers hold the
+object's invariant as an opaque predicate, so a fact buried inside it is one they cannot
+use. Written as `[Refine]` on `StackModel` it travels in the model's type and every caller
+has it, everywhere, without asking. The compiler will tell you if you get this backwards
+(`PALCS0527`).
+
+If your model is an atomic type such as `SpecInt` or `Seq<int>` there is no struct to
+refine, so put the `[Refine]` on the `[Model]` member instead and name the model value
+`Result`, as you would in an `[Ensures]`. That form works for a struct model too, and is the
+right one when the fact is something this *class* guarantees rather than something intrinsic
+to the model type.
+
+You never have to state the connection between the fields and the model, though: that is
+what `[Model]` is, and it is always part of the invariant.
 
 **You choose the model; the compiler does not derive it.** `[Model]` names a pure ghost
 type of your choosing, so it can be a type you already have a theory about, and you can
