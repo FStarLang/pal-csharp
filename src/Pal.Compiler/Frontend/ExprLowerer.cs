@@ -185,7 +185,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrLiteral(loc, null);
         }
 
-        return new IrCall(loc, method.Name, [.. args.Select(a => Lower(a.Expression))]) { Kind = kind.Value };
+        return new IrCall(loc, Naming.Of(method), [.. args.Select(a => Lower(a.Expression))]) { Kind = kind.Value };
     }
 
     private IrExpr LowerIntrinsic(

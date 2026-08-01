@@ -23,13 +23,13 @@ status=0
 
 # 1. No test directory name may appear in the compiler sources.
 while IFS= read -r name; do
-  [[ "$name" == "toolchain_smoke" ]] && continue
   if grep -rniq --include='*.cs' -- "$name" "$COMPILER_DIR"; then
     echo "error: test name '$name' appears in Pal.Compiler:" >&2
     grep -rni --include='*.cs' -- "$name" "$COMPILER_DIR" >&2
     status=1
   fi
-done < <(find "$TEST_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort)
+done < <(grep -rl 'verify\.mk' --include='Makefile' "$TEST_DIR" \
+           | xargs -r -n1 dirname | xargs -r -n1 basename | sort -u)
 
 # 2. No method name declared in a test .cs file may appear in the compiler.
 while IFS= read -r ident; do

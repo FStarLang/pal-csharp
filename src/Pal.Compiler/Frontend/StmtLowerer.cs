@@ -171,7 +171,7 @@ public sealed class StmtLowerer(SemanticModel model, WellKnown known, Diagnostic
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)
         {
-            var call = new IrCall(loc, method.Name, [.. args.Select(a => _spec.Lower(a.Expression))])
+            var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
             { Kind = CalleeKind.Lemma };
             return new IrGhostStmt(loc, GhostKind.LemmaCall, call, null);
         }
@@ -179,7 +179,7 @@ public sealed class StmtLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (kind == CalleeKind.Method)
         {
             return new IrExprStmt(loc,
-                new IrCall(loc, method.Name, [.. args.Select(a => _code.Lower(a.Expression))])
+                new IrCall(loc, Naming.Of(method), [.. args.Select(a => _code.Lower(a.Expression))])
                 { Kind = CalleeKind.Method });
         }
 

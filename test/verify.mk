@@ -54,13 +54,16 @@ $(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS)
 	@touch $@
 
 verify: translate
-	@$(MAKE) --no-print-directory -f $(PAL_ROOT)/test/verify.mk _verify
+	@$(MAKE) --no-print-directory -f $(PAL_ROOT)/test/verify.mk PHASE=verify _verify
 
 GENERATED := $(sort $(wildcard $(OUT)/*.fst))
 CHECKED   := $(patsubst $(OUT)/%.fst,$(CACHE_DIR)/%.fst.checked,$(GENERATED))
 
 _verify: $(CHECKED)
 
+# Only in the second phase: at top level the generated files may be stale, and
+# remaking `.depend` from them during parse would fail before `translate` runs.
+ifeq ($(PHASE),verify)
 ifneq ($(GENERATED),)
 # F* computes the module dependency order, so a method calling another method
 # verifies in the right order without the harness knowing anything about it.
@@ -69,6 +72,7 @@ $(CACHE_DIR)/.depend: $(GENERATED)
 	@$(FSTAR_EXE) $(FSTAR_OPTIONS) --dep full $(GENERATED) --output_deps_to $@
 
 include $(CACHE_DIR)/.depend
+endif
 endif
 
 %.checked:

@@ -124,7 +124,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return Emit(cv.Operand, scope) with { Type = cv.Target };
 
             case IrInlinePulse raw:
-                return new Term($"({raw.Text})", TermKind.Other);
+                return new Term($"({Antiquotation.Expand(raw.Text, scope)})", TermKind.Other);
 
             case IrLive live:
                 diagnostics.Error("PALCS0303", live.Loc,

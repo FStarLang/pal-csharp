@@ -107,7 +107,8 @@ public sealed class MethodPlan
             .ToImmutableArray();
 
         Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
-        Ensures = Clause(postResources.ToImmutable(), postConjuncts, postExistentials.ToImmutable());
+        Ensures = Clause(postResources.ToImmutable(), UnderPrecondition(preConjuncts, postConjuncts),
+            postExistentials.ToImmutable());
 
         _ = diagnostics;
     }
@@ -130,6 +131,25 @@ public sealed class MethodPlan
         IrArrayType => TermKind.Seq,
         _ => TermKind.Other,
     };
+
+    /// <summary>
+    /// R4.8. A Pulse <c>ensures</c> is type-checked in a context that does *not*
+    /// include the <c>requires</c>, so a postcondition whose well-typedness depends
+    /// on the precondition — <c>Result == s[i]</c> guarded by <c>i &lt; s.Length</c>
+    /// is the everyday case — is rejected before any proof is attempted. Restating
+    /// the precondition as a hypothesis fixes that without weakening anything: the
+    /// precondition is expressed entirely over the pre-state binders, which are
+    /// still in scope in the postcondition, and the caller has just discharged it,
+    /// so <c>PRE ==&gt; POST</c> gives the caller exactly <c>POST</c>.
+    /// </summary>
+    private static ImmutableArray<string> UnderPrecondition(
+        ImmutableArray<string> pre, ImmutableArray<string> post)
+    {
+        var hypotheses = pre.Where(p => p.Length > 0).ToImmutableArray();
+        var goals = post.Where(p => p.Length > 0).ToImmutableArray();
+        if (hypotheses.Length == 0 || goals.Length == 0) return post;
+        return [$"({SpecEmitter.Conjunction(hypotheses)}) ==> ({SpecEmitter.Conjunction(goals)})"];
+    }
 
     /// <summary>Assembles a <c>requires</c>/<c>ensures</c>/<c>invariant</c> clause.</summary>
     public static string Clause(

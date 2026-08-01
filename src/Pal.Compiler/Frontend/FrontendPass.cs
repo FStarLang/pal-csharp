@@ -206,7 +206,7 @@ public static class FrontendPass
             ? Declarations.StringArgument(pb) : null;
 
         return new IrMethod(
-            loc, symbol.Name, parameters, returnType,
+            loc, Naming.Of(symbol), parameters, returnType,
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures],
             specs.Decreases,
@@ -245,7 +245,7 @@ public static class FrontendPass
         var recursive = Declarations.Find(candidate.Symbol, known.SpecAttribute) is { } spec &&
             spec.NamedArguments.Any(n => n.Key == "Recursive" && n.Value.Value is true);
 
-        return new IrSpecFunction(loc, candidate.Symbol.Name, parameters, returnType,
+        return new IrSpecFunction(loc, Naming.Of(candidate.Symbol), parameters, returnType,
             specs.Requires, lowerer.Lower(bodyExpression))
         {
             IsRecursive = recursive,

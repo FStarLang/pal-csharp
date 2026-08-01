@@ -59,12 +59,24 @@ The rules below depend on the following, each **verified against the pinned tool
 | F4 | Pulse source requires the `#lang-pulse` pragma after the module header and `open`s. | `pal/pulse/Pulse.Lib.C.Array.fst:9`; local `Smoke.fst`, verified. |
 | F5 | The F* binary release bundles Pulse; no separate install is needed. | `tools/fstar/lib/fstar/pulse/` present after `make tools`. |
 | F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the insertion-sort probe (`test/probe_insertion_sort`): both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Array_Access` and PAL's `array_read_all` do the same. |
+| F8 | A **stateful block may appear in term position**, as the scrutinee of a `let`: `let t = if (c) { <stateful block> } else { e };` is well-formed Pulse. This is what makes the short-circuit rule R6.3 compositional — the same lowering serves a loop guard, an `if` condition and an assignment right-hand side, with no context-dependent special case. | `test/pulse_facts/PulseFacts.fst:short_circuit_in_term_position`, verified; relied on by every generated short-circuit. |
+| F9 | A `decreases` measure may dereference a mutable local, but **not underneath an `if`**. `decreases (if !b then 0 else I32.v !r)` is rejected with "Expected type `FStar.Int32.t` but `!r` has type `fn …`", because the `!` sugar is elaborated only outside the branches. A conditional measure must keep its dereferences out of the branches. | `test/pulse_facts/PulseFacts.fst:decreases_conditional_without_deref`, verified; the failing form was reproduced while writing `test/binary_search`. |
 | F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
 
-F1 in particular **retires** the plan's original top risk: no `cont`-flag rotation and no
+F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
 (§5.3). F6 and F7 are constraints on the *library*, not on the emitter, and are the reason
 `Pulse.Lib.CSharp.Array` is not a thin `include` of `Pulse.Lib.Array`.
+
+Two further points of Pulse syntax, learned the hard way and pinned by the same test:
+a `decreases` clause on a `while` takes **no trailing semicolon**, and a recursive F\*
+definition needs `: Tot t (decreases m)` rather than `: t` followed by `(decreases m)`.
+
+One semantic fact matters more than any of these for anybody *writing* annotations:
+**a Pulse loop body sees the invariant and nothing else.** Pure facts from the enclosing
+`requires` are not in scope inside the loop. Any precondition the body still needs must be
+restated as an invariant. This is by far the most common annotation fix, and it is not
+something the translator may paper over (§0, rule 3).
 
 ---
 
@@ -74,17 +86,25 @@ Following PAL's conventions.
 
 | C# declaration | Emitted module |
 |---|---|
-| method `M` | `Func_M.fsti` (signature + contract) and `Func_M.fst` (body) |
+| method `C.M` | `Func_C_M.fsti` (signature + contract) and `Func_C_M.fst` (body) |
 | `struct S` | `Struct_S.fst` |
-| `[Spec]` method `P` | `Let_P.fst` |
+| `[Spec]` method `C.P` | `Let_C_P.fst` |
+| `[Lemma]` method `C.L` | `Let_C_L.fst` |
 | `[PulseType]` type `T` | `Type_T.fst` |
 | `IncludePulse("M", …)` | `M.fst` |
 | static field | `Global_F.fst` |
 | — | `TranslationErrors.fst` — contains `let _ = assert False` iff translation reported errors, so running F* on the output directory always surfaces translation problems |
 
-**R2.1 (naming).** A C# method `Ns.C.M` emits `fn func_M`. A parameter `p` becomes the
-Pulse binder `var_p`. A local `x` becomes `var_x`. Name mangling is a pure function of the
-source name; the emitter never chooses names by inspecting a program's meaning.
+**R2.1 (naming).** A C# method `Ns.C.M` emits `fn func_C_M` in module `Func_C_M`. A
+parameter `p` becomes the Pulse binder `var_p`. A local `x` becomes `var_x`. A `[Spec]`
+function becomes `spec_C_P`, a `[Lemma]` becomes `lemma_C_L`. Name mangling is a pure
+function of the source name; the emitter never chooses names by inspecting a program's
+meaning.
+
+PAL can name a module after the function alone, because C has a single global function
+namespace. C# does not — two classes in one program may each declare `Abs` — so the
+declaring type is always part of the name. Always, not only on collision: a program's
+generated module names must not change when an unrelated class is added.
 
 **R2.2 (provenance).** Every emitted construct records the Roslyn `Location` it came from,
 written to `source_range_info.json`. Constructs with no provenance are emitter-invented and
@@ -185,6 +205,45 @@ contents existential.
 callers may omit it) emits an erased implicit `(#g: erased ⟦G⟧)` and is erased from the
 runtime signature. Equivalently `[GhostArg("G g")]`.
 
+*Known limitation, shared with PAL.* An implicit binder is resolved by unification at the
+call site, so a ghost argument that appears only in the **pure** part of a contract is not
+determined and such a method cannot yet be called from translated C#. Ghost arguments that
+appear in a separation-logic conjunct are resolved from the resource and call normally.
+
+**R4.7 (`[Lemma]` methods).** A lemma is a proof step about the values the program
+actually holds, so — unlike a `[Spec]` function (R4.6) — its parameters keep their
+**program** reading: `int` is `I32.t`, `SpecInt` is `int`, `T[]` and `Seq<T>` are
+`Seq.seq`. It is emitted as an ordinary F\* lemma in `Let_C_L.fst`,
+
+```
+let lemma_C_L (var_p₁: ⟦T₁⟧) … : Lemma (requires ⟦P⟧) (ensures ⟦Q⟧) = ⟦body⟧
+```
+
+where `⟦body⟧` is the C# body, the `[PulseBody]` text with `$(…)` antiquotation expanded,
+or `admit()` under `[Admit]`. A call is a plain ghost statement `Let_C_L.lemma_C_L a₁ … aₙ;`
+with the arguments passed **raw** — no `Int32.v` coercion, because the lemma's binders are
+already program-typed. A lemma that wants a mathematical index therefore declares `int n`
+and lets the specification translation insert `I32.v` where the *specification* needs it.
+
+**R4.8 (postconditions are stated under the precondition).** A Pulse `ensures` is
+type-checked in a context that does **not** include the `requires`, so a postcondition
+whose well-typedness depends on the precondition — `Result == s[i]` guarded by
+`i < s.Length` is the everyday case — would be rejected before any proof is attempted.
+The emitted postcondition is therefore
+
+```
+ensures … ** pure ((⟦P₁⟧ /\ … /\ ⟦Pₙ⟧) ==> (⟦Q₁⟧ /\ … /\ ⟦Qₘ⟧))
+```
+
+This weakens nothing. The precondition is expressed entirely over pre-state binders, which
+remain in scope in the postcondition, and the caller has just discharged it, so
+`P ==> Q` gives the caller exactly `Q`.
+
+It does **not** rescue a postcondition whose well-typedness depends on an *earlier
+postcondition*; F\* type-checks each conjunct of `p₁ /\ p₂` with `p₁` in scope, so the
+conjunct that bounds an array must be written before the conjunct that indexes it. That is
+an ordering obligation on the annotations, and it is documented rather than inferred.
+
 ---
 
 ## 5. Statements
@@ -204,8 +263,21 @@ and `x++` to `x = x + 1` in the Normalize pass, which is a C#→C# rewrite.
 **R5.4 (`if`).** `if (c) s₁ else s₂` ⟶ `if (⟦c⟧) { ⟦s₁⟧ } else { ⟦s₂⟧ }`. **Both branches
 are always emitted**, even when one is empty.
 
-**R5.5 (`return`).** `return e;` ⟶ `⟦e⟧` in tail position. Non-tail `return` is handled by
-the Normalize pass.
+**R5.5 (`return`).** `return e;` ⟶ `⟦e⟧` in tail position.
+
+**R5.5b (early return).** Pulse has no non-tail `return`, so the Normalize pass rewrites
+one away as a **C#→C# transformation**: a statement sequence `s₁ … sₖ rest` in which `sₖ`
+is an `if` whose taken branch ends in a `return` becomes
+
+```csharp
+s₁ … if (c) { thenBranch } else { elseBranch; rest }
+```
+
+so that every `return` is in tail position. The rewrite is driven by the syntactic
+predicate "does this branch end in a `return`", is applied uniformly, and preserves the
+order and the identity of every statement — it neither duplicates code nor introduces a
+flag. `return` inside a loop is *not* restructured; it is rejected with a diagnostic, since
+turning it into a flag-driven loop would be the translator inventing control flow.
 
 **R5.6 (`while`).**
 
@@ -222,7 +294,13 @@ decreases ⟦m⟧
 { ⟦B⟧ }
 ```
 
-By F1 the guard `⟦c⟧` may be a stateful block, so no flag encoding is used.
+By F1 and F8 the guard `⟦c⟧` may be a stateful block, so no flag encoding is used. The
+`decreases` clause takes **no trailing semicolon** (§1).
+
+A Pulse loop body sees the invariant and nothing else. The emitter therefore does **not**
+propagate the enclosing `requires` into the loop; a fact the body needs is the annotation
+author's responsibility to restate as an invariant. Inventing invariants is exactly the
+"emitter invents proof steps" failure §0 rule 3 forbids.
 
 **R5.7 (`for` → `while`).** `for (init; cond; step) { body }` ⟶
 `{ init; while (cond) { body; step } }` as a **C#→C# rewrite** in the Normalize pass, with
@@ -365,9 +443,9 @@ never a change here that special-cases this loop.
 
 Rules are recorded here as they are validated.
 
-* §1 facts **F1–F7** are verified against the pinned toolchain and regression-pinned in
+* §1 facts **F1–F9** are verified against the pinned toolchain and regression-pinned in
   `test/pulse_facts`.
-* **`test/probe_insertion_sort` is the first full end-to-end validation of §2–§6.** Its
+* **`test/probe_insertion_sort` was the first end-to-end validation of §2–§6.** Its
   `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing the rules
   above on `InsertionSort.cs` — before any emitter code existed — and verify against
   `Pulse.Lib.CSharp.*`, proving length preservation and permutation. Every deviation the
@@ -376,7 +454,32 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
-* Sortedness (plan tier 7.1a) is not yet proven by the probe; permutation and length
-  preservation are.
-* Rules R2–R6 are specified; the emitter implementing them is in progress. Each acceptance
-  test cites the rules it exercises.
+* **The emitter now implements R2–R6 and reproduces the probe from source.** Eleven
+  acceptance-test directories translate and verify from annotated C#: `swap`, `abs_max`,
+  `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `binary_search`,
+  `lemma_call`, `ghost_arg` and `pulse_interop`.
+* **The contortion detector is running.** `abs_max`, `sum_array`, `reverse` and
+  `insertion_sort` each ship a *variant*: the same contract and algorithm written
+  differently — `for` against `while`, inverted branches, renamed and reordered locals,
+  an exchanged guard, an index computed rather than carried, an inferred measure against a
+  given one. All four verify with **no change to the translator**. `test/no-example-names.sh`
+  additionally forbids any acceptance-test directory or method name from appearing anywhere
+  in `Pal.Compiler`.
+* Every fix demanded by these tests landed where §0 rule 3 requires. `binary_search` needed
+  three `Pal.Assert` steps and a measure that decreases on the iteration that finds the key
+  — all in the `.cs` file. `sum_array` needed the `SumsFit` precondition and the
+  `SumUpToStep` unfolding lemma — again in the `.cs` file. The only emitter changes were
+  new *rules*: R4.7, R4.8 and R2.1's type qualification.
+
+### Not yet done
+
+* Sortedness for insertion sort (plan tier 7.1a); permutation and length preservation are
+  proven.
+* `struct`, `Span<T>`, `break`/`continue`, numeric conversions, and non-tail `return`
+  inside a loop: all currently rejected with a diagnostic rather than mistranslated.
+* A ghost argument determined only by the pure part of a contract cannot be passed at a
+  call site (R4.5).
+* `Passes/Check.cs` — the standalone well-formedness validator PAL runs twice. Today the
+  checks are distributed across the lowering passes, so a nonsensical declaration such as a
+  program method returning `SpecInt` produces bad Pulse rather than a diagnostic.
+* The provenance lint over `source_range_info.json` (R2.2).
