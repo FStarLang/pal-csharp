@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <AssemblyName>Pal.Annotations</AssemblyName>
+    <RootNamespace>PalLang</RootNamespace>
+    <Description>Attributes and proof intrinsics for pal-csharp, a proof annotation language for C#.</Description>
+  </PropertyGroup>
+
+</Project>

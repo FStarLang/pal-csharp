@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Cache the pinned F* toolchain. The key is the pin file, so a version
+      # bump invalidates the cache and local/CI toolchains cannot drift.
+      - name: Cache F*
+        uses: actions/cache@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt') }}
+
+      - name: Install F*
+        run: make tools
+
+      - name: Build translator
+        run: make build
+
+      - name: Build Pulse support library
+        run: make lib
+
+      - name: Test
+        run: make -C test
+
+      # Anti-contortion checks (doc/translation.md).
+      - name: Compiler must not name any example
+        run: ./test/no-example-names.sh
