@@ -66,6 +66,9 @@ public static class Program
         program = Normalize.Run(program, diagnostics);
         Stage("normalize", watch, timePasses);
 
+        program = Check.Run(program, diagnostics);
+        Stage("check", watch, timePasses);
+
         if (printIr) Console.WriteLine(Printer.Print(program));
 
         var modules = new PulseEmitter(diagnostics).Emit(program);
