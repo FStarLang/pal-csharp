@@ -589,6 +589,16 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 diagnostics.Error("PALCS0400", v.Loc, $"`{v.Name}` is not in scope here.");
                 return "()";
 
+            // R6.10: a by-reference argument passes the cell, not its contents.
+            case IrRefArg { Operand: IrVar v } when _slots.TryGetValue(v.Name, out var slot)
+                                                   && slot.Kind is SlotKind.Cell or SlotKind.RefParam:
+                return slot.Binder;
+
+            case IrRefArg r:
+                diagnostics.Error("PALCS0402", r.Loc,
+                    "Only a local variable or a `ref`/`out` parameter can be passed by reference.");
+                return "()";
+
             case IrLength len:
             {
                 var array = Expr(len.Array);

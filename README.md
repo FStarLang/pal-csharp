@@ -25,7 +25,8 @@ source rewriting.
 
 ## Status
 
-Milestone 1. The translator works end to end: annotated C# in, verified Pulse out.
+**Milestone 1 is complete.** The translator works end to end — annotated C# in, verified
+Pulse out — and the whole M1 acceptance suite passes.
 
 - [x] Pinned F\*/Pulse toolchain (`make tools`)
 - [x] Test harness, negative tests, and the two anti-contortion lints
@@ -36,8 +37,11 @@ Milestone 1. The translator works end to end: annotated C# in, verified Pulse ou
 - [x] Scalars, `ref`/`out`/`in`, arrays, loops, `break`/`continue`, fractional
       permissions, `[Spec]` functions, `[Lemma]` calls, `Ghost<T>` arguments, raw-Pulse
       interop
+- [x] `struct`s with `[Refine]` type refinements
 - [x] **Insertion sort proved sorted *and* a permutation of its input**
-- [ ] `struct` support (`point_struct`, `circular_buffer`) — see
+- [x] Sixteen acceptance directories verify, each with an independently written variant
+      that must verify with no translator change
+- [ ] `Span<T>`, classes and objects, generics — see
       [`doc/translation.md`](doc/translation.md) §8
 - [ ] `Pal.Analyzers` — in-IDE squiggles on specifications
 

@@ -146,7 +146,22 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
 {
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
+
+    /// <summary>
+    /// The callee's declared result type, when the frontend could map it. Emit needs it
+    /// to know whether a <see cref="CalleeKind.Spec"/> application denotes a proposition
+    /// or a mathematical value (R4.6).
+    /// </summary>
+    public IrType? ResultType { get; init; }
 }
+
+/// <summary>
+/// An argument passed by reference: the <c>ref</c>/<c>out</c>/<c>in</c> at a call site
+/// (R6.10). It is not an expression a C# programmer can write anywhere else, and it
+/// never appears in a specification; it exists so that Emit can pass the callee the
+/// <em>cell</em> rather than the cell's current contents.
+/// </summary>
+public sealed record IrRefArg(IrLoc Loc, IrExpr Operand) : IrExpr(Loc);
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);

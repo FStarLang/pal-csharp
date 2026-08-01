@@ -545,6 +545,45 @@ callable in spec position and emit `Let_M.fst`; `[Lemma]` methods emit ghost cal
 `Pal.Exists`. `Pal.Implies(a, b)` ⟶ `⟦a⟧ ==> ⟦b⟧`. `Pal.Contents(a)` ⟶ the array's contents
 existential, giving specs a `Seq` view.
 
+A quantifier binder is bound *outside* both program states, so it is in scope on both
+sides of `Old`: under `forall (int k)`, `Old(a[k])` reads the pre-state array at the
+same `k` the postcondition speaks of. Emit therefore extends the pre-state scope with
+the binder as well as the current one.
+
+**R6.8 (projection receivers).** `⟦e.f⟧ = ⟦e⟧′.Struct_S.fld_f`, where `⟦e⟧′` is `⟦e⟧`
+parenthesised unless it is already atomic. This is not cosmetic: `!var_s.M.fld` parses in
+Pulse as `!(var_s.M.fld)`, a dereference of a projection *out of* a reference, which is
+not what C#'s `s.f` on a `ref` parameter means.
+
+**R6.9 (mathematical `[Spec]` results).** R4.6 makes a `[Spec]` method's integer
+*parameters* mathematical; its integer *result* is mathematical for the same reason. A
+`[Spec] int` emits `: int` with a mathematical body, and an application of it denotes a
+mathematical value — so it composes with arithmetic and may be used as an array index. A
+`[Spec] bool` emits `: prop`. Nothing else about the two cases differs.
+
+**R6.10 (by-reference arguments).** A `ref`/`out`/`in` argument passes the *cell*, not its
+contents:
+
+```csharp
+Enqueue(a, ref s, value);
+```
+⟶
+```
+let t0 = !var_value;
+let t1 = func_Enqueue var_a var_s t0;
+```
+
+`var_s` is passed unchanged, so the callee's `requires R.pts_to var_s _` is satisfied by
+the caller's ownership of the same cell and the write the callee performs is visible after
+the call. Passing anything other than a cell — a temporary, a field, an array element — is
+**PALCS0402**; C# does not permit it either.
+
+Two consequences the write-set analysis (R5.4) must respect: a call may write through
+*every* by-reference argument and through *every* array argument, so all of those names
+must be existentially quantified in an enclosing loop's invariant. Missing one does not
+produce an unsound proof — it produces an invariant asserting the call changed nothing,
+which simply fails to re-establish.
+
 ---
 
 ## 7. Worked derivation
@@ -580,7 +619,7 @@ never a change here that special-cases this loop.
 
 Rules are recorded here as they are validated.
 
-* §1 facts **F1–F9** are verified against the pinned toolchain and regression-pinned in
+* §1 facts **F1–F12** are verified against the pinned toolchain and regression-pinned in
   `test/pulse_facts`.
 * **`test/probe_insertion_sort` was the first end-to-end validation of §2–§6.** Its
   `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing the rules
@@ -591,16 +630,16 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
-* **The emitter now implements R2–R6 and reproduces the probe from source.** Fourteen
-  acceptance-test directories translate and verify from annotated C#: `swap`, `abs_max`,
+* **The emitter implements R2–R6 and reproduces the probe from source.** The whole M1
+  acceptance suite translates and verifies from annotated C#: `swap`, `abs_max`,
   `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `insertion_sort_sorted`,
-  `binary_search`, `lemma_call`, `ghost_arg`, `pulse_interop`, `break_continue` and
-  `compare_elements`.
+  `binary_search`, `lemma_call`, `ghost_arg`, `pulse_interop`, `break_continue`,
+  `compare_elements`, `point_struct` and `circular_buffer`.
 * **Ill-formed C# stops at the C# level.** `Passes/Check.cs` is the standalone
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — twelve cases, each
+  `test/diagnostics` is its counterpart to the verification tests — fourteen cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -645,13 +684,31 @@ Rules are recorded here as they are validated.
   `SumUpToStep` unfolding lemma — again in the `.cs` file. The only emitter changes were
   new *rules*: R4.7, R4.8 and R2.1's type qualification.
 
+* **Structs closed the suite, and cost four rules rather than four special cases.**
+  `test/circular_buffer` was the last acceptance test, and every failure it produced was
+  either a missing *rule* or a missing *annotation* — never an example-shaped patch:
+  R6.7's `Old`-under-a-binder scope, R6.8's receiver parenthesisation, R6.9's mathematical
+  `[Spec]` results and R6.10's by-reference arguments are all stated context-free above and
+  apply to every program. Everything else went into the `.cs` file: the pure `At` model the
+  executable `Wrap` is tied to (a specification may only call `[Spec]`/`[Lemma]` methods,
+  never executable ones), the `capacity <= 2^30 - 1` bound that makes `Head + Count`
+  provably non-overflowing, and the explicit `a.Length == Old(a.Length)` a quantified
+  frame condition needs.
+
 ### Not yet done
 
-* `struct` and `Span<T>`. A method mentioning either is rejected with a diagnostic rather
-  than mistranslated, so `test/point_struct` and `test/circular_buffer` of the M1 suite are
-  outstanding. `Struct_<n>.fst` generation and `[Refine]` are designed (§3) but unbuilt.
+* `Span<T>` and `ReadOnlySpan<T>`. A method mentioning either is rejected with a diagnostic
+  rather than mistranslated; fractional permissions are reached through `[Frac]` instead
+  (R4.9).
+* A struct field must be a value — a scalar or another translated struct. An array or
+  class field is **PALCS0511**, and that is the model rather than a shortcut: a struct
+  copy would duplicate ownership of the same memory. Storage therefore travels alongside
+  the state it describes, as in `test/circular_buffer`.
+* Classes and objects, generics, interfaces, `string`, and `float`/`double`.
 * Numeric conversions between machine-integer widths, and a non-tail `return` inside a
   loop: likewise rejected rather than mistranslated.
+* `out` is modelled exactly as `ref`, not as `pts_to_uninit` strengthening to `pts_to`, so
+  a caller must initialise an `out` argument before the call.
 * A ghost argument determined only by the pure part of a contract cannot be passed at a
   call site (R4.5), because ghost arguments are resolved by unification and there is no
   zero-cost C# surface for explicit implicit application.

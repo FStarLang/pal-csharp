@@ -79,7 +79,7 @@ public sealed class NonNullAttribute : Attribute;
 // ---------------------------------------------------------------------------
 
 /// <summary>A predicate that holds whenever a value of this type is initialized.</summary>
-[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Field,
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Field | AttributeTargets.Property,
                 AllowMultiple = true)]
 public sealed class RefineAttribute(string predicate) : Attribute
 {
@@ -87,7 +87,7 @@ public sealed class RefineAttribute(string predicate) : Attribute
 }
 
 /// <summary>A predicate that holds always, including when uninitialized.</summary>
-[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Field,
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Field | AttributeTargets.Property,
                 AllowMultiple = true)]
 public sealed class RefineAlwaysAttribute(string predicate) : Attribute
 {

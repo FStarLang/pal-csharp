@@ -185,6 +185,51 @@ and after, so postconditions about it need no existential, and — the point —
 array may be passed to two parameters at once**. Writing through a `[Frac]` parameter is an
 error.
 
+### Structs
+
+A `struct` is translated as an F\* record, and `[Refine]` puts a predicate on it:
+
+```csharp
+[Refine("Lo <= Hi")]
+public struct Range
+{
+    public int Lo;
+    public int Hi { get; set; }   // an auto-property is a field
+}
+```
+
+Three things are worth knowing.
+
+**A refinement names the fields directly.** Write `[Refine("Lo <= Hi")]`, not
+`[Refine("this.Lo <= this.Hi")]`: inside a struct declaration an unqualified field name is
+what a C# programmer expects, and `this` is a keyword that cannot be bound. A `[Refine]` on
+a single field reads the same way — `[Refine("Count >= 0")]` on `Count`.
+
+**The refinement is a type, not an obligation you carry around.** Whoever produces a
+`Range` proves it; whoever consumes one may assume it. Neither costs an annotation.
+
+**A struct field must be a value** — a scalar, or another struct that pal-csharp
+translates. An `int[]` field is rejected (`PALCS0511`). This is the model, not a gap: a C#
+struct is *copied* on assignment, so a struct holding an array would give every copy a
+second claim on the same memory, which is exactly the aliasing separation logic exists to
+rule out. C can put a pointer in a struct because a C struct is addressed rather than
+copied. In pal-csharp the storage travels alongside the state that describes it:
+
+```csharp
+public static void Enqueue(int[] a, ref RingState s, int value)
+```
+
+Structs are built with object initializers; unmentioned fields take their zero. A
+user-written constructor is rejected.
+
+```csharp
+var r = new Range { Lo = 0, Hi = 10 };
+```
+
+`default(T)` is allowed, but on a refined struct it carries a real obligation — the zero
+value must satisfy the refinement, and often it does not. That is the annotation doing its
+job.
+
 ---
 
 ## 4. Specification functions
@@ -203,9 +248,28 @@ public static bool Sorted(Seq<int> s, SpecInt lo, SpecInt hi) =>
 public static SpecInt SumUpTo(SpecInt n) => n <= 0 ? 0 : n + SumUpTo(n - 1);
 ```
 
-A `[Spec]` function's parameters get the **specification** reading: `int` is a mathematical
-integer, `T[]` and `Seq<T>` are both ghost sequences, a `bool` result is a proposition.
-Use `SpecInt` / `SpecNat` when you mean an unbounded integer and want to say so.
+A `[Spec]` function's parameters *and its result* get the **specification** reading: `int`
+is a mathematical integer, `T[]` and `Seq<T>` are both ghost sequences, a `bool` result is
+a proposition. Use `SpecInt` / `SpecNat` when you mean an unbounded integer and want to say
+so. Because an `int`-returning `[Spec]` denotes a mathematical value, it composes with
+arithmetic and may be used as an array index in a contract.
+
+**A contract may only call `[Spec]` and `[Lemma]` methods** — never an executable one, which
+has a heap effect and no meaning as a term. When you want to say something about what an
+executable method computes, give it a pure model and tie the two together:
+
+```csharp
+[Spec]
+public static int At(int start, int i, int capacity) =>
+    start + i < capacity ? start + i : start + i - capacity;
+
+[Ensures("Result == At(start, i, capacity)")]
+public static int Wrap(int start, int i, int capacity) { … }
+```
+
+Without that `Ensures`, a caller of `Wrap` would learn only that the result is in range — a
+type property. With it, the caller knows *which* index it is, which is the property the
+rest of the proof needs.
 
 **Keep a predicate total if a loop invariant will mention it.** A `[Requires]` on a `[Spec]`
 function becomes a refinement that must be discharged *wherever the predicate appears* —
@@ -316,10 +380,11 @@ span, collected in `diagnostics.json` alongside the generated modules, and every
 writes `assert False` into `TranslationErrors.fst`, so a failed translation can never be
 mistaken for a passing proof.
 
-Currently outside the supported subset: `struct` and `Span<T>` (planned), `goto`,
+Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
 `try`/`catch`/`throw`, `class` instances, generics, interfaces, delegates, `async`,
-floating point, numeric conversions between machine-integer widths, and a `return` that is
-not in tail position.
+`string`, floating point, numeric conversions between machine-integer widths, struct
+fields that are not values, user-written struct constructors, and a `return` that is not in
+tail position.
 
 Within the subset, the proof obligations are: no arithmetic overflow, no out-of-bounds
 index, no null dereference, no division by zero. C# defines the first as wrapping and turns

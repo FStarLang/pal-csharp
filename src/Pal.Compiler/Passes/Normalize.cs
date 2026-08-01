@@ -247,6 +247,7 @@ public static class Normalize
             case IrLength l: Free(l.Array, into); return;
             case IrField f: Free(f.Receiver, into); return;
             case IrNew n: foreach (var f in n.Fields) Free(f.Value, into); return;
+            case IrRefArg r: Free(r.Operand, into); return;
             case IrCall call: foreach (var a in call.Args) Free(a, into); return;
             case IrConvert cv: Free(cv.Operand, into); return;
             case IrOld o: Free(o.Operand, into); return;
@@ -313,8 +314,13 @@ public static class Normalize
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;
                     case IrField { Receiver: IrVar rec }: into.Add(rec.Name); break;
                 }
+                AssignedByCalls(a.Value, into);
                 return;
-            case IrIf i: Assigned(i.Then, into); Assigned(i.Else, into); return;
+            case IrIf i:
+                AssignedByCalls(i.Cond, into);
+                Assigned(i.Then, into);
+                Assigned(i.Else, into);
+                return;
             case IrWhile w:
                 Assigned(w.Body, into);
                 foreach (var st in w.Step) Assigned(st, into);
@@ -324,10 +330,47 @@ public static class Normalize
                 foreach (var s in f.Step) Assigned(s, into);
                 Assigned(f.Body, into);
                 return;
-            case IrExprStmt { Expr: IrCall call }:
-                // A method call may write through any array or `ref` argument it is given.
-                foreach (var arg in call.Args) if (arg is IrVar v) into.Add(v.Name);
+            case IrLocalDecl d: AssignedByCalls(d.Init, into); return;
+            case IrReturn r: AssignedByCalls(r.Value, into); return;
+            case IrExprStmt e: AssignedByCalls(e.Expr, into); return;
+            default: return;
+        }
+    }
+
+    /// <summary>
+    /// Names written by the calls occurring anywhere in an expression. A callee may
+    /// write through any array it is handed and through every by-reference argument, so
+    /// those names must be existentially quantified in an enclosing loop's invariant —
+    /// otherwise the invariant would silently assert that the call changed nothing.
+    /// </summary>
+    private static void AssignedByCalls(IrExpr? expr, HashSet<string> into)
+    {
+        switch (expr)
+        {
+            case null: return;
+            case IrCall call:
+                foreach (var arg in call.Args)
+                {
+                    switch (arg)
+                    {
+                        case IrVar v: into.Add(v.Name); break;
+                        case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
+                    }
+                    AssignedByCalls(arg, into);
+                }
                 return;
+            case IrRefArg r: AssignedByCalls(r.Operand, into); return;
+            case IrUnary u: AssignedByCalls(u.Operand, into); return;
+            case IrBinary b: AssignedByCalls(b.Left, into); AssignedByCalls(b.Right, into); return;
+            case IrConditional c:
+                AssignedByCalls(c.Cond, into);
+                AssignedByCalls(c.Then, into);
+                AssignedByCalls(c.Else, into);
+                return;
+            case IrElement el: AssignedByCalls(el.Array, into); AssignedByCalls(el.Index, into); return;
+            case IrField f: AssignedByCalls(f.Receiver, into); return;
+            case IrConvert cv: AssignedByCalls(cv.Operand, into); return;
+            case IrNew n: foreach (var f in n.Fields) AssignedByCalls(f.Value, into); return;
             default: return;
         }
     }

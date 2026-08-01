@@ -179,8 +179,8 @@ public sealed class StmtLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (kind == CalleeKind.Method)
         {
             return new IrExprStmt(loc,
-                new IrCall(loc, Naming.Of(method), [.. args.Select(a => _code.Lower(a.Expression))])
-                { Kind = CalleeKind.Method });
+                new IrCall(loc, Naming.Of(method), [.. args.Select(_code.LowerArgument)])
+                { Kind = CalleeKind.Method, ResultType = known.MapType(method.ReturnType) });
         }
 
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");

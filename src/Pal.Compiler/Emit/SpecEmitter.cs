@@ -141,7 +141,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     return new Term("()", TermKind.Other);
                 }
                 return new Term(
-                    $"{receiver.Text}.{Names.Projection(named.Name, f.Field)}",
+                    $"{Receiver(receiver.Text)}.{Names.Projection(named.Name, f.Field)}",
                     MethodPlan.KindOf(f.Type ?? IrPrim.Int), f.Type);
             }
 
@@ -156,10 +156,14 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return Quantifier(q, scope);
 
             case IrCall { Kind: CalleeKind.Spec } call:
+                // R4.6: a [Spec] function returning `bool` denotes a proposition; one
+                // returning an integer denotes a mathematical value, and so may be used
+                // in arithmetic and as an array index.
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
                     string.Join(" ", call.Args.Select(a => Argument(a, scope))) + ")",
-                    TermKind.Prop);
+                    call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
+                    call.ResultType);
 
             case IrConvert cv:
                 // A widening conversion is the identity on mathematical values.
@@ -316,7 +320,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
     private Term Quantifier(IrQuantifier q, SpecScope scope)
     {
-        var inner = new SpecScope(scope);
+        // A quantifier binder is bound *outside* both states, so it must be visible in
+        // the pre-state scope too: `Old(a[k])` under `forall k` reads the pre-state
+        // array at the same `k` the postcondition is talking about.
+        var pre = scope.Pre is null ? null : new SpecScope(scope.Pre);
+        var inner = new SpecScope(scope) { Pre = pre };
         var binders = new List<string>();
         foreach (var b in q.Binders)
         {
@@ -325,7 +333,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             // (R4.6), so `forall (int i)` is `forall (var_i: int)`.
             var rendered = b.Type is IrPrim { IsMachineInt: true } ? "int" : Types.Render(b.Type);
             binders.Add($"({name}: {rendered})");
-            inner.Bind(b.Name, new Term(name, TermKind.Math, b.Type));
+            var term = new Term(name, TermKind.Math, b.Type);
+            inner.Bind(b.Name, term);
+            pre?.Bind(b.Name, term);
         }
 
         var keyword = q.IsForall ? "forall" : "exists";
@@ -342,6 +352,16 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// R3.5. A struct field holds a machine value, so a literal keeps its width suffix
     /// rather than becoming the mathematical integer a specification otherwise uses.
     /// </summary>
+    /// <summary>
+    /// Parenthesises a projection's receiver unless it is already atomic. Without this
+    /// `!var_s.M.fld` would parse as `!(var_s.M.fld)` — a deref of a projection out of a
+    /// reference — which is not what the C# `s.fld` on a `ref` parameter means.
+    /// </summary>
+    private static string Receiver(string text) =>
+        text.Length > 0 && (char.IsLetter(text[0]) || text[0] is '_' or '(')
+            ? text
+            : $"({text})";
+
     private string FieldValue(IrExpr expr, SpecScope scope) => expr switch
     {
         IrLiteral l => Types.Literal(l.Value, expr.Type),

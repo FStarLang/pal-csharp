@@ -279,6 +279,19 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         return new IrUnary(loc, op.Value, Lower(node.Operand));
     }
 
+    /// <summary>
+    /// R6.10. A <c>ref</c>/<c>out</c>/<c>in</c> argument passes the variable itself, so
+    /// the reference must survive lowering; without this the callee would be handed a
+    /// snapshot of the value and the write it performs would be lost.
+    /// </summary>
+    public IrExpr LowerArgument(ArgumentSyntax arg)
+    {
+        var inner = Lower(arg.Expression);
+        return arg.RefKindKeyword.IsKind(SyntaxKind.None)
+            ? inner
+            : new IrRefArg(Locations.From(arg), inner);
+    }
+
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return Unsupported(node, loc);
@@ -297,7 +310,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrLiteral(loc, null);
         }
 
-        return new IrCall(loc, Naming.Of(method), [.. args.Select(a => Lower(a.Expression))]) { Kind = kind.Value };
+        return new IrCall(loc, Naming.Of(method), [.. args.Select(LowerArgument)])
+        {
+            Kind = kind.Value,
+            ResultType = known.MapType(method.ReturnType),
+        };
     }
 
     private IrExpr LowerIntrinsic(

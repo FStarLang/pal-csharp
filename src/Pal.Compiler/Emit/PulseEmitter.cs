@@ -154,9 +154,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             binders[^1] = last[..^1] + " { " + refinement + " })";
         }
 
-        var body = _spec.Emit(fn.Body, scope);
-        var returnType = fn.ReturnType is IrPrim { Kind: PrimKind.Bool } ? "prop" : Types.Render(fn.ReturnType);
-        var text = fn.ReturnType is IrPrim { Kind: PrimKind.Bool } ? _spec.AsProp(body) : body.Text;
+        var (returnType, text) = fn.ReturnType switch
+        {
+            IrPrim { Kind: PrimKind.Bool } => ("prop", _spec.AsProp(_spec.Emit(fn.Body, scope))),
+            // R4.6: a [Spec] method's integer result is mathematical for the same reason
+            // its parameters are — a specification carries no overflow obligation.
+            IrPrim { IsMachineInt: true } => ("int", _spec.Math(fn.Body, scope)),
+            _ => (Types.Render(fn.ReturnType), _spec.Emit(fn.Body, scope).Text),
+        };
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.SpecModule(fn.Name)}");
