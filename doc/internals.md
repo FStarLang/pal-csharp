@@ -220,6 +220,7 @@ test/
   verify.mk                     the shared harness
   diagnostics/                  negative tests: what must be *rejected*
   pulse_facts/                  regression pins for the facts in translation.md §1
+                                (PulseFacts F1-F12, StructFacts F10-F12, ObjectFacts F13-F16)
   no-example-names.sh           no test-suite identifier may appear in Pal.Compiler
   provenance-lint.sh            every generated construct must trace to a C# span
   fst-configs.sh                writes (and `--check`s) the .fst.config.json files

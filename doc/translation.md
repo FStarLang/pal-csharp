@@ -65,6 +65,10 @@ The rules below depend on the following, each **verified against the pinned tool
 | F10 | F\* resolves **module-qualified record syntax** in all three positions — projection `e.M.f`, update `{ e with M.f = v }`, and literal `{ M.f = a; g = b }` — without the defining module being `open`ed. So a generated struct module needs no `open` anywhere, and two structs may share a field name with no ambiguity. | `test/pulse_facts/PulseFacts.fst` + `test/pulse_facts/StructFacts.fst`, verified. |
 | F11 | A record **update's source must be a pure term**: `{ !r with M.f = v }` is rejected ("Ill-typed term … got expression of type `fn … returns …`"), because `!r` is a stateful operation and the update is a term former, not a statement. The deref must be let-bound first. This does not contradict F8: F8 is about a stateful block as the *scrutinee of a `let`*, which is precisely the form that fixes this. | `test/pulse_facts/StructFacts.fst:struct_field_write`, verified; the failing form was reproduced while writing R3.4. |
 | F12 | A Pulse `fn` **must have at least one binder**. A parameterless one fails in the elaborator, not the solver: "Tactic failed — main: FnDefn does not have binders". So a C# method with no parameters takes `()`. | `test/pulse_facts/StructFacts.fst:no_parameters`, verified; the failing form was reproduced by `test/point_struct`'s `Origin()`. |
+| F13 | `preserves p` is a genuine `fn` spec clause, meaning exactly `requires p ensures p`, and it composes with `requires` and `ensures` on the same `fn`. | `test/pulse_facts/ObjectFacts.fst:count`, verified. Relied on by R4.11. |
+| F14 | `Pulse.Lib.Box` is the **sound** heap cell and the right model of a CLR object. `Pulse.Lib.Reference.alloc` is marked `[@@deprecated "…is unsound; only use for model implementations"]` and may not appear in generated code; `Box.alloc` carries no such marker. `Box` additionally supplies `null`, a *pure* `is_null`, and `pts_to_not_null`, so a nullable object reference needs no new machinery. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Reference.fsti:87` and `Pulse.Lib.Box.fsti:31-53,90-110`; `test/pulse_facts/ObjectFacts.fst:ownership_implies_non_null`, verified. Relied on by R3.8 and R3.11. |
+| F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
+| F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -235,6 +239,100 @@ The deref is let-bound rather than written inline because a record update's sour
 a pure term (F11). Nested paths compose the same way: `x.f.g = e` updates `f` with an
 update of `g`.
 
+### 3.4 Classes
+
+**Status: specified, not yet implemented.** This subsection is the scheme the object
+support will implement; per §0 it is written before the code. Every shape below is pinned
+by `test/pulse_facts/ObjectFacts.fst`, which verifies against the pinned toolchain.
+
+A class is the construct M1 could not express at all. R3.4 forbids a struct field of
+reference type (PALCS0511) because copying the struct would duplicate ownership, which is
+why `test/circular_buffer` has to pass its storage array *alongside* the struct that
+describes it. A class is a heap cell rather than a value, so it can own its array outright.
+
+**R3.7 (class representation).** A `sealed class C` emits a record of its fields, using the
+same `fld_` prefix and the same access and update rules as a struct (R3.5, R3.6):
+
+```fstar
+noeq type class_C__raw = { fld_f₁: T₁; … }
+```
+
+Unlike R3.4, a field of reference type is **allowed** here, and is the point of the whole
+construct.
+
+**R3.8 (class reference type).** `C` is translated to `Pulse.Lib.Box.box class_C__raw`.
+
+`Box` and not `Pulse.Lib.Reference.ref`: `Reference.alloc` carries
+`[@@deprecated "Reference.alloc is unsound; only use for model implementations"]` and may
+not appear in generated code, whereas `Box.alloc` is an ordinary specified operation
+(F14).
+
+**R3.9 (object model).** Each class emits a pure record type `class_C__model` of the
+class's *observations* — one field per `[Spec]`-visible quantity.
+
+The model must expose everything a **caller** needs, both to establish a precondition and
+to exploit a postcondition. This is a real constraint, not bookkeeping: modelling a stack
+by its element sequence alone leaves capacity trapped inside the invariant's existential,
+so a client could not state "the stack is not full" and `Push` would be uncallable. The
+model of a bounded stack is therefore `{ elems: Seq.seq T; cap: nat }`, not `Seq.seq T`.
+
+**R3.10 (object invariant).** Each class emits
+
+```fstar
+let class_C__inv (this: class_C) (m: class_C__model) : slprop =
+  exists* (r: class_C__raw) … .
+    B.pts_to this r ** <the resource of each reference-typed field> **
+    pure (<the model agrees with the representation> /\ <the [Invariant] clauses>)
+```
+
+Two properties of this shape are load-bearing.
+
+* **The invariant is indexed by the model, and must be.** With an un-indexed
+  `inv (x: C) : slprop`, the object's entire state sits under an existential, so a
+  postcondition can mention arguments and nothing else — `Count(this) == Old(Count(this)) + 1`
+  would be inexpressible, and every method spec would degrade to "the object is still well
+  formed". That is memory safety, not functional correctness, and it is exactly the
+  weak-specification failure this project exists to avoid. The index is what makes
+  functional correctness statable. Note that this is not a new idea here: `A.pts_to var_a s`
+  is already a model-indexed resource, and R4.10 threads a class's model exactly as R4.4
+  already threads an array's.
+* **A class invariant is a `pure` conjunct inside the predicate, not a `[Refine]`.** A
+  refinement type must hold of *every* value of the type, but R3.6 writes a whole record
+  per field assignment, so a method that transiently breaks its invariant between two field
+  writes would be rejected outright. Struct refinements are always true; class invariants
+  are temporarily breakable, and the fold/unfold discipline of R4.10 is what marks the
+  window in which they may be broken. Using one mechanism for both would be wrong.
+
+**R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
+machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
+contract), and `Box.pts_to_not_null` proves that a live object is non-null.
+
+That last one settles the design. Ownership *implies* non-nullness, so a method holding
+`class_C__inv this m` never has to test for null and R6.4's "no null dereference"
+obligation is discharged by the invariant rather than by a check. `C?` maps to `box` with
+no additional obligation; `C` maps to `box` together with a `pure (not (is_null x))`
+conjunct that `pts_to_not_null` supplies for free.
+
+**R3.12 (allocation and the garbage collector).** `new C(…)` emits `Box.alloc`, and the
+emitter **never** emits `Box.free`.
+
+This needs no MODELING AXIOM, unlike the array case. Pulse slprops are affine: `Box.free`
+exists but nothing compels a caller to reach it, and a leftover resource is discharged by
+`drop_` (F15). An object whose invariant is simply dropped *is* a garbage-collected object.
+Contrast `Pulse.Lib.CSharp.Array.alloc`, which did need an axiom, because the underlying
+`Pulse.Lib.Array.alloc` is a stack allocation that must not outlive its frame. The CLR
+being garbage collected is thus a genuine simplification over PAL's C, not merely a
+different set of obligations.
+
+**R3.13 (aliasing).** An object resource is linear, so two owned parameters are necessarily
+distinct objects. Aliasing is therefore not unsound — it is *unprovable*.
+
+That is the correct outcome, but F* reports it as a bare `Cannot prove: class_C__inv a _`,
+which means nothing to a C# programmer who has just written `Merge(s, s)`. The emitter must
+therefore detect a call passing syntactically equal object arguments to two owned
+parameters and reject it as **PALCS0520** with an explanatory message. This is a
+diagnostic, not a proof step, so it does not violate §0 rule 3.
+
 ---
 
 ## 4. Methods and contracts
@@ -344,6 +442,74 @@ mechanically, and neither is a choice:
 
 What this buys, and what nothing else does: the same array may be passed to two parameters
 at once, because the caller splits its permission rather than surrendering it.
+
+### 4.5 Instance methods
+
+**Status: specified, not yet implemented**, alongside §3.4.
+
+**R4.10 (instance method).** An instance method of `sealed class C` translates exactly as
+R4.1 does, with three additions. The receiver becomes a leading explicit binder `this`, the
+model becomes a leading *erased* implicit binder, and the object resource brackets the
+contract:
+
+```csharp
+[Requires(P)] [Ensures(Q)]
+public void M(T x) { … }
+```
+⟶
+```
+fn method_C_M (this: class_C) (var_x: ⟦T⟧) (#m: erased class_C__model)
+  requires class_C__inv this m ** pure ⟦P⟧
+  ensures  class_C__inv this ⟦M's model transformer⟧ ** pure ⟦Q⟧
+{ unfold class_C__inv this m;  ⟦body⟧;  fold class_C__inv this <new model>; }
+```
+
+`this` is a C# keyword and so cannot be a shim parameter (the same obstacle R3.4 hit for
+`[Refine]`); in a contract the receiver's observations are therefore written as calls to
+the class's `[Spec]` methods, `Count(this)`, which is the spelling a C# programmer expects
+anyway and is what R3.9's model exists to interpret.
+
+The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken. It is
+emitted unconditionally, for the same reason `struct_S__pred` is emitted even when trivial
+(§0 rule 2).
+
+**R4.11 (read-only method).** When a method assigns no field and passes `this` to no
+mutating method, R4.10's two clauses collapse to one:
+
+```
+preserves class_C__inv this m
+```
+
+`preserves p` is a real Pulse spec clause meaning exactly `requires p ensures p`, and it
+composes with `requires`/`ensures` (F13). This is a *specification-strength* rule, not an
+optimisation: `preserves` is right for a read-only method and wrong for a mutating one,
+where it would be true but vacuous. The distinction is decided by the existing write-set
+analysis (Normalize), not by a heuristic.
+
+**R4.12 (constructor).** `new C(args)` emits a function that allocates, establishes the
+invariant, and returns the object:
+
+```
+fn ctor_C (…args…)
+  requires pure ⟦P⟧
+  returns  x : class_C
+  ensures  class_C__inv x ⟦the initial model⟧
+```
+
+The postcondition names the **initial model**, not merely `class_C__inv x`. `ensures inv x`
+alone would say the object is well formed without saying what it holds, which is R3.10's
+weak-specification failure relocated to the constructor.
+
+Freshness is free and needs no emitter work: the frame rule gives every caller
+`frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
+everything that already existed.
+
+**R4.13 (rejections).** M2 supports `sealed` classes only. `virtual`, `abstract`,
+`override`, and interface implementations are **PALCS0521**: a per-class `class_C__inv`
+cannot express behavioural subtyping without existential packages, and admitting them
+without one would silently produce unsound or unprovable specs. A **static mutable field**
+is **PALCS0522** — it is unowned global mutable state, which no per-object invariant
+covers.
 
 ---
 
@@ -619,8 +785,9 @@ never a change here that special-cases this loop.
 
 Rules are recorded here as they are validated.
 
-* §1 facts **F1–F12** are verified against the pinned toolchain and regression-pinned in
-  `test/pulse_facts`.
+* §1 facts **F1–F16** are verified against the pinned toolchain and
+  regression-pinned in `test/pulse_facts`. F13–F16 were established by probing
+  Pulse *before* §3.4 and §4.5 were written, which is the order §0 requires.
 * **`test/probe_insertion_sort` was the first end-to-end validation of §2–§6.** Its
   `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing the rules
   above on `InsertionSort.cs` — before any emitter code existed — and verify against
@@ -705,7 +872,23 @@ Rules are recorded here as they are validated.
   copy would duplicate ownership of the same memory. Storage therefore travels alongside
   the state it describes, as in `test/circular_buffer`.
 * Classes and objects, generics, interfaces, `string`, and `float`/`double`.
-* Numeric conversions between machine-integer widths, and a non-tail `return` inside a
+  **Classes are specified but not yet implemented**: §3.4 (R3.7–R3.13) and §4.5
+  (R4.10–R4.13) are the scheme, and `test/pulse_facts/ObjectFacts.fst` pins every Pulse
+  shape they name against the pinned toolchain. Generics, interfaces, `string` and floats
+  remain unspecified as well as unimplemented.
+* **Object abstraction is deliberately deferred.** `class_C__inv` is specified as a
+  *concrete* definition in the class's own module. Hiding it behind an `.fsti`
+  (`val class_C : Type0`, `val class_C__inv : class_C -> class_C__model -> slprop`) works
+  and needs no F\* `friend`, but it requires a module shape the emitter does not have
+  today, and C# `private` already hides the representation at the source level. The step is
+  available when proof performance or genuine information hiding demands it.
+* **Object lifecycle and re-entrancy are unspecified.** A class with two-phase
+  initialisation or `Dispose` wants a *state*-indexed invariant, and calling a method on
+  `this` while its invariant is unfolded (R4.10) requires either re-establishing the
+  invariant first or a marked helper that operates on the unfolded state. Neither is
+  designed; R4.13's `sealed`-only restriction keeps them out of scope for now.
+* **Reference identity** — `ReferenceEquals`, and `==` on a class — has no story. `Box`
+  supports equality, but nothing relates it to the ownership discipline.* Numeric conversions between machine-integer widths, and a non-tail `return` inside a
   loop: likewise rejected rather than mistranslated.
 * `out` is modelled exactly as `ref`, not as `pts_to_uninit` strengthening to `pts_to`, so
   a caller must initialise an `out` argument before the call.

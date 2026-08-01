@@ -230,6 +230,69 @@ var r = new Range { Lo = 0, Hi = 10 };
 value must satisfy the refinement, and often it does not. That is the annotation doing its
 job.
 
+### Classes
+
+**Not yet implemented.** This is the planned surface; the translation scheme behind it is
+`doc/translation.md` §3.4 and §4.5, and every Pulse shape it relies on is already verified
+in `test/pulse_facts/ObjectFacts.fst`. It is written down here so that the design can be
+argued with before the code exists.
+
+A class is what lets state and the storage it describes finally live together. Compare the
+struct version above:
+
+```csharp
+[Invariant("0 <= Count && Count <= Capacity")]
+public sealed class Stack
+{
+    private int[] items;      // a class MAY own an array; a struct may not
+    private int top;
+
+    [Spec] public int Count    => top;
+    [Spec] public int Capacity => items.Length;
+
+    [Requires("0 <= capacity")]
+    [Ensures("Count == 0 && Capacity == capacity")]
+    public Stack(int capacity) { items = new int[capacity]; top = 0; }
+
+    [Requires("Count < Capacity")]
+    [Ensures("Count == Old(Count) + 1")]
+    public void Push(int v) { items[top] = v; top = top + 1; }
+
+    [Ensures("Result == Count")]
+    public int Size() => top;
+}
+```
+
+Four things are worth knowing, and each is a consequence of the scheme rather than a
+convention.
+
+**`[Invariant]` on a class is *not* `[Refine]` on a struct.** A struct's refinement holds of
+every value at all times. A class invariant may be *temporarily broken* inside a method —
+`Push` above breaks it between the two field writes — and is re-established on exit. That is
+why they are different attributes rather than one.
+
+**Your contracts talk about the object through its `[Spec]` members.** `Count` and
+`Capacity` above are ordinary `[Spec]` properties, and `Count == Old(Count) + 1` means what
+it says. Behind the scenes these are the *model* of the object, and the rule that follows
+from it is the one to remember: **every quantity a caller needs must be a `[Spec]`
+member.** Had `Capacity` been left out, `Push`'s `[Requires("Count < Capacity")]` would be
+unwritable and `Push` would be uncallable — the object would verify and be useless.
+
+**An object is owned, so two parameters are two different objects.** `Merge(Stack a, Stack
+b)` may not be called as `Merge(s, s)`; that is reported as `PALCS0520`. Ownership also
+means a live object is never `null`, so no method needs a null check to satisfy the
+translator.
+
+**M2 is `sealed` classes only.** `virtual`, `abstract`, `override` and interface
+implementations are rejected (`PALCS0521`), because a per-class invariant cannot express
+behavioural subtyping. A static mutable field is rejected too (`PALCS0522`): it is global
+state that no per-object invariant covers.
+
+Two things a class gets for free, and neither costs an annotation. A freshly constructed
+object is automatically distinct from every object that already existed. And nothing is
+ever freed — the CLR's garbage collector means pal-csharp inherits none of PAL's
+deallocation obligations.
+
 ---
 
 ## 4. Specification functions
@@ -381,10 +444,10 @@ writes `assert False` into `TranslationErrors.fst`, so a failed translation can 
 mistaken for a passing proof.
 
 Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
-`try`/`catch`/`throw`, `class` instances, generics, interfaces, delegates, `async`,
-`string`, floating point, numeric conversions between machine-integer widths, struct
-fields that are not values, user-written struct constructors, and a `return` that is not in
-tail position.
+`try`/`catch`/`throw`, `class` instances (**specified but not implemented** — see
+§3 Classes), generics, interfaces, delegates, `async`, `string`, floating point, numeric
+conversions between machine-integer widths, struct fields that are not values,
+user-written struct constructors, and a `return` that is not in tail position.
 
 Within the subset, the proof obligations are: no arithmetic overflow, no out-of-bounds
 index, no null dereference, no division by zero. C# defines the first as wrapping and turns
