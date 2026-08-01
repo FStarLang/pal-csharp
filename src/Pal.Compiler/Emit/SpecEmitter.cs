@@ -100,12 +100,32 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return Emit(ct.Array, scope) with { Kind = TermKind.Seq };
 
             case IrLength len:
-                return new Term($"(Seq.length {Emit(len.Array, scope).Text})", TermKind.Math);
+            {
+                // F7. `a.Length` has two readings: in a specification the array is
+                // represented by its contents, so it is `Seq.length`; in a termination
+                // measure only the live array is in scope, and its length is the pure
+                // `arr_length`, which is exactly what F7 introduced it for. The reading is
+                // chosen by what the array term denotes, never by where we happen to be.
+                var arr = Emit(len.Array, scope);
+                return arr.Kind == TermKind.Array
+                    ? new Term($"(arr_length {arr.Text})", TermKind.Machine, IrPrim.Int)
+                    : new Term($"(Seq.length {arr.Text})", TermKind.Math);
+            }
 
             case IrElement el:
+            {
+                var arr = Emit(el.Array, scope);
+                if (arr.Kind == TermKind.Array)
+                {
+                    diagnostics.Error("PALCS0304", el.Loc,
+                        "An array element cannot be read here: only the array itself is in " +
+                        "scope, not its contents. Name the value in a loop invariant first.");
+                    return new Term("()", TermKind.Other);
+                }
                 return new Term(
-                    $"(Seq.index {Emit(el.Array, scope).Text} {Math(el.Index, scope)})",
+                    $"(Seq.index {arr.Text} {Math(el.Index, scope)})",
                     TermKind.Machine, el.Type);
+            }
 
             case IrSeqOp s:
                 return SeqOp(s, scope);

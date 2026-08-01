@@ -126,13 +126,25 @@ public static class Normalize
         var body = Statement(f.Body, inner, diagnostics);
         var merged = new IrBlock(f.Body.Loc, [.. Flatten(body), .. f.Step]);
 
-        var loop = new IrWhile(
-            f.Loc,
-            f.Cond ?? new IrLiteral(f.Loc, true) { Type = IrPrim.Bool },
-            f.Invariants, f.Decreases, merged)
-        {
-            Counted = DetectCounter(f),
-        };
+        // A `continue` must still run the step, so a body that contains one keeps the
+        // step in its own slot; otherwise the two are indistinguishable and appending is
+        // both simpler and identical in meaning.
+        var loop = Escapes(f.Body)
+            ? new IrWhile(
+                f.Loc,
+                f.Cond ?? new IrLiteral(f.Loc, true) { Type = IrPrim.Bool },
+                f.Invariants, f.Decreases, body)
+            {
+                Counted = DetectCounter(f),
+                Step = f.Step,
+            }
+            : new IrWhile(
+                f.Loc,
+                f.Cond ?? new IrLiteral(f.Loc, true) { Type = IrPrim.Bool },
+                f.Invariants, f.Decreases, merged)
+            {
+                Counted = DetectCounter(f),
+            };
 
         return new IrBlock(f.Loc, [.. f.Init, Loop(loop, inner, diagnostics)]);
     }
@@ -145,6 +157,15 @@ public static class Normalize
     /// step moves monotonically. This is a syntactic property of the loop's own three
     /// clauses; it says nothing about what the loop computes.
     /// </summary>
+    /// <summary>Whether a loop body contains a `break` or `continue` of its own.</summary>
+    private static bool Escapes(IrStmt stmt) => stmt switch
+    {
+        IrBreak or IrContinue => true,
+        IrBlock b => b.Statements.Any(Escapes),
+        IrIf i => Escapes(i.Then) || (i.Else is not null && Escapes(i.Else)),
+        _ => false,
+    };
+
     private static CountedFor? DetectCounter(IrFor f)
     {
         if (f.Init.Length != 1 || f.Init[0] is not IrLocalDecl decl) return null;
@@ -167,9 +188,11 @@ public static class Normalize
         foreach (var i in loop.Invariants) Free(i, mentioned);
         if (loop.Decreases is not null) Free(loop.Decreases, mentioned);
         Free(loop.Body, mentioned);
+        foreach (var st in loop.Step) Free(st, mentioned);
 
         var assigned = new HashSet<string>();
         Assigned(loop.Body, assigned);
+        foreach (var st in loop.Step) Assigned(st, assigned);
 
         // R5.8: ownership of everything the loop touches that it did not itself declare.
         var live = mentioned.Where(outer.Contains).OrderBy(n => n, StringComparer.Ordinal).ToImmutableArray();
@@ -255,6 +278,7 @@ public static class Normalize
                 foreach (var inv in w.Invariants) Free(inv, into);
                 Free(w.Decreases, into);
                 Free(w.Body, into);
+                foreach (var st in w.Step) Free(st, into);
                 return;
             case IrFor f:
                 foreach (var s in f.Init) Free(s, into);
@@ -290,7 +314,10 @@ public static class Normalize
                 }
                 return;
             case IrIf i: Assigned(i.Then, into); Assigned(i.Else, into); return;
-            case IrWhile w: Assigned(w.Body, into); return;
+            case IrWhile w:
+                Assigned(w.Body, into);
+                foreach (var st in w.Step) Assigned(st, into);
+                return;
             case IrFor f:
                 foreach (var s in f.Init) Assigned(s, into);
                 foreach (var s in f.Step) Assigned(s, into);

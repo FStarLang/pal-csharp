@@ -303,8 +303,14 @@ author's responsibility to restate as an invariant. Inventing invariants is exac
 "emitter invents proof steps" failure §0 rule 3 forbids.
 
 **R5.7 (`for` → `while`).** `for (init; cond; step) { body }` ⟶
-`{ init; while (cond) { body; step } }` as a **C#→C# rewrite** in the Normalize pass, with
-`continue` re-targeted to run `step`. The emitter only ever sees `while`.
+`{ init; while (cond) { body; step } }` as a **C#→C# rewrite** in the Normalize pass. The
+emitter only ever sees `while`.
+
+One qualification, for R5.10's sake: C# runs `step` after a `continue` but not after a
+`break`, and appending `step` to `body` loses that distinction. So when the body contains
+an escape the step is *not* appended; it is carried in a separate slot on the `while` and
+emitted by R5.10 under the break flag alone. When the body contains no escape the two are
+indistinguishable and the step is appended, as above.
 
 **R5.8 (`live` inference).** The `invariant` includes `pts_to` for every local the loop body
 reads or writes, computed from the body's free variables. This is an improvement over PAL,
@@ -343,8 +349,38 @@ The measure is obtained, in order:
 Case 3 is deliberate: guessing a measure would be the emitter inventing a proof step
 (Rule 3).
 
-**R5.10 (`break`).** `Pal.Ensures(Q)` in a loop body emits one `ensures` clause per `break`
-site, as in PAL.
+**R5.10 (`break` and `continue`).** Pulse has neither. Both are translated with *escape
+flags*, allocated only for the forms the body actually uses, so a loop with no escape is
+emitted exactly as R5.6 describes.
+
+| C# | Pulse |
+|---|---|
+| a loop whose body contains `break` | `let mut var_brk_n = false;` **before** the loop |
+| a loop whose body contains `continue` | `let mut var_cont_n = false;` as the **first statement of the body**, so it is cleared on every iteration |
+| `break;` | `var_brk_n := true;` (and `var_cont_n := true;` if that flag exists) |
+| `continue;` | `var_cont_n := true;` |
+| guard `c` | `⟦c⟧ && not !var_brk_n` |
+| invariant | additionally `exists* v. pts_to var_brk_n v` |
+| measure `m` | `⟦m⟧ + (if !var_brk_n then 0 else 1)` |
+| `S₁; S₂` in a loop body, where `S₁` may escape | `⟦S₁⟧; if (not !var_brk_n && not !var_cont_n) { ⟦S₂⟧ } else { () };` |
+| the `for` step of R5.7 | emitted after the body, under `not !var_brk_n` only |
+
+Four points are worth stating because each is forced, not chosen:
+
+* **The user's guard comes first.** In a short-circuit guard `e₁ && e₂` only `e₁`'s
+  dereferences stay visible to the loop body, so appending the flag rather than prepending
+  it is what keeps R5.6 loops unchanged.
+* **The measure needs the flag.** The iteration that breaks need not decrease the user's
+  measure — it exits instead. Adding one while the flag is still clear restores the
+  decrease on every path, uniformly. It stays *linear*, which matters: multiplication in a
+  measure puts Z3 into nonlinear mode and destabilises unrelated obligations in the same
+  definition. It also stays inside F9, which forbids a dereference in a *branch* of an
+  `if` in a measure but not in its condition.
+* **`var_cont_n` needs no invariant** because it is allocated inside the body and so does
+  not cross the loop's boundary.
+* **The guard is a syntactic test.** "May escape" is a walk over the statement that stops
+  at a nested loop, whose own `break` and `continue` bind to that loop. It never looks at
+  what the loop computes.
 
 **R5.11 (ghost statements).** `Pal.Assert(p)` ⟶ `assert (⟦p⟧)`. A call to a `[Lemma]`
 method ⟶ the corresponding ghost call. `Pal.GhostStmt("…")` ⟶ the string verbatim, after

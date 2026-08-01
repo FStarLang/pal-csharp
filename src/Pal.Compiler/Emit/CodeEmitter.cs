@@ -23,6 +23,16 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
     private int _indent = 1;
     private int _temp;
     private int _ghost;
+    private int _loop;
+
+    /// <summary>
+    /// R5.10. The escape flags of the innermost loop being emitted, or null outside any
+    /// loop. <c>Break</c> is allocated before the loop and read by its guard and measure;
+    /// <c>Continue</c> is allocated inside the body and reset on every iteration.
+    /// </summary>
+    private sealed record Escape(string? Break, string? Continue);
+
+    private Escape? _escape;
 
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
@@ -119,7 +129,7 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         switch (stmt)
         {
             case IrBlock b:
-                foreach (var s in b.Statements) Statement(s, plan);
+                Sequence(b.Statements, plan);
                 return;
 
             case IrLocalDecl d:
@@ -150,9 +160,15 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 diagnostics.Unsupported(r.Loc, "A `return` in this position");
                 return;
 
-            case IrBreak or IrContinue:
-                diagnostics.Unsupported(stmt.Loc, "`break` and `continue`",
-                    "Restructure the loop so its guard carries the exit condition.");
+            case IrBreak b2:
+                if (_escape?.Break is { } brkCell) Line($"{brkCell} := true;");
+                else diagnostics.Unsupported(b2.Loc, "`break` outside a loop");
+                if (_escape?.Continue is { } brkEsc) Line($"{brkEsc} := true;");
+                return;
+
+            case IrContinue c2:
+                if (_escape?.Continue is { } contCell) Line($"{contCell} := true;");
+                else diagnostics.Unsupported(c2.Loc, "`continue` outside a loop");
                 return;
 
             default:
@@ -160,6 +176,66 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                 return;
         }
     }
+
+    /// <summary>
+    /// R5.10. A statement sequence, with the escape guard threaded through it.
+    ///
+    /// <para>Pulse has no <c>break</c> and no <c>continue</c>, so the *remainder* of a
+    /// sequence after a statement that may escape is emitted under a test of the escape
+    /// flags. The rewrite is compositional — it looks only at the statement in hand and
+    /// the statements after it — and it is inserted only where <see cref="MayEscape"/>
+    /// holds, so a loop without <c>break</c> or <c>continue</c> is emitted exactly as
+    /// before.</para>
+    /// </summary>
+    private void Sequence(ImmutableArray<IrStmt> statements, MethodPlan plan)
+    {
+        for (var k = 0; k < statements.Length; k++)
+        {
+            Statement(statements[k], plan);
+
+            var rest = statements.RemoveRange(0, k + 1);
+            if (rest.IsEmpty || _escape is null || !MayEscape(statements[k])) continue;
+
+            Line($"if ({EscapeTest()}) {{");
+            _indent++;
+            Sequence(rest, plan);
+            Line("()");
+            _indent--;
+            Line("} else { () };");
+            return;
+        }
+    }
+
+    /// <summary>
+    /// Emits the reads of the escape flags and returns the pure test meaning
+    /// "this iteration has not escaped". The flags are read into `let`-bound names because
+    /// a Pulse <c>if</c> condition must be pure.
+    /// </summary>
+    private string EscapeTest()
+    {
+        var parts = new List<string>();
+        foreach (var cell in new[] { _escape!.Break, _escape.Continue })
+        {
+            if (cell is null) continue;
+            var t = Fresh();
+            Line($"let {t} = !{cell};");
+            parts.Add($"not {t}");
+        }
+        return string.Join(" && ", parts);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="stmt"/> can transfer control out of the sequence it is in.
+    /// The walk deliberately stops at a nested loop, whose own <c>break</c> and
+    /// <c>continue</c> bind to that loop.
+    /// </summary>
+    private static bool MayEscape(IrStmt stmt) => stmt switch
+    {
+        IrBreak or IrContinue => true,
+        IrBlock b => b.Statements.Any(MayEscape),
+        IrIf i => MayEscape(i.Then) || (i.Else is not null && MayEscape(i.Else)),
+        _ => false,
+    };
 
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
     private void LocalDeclaration(IrLocalDecl d)
@@ -251,11 +327,38 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
                  $"assert ({string.Join(" ** ", toFix.Select(s => s.Resource(fixedNames[s.Name])))});");
         }
 
+        // R5.10. Flags are allocated only for the forms the body actually uses, so a
+        // loop with neither `break` nor `continue` is emitted unchanged.
+        var brkCell = MayEscape(w.Body) && ContainsBreak(w.Body) ? $"var_brk_{_loop}" : null;
+        var contCell = ContainsContinue(w.Body) ? $"var_cont_{_loop}" : null;
+        _loop++;
+        var outerEscape = _escape;
+        _escape = brkCell is null && contCell is null ? null : new Escape(brkCell, contCell);
+
+        if (brkCell is not null)
+        {
+            Line($"let mut {brkCell} = false;");
+            var value = FreshValue("brk");
+            existentials.Add(value);
+            resources.Add($"R.pts_to {brkCell} {value}");
+        }
+
         var guard = Capture(() => Expr(w.Cond));
         Line("while (");
         _indent++;
         foreach (var line in guard.Lines) _sb.Append(line);
-        Line(guard.Term);
+        if (brkCell is null)
+        {
+            Line(guard.Term);
+        }
+        else
+        {
+            // The user's guard comes first so that its dereferences stay visible to the
+            // body; the break flag is a pure conjunct appended to it.
+            var t = Fresh();
+            Line($"let {t} = !{brkCell};");
+            Line($"({guard.Term}) && not {t}");
+        }
         _indent--;
         Line(")");
 
@@ -263,15 +366,62 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         Line("invariant " + MethodPlan.Clause(resources.ToImmutable(), invariants, existentials.ToImmutable()));
 
         if (w.Decreases is not null)
-            Line($"decreases ({spec.Math(w.Decreases, DerefScope())})");
+        {
+            var measure = spec.Math(w.Decreases, DerefScope());
+            // The iteration that breaks need not decrease the user's measure — it exits
+            // instead. Adding one while the flag is still clear restores the decrease
+            // uniformly, and stays linear: F9 forbids a dereference inside a branch of an
+            // `if` in a measure, but not in its condition.
+            if (brkCell is not null) measure = $"({measure}) + (if !{brkCell} then 0 else 1)";
+            Line($"decreases ({measure})");
+        }
 
         Line("{");
         _indent++;
+        if (contCell is not null) Line($"let mut {contCell} = false;");
         Statement(w.Body, plan);
+        if (!w.Step.IsEmpty)
+        {
+            // R5.7 + R5.10. The `for` step runs after a `continue` but not after a
+            // `break`, so it sits outside the body's escape guard and under the break
+            // flag alone.
+            if (brkCell is not null)
+            {
+                var t = Fresh();
+                Line($"let {t} = !{brkCell};");
+                Line($"if (not {t}) {{");
+                _indent++;
+                Sequence(w.Step, plan);
+                Line("()");
+                _indent--;
+                Line("} else { () };");
+            }
+            else
+            {
+                Sequence(w.Step, plan);
+            }
+        }
         Line("()");
         _indent--;
         Line("};");
+        _escape = outerEscape;
     }
+
+    private static bool ContainsBreak(IrStmt stmt) => stmt switch
+    {
+        IrBreak => true,
+        IrBlock b => b.Statements.Any(ContainsBreak),
+        IrIf i => ContainsBreak(i.Then) || (i.Else is not null && ContainsBreak(i.Else)),
+        _ => false,
+    };
+
+    private static bool ContainsContinue(IrStmt stmt) => stmt switch
+    {
+        IrContinue => true,
+        IrBlock b => b.Statements.Any(ContainsContinue),
+        IrIf i => ContainsContinue(i.Then) || (i.Else is not null && ContainsContinue(i.Else)),
+        _ => false,
+    };
 
     /// <summary>
     /// The scope a <c>decreases</c> measure is read in: by F3 a measure may dereference
@@ -284,7 +434,11 @@ public sealed class CodeEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
         foreach (var (name, slot) in _slots)
         {
             var text = slot.Kind is SlotKind.Cell or SlotKind.RefParam ? $"!{slot.Binder}" : slot.Binder;
-            scope.Bind(name, new Term(text, MethodPlan.KindOf(slot.Type), slot.Type));
+            // Here an array denotes the live array, not its contents: a measure may
+            // dereference a mutable local (F3) but may not mention the invariant's
+            // existentials, which is where the contents live.
+            var kind = slot.Kind is SlotKind.Array ? TermKind.Array : MethodPlan.KindOf(slot.Type);
+            scope.Bind(name, new Term(text, kind, slot.Type));
         }
         return scope;
     }

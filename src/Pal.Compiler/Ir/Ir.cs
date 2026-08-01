@@ -210,6 +210,14 @@ public sealed record IrWhile(
 
     /// <summary>Locals the loop needs ownership of; inferred by Elab (R5.8).</summary>
     public ImmutableArray<string> Live { get; init; } = ImmutableArray<string>.Empty;
+
+    /// <summary>
+    /// The step of the <c>for</c> this loop was desugared from (R5.7). It is kept apart
+    /// from the body rather than appended to it because C# runs the step after a
+    /// <c>continue</c> but not after a <c>break</c>, which is a distinction the body's
+    /// escape guard cannot make (R5.10).
+    /// </summary>
+    public ImmutableArray<IrStmt> Step { get; init; } = ImmutableArray<IrStmt>.Empty;
 }
 
 /// <summary>
