@@ -454,10 +454,36 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
-* **The emitter now implements R2–R6 and reproduces the probe from source.** Eleven
+* **The emitter now implements R2–R6 and reproduces the probe from source.** Twelve
   acceptance-test directories translate and verify from annotated C#: `swap`, `abs_max`,
-  `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `binary_search`,
-  `lemma_call`, `ghost_arg` and `pulse_interop`.
+  `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `insertion_sort_sorted`,
+  `binary_search`, `lemma_call`, `ghost_arg` and `pulse_interop`.
+* **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
+  `test/insertion_sort_sorted` proves, of the ordinary two-nested-loop C# insertion sort:
+
+  ```
+  Contents(a).Length == Old(Contents(a)).Length
+  Sorted(Contents(a), 0, Contents(a).Length)
+  IsPermutation(Contents(a), Old(Contents(a)))
+  ```
+
+  which is the full functional-correctness statement for a sort — the output is ordered
+  *and* it is the input rearranged. Two techniques were needed, and both are recorded here
+  because they generalise:
+
+  1. **Spec predicates used in loop invariants must be total.** A `[Spec]` predicate
+     carrying a `[Requires]` becomes a refinement on its last binder (R4.6), and that
+     refinement must then be discharged wherever the predicate appears — including at
+     invariant *establishment*, where the loop counter is often out of range (`i = 1` on an
+     empty array). `Sorted`, `AllAbove` and `Dominated` therefore take no `[Requires]`; the
+     index bounds are folded into the quantifier's antecedent, from which well-typedness of
+     `s[i]` follows.
+  2. **The proof is carried entirely by annotations in the `.cs` file** — four invariants
+     naming the two intact runs either side of the hole, and four `Pal.Assert` steps
+     restating them at the narrowed hole after the shift — plus one general library lemma
+     (`Pulse.Lib.CSharp.Seq.upd_shift_is_permutation`) reached through a `[Lemma]` method.
+     That is precisely the split §0 rule 3 mandates: **no emitter change was made for this
+     proof.**
 * **The contortion detector is running.** `abs_max`, `sum_array`, `reverse` and
   `insertion_sort` each ship a *variant*: the same contract and algorithm written
   differently — `for` against `while`, inverted branches, renamed and reordered locals,
@@ -473,8 +499,6 @@ Rules are recorded here as they are validated.
 
 ### Not yet done
 
-* Sortedness for insertion sort (plan tier 7.1a); permutation and length preservation are
-  proven.
 * `struct`, `Span<T>`, `break`/`continue`, numeric conversions, and non-tail `return`
   inside a loop: all currently rejected with a diagnostic rather than mistranslated.
 * A ghost argument determined only by the pure part of a contract cannot be passed at a

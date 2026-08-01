@@ -121,9 +121,19 @@ public static class FrontendPass
 
         var own = $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
 
+        // A specification string is written as if it were an expression inside the
+        // annotated method, so the method's own namespace has to be in scope: without
+        // it a sibling class can be named unqualified (it is imported by `using
+        // static`) but not qualified, which is the more natural way to write it.
+        var ns = candidate.Symbol.ContainingNamespace;
+        var enclosing = ns is null || ns.IsGlobalNamespace
+            ? ImmutableArray<string>.Empty
+            : ImmutableArray.Create($"using {ns.ToDisplayString()};");
+
         return
         [
             .. fileUsings,
+            .. enclosing,
             $"using {WellKnown.Namespace};",
             $"using static {WellKnown.Namespace}.Pal;",
             .. helperTypes.Contains(own) ? ImmutableArray<string>.Empty : [own],
