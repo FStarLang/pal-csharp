@@ -11,7 +11,7 @@ CACHE_DIR ?= _cache
 PULSE_DIR ?= ../../pulse
 
 FSTAR_OPTIONS := --cache_checked_modules --cache_dir $(CACHE_DIR) \
-                 --already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
+                 --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
                  --include $(CACHE_DIR) \
                  --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR)
 

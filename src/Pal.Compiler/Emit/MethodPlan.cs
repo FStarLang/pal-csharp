@@ -1,0 +1,151 @@
+using System.Collections.Immutable;
+using System.Text;
+using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Ir;
+
+namespace Pal.Compiler.Emit;
+
+/// <summary>
+/// The signature half of R4.1: how a method's parameters become Pulse binders, what
+/// resources its contract owns, and what its specifications' free names denote in the
+/// pre- and post-state.
+/// </summary>
+public sealed class MethodPlan
+{
+    private readonly SpecEmitter _spec;
+
+    public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics)
+    {
+        _spec = spec;
+
+        var assigned = new HashSet<string>();
+        Passes.Normalize.Assigned(method.Body, assigned);
+
+        var binders = ImmutableArray.CreateBuilder<string>();
+        var ghostBinders = ImmutableArray.CreateBuilder<string>();
+        var preResources = ImmutableArray.CreateBuilder<string>();
+        var postResources = ImmutableArray.CreateBuilder<string>();
+        var postExistentials = ImmutableArray.CreateBuilder<string>();
+        var prologue = ImmutableArray.CreateBuilder<(string Cell, string Source)>();
+
+        var pre = new SpecScope();
+        var post = new SpecScope { Pre = pre, ResultTerm = Names.Result };
+        var slots = ImmutableDictionary.CreateBuilder<string, Slot>();
+
+        foreach (var p in method.Parameters)
+        {
+            var name = Names.Local(p.Name);
+
+            if (p.IsGhost)
+            {
+                ghostBinders.Add($"(#{name}: erased ({Types.Render(p.Type)}))");
+                var term = new Term($"(reveal {name})", KindOf(p.Type), p.Type);
+                pre.Bind(p.Name, term);
+                post.Bind(p.Name, term);
+                slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
+                continue;
+            }
+
+            switch (p.Type)
+            {
+                case IrArrayType array:
+                {
+                    var preValue = "pre_" + p.Name;
+                    var postValue = "post_" + p.Name;
+                    binders.Add($"({name}: array {Types.Render(array.Element)})");
+                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Render(array.Element)}))");
+                    preResources.Add($"A.pts_to {name} {preValue}");
+                    postResources.Add($"A.pts_to {name} {postValue}");
+                    postExistentials.Add(postValue);
+                    pre.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name);
+                    break;
+                }
+
+                case var _ when p.Mode is ParamMode.Ref or ParamMode.Out or ParamMode.In:
+                {
+                    var preValue = "pre_" + p.Name;
+                    var postValue = "post_" + p.Name;
+                    binders.Add($"({name}: R.ref {Types.Render(p.Type)})");
+                    ghostBinders.Add($"(#{preValue}: erased ({Types.Render(p.Type)}))");
+                    preResources.Add($"R.pts_to {name} {preValue}");
+                    postResources.Add($"R.pts_to {name} {postValue}");
+                    postExistentials.Add(postValue);
+                    pre.Bind(p.Name, new Term($"(reveal {preValue})", KindOf(p.Type), p.Type));
+                    post.Bind(p.Name, new Term(postValue, KindOf(p.Type), p.Type));
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.RefParam, name);
+                    break;
+                }
+
+                default:
+                {
+                    // R4.2: a by-value parameter is rebound as a cell only if assigned.
+                    var isCell = assigned.Contains(p.Name);
+                    var binder = isCell ? Names.Argument(p.Name) : name;
+                    binders.Add($"({binder}: {Types.Render(p.Type)})");
+                    if (isCell) prologue.Add((name, binder));
+                    var term = new Term(binder, KindOf(p.Type), p.Type);
+                    pre.Bind(p.Name, term);
+                    post.Bind(p.Name, term);
+                    slots[p.Name] = new Slot(p.Name, p.Type,
+                        isCell ? SlotKind.Cell : SlotKind.Value, isCell ? name : binder);
+                    break;
+                }
+            }
+        }
+
+        Binders = [.. binders, .. ghostBinders];
+        Prologue = prologue.ToImmutable();
+        PreScope = pre;
+        PostScope = post;
+        Slots = slots.ToImmutable();
+
+        var preConjuncts = method.Requires.Select(r => _spec.AsProp(_spec.Emit(r, pre))).ToImmutableArray();
+        var postConjuncts = method.Ensures.Select(e => _spec.AsProp(_spec.Emit(e, post)))
+            .Concat(method.Preserves.Select(e => _spec.AsProp(_spec.Emit(e, post))))
+            .ToImmutableArray();
+
+        Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
+        Ensures = Clause(postResources.ToImmutable(), postConjuncts, postExistentials.ToImmutable());
+
+        _ = diagnostics;
+    }
+
+    public ImmutableArray<string> Binders { get; }
+    /// <summary>By-value parameters that must be rebound as cells (R4.2).</summary>
+    public ImmutableArray<(string Cell, string Source)> Prologue { get; }
+    public string Requires { get; }
+    public string Ensures { get; }
+    public SpecScope PreScope { get; }
+    public SpecScope PostScope { get; }
+    public ImmutableDictionary<string, Slot> Slots { get; }
+
+    public static TermKind KindOf(IrType type) => type switch
+    {
+        IrPrim { IsMachineInt: true } => TermKind.Machine,
+        IrPrim { Kind: PrimKind.Bool } => TermKind.Prop,
+        IrPrim { IsSpecNumeric: true } => TermKind.Math,
+        IrSeqType => TermKind.Seq,
+        IrArrayType => TermKind.Seq,
+        _ => TermKind.Other,
+    };
+
+    /// <summary>Assembles a <c>requires</c>/<c>ensures</c>/<c>invariant</c> clause.</summary>
+    public static string Clause(
+        ImmutableArray<string> resources,
+        ImmutableArray<string> pureConjuncts,
+        ImmutableArray<string> existentials)
+    {
+        var parts = resources.Where(r => r.Length > 0).ToList();
+        var pure = pureConjuncts.Where(p => p.Length > 0).ToList();
+        if (pure.Count > 0)
+            parts.Add($"pure ({SpecEmitter.Conjunction(pure)})");
+        if (parts.Count == 0) parts.Add("emp");
+
+        var body = string.Join(" **\n           ", parts);
+        return existentials.Length == 0
+            ? body
+            : $"exists* {string.Join(" ", existentials)}.\n           {body}";
+    }
+}

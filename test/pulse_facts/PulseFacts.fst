@@ -40,3 +40,37 @@ ensures exists* s'. A.pts_to a s' ** pure (s' == reveal s)
   };
   ()
 }
+
+/// F8: a stateful block may appear in *term* position, as the scrutinee of a
+///     `let`. This is what makes the short-circuit rule R6.3 compositional:
+///     `e1 && e2` lowers to the same `let t = if [[e1]] { [[e2]] } else { false }`
+///     whether it appears in a loop guard, an `if` condition or an assignment
+///     right-hand side, with no context-dependent special case.
+///
+/// F9: a `decreases` measure may dereference a mutable local, but *not* under
+///     an `if`. `decreases (if !b then 0 else I32.v !r)` is rejected ("Expected
+///     type FStar.Int32.t but !r has type fn ..."), because the `!` sugar is
+///     only elaborated outside the branches. A conditional measure must
+///     therefore keep its dereferences out of the branches -- or, better, the
+///     program should be written so a straight-line measure works.
+fn short_circuit_in_term_position (r: R.ref bool) (q: R.ref bool)
+requires exists* b c. R.pts_to r b ** R.pts_to q c
+ensures  exists* b c. R.pts_to r b ** R.pts_to q c
+{
+  let b = !r;
+  let t = if (b) { let c = !q; (not c) } else { false };
+  r := t;
+}
+
+fn decreases_conditional_without_deref (r: R.ref FStar.Int32.t) (b: R.ref bool)
+requires exists* v c. R.pts_to r v ** R.pts_to b c ** pure (FStar.Int32.v v >= 0)
+ensures  exists* v c. R.pts_to r v ** R.pts_to b c
+{
+  while (let c = !b; (not c))
+  invariant exists* v c. R.pts_to r v ** R.pts_to b c ** pure (FStar.Int32.v v >= 0)
+  decreases ((FStar.Int32.v !r + 1) * (if !b then 0 else 1))
+  {
+    b := true;
+  };
+  ()
+}

@@ -92,6 +92,13 @@ public readonly struct Seq<T>
     public int Length => throw Ghost();
     public T this[int index] => throw Ghost();
 
+    /// <summary>
+    /// Indexing by an unbounded specification integer. The overload exists so that a
+    /// recursive <c>[Spec]</c> function, whose parameters are naturally <c>SpecInt</c>,
+    /// can index without a cast.
+    /// </summary>
+    public T this[SpecInt index] => throw Ghost();
+
     public static bool operator ==(Seq<T> a, Seq<T> b) => throw Ghost();
     public static bool operator !=(Seq<T> a, Seq<T> b) => throw Ghost();
 

@@ -12,7 +12,7 @@ tools/fstar/bin/fstar.exe: tools/fstar-version.txt tools/install-fstar.sh
 
 # Build the .NET translator.
 build:
-	dotnet build Pal.sln
+	dotnet build Pal.slnx
 
 # Build the Pulse support library.
 lib: tools
@@ -24,4 +24,4 @@ test: tools build lib
 clean:
 	$(MAKE) -C test clean
 	$(MAKE) -C pulse clean
-	dotnet clean Pal.sln 2>/dev/null || true
+	dotnet clean Pal.slnx 2>/dev/null || true
