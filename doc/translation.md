@@ -618,6 +618,29 @@ also the shape arrays already use — `ensures exists* post_a. A.pts_to var_a po
 machinery: inside ⟦Q⟧ an observation reads as `spec_C_Obs m'`, and `Old(observation)` as
 `spec_C_Obs m`.
 
+*A self-call is a call like any other.* An instance method called on `this` lowers, by
+R6.6, to a call whose first argument is `this` — because that is what it is. Its precondition asks for
+`class_C__inv this m`, and the window this method is running in is precisely where that
+does not hold, so **Pulse reports it**. The emitter neither refuses it nor arranges around
+it, and both restraints are deliberate.
+
+Refusing would be a claim the scheme is not entitled to make. The rule is a consequence of
+R4.10, not an extra restriction on top of it: an unfolded object does not satisfy a
+contract that asks for a folded one, and Pulse says so in exactly those terms. A
+compiler-side check would be a *second*, hand-maintained statement of the same fact,
+free to drift from the first.
+
+Arranging around it would be worse. Re-folding before the call and re-unfolding after is
+the obvious repair, and it silently inserts a proof obligation the user never wrote — the
+invariant would have to be re-established at a point they did not choose, and when it could
+not be, the failure would land there rather than where the design went wrong. That is §0
+rule 3's case exactly.
+
+So the remedy is the user's, and it is the ordinary one: move the shared work into a static
+method taking what it needs, and have both instance methods call *that*. What is left over
+after doing so is usually a sign that the object wanted a state-indexed invariant, which is
+a different scheme (see §8).
+
 **R4.10a (the receiver is spelled `@this`).** A contract on an instance member names the
 receiver `@this`, as in `[Requires("@this.Count < @this.Capacity")]`.
 
@@ -1339,11 +1362,14 @@ Rules are recorded here as they are validated.
   R5.11a and R5.12 bind `this.f` where the emitter has just named the representation; a
   `[Requires]` or `[Ensures]` still reads against the model (R3.9c), which is right, but
   there is no third context in which a field is in scope. Nothing so far has wanted one.
-* **Object lifecycle and re-entrancy are unspecified.** A class with two-phase
-  initialisation or `Dispose` wants a *state*-indexed invariant, and calling a method on
-  `this` while its invariant is unfolded (R4.10) requires either re-establishing the
-  invariant first or a marked helper that operates on the unfolded state. Neither is
-  designed; R4.13's `sealed`-only restriction keeps them out of scope for now.
+* **Object lifecycle is unspecified.** A class with two-phase initialisation or `Dispose`
+  wants a *state*-indexed invariant — `class_C__inv this st m` — and nothing in M2 has one.
+  R4.13's `sealed`-only restriction keeps it out of scope for now.
+
+  Note that **calling an instance method on `this` is not on this list**. It is settled, by
+  design: R4.10 translates it faithfully, its precondition asks for a folded invariant, the
+  window it runs in has an unfolded one, and Pulse reports the mismatch. There is nothing
+  for the emitter to add.
 * **Reference identity** — `ReferenceEquals`, and `==` on a class — has no story. `Box`
   supports equality, but nothing relates it to the ownership discipline.* Numeric conversions between machine-integer widths, and a non-tail `return` inside a
   loop: likewise rejected rather than mistranslated.
