@@ -1133,7 +1133,11 @@ Rules are recorded here as they are validated.
   unobservable, without naming a field. The proof needed three general sequence facts —
   `rotate`'s characteristic equation and two modular ones — and they went into
   `Pulse.Lib.CSharp.Seq` over arbitrary sequences, which is §0 rule 3 working as designed:
-  every module verified on the first attempt once the library had them.
+  every module verified on the first attempt once the library had them. §7.2's variant
+  detector was run on it — `QueueVariant.cs`, the same class with members in the opposite
+  order, renamed fields, `this.` written out, compound assignment and expression bodies —
+  and the output is identical modulo names and declaration order. Wrap-around is
+  translated as arithmetic, not recognised as a shape.
 * **The transiently broken invariant is exercised.** `test/interval_class`'s `Shift`
   writes `lo` and then `hi`; between the two the object is a well-formed
   `class_Interval__raw` whose `lo <= hi` is false. R3.10's choice of a `pure` conjunct over
