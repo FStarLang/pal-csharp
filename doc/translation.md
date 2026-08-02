@@ -492,6 +492,37 @@ method may have called something that moved a sub-model, so the binder the `unfo
 produced is stale. `with model_g. assert (Class_D.class_D__inv …fld_g model_g);` names
 what the context is actually holding.
 
+Three consequences of the rule being *the same* rule are worth stating, because each was
+a question the refusal left open, and `test/deep_class` settles all three.
+
+* **A class may own an array and an object at once**, and nothing mediates between them.
+  `Ledger` writes `slots[at]` and then calls `cursor.Step()`; the write settles nothing
+  about the cursor and the call settles nothing about the array, which is separation and
+  not a rule anyone had to add. The invariant may relate them — `cursor.Bound ==
+  slots.Length` ties the object to the array's length — because by then both are values.
+* **Depth is not a special case.** `Ledger` owns a `Cursor` that owns two `Cell`s, and the
+  middle level is a composite and a component at once. A client of `Ledger` reasons about
+  a sequence and a count and never learns that the count lives in a `Cell`.
+* **Refinements do not inherit, so each level republishes what its owners need.** A
+  `[Refine]` belongs to the *class* model type `class_D__model`; an owner's composite model
+  is built from the `[Spec]` **struct** `struct_DModel`, which is that type without the
+  refinement. So `Cell`'s `0 <= V` is available inside `Cursor`'s window and *not* in
+  `Ledger`'s contracts, and `Cursor` has to state it again. This is F17 one more time, and
+  it is the one cost R3.10b charges for depth. It is not busywork: the facts a level
+  publishes are exactly the facts its clients may use, so restating them is the interface
+  being written down. The alternative — refining the composite's field types by the owning
+  class — is not available, because a `[Spec]` struct names no class and several classes
+  may share one.
+
+**Ownership transfer is not expressible, and Pulse says so.** A class-typed *parameter* is
+preserved (R4.9), so a constructor that stores one in a field asks the `fold` for a
+resource its own postcondition also returns, and Pulse reports `Cannot prove:
+class_Cell__inv var_x pre_x`. That is the same disposition as a self-call: the translation
+is faithful, the program is wrong, and the prover is the one to say it. Sub-objects are
+therefore built by the constructor that owns them, which is also why no owner can alias
+two of its fields. Aliasing at a *call* is a different matter and stays PALCS0520, whose
+message a reader of `Merge(s, s)` can act on.
+
 What is *still* PALCS0531 is a field whose type is spec-only — a `Seq`, a `Ghost`. Those
 are mathematical values with no runtime representation and no resource, so there is nothing
 for the invariant to hold and nothing for a constructor to allocate. A field of a class
@@ -1310,6 +1341,11 @@ Rules are recorded here as they are validated.
   not answer — when may the outer object open the inner one? — turns out not to arise, as
   it never opens it. A client of `Range` names no field at any depth, and separation gives
   it that advancing one `Range` leaves another alone *through two levels of ownership*.
+  `test/deep_class` takes it further: three levels, and one class owning an array *and* an
+  object, with an invariant tying them together. It also found the one cost of depth — a
+  `[Refine]` belongs to the class model type, so an owner's composite model, built from
+  spec structs, does not inherit it and each level must republish what its owners need.
+
   `AdvanceBy` puts a loop over a sub-object, which is R5.12 and R3.10b at once: `low` is
   written so its model is quantified, `high` is not so its model is named before the loop.
 
