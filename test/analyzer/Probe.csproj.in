@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The project under analysis. It is an ordinary C# library: nothing here says "pal", and
+    building it with the stock compiler is exactly what a user's project does. The analyzer
+    is wired in the way any analyzer is, as `Analyzer` items pointing at the built
+    assemblies, which is also the test that the netstandard2.0 build really loads.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS0169;CS0414;CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Case.cs" />
+    <Reference Include="Pal.Annotations">
+      <HintPath>@ANNOTATIONS@</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Analyzer Include="@ANALYZERS@/Pal.Analyzers.dll" />
+    <Analyzer Include="@ANALYZERS@/Pal.Compiler.dll" />
+    <Analyzer Include="@ANALYZERS@/Pal.Annotations.dll" />
+  </ItemGroup>
+
+</Project>

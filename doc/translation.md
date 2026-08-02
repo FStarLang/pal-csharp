@@ -1462,8 +1462,50 @@ Rules are recorded here as they are validated.
   provably non-overflowing, and the explicit `a.Length == Old(a.Length)` a quantified
   frame condition needs.
 
+* **The diagnostics are in the editor** (`src/Pal.Analyzers`, `test/analyzer`). The
+  analyzer states no rule of its own: it runs the compiler's own frontend, normaliser and
+  checker over the compilation the IDE already has, and turns each `PalDiagnostic` into a
+  Roslyn one. Everything `palcs` refuses, the editor underlines, in the same words and at
+  the same span — including a span *inside* a specification string, which is why `IrLoc`
+  has carried an end position since M1. There is no second copy of the subset, so there is
+  nothing to drift.
+
+  It stops short of the emitter, so it writes no files and runs no F\*. Verification is a
+  separate, slow, deliberate act; what an editor can give for free is the answer to "is
+  this program inside the language at all", and that is what it gives. It also bails out
+  twice before doing any work: on a project that does not reference `PalLang`, and on a
+  compilation C# itself has already rejected — the second for the same reason `palcs` does
+  it, that reporting a binding error a second time in worse terms helps nobody.
+
+  Two things had to be arranged, and neither is a translation concern. A Roslyn analyzer
+  is loaded into whatever process is compiling, which may be .NET Framework, so it must be
+  `netstandard2.0`; `Pal.Compiler` was `net10.0` for no better reason than that it was the
+  default when the only consumer was a command-line tool. It uses no API newer than
+  netstandard2.0, so multi-targeting it cost one `#if`'d shim file — `Index`, `Range`,
+  `IsExternalInit`, and four BCL overloads — and changed no real code. And an analyzer must
+  declare its diagnostic ids before it has seen a program, which is a list, and a list
+  drifts: `Diagnostics/Catalog.cs` holds the ids and *only* the ids, with the message still
+  written where the rule is checked, and `test/diagnostic-ids.sh` greps the passes for
+  `"PALCSnnnn"` literals and fails the build if the two sets or the two severities disagree.
+
+  `test/analyzer` builds real projects with the analyzer loaded, using
+  `test/diagnostics`'s own cases so that the expectation is shared rather than restated. It
+  checks the half a negative test cannot state as well: a program that is inside the
+  language builds clean, with no pal-csharp diagnostic of any severity — and *builds*,
+  which asserts the project's core invariant against the C# compiler rather than against a
+  document.
+
 ### Not yet done
 
+* **Packaging the analyzer as a NuGet package.** It is wired into `test/analyzer` as
+  `Analyzer` items, which is enough to run it and enough to test it, but a user still has
+  to point at the built assemblies. A package also has to carry `System.Text.Json` and
+  `System.Memory` for a .NET Framework host, where they are not in the shared framework;
+  under `dotnet build` they resolve today.
+* **Live squiggles are per-compilation work.** The analysis is whole-program — a call needs
+  its callee's contract — so it runs once per compilation and is then reported per file.
+  On the programs in `test/` that is milliseconds; nothing has been measured at a scale
+  where it would not be.
 * `Span<T>` and `ReadOnlySpan<T>`. A method mentioning either is rejected with a diagnostic
   rather than mistranslated; fractional permissions are reached through `[Frac]` instead
   (R4.9).

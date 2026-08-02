@@ -39,11 +39,14 @@ Pulse out — and the whole M1 acceptance suite passes.
       interop
 - [x] `struct`s with `[Refine]` type refinements
 - [x] **Insertion sort proved sorted *and* a permutation of its input**
-- [x] Sixteen acceptance directories verify, each with an independently written variant
+- [x] Classes and objects — abstract invariants over a pure model, a class owning its
+      array, and a class owning other objects three levels deep
+- [x] Twenty-five acceptance directories verify, each with an independently written variant
       that must verify with no translator change
-- [ ] `Span<T>`, classes and objects, generics — see
+- [x] `Pal.Analyzers` — in-IDE squiggles, running the translator's own passes so the
+      editor and `palcs` cannot disagree
+- [ ] `Span<T>`, generics, interfaces — see
       [`doc/translation.md`](doc/translation.md) §8
-- [ ] `Pal.Analyzers` — in-IDE squiggles on specifications
 
 ## Quick start
 

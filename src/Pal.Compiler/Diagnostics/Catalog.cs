@@ -1,0 +1,62 @@
+using System.Collections.Immutable;
+
+namespace Pal.Compiler.Diagnostics;
+
+/// <summary>
+/// Every diagnostic id pal-csharp can report, and the severity it reports it at.
+///
+/// This exists for one consumer: a Roslyn analyzer has to declare its
+/// <c>SupportedDiagnostics</c> up front, before it has seen a program, and Roslyn will
+/// drop a diagnostic whose descriptor was not declared. So the id space has to be
+/// enumerable without running a pass.
+///
+/// It is deliberately *only* the ids. The message is still written where the rule is
+/// checked, because the message is the explanation and the explanation belongs next to the
+/// thing being explained — a second copy of it here would be the hand-maintained
+/// restatement this project refuses everywhere else. What is left is a list of names, and
+/// <c>test/diagnostic-ids.sh</c> keeps even that from drifting: it greps the passes for
+/// <c>"PALCSnnnn"</c> literals and diffs the set against this table, so an id added to a
+/// pass and not added here fails the build.
+/// </summary>
+public static class Catalog
+{
+    public static readonly ImmutableArray<(string Id, Severity Severity)> Ids =
+    [
+        ("PALCS0001", Severity.Error),
+        ("PALCS0100", Severity.Error),
+        ("PALCS0200", Severity.Error),
+        ("PALCS0300", Severity.Error),
+        ("PALCS0301", Severity.Error),
+        ("PALCS0302", Severity.Error),
+        ("PALCS0303", Severity.Error),
+        ("PALCS0304", Severity.Error),
+        ("PALCS0305", Severity.Error),
+        ("PALCS0400", Severity.Error),
+        ("PALCS0402", Severity.Error),
+        ("PALCS0500", Severity.Error),
+        ("PALCS0501", Severity.Error),
+        ("PALCS0502", Severity.Error),
+        ("PALCS0503", Severity.Error),
+        ("PALCS0504", Severity.Error),
+        ("PALCS0505", Severity.Error),
+        ("PALCS0506", Severity.Error),
+        ("PALCS0507", Severity.Error),
+        ("PALCS0508", Severity.Error),
+        ("PALCS0509", Severity.Error),
+        ("PALCS0510", Severity.Error),
+        ("PALCS0511", Severity.Error),
+        ("PALCS0520", Severity.Error),
+        ("PALCS0521", Severity.Error),
+        ("PALCS0522", Severity.Error),
+        ("PALCS0523", Severity.Error),
+        ("PALCS0524", Severity.Error),
+        ("PALCS0525", Severity.Error),
+        ("PALCS0526", Severity.Error),
+        ("PALCS0527", Severity.Error),
+        ("PALCS0530", Severity.Error),
+        ("PALCS0531", Severity.Error),
+        ("PALCS0900", Severity.Warning),
+        ("PALCS0901", Severity.Warning),
+        ("PALCS0902", Severity.Warning),
+    ];
+}

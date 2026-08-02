@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/Pal.Annotations/Pal.Annotations.csproj" />
     <Project Path="src/Pal.Compiler/Pal.Compiler.csproj" />
+    <Project Path="src/Pal.Analyzers/Pal.Analyzers.csproj" />
     <Project Path="src/Pal.Tool/Pal.Tool.csproj" />
   </Folder>
 </Solution>

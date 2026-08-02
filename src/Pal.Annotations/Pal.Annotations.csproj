@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>netstandard2.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
@@ -11,5 +11,14 @@
     <RootNamespace>PalLang</RootNamespace>
     <Description>Attributes and proof intrinsics for pal-csharp, a proof annotation language for C#.</Description>
   </PropertyGroup>
+
+  <!--
+    netstandard2.0 is what a Roslyn analyzer must be, because the compiler that loads it
+    may be running on .NET Framework.  Nothing here needs a newer runtime; `Span<T>` is
+    the only type netstandard2.0 lacks, and it is a package away.
+  -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+  </ItemGroup>
 
 </Project>

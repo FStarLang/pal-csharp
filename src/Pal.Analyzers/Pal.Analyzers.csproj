@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    netstandard2.0, because a Roslyn analyzer is loaded into whatever process is compiling
+    and that process may be .NET Framework.  Pal.Compiler multi-targets for the same
+    reason; see src/Pal.Compiler/Polyfill.cs.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Pal.Analyzers</AssemblyName>
+    <RootNamespace>Pal.Analyzers</RootNamespace>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+  </PropertyGroup>
+
+  <!--
+    PrivateAssets keeps Roslyn itself out of what ships: the host already has it, and two
+    copies is how analyzers break.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Pal.Compiler/Pal.Compiler.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -12,6 +12,7 @@ all: $(TESTS) lint
 .PHONY: lint
 lint: $(TESTS)
 	@bash no-example-names.sh
+	@bash diagnostic-ids.sh
 	@bash provenance-lint.sh
 	@bash fst-configs.sh --check
 
