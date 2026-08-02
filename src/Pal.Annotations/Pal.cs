@@ -63,6 +63,25 @@ public static class Pal
     [Conditional(Cond)]
     public static void Assume(bool predicate) { }
 
+    // -- Permissions -------------------------------------------------------
+
+    /// <summary>
+    /// Halve the permission held on <paramref name="location"/>, an array or an object,
+    /// so that it can be observed through two names at once. Pulse never splits a
+    /// permission on its own, and no frontend can tell where a split is wanted, so the
+    /// split is written here — like every other proof step, by the author.
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Share<T>(T location) { }
+
+    /// <summary>
+    /// Recombine the two halves <see cref="Share{T}"/> produced. It is <c>Share</c>'s
+    /// exact inverse, so the pair round-trips with nothing in between, and it proves the
+    /// two views agreed about what they were observing.
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Gather<T>(T location) { }
+
     // -- Escape hatches to raw Pulse ---------------------------------------
 
     /// <summary>Emit a verbatim Pulse statement, after antiquotation expansion.</summary>

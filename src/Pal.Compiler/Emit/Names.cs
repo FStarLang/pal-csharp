@@ -61,6 +61,28 @@ public static class Names
     public static string ClassRaw(string name) => "class_" + name + "__raw";
     public static string ClassInv(string name) => "class_" + name + "__inv";
 
+    // R3.10d. The three ghost lemmas that make an object shareable. They are per class,
+    // not once in the support library, because their proofs recurse into the class's own
+    // fields — each array's `share`, each sub-object's `share` (F22).
+    /// <summary>
+    /// R4.11b's permission binder for a parameter the emitter — not the author — decided
+    /// is observed rather than owned. It is prefixed rather than taken from the source so
+    /// that it cannot collide with a `[Frac("p")]` name the author chose.
+    /// </summary>
+    public static string Permission(string parameter) => "perm_" + parameter;
+
+    public static string ClassInvShare(string name) => ClassInv(name) + "_share";
+    public static string ClassInvGather(string name) => ClassInv(name) + "_gather";
+    public static string ClassInvGatherGen(string name) => ClassInv(name) + "_gather_gen";
+
+    /// <summary>
+    /// R3.10d. The second copy of an existential inside <c>gather</c>, which holds two
+    /// views of one object at once. The prefix cannot collide with a real binder: every
+    /// name <see cref="Contents"/> and <see cref="SubModel"/> produce begins with
+    /// <c>contents_</c> or <c>model_</c>, so nothing they generate starts with <c>alt_</c>.
+    /// </summary>
+    public static string Alt(string binder) => "alt_" + binder;
+
     // R3.9d. The refined model type is named after the *class*, not after the model type:
     // an atomic model such as `SpecInt` has no user-declared struct to refine, and two
     // classes sharing a model type must not collide.

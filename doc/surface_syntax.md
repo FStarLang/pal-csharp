@@ -182,8 +182,44 @@ The residue is attributes:
 `[Frac]` is the one with real consequences. Because the permission is exactly the right to
 read, the contents cannot change: the same binder stands for the argument's contents before
 and after, so postconditions about it need no existential, and — the point — the **same
-array may be passed to two parameters at once**. Writing through a `[Frac]` parameter is an
-error.
+array or object may be passed to two parameters at once**. Writing through a `[Frac]`
+parameter is an error.
+
+Two `[Frac]` parameters must be given **different** permission names. That is what makes
+them allowed to be the same thing: one shared name would tie them together again and forbid
+the aliasing the attribute exists to allow.
+
+### Splitting a permission: `Pal.Share` and `Pal.Gather`
+
+Passing one array to two `[Frac]` parameters does not work by itself. Pulse holds the whole
+permission under one name and will not split it on a guess, so the call is refused with
+`Cannot prove: A.pts_to var_a _ _` against a context holding exactly that. The split is
+written:
+
+```csharp
+Pal.Share(a);              // a is now held as two halves
+bool same = Equal(a, a);   // each parameter takes one
+Pal.Gather(a);             // and the two halves become one again
+```
+
+`Pal.Gather` is `Pal.Share`'s exact inverse, so the pair round-trips with nothing in
+between and full ownership is restored — a mutator is callable again afterwards. It also
+proves the two views **agreed**, which is not an extra assumption: they were views of one
+object, so nothing else was possible.
+
+Both work on objects as well as arrays, and on an object the permission reaches everything
+it owns — its fields, its arrays and its sub-objects, all the way down. So a whole object
+graph can be observed through a fraction, and none of it can be written through one.
+
+Why you write this and not the compiler: deciding where to split means recognising that two
+expressions denote the same object, and no C# frontend can do that — the two names may be
+fields, or may have been aliased three statements earlier. A split is a proof step, and
+proof steps are the annotation language's job.
+
+**Two views at a time, and no more.** Sharing an already-shared name leaves three resources
+that all look alike, and Pulse's matcher needs a unique candidate, so the next call is
+refused. Three observers are reached by nesting — share, use both, gather, then share
+again — not by sharing twice.
 
 ### Structs
 
@@ -338,13 +374,30 @@ model.** Had `Capacity` been left out of `StackModel`, `Push`'s
 `[Requires("Count < Capacity")]` would be unwritable and `Push` uncallable — the class would
 verify and be useless. You find this out at the declaration, not at a call site.
 
-**An object is owned, so two parameters are two different objects.** `Merge(Stack a, Stack
-b)` may not be called as `Merge(s, s)`. That is not a compiler error — it translates
-perfectly well — it is an unprovable one, and Pulse reports it as `Cannot prove:
-class_Stack__inv var_s _` on the calling line. pal-csharp refuses what it cannot translate;
-what cannot be *proved* is the prover's to say, and keeping that boundary sharp is why the
-frontend is small. Ownership also means a live object is never `null`, so no method needs
-a null check to satisfy the translator.
+**An object is owned, so two parameters are two different objects** — unless you say
+otherwise. `Merge(Stack a, Stack b)` may not be called as `Merge(s, s)`. That is not a
+compiler error — it translates perfectly well — it is an unprovable one, and Pulse reports
+it as `Cannot prove: class_Stack__inv var_s _` on the calling line. pal-csharp refuses what
+it cannot translate; what cannot be *proved* is the prover's to say, and keeping that
+boundary sharp is why the frontend is small. Ownership also means a live object is never
+`null`, so no method needs a null check to satisfy the translator.
+
+To allow the aliasing, mark the parameters `[Frac]` and split at the call site with
+`Pal.Share` (§3). `SameSize([Frac("pa")] Stack a, [Frac("pb")] Stack b)` may be called on
+one stack twice. What you give up is writing: a mutator needs full ownership, and calling
+one on a fractional object is refused — again by Pulse, on the calling line, because
+whether you have enough permission is a separation-logic question and not a syntactic one.
+
+**A read-only method is fractional already, and you write nothing.** A method that assigns
+no field is generalised over its receiver's permission automatically. A caller holding the
+whole object is unaffected; a caller holding half can still call it. There is no attribute
+for this because there is no decision to make: the same analysis that decides a method
+preserves its object decides it needs only a fraction of it, and one analysis cannot
+disagree with itself.
+
+**An object local can alias.** `Stack t = s;` binds a second name to one object; it
+allocates nothing, owns nothing, and emits nothing. Both names denote the same object
+throughout, which is what makes `Pal.Share(t)` and `Pal.Share(s)` the same statement.
 
 **M2 is `sealed` classes only.** `virtual`, `abstract`, `override` and interface
 implementations are rejected (`PALCS0521`), because a per-class invariant cannot express

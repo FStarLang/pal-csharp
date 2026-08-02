@@ -37,7 +37,15 @@ public sealed class MethodPlan
         var prologue = ImmutableArray.CreateBuilder<(string Cell, string Source)>();
 
         var pre = new SpecScope();
-        var post = new SpecScope { Pre = pre, ResultTerm = Names.Result };
+        // `Result` denotes the value the method returns, so it carries that value's kind.
+        // Defaulting it to `Machine` is right for the common case and wrong for a `bool`,
+        // which is already a proposition and must not be coerced with `Int32.v`.
+        var post = new SpecScope
+        {
+            Pre = pre,
+            ResultTerm = Names.Result,
+            ResultKind = KindOf(method.ReturnType),
+        };
         var slots = ImmutableDictionary.CreateBuilder<string, Slot>();
 
         foreach (var p in method.Parameters)
@@ -106,15 +114,34 @@ public sealed class MethodPlan
                     binders.Add($"({name}: {Types.Render(p.Type)})");
                     ghostBinders.Add($"(#{preModel}: erased ({modelType}))");
 
+                    // R4.9a: `[Frac("p")]` weakens an object parameter to an observation.
+                    // R4.11b: a *receiver* the write-set analysis has already found
+                    // read-only gets the same weakening with no annotation, because there
+                    // it is a pure generalisation (F26) — a caller with full ownership is
+                    // unaffected, Pulse instantiates the binder at `1.0R` — and because
+                    // R3.10c propagates the fraction into sub-object invariants, so
+                    // without it no fractional owner could read its own parts.
+                    var fraction = p.Fraction;
+                    if (fraction is null && p.Name == Names.This && !mutatedObjects.Contains(p.Name))
+                        fraction = Names.Permission(p.Name);
+                    if (fraction is not null) ghostBinders.Add($"(#{fraction}: perm)");
+                    var perm = fraction is null ? "" : $"#{fraction} ";
+
+                    // An observed object contributes no existential: its permission is
+                    // precisely the right to read, so the model cannot move and the one
+                    // binder stands for the pre- and the post-state.
+                    var observed = fraction is not null;
+
                     var inv = $"{Names.ClassModule(klass.Name)}.{Names.ClassInv(klass.Name)}";
-                    preResources.Add($"{inv} {name} {preModel}");
+                    preResources.Add($"{inv} {name} {perm}{preModel}");
 
                     // R4.11. A method that changes no field cannot change the model, so
                     // the *same* binder stands for the pre- and the post-state. That is
                     // literally `preserves`: without it the caller would hold
                     // `exists* m'. inv this m'` and would have to be told, conjunct by
                     // conjunct, that nothing moved.
-                    if (mutatedObjects.Contains(p.Name))
+                    var moves = mutatedObjects.Contains(p.Name) && !observed;
+                    if (moves)
                     {
                         postResources.Add($"{inv} {name} {postModel}");
                         postExistentials.Add(postModel);
@@ -122,15 +149,16 @@ public sealed class MethodPlan
                     }
                     else
                     {
-                        postResources.Add($"{inv} {name} {preModel}");
+                        postResources.Add($"{inv} {name} {perm}{preModel}");
                         post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
                     }
 
                     pre.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Object, name)
                     {
+                        Fraction = fraction,
                         PreModel = preModel,
-                        PostModel = mutatedObjects.Contains(p.Name) ? postModel : preModel,
+                        PostModel = moves ? postModel : preModel,
                     };
                     break;
                 }

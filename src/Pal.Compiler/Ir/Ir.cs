@@ -313,9 +313,10 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-public enum GhostKind { Assert, Assume, Raw, LemmaCall }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather }
 
-/// <summary><c>Pal.Assert</c> / <c>Pal.Assume</c> / <c>Pal.GhostStmt</c> / a <c>[Lemma]</c> call.</summary>
+/// <summary><c>Pal.Assert</c> / <c>Pal.Assume</c> / <c>Pal.GhostStmt</c> / <c>Pal.Share</c> /
+/// <c>Pal.Gather</c> / a <c>[Lemma]</c> call.</summary>
 public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string? Text) : IrStmt(Loc);
 
 // ---------------------------------------------------------------------------

@@ -161,6 +161,13 @@ public sealed class StmtLowerer(
                     return new IrGhostStmt(loc, GhostKind.Assume, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.GhostStmt) when _spec.ConstantString(args[0].Expression) is { } text:
                     return new IrGhostStmt(loc, GhostKind.Raw, null, text);
+                // R5.13. The argument is lowered as an ordinary expression so that the
+                // name it mentions counts as live in an enclosing loop; what it may be is
+                // decided by the emitter, which is where the slot kinds are known.
+                case nameof(PalLang.Pal.Share):
+                    return new IrGhostStmt(loc, GhostKind.Share, _spec.Lower(args[0].Expression), null);
+                case nameof(PalLang.Pal.Gather):
+                    return new IrGhostStmt(loc, GhostKind.Gather, _spec.Lower(args[0].Expression), null);
                 // `Invariant`, `Decreases` and `Requires`/`Ensures` are consumed by the
                 // enclosing construct, not emitted here; see ExtractLoopSpecs.
                 case nameof(PalLang.Pal.Invariant):

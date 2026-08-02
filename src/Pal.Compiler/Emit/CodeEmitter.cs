@@ -344,7 +344,7 @@ public sealed class CodeEmitter(
         var (writesRecord, written) = ReceiverWrites(body);
 
         var record = FreshValue("rep");
-        var recordResource = $"B.pts_to {receiver.Binder} {record}";
+        var recordResource = $"B.pts_to {receiver.Binder} {receiver.PermArg}{record}";
         resources.Add(recordResource);
         if (writesRecord) existentials.Add(record);
         else fixedNames.Add((record, recordResource));
@@ -371,7 +371,8 @@ public sealed class CodeEmitter(
                 // as an array is carried by its `A.pts_to` at its contents. Inside the
                 // loop it is still *folded*, so the body may call its methods.
                 var sub = FreshValue(Names.SubModel(f.Name));
-                var subResource = $"{PulseEmitter.SubInv(f.Type)} {projection} {sub}";
+                var subResource =
+                    $"{PulseEmitter.SubInv(f.Type)} {projection} {receiver.PermArg}{sub}";
                 resources.Add(subResource);
                 var settled = !writesRecord && !written.Contains(f.Name);
                 if (settled) fixedNames.Add((sub, subResource));
@@ -382,7 +383,7 @@ public sealed class CodeEmitter(
             if (f.Type is IrArrayType)
             {
                 var contents = FreshValue(Names.Contents(f.Name));
-                var resource = $"A.pts_to {projection} {contents}";
+                var resource = $"A.pts_to {projection} {receiver.PermArg}{contents}";
                 resources.Add(resource);
                 var stable = !writesRecord && !written.Contains(f.Name);
                 if (stable)
@@ -471,7 +472,7 @@ public sealed class CodeEmitter(
 
 
     private static string Unfold(Slot obj) =>
-        $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PreModel}";
+        $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel}";
 
     /// <summary>
     /// R4.11a — the fold witness. A read-only method re-folds at the binder it was handed:
@@ -529,7 +530,7 @@ public sealed class CodeEmitter(
             var klass = (IrClassType)obj.Type;
             if (obj.PostModel == obj.PreModel)
             {
-                Line($"fold {Inv(klass)} {obj.Binder} {obj.PreModel};");
+                Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{obj.PreModel};");
                 continue;
             }
 
@@ -612,6 +613,23 @@ public sealed class CodeEmitter(
             // R3.8. An object local binds a reference. C# can rebind it, but nothing in
             // the supported subset does, and binding it immutably is what lets it be
             // handed to a callee that consumes and returns its invariant.
+            case IrLocalDecl { Type: IrClassType, Init: IrVar alias } d
+                when Lookup(alias.Name) is { Kind: SlotKind.Object } aliased:
+            {
+                // R3.8, the other half. `C x = y;` binds a second C# name to one object; it
+                // allocates nothing and owns nothing, because the invariant is attached to
+                // `y` and Pulse matches resources by name. So the translation is to *share
+                // the slot*: `x` and `y` denote the same Pulse binder, and every rule that
+                // consults a slot — R4.14's discard, R5.13's lemma, an argument position —
+                // sees one object, which is what C# says there is.
+                //
+                // Emitting `let var_x = var_y;` instead would leave the context holding
+                // `inv var_y _` while every later mention asked for `inv var_x _`, and no
+                // pure equality closes that gap (Error 228).
+                _slots[d.Name] = aliased with { Name = d.Name };
+                return;
+            }
+
             case IrLocalDecl { Type: IrClassType oc, Init: not null } d:
             {
                 // F19. The discard would land at this block's close, where Pulse is still
@@ -1072,6 +1090,12 @@ public sealed class CodeEmitter(
     /// </summary>
     private void Ghost(IrGhostStmt g, MethodPlan plan)
     {
+        // R5.13 is handled before the naming bracket below, and deliberately. That bracket
+        // names every owned resource at the permission the slot was declared with; a
+        // `Share` is the statement that stops that being true, so a lemma about the
+        // permission must not be preceded by an assertion that presumes it.
+        if (g.Kind is GhostKind.Share or GhostKind.Gather) { Permission(g); return; }
+
         // R5.12, again: inside R4.10's window the receiver is a representation, so its
         // folded invariant is not what the context holds and asserting it would fail. The
         // representation is named instead, which is also what lets a ghost statement in an
@@ -1126,6 +1150,39 @@ public sealed class CodeEmitter(
                 return;
         }
     }
+
+    /// <summary>
+    /// R5.13. <c>Pal.Share</c>/<c>Pal.Gather</c> translate by what their argument is: an
+    /// object goes through the lemmas R3.10d emitted for its class, an array through
+    /// <c>Pulse.Lib.Array</c>'s. Nothing else has a permission to split, so nothing else
+    /// has a translation — and that is a translatability refusal, not a provability one:
+    /// whether the permission was there to split is Pulse's question.
+    /// </summary>
+    private void Permission(IrGhostStmt g)
+    {
+        var share = g.Kind is GhostKind.Share;
+
+        if (g.Prop is IrVar v && Lookup(v.Name) is { } slot)
+        {
+            switch (slot.Type)
+            {
+                case IrClassType c:
+                    var lemma = share ? Names.ClassInvShare(c.Name) : Names.ClassInvGather(c.Name);
+                    Line($"{Names.ClassModule(c.Name)}.{lemma} {slot.Binder};");
+                    return;
+                case IrArrayType:
+                    Line($"A.{(share ? "share" : "gather")} {slot.Binder};");
+                    return;
+            }
+        }
+
+        diagnostics.Unsupported(g.Loc,
+            $"`Pal.{(share ? "Share" : "Gather")}` of anything but an array or an object variable");
+    }
+
+    private Slot? Lookup(string name) =>
+        _slots.TryGetValue(name, out var slot) ? slot
+        : _objectLocals.FirstOrDefault(l => l.Name == name);
 
     /// <summary>
     /// R4.7: a lemma is applied to the values the program holds, so its arguments are

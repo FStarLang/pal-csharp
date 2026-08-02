@@ -21,6 +21,7 @@ open Pulse.Lib.Box { box, (!), (:=) }
 module CA = Pulse.Lib.CSharp.Array
 module I32 = FStar.Int32
 module Seq = FStar.Seq
+module T = FStar.Tactics
 
 #lang-pulse
 
@@ -423,4 +424,311 @@ fn ranked_bump_left (this: ranked) (#pre: erased ranked__model)
   counter_bump t0.fld_l;
   with ml' mr'. assert (counter__inv t0.fld_l ml' ** counter__inv t0.fld_r mr');
   fold ranked__inv this ({ m_l = ml'.m_n; m_r = mr'.m_n });
+}
+
+// ---------------------------------------------------------------------------
+// F21-F25: fractional object invariants (R3.10c, R3.10d)
+// ---------------------------------------------------------------------------
+
+/// F21: an slprop `let` may take a **meta-argument-defaulted** permission binder, exactly
+///      as `Pulse.Lib.Box.pts_to` does. `frac__inv x m` then *means* `frac__inv x #1.0R m`,
+///      so indexing every class invariant by a permission changes no existing emission:
+///      full ownership stays the thing you get by not asking for anything.
+///
+///      The fraction propagates to every resource conjunct -- the box, each array, and
+///      each sub-object's own invariant. That is the whole of R3.10c.
+noeq type frac__raw = { fld_items: A.array I32.t; fld_top: I32.t }
+let frac = B.box frac__raw
+noeq type frac__model = { m_elems: Seq.seq I32.t }
+
+let frac__inv (this: frac) (#[T.exact (`1.0R)] p: perm) (m: frac__model) : slprop =
+  exists* (r: frac__raw) (contents: Seq.seq I32.t).
+    B.pts_to this #p r **
+    A.pts_to r.fld_items #p contents **
+    pure (Seq.length contents <= 2147483647 /\
+          0 <= I32.v r.fld_top /\ I32.v r.fld_top <= Seq.length contents /\
+          m == ({ m_elems = Seq.slice contents 0 (I32.v r.fld_top) }))
+
+/// F21, the load-bearing half: the defaulted form and the explicit one are the same
+/// slprop. Nothing in R3.10, R4.10 or R4.11 has to change to gain a permission index.
+ghost fn frac_default_is_full (this: frac) (#m: frac__model)
+  requires frac__inv this m
+  ensures  frac__inv this #1.0R m
+{ () }
+
+/// F22: the per-class `share` is provable from `Box.share`, `Array.share` and (F23) the
+///      sub-objects' own `share`. The `assert` before each `fold` is **required**: the
+///      invariant's existentials are solved by matching against the context, and after a
+///      share the context holds two candidates for every one of them.
+ghost fn frac__inv_share (this: frac) (#p: perm) (#m: frac__model)
+  requires frac__inv this #p m
+  ensures  frac__inv this #(p /. 2.0R) m ** frac__inv this #(p /. 2.0R) m
+{
+  unfold (frac__inv this #p m);
+  with r. assert (B.pts_to this #p r);
+  with contents. assert (A.pts_to r.fld_items #p contents);
+  B.share this;
+  A.share r.fld_items;
+  assert (B.pts_to this #(p /. 2.0R) r ** A.pts_to r.fld_items #(p /. 2.0R) contents);
+  fold (frac__inv this #(p /. 2.0R) m);
+  assert (B.pts_to this #(p /. 2.0R) r ** A.pts_to r.fld_items #(p /. 2.0R) contents);
+  fold (frac__inv this #(p /. 2.0R) m);
+}
+
+/// F23: `gather` proves the two models **equal**. It is not an extra hypothesis and not a
+///      design choice: R3.9's invariant pins `m` to the abstraction function of the
+///      representation, `Box.gather` proves the two representations equal, and a function
+///      of equal arguments is equal. So two read-only aliases of one object necessarily
+///      agree about it -- which is the entire point of allowing them.
+///      The two permissions are **explicit** parameters. As implicits they were solved by
+///      matching, and a nested gather could then come back at `q +. p` where its caller
+///      wanted `p +. q` -- the same permission, but a user-defined slprop gets no
+///      normalisation (F24) and the caller's `fold` is matched syntactically. Naming them
+///      at the call site fixes the order once, and the nesting composes.
+///
+///      The renaming of the second view onto the first happens **before** anything is
+///      gathered, via `pts_to_injective_eq` rather than `gather`. `gather` is
+///      `allow_ambiguous` and keeps whichever of the two values it matched first, so a
+///      later `fold` naming the other one would fail against a resource provably equal to
+///      what it wanted. Renaming first leaves exactly one candidate per existential, and
+///      then there is nothing left to be ambiguous about.
+[@@allow_ambiguous]
+ghost fn frac__inv_gather_gen (this: frac) (p q: perm) (#m #m': frac__model)
+  requires frac__inv this #p m ** frac__inv this #q m'
+  ensures  frac__inv this #(p +. q) m ** pure (m == m')
+{
+  unfold (frac__inv this #p m);
+  with r0. assert (B.pts_to this #p r0);
+  with c0. assert (A.pts_to r0.fld_items #p c0);
+  unfold (frac__inv this #q m');
+  with r1. assert (B.pts_to this #q r1);
+  with c1. assert (A.pts_to r1.fld_items #q c1);
+  B.pts_to_injective_eq this;
+  assert (pure (r0 == r1));
+  rewrite (B.pts_to this #q r1) as (B.pts_to this #q r0);
+  rewrite (A.pts_to r1.fld_items #q c1) as (A.pts_to r0.fld_items #q c1);
+  B.gather this;
+  A.gather r0.fld_items;
+  fold (frac__inv this #(p +. q) m);
+}
+
+/// F24: Pulse normalises `p /. 2.0R +. p /. 2.0R` to `p` for `pts_to`, which has prover
+///      support, but **not** for a user-defined slprop, which is matched syntactically.
+///      So the emitted `gather` is stated as `share`'s exact inverse and discharges the
+///      arithmetic once, here, rather than leaving a `rewrite` at every call site.
+[@@allow_ambiguous]
+ghost fn frac__inv_gather (this: frac) (#p: perm) (#m #m': frac__model)
+  requires frac__inv this #(p /. 2.0R) m ** frac__inv this #(p /. 2.0R) m'
+  ensures  frac__inv this #p m ** pure (m == m')
+{
+  frac__inv_gather_gen this (p /. 2.0R) (p /. 2.0R);
+  rewrite (frac__inv this #(p /. 2.0R +. p /. 2.0R) m) as (frac__inv this #p m);
+}
+
+/// F23, the nested case: a class owning a class. `share` recurses into the sub-object's
+/// own `share`, which is why the lemma is emitted per class rather than written once.
+noeq type frac_outer__raw = { fld_inner: frac; fld_n: I32.t }
+let frac_outer = B.box frac_outer__raw
+noeq type frac_outer__model = { m_inner: frac__model; m_n: int }
+
+let frac_outer__inv (this: frac_outer) (#[T.exact (`1.0R)] p: perm)
+                    (m: frac_outer__model) : slprop =
+  exists* (r: frac_outer__raw) (model_inner: frac__model).
+    B.pts_to this #p r **
+    frac__inv r.fld_inner #p model_inner **
+    pure (m == ({ m_inner = model_inner; m_n = I32.v r.fld_n }))
+
+ghost fn frac_outer__inv_share (this: frac_outer) (#p: perm) (#m: frac_outer__model)
+  requires frac_outer__inv this #p m
+  ensures  frac_outer__inv this #(p /. 2.0R) m ** frac_outer__inv this #(p /. 2.0R) m
+{
+  unfold (frac_outer__inv this #p m);
+  with r. assert (B.pts_to this #p r);
+  with model_inner. assert (frac__inv r.fld_inner #p model_inner);
+  B.share this;
+  frac__inv_share r.fld_inner;
+  assert (B.pts_to this #(p /. 2.0R) r ** frac__inv r.fld_inner #(p /. 2.0R) model_inner);
+  fold (frac_outer__inv this #(p /. 2.0R) m);
+  assert (B.pts_to this #(p /. 2.0R) r ** frac__inv r.fld_inner #(p /. 2.0R) model_inner);
+  fold (frac_outer__inv this #(p /. 2.0R) m);
+}
+
+/// F23, nested `gather`. This is the pin that matters most: with the permissions left
+/// implicit, the *outer* fold here failed while every one-level class verified, because
+/// only a nested call has a permission for matching to get backwards. A class owning a
+/// class is the smallest configuration that can catch it, so it is pinned rather than
+/// left to the acceptance suite.
+[@@allow_ambiguous]
+ghost fn frac_outer__inv_gather_gen (this: frac_outer) (p q: perm)
+                                    (#m #alt_m: frac_outer__model)
+  requires frac_outer__inv this #p m ** frac_outer__inv this #q alt_m
+  ensures  frac_outer__inv this #(p +. q) m ** pure (m == alt_m)
+{
+  unfold (frac_outer__inv this #p m);
+  with r. assert (B.pts_to this #p r);
+  with model_inner. assert (frac__inv r.fld_inner #p model_inner);
+  unfold (frac_outer__inv this #q alt_m);
+  with alt_r. assert (B.pts_to this #q alt_r);
+  with alt_model_inner. assert (frac__inv alt_r.fld_inner #q alt_model_inner);
+  B.pts_to_injective_eq this;
+  assert (pure (r == alt_r));
+  rewrite (B.pts_to this #q alt_r) as (B.pts_to this #q r);
+  rewrite (frac__inv alt_r.fld_inner #q alt_model_inner)
+       as (frac__inv r.fld_inner #q alt_model_inner);
+  B.gather this;
+  frac__inv_gather_gen r.fld_inner p q;
+  fold (frac_outer__inv this #(p +. q) m);
+}
+
+[@@allow_ambiguous]
+ghost fn frac_outer__inv_gather (this: frac_outer) (#p: perm)
+                                (#m #alt_m: frac_outer__model)
+  requires frac_outer__inv this #(p /. 2.0R) m ** frac_outer__inv this #(p /. 2.0R) alt_m
+  ensures  frac_outer__inv this #p m ** pure (m == alt_m)
+{
+  frac_outer__inv_gather_gen this (p /. 2.0R) (p /. 2.0R);
+  rewrite (frac_outer__inv this #(p /. 2.0R +. p /. 2.0R) m)
+       as (frac_outer__inv this #p m);
+}
+
+/// An observer: two object parameters at *independent* permissions, which is what makes
+/// the two arguments allowed to be the same object.
+fn frac_observe (a: frac) (b: frac) (#pa #pb: perm) (#ma #mb: frac__model)
+  preserves frac__inv a #pa ma
+  preserves frac__inv b #pb mb
+  returns v: bool
+  ensures pure (v == (Seq.length ma.m_elems = Seq.length mb.m_elems))
+{
+  unfold (frac__inv a #pa ma);
+  let ra = !a;
+  fold (frac__inv a #pa ma);
+  unfold (frac__inv b #pb mb);
+  let rb = !b;
+  fold (frac__inv b #pb mb);
+  (I32.v ra.fld_top = I32.v rb.fld_top)
+}
+
+/// F25: Pulse does **not** split a permission at a call site. Dropping the `share` below
+///      fails with `Cannot prove: frac__inv s _` against a context holding exactly
+///      `frac__inv s m`, because splitting is a proof step and Pulse does not guess it.
+///      So read-only aliasing is reached by asking for it, in C#, with `Pal.Share`.
+///
+///      The same is true of an array: `f a a` with two `[Frac]` parameters needs
+///      `A.share a` first (`frac_alias_array`). R4.9 has claimed since M1 that "the same
+///      array may be passed to two parameters at once"; until now nothing tested it, and
+///      it was not in fact reachable.
+fn frac_alias (s: frac) (#m: frac__model)
+  preserves frac__inv s m
+  returns v: bool
+{
+  frac__inv_share s;
+  let v = frac_observe s s;
+  frac__inv_gather s;
+  v
+}
+
+fn frac_observe_array (a: A.array I32.t) (b: A.array I32.t) (#pa #pb: perm)
+                      (#sa #sb: erased (Seq.seq I32.t))
+  preserves A.pts_to a #pa sa
+  preserves A.pts_to b #pb sb
+  returns v: bool
+{ true }
+
+fn frac_alias_array (a: A.array I32.t) (#s: erased (Seq.seq I32.t))
+  preserves A.pts_to a s
+  returns v: bool
+{
+  A.share a;
+  let v = frac_observe_array a a;
+  A.gather a;
+  v
+}
+
+/// F26: generalising a **read-only** method over the permission is a *pure* generalisation.
+///      A caller holding full ownership calls it with nothing written and nothing changed,
+///      because Pulse instantiates the binder at `1.0R`. So R4.11's existing write-set
+///      analysis -- which already decides `preserves` -- decides this too, and read-only
+///      aliasing costs no annotation on any instance method.
+///
+///      It is also *necessary* for composition, not merely convenient. R3.10c propagates
+///      the outer fraction into a sub-object's invariant, so a read-only method of an
+///      owner holds `class_D__inv r.fld_g #p model_g` and can only call `D`'s readers if
+///      they too are generalised. A scheme that fixed sub-readers at `1.0R` would make
+///      every fractional owner unable to read its own parts.
+fn frac_peek (this: frac) (#p: perm) (#m: erased frac__model)
+  preserves frac__inv this #p m
+  returns v: I32.t
+  ensures pure (I32.v v == Seq.length (reveal m).m_elems)
+{
+  unfold (frac__inv this #p m);
+  let r = !this;
+  fold (frac__inv this #p m);
+  r.fld_top
+}
+
+fn frac_full_owner_reads (this: frac) (#m: erased frac__model)
+  preserves frac__inv this m
+  returns v: I32.t
+{
+  frac_peek this
+}
+
+/// The composition half: an owner at permission `p` reading through its sub-object.
+fn frac_outer_peek (this: frac_outer) (#p: perm) (#m: erased frac_outer__model)
+  preserves frac_outer__inv this #p m
+  returns v: I32.t
+{
+  unfold (frac_outer__inv this #p m);
+  let r = !this;
+  let v = frac_peek r.fld_inner;
+  with mi. assert (frac__inv r.fld_inner #p mi);
+  fold (frac_outer__inv this #p m);
+  v
+}
+
+/// F27: **two** views of one object may be in scope at once; **three** may not. Matching an
+///      slprop against the context is a search for a unique candidate, and after a second
+///      `share` there are three resources with the same head and the same name, so the
+///      match is ambiguous and the call is refused -- `Cannot prove: frac__inv s _`
+///      against a context listing the very thing it wants, three times over.
+///
+///      Two is enough for the feature, which is read-only aliasing between two names, and
+///      more than two is reached by *nesting*: share, use both halves, gather, and only
+///      then share again. What is not available is holding three views simultaneously.
+///      This is a fact about Pulse's matcher and not about permissions -- splitting is
+///      unbounded, as `frac_split_thrice` shows -- so it is pinned rather than designed
+///      around.
+fn frac_two_views (s: frac) (#m: frac__model)
+  preserves frac__inv s m
+  returns v: I32.t
+{
+  frac__inv_share s;
+  let v = frac_peek s;
+  frac__inv_gather s;
+  v
+}
+
+[@@expect_failure]
+fn frac_three_views (s: frac) (#m: frac__model)
+  preserves frac__inv s m
+  returns v: I32.t
+{
+  frac__inv_share s;
+  frac__inv_share s;
+  let v = frac_peek s;
+  frac__inv_gather s;
+  frac__inv_gather s;
+  v
+}
+
+/// The permission itself splits as far as anyone likes; it is only *simultaneous* views
+/// that are limited. Halving twice and recombining twice is fine as long as no third view
+/// is live at the point of a call.
+ghost fn frac_split_thrice (s: frac) (#m: frac__model)
+  preserves frac__inv s m
+{
+  frac__inv_share s;
+  frac__inv_share s;
+  frac__inv_gather s;
+  frac__inv_gather s;
 }

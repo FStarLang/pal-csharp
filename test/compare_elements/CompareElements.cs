@@ -5,6 +5,12 @@
 // and the post-state — a postcondition about an argument's final contents needs no
 // existential and no frame reasoning.
 //
+// The caller's half of that is `test/frac_alias`, and it was missing for a long time. F25
+// says Pulse does not split a permission at a call site, so passing one array to both
+// parameters needs `Pal.Share` first (R5.13); until that rule existed the claim above was
+// true of the *signature* and not reachable by any caller. Nothing here changed when it
+// was fixed, which is the point — the annotation was always right.
+//
 // The methods here read two arrays and never write either, which is what makes the
 // annotation honest rather than decorative: writing through one is rejected (PALCS0305).
 using PalLang;

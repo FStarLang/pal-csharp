@@ -55,6 +55,13 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public string? Fraction { get; init; }
 
+    /// <summary>
+    /// The permission this slot's resources are held at, ready to splice in front of a
+    /// value binder: <c>"#p "</c>, or empty for full ownership. R3.10c makes a class
+    /// invariant carry one too, so an object slot renders it exactly as an array does.
+    /// </summary>
+    public string PermArg => Perm;
+
     private string Perm => Fraction is null ? "" : $"#{Fraction} ";
 
     /// <summary>For an object slot: the ghost binder holding its model on entry.</summary>
@@ -73,7 +80,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         SlotKind.Object when Type is IrClassType c =>
-            $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} {Binder} {value}",
+            $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} {Binder} {Perm}{value}",
         _ => "",
     };
 
@@ -157,6 +164,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassModelPred(cl.Name), decl.Loc),
                     new Provenance(Names.ClassModel(cl.Name), decl.Loc),
                     new Provenance(Names.ClassInv(cl.Name), decl.Loc),
+                    // R3.10d's three lemmas. Their span is the class declaration: they
+                    // exist because the class does, and there is nothing else in the C#
+                    // for them to point at.
+                    new Provenance(Names.ClassInvShare(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassInvGatherGen(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassInvGather(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
                 ],
@@ -360,6 +373,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     internal static string SubModelType(IrType t) =>
         $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassModel(((IrClassType)t).Name)}";
 
+    /// <summary>R3.10d. A sub-object's own <c>share</c>, qualified by its module.</summary>
+    private static string SubShare(IrType t) =>
+        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvShare(((IrClassType)t).Name)}";
+
+    /// <summary>R3.10d. A sub-object's general <c>gather</c>, qualified by its module.</summary>
+    private static string SubGatherGen(IrType t) =>
+        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvGatherGen(((IrClassType)t).Name)}";
+
     private EmittedModule EmitClass(IrClass c)
     {
         // R3.7: inside the defining module a field needs no qualifier, and must not have
@@ -428,6 +449,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
 
+        // R3.10c needs `T.exact` for the invariant's defaulted permission binder. The
+        // alias is emitted here rather than in the shared preamble because a class module
+        // is the only one that has a use for it.
+        sb.AppendLine("module T = FStar.Tactics");
+        sb.AppendLine();
+
         sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).AppendLine(" = {");
         foreach (var f in c.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
@@ -453,23 +480,32 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.10: the invariant is indexed by the model. An un-indexed `inv (x: C)` puts
         // the object's whole state under an existential, so no postcondition could relate
         // the post-state to the pre-state — memory safety and nothing more.
-        sb.AppendLine($"let {Names.ClassInv(c.Name)} " +
-                      $"(this: {Names.ClassType(c.Name)}) (m: {Names.ClassModel(c.Name)}) : slprop =");
+        //
+        // R3.10c: it is also indexed by a *permission*, which propagates to every resource
+        // conjunct. The binder is meta-argument-defaulted (F21), so `class_C__inv x m`
+        // still means full ownership and no other rule's output changes: the whole feature
+        // is reached by asking for it.
+        sb.AppendLine($"let {Names.ClassInv(c.Name)} (this: {Names.ClassType(c.Name)}) " +
+                      $"(#[T.exact (`1.0R)] p: perm) (m: {Names.ClassModel(c.Name)}) : slprop =");
         var existentials = new List<string> { $"(r: {Names.ClassRaw(c.Name)})" };
         existentials.AddRange(arrays.Select(f =>
             $"({Names.Contents(f.Name)}: Seq.seq {Types.Render(((IrArrayType)f.Type).Element)})"));
         existentials.AddRange(objects.Select(f =>
             $"({Names.SubModel(f.Name)}: {SubModelType(f.Type)})"));
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
-        sb.AppendLine("    B.pts_to this r **");
+        sb.AppendLine("    B.pts_to this #p r **");
         foreach (var f in arrays)
-            sb.AppendLine($"    A.pts_to r.{Names.Field(f.Name)} {Names.Contents(f.Name)} **");
+            sb.AppendLine($"    A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
         // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
         // conjunct: the outer invariant does not restate the inner one, it *contains* it,
         // so an inner class's [Invariant] clauses are proved once, where they were written.
+        // R3.10c hands it the *same* fraction: an object held at `p` is one every part of
+        // which is held at `p`, and there is no other coherent reading.
         foreach (var f in objects)
-            sb.AppendLine($"    {SubInv(f.Type)} r.{Names.Field(f.Name)} {Names.SubModel(f.Name)} **");
+            sb.AppendLine($"    {SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)} **");
         sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
+
+        EmitShareAndGather(sb, c, arrays, objects);
 
         // R3.9c: each [Spec] member is a pure function of the model, never of the
         // representation — a caller holds only the model, so an observation it cannot
@@ -491,6 +527,159 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
 
         return new EmittedModule(Names.ClassModule(c.Name), sb.ToString());
+    }
+
+    /// <summary>
+    /// R3.10d. The three ghost lemmas that make an object observable through more than one
+    /// alias. They are emitted per class, not written once in the support library, because
+    /// their proofs recurse into the class's own structure: the box, then each array, then
+    /// <em>each sub-object's own</em> <c>share</c> (F22). A generic lemma would have to
+    /// quantify over that structure, and there is nothing to quantify over — the invariant
+    /// is a <c>let</c>, not an instance of an interface.
+    /// <para>
+    /// Every <c>fold</c> here is preceded by an <c>assert</c> naming what it consumes. That
+    /// is not a proof rescued by the emitter but the scheme itself: after a share the
+    /// context holds two candidates for every existential the invariant has, and the
+    /// prover solves them by matching. The bodies are fixed by this rule and do not vary
+    /// with the program, exactly as R4.10's fold/unfold bracket does not.
+    /// </para>
+    /// </summary>
+    private void EmitShareAndGather(
+        StringBuilder sb, IrClass c,
+        ImmutableArray<IrFieldDecl> arrays, ImmutableArray<IrFieldDecl> objects)
+    {
+        var inv = Names.ClassInv(c.Name);
+        var ty = Names.ClassType(c.Name);
+        var model = Names.ClassModel(c.Name);
+        var half = "(p /. 2.0R)";
+
+        // -- share -----------------------------------------------------------
+        sb.AppendLine();
+        sb.AppendLine($"ghost fn {Names.ClassInvShare(c.Name)} (this: {ty}) " +
+                      $"(#p: perm) (#m: {model})");
+        sb.AppendLine($"  requires {inv} this #p m");
+        sb.AppendLine($"  ensures {inv} this #{half} m ** {inv} this #{half} m");
+        sb.AppendLine("{");
+        sb.AppendLine($"  unfold ({inv} this #p m);");
+        sb.AppendLine("  with r. assert (B.pts_to this #p r);");
+        foreach (var f in arrays)
+            sb.AppendLine($"  with {Names.Contents(f.Name)}. assert " +
+                          $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
+        foreach (var f in objects)
+            sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
+                          $"({SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)});");
+        sb.AppendLine("  B.share this;");
+        foreach (var f in arrays)
+            sb.AppendLine($"  A.share r.{Names.Field(f.Name)};");
+        foreach (var f in objects)
+            sb.AppendLine($"  {SubShare(f.Type)} r.{Names.Field(f.Name)};");
+        var shared = Resources(c, arrays, objects, half, "r", Names.Contents, Names.SubModel);
+        sb.AppendLine($"  assert ({shared});");
+        sb.AppendLine($"  fold ({inv} this #{half} m);");
+        sb.AppendLine($"  assert ({shared});");
+        sb.AppendLine($"  fold ({inv} this #{half} m);");
+        sb.AppendLine("}");
+
+        // -- the general gather ---------------------------------------------
+        // F23: the models come back *equal*, and that is a consequence rather than an
+        // assumption. R3.9 pins `m` to the abstraction function of the representation,
+        // `Box.gather` proves the two representations equal, and a function of equal
+        // arguments is equal. Two observers of one object cannot disagree about it.
+        sb.AppendLine();
+        sb.AppendLine("[@@allow_ambiguous]");
+        // The two permissions are *explicit*. As implicits they were instantiated by
+        // matching, so a nested gather could come back at `q +. p` where its caller's fold
+        // wanted `p +. q` — provably the same permission, but slprop matching is syntactic
+        // and a user-defined slprop gets no normalisation (F24). Naming them at the call
+        // fixes the order once and the whole nesting composes.
+        sb.AppendLine($"ghost fn {Names.ClassInvGatherGen(c.Name)} (this: {ty}) " +
+                      $"(p q: perm) (#m #alt_m: {model})");
+        sb.AppendLine($"  requires {inv} this #p m ** {inv} this #q alt_m");
+        sb.AppendLine($"  ensures {inv} this #(p +. q) m ** pure (m == alt_m)");
+        sb.AppendLine("{");
+        sb.AppendLine($"  unfold ({inv} this #p m);");
+        sb.AppendLine("  with r. assert (B.pts_to this #p r);");
+        foreach (var f in arrays)
+            sb.AppendLine($"  with {Names.Contents(f.Name)}. assert " +
+                          $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
+        foreach (var f in objects)
+            sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
+                          $"({SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)});");
+        sb.AppendLine($"  unfold ({inv} this #q alt_m);");
+        sb.AppendLine("  with alt_r. assert (B.pts_to this #q alt_r);");
+        foreach (var f in arrays)
+            sb.AppendLine($"  with {Names.Alt(Names.Contents(f.Name))}. assert " +
+                          $"(A.pts_to alt_r.{Names.Field(f.Name)} #q {Names.Alt(Names.Contents(f.Name))});");
+        foreach (var f in objects)
+            sb.AppendLine($"  with {Names.Alt(Names.SubModel(f.Name))}. assert " +
+                          $"({SubInv(f.Type)} alt_r.{Names.Field(f.Name)} #q " +
+                          $"{Names.Alt(Names.SubModel(f.Name))});");
+        // The two views are of one object, so the second's resources are renamed onto the
+        // first's *before* anything is gathered. The equality has to be learned without
+        // consuming either view — hence `pts_to_injective_eq` rather than `gather` — for a
+        // reason worth stating: `gather` keeps whichever of the two values it matched
+        // first, and slprop matching is syntactic, so a later `fold` looking for the other
+        // name would fail against a resource that is provably the same thing. Renaming
+        // first leaves exactly one candidate for every existential, and then nothing can
+        // be ambiguous.
+        sb.AppendLine("  B.pts_to_injective_eq this;");
+        sb.AppendLine("  assert (pure (r == alt_r));");
+        sb.AppendLine("  rewrite (B.pts_to this #q alt_r) as (B.pts_to this #q r);");
+        foreach (var f in arrays)
+        {
+            var alt = Names.Alt(Names.Contents(f.Name));
+            sb.AppendLine($"  rewrite (A.pts_to alt_r.{Names.Field(f.Name)} #q {alt})");
+            sb.AppendLine($"       as (A.pts_to r.{Names.Field(f.Name)} #q {alt});");
+        }
+        foreach (var f in objects)
+        {
+            var alt = Names.Alt(Names.SubModel(f.Name));
+            sb.AppendLine($"  rewrite ({SubInv(f.Type)} alt_r.{Names.Field(f.Name)} #q {alt})");
+            sb.AppendLine($"       as ({SubInv(f.Type)} r.{Names.Field(f.Name)} #q {alt});");
+        }
+        sb.AppendLine("  B.gather this;");
+        foreach (var f in arrays)
+            sb.AppendLine($"  A.gather r.{Names.Field(f.Name)};");
+        foreach (var f in objects)
+            sb.AppendLine($"  {SubGatherGen(f.Type)} r.{Names.Field(f.Name)} p q;");
+        // No `assert` before this `fold`, unlike `share`'s: one candidate per existential
+        // is left, so there is nothing to disambiguate, and the abstraction equation is
+        // discharged by SMT from the `pure (… == …)` each gather returned.
+        sb.AppendLine($"  fold ({inv} this #(p +. q) m);");
+        sb.AppendLine("}");
+
+        // -- gather, stated as share's exact inverse -------------------------
+        // F24: Pulse normalises `p /. 2.0R +. p /. 2.0R` for `pts_to`, which has prover
+        // support, but not for a user-defined slprop, which is matched syntactically.
+        // Discharging the arithmetic here is what keeps it out of every call site, where
+        // it would be a proof step about the encoding rather than about the program.
+        sb.AppendLine();
+        sb.AppendLine("[@@allow_ambiguous]");
+        sb.AppendLine($"ghost fn {Names.ClassInvGather(c.Name)} (this: {ty}) " +
+                      $"(#p: perm) (#m #alt_m: {model})");
+        sb.AppendLine($"  requires {inv} this #{half} m ** {inv} this #{half} alt_m");
+        sb.AppendLine($"  ensures {inv} this #p m ** pure (m == alt_m)");
+        sb.AppendLine("{");
+        sb.AppendLine($"  {Names.ClassInvGatherGen(c.Name)} this {half} {half};");
+        sb.AppendLine($"  rewrite ({inv} this #(p /. 2.0R +. p /. 2.0R) m) as ({inv} this #p m);");
+        sb.AppendLine("}");
+    }
+
+    /// <summary>
+    /// R3.10d. Every resource the invariant holds, at one permission — what the
+    /// <c>assert</c> before a <c>fold</c> has to name so the prover can solve the
+    /// invariant's existentials against a context that holds two candidates for each.
+    /// </summary>
+    private static string Resources(
+        IrClass c, ImmutableArray<IrFieldDecl> arrays, ImmutableArray<IrFieldDecl> objects,
+        string perm, string record, Func<string, string> contents, Func<string, string> submodel)
+    {
+        var parts = new List<string> { $"B.pts_to this #{perm} {record}" };
+        parts.AddRange(arrays.Select(f =>
+            $"A.pts_to {record}.{Names.Field(f.Name)} #{perm} {contents(f.Name)}"));
+        parts.AddRange(objects.Select(f =>
+            $"{SubInv(f.Type)} {record}.{Names.Field(f.Name)} #{perm} {submodel(f.Name)}"));
+        return string.Join(" ** ", parts);
     }
 
     // =======================================================================

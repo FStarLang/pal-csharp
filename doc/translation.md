@@ -82,6 +82,13 @@ The rules below depend on the following, each **verified against the pinned tool
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
 | F18 | F15's affinity is a **permission to discard, not an automatic discard**. A method that allocates an object and does not return it still holds the invariant when it ends: `Error 228: Leftover resources: class_C__inv x _`. Writing the discard needs a name for the model the context holds — an existential witness the emitter never chose — which `with m. assert p;` binds. | `test/pulse_facts/ObjectFacts.fst:allocate_and_discard`, verified; the failure was reproduced by `test/counter_client`'s `FreshIsZero` before R4.14 existed. Relied on by R4.14. |
 | F20 | An object's invariant may **contain** another's, and nesting needs no new device: the outer invariant existentially quantifies the sub-object's *model* exactly as R3.10a quantifies an array's *contents*. Inside the outer `unfold` window the sub-object stays **folded**, so calling its methods is an ordinary call. The closing `fold` must re-name the sub-models where it happens, because a call may have moved one. A bound on a sub-model reaches a call site only as a **refinement on the model type** — F17 again, and not optional: as a `pure` conjunct inside the sub-invariant it is behind a folded slprop and does not reach. | `test/pulse_facts/ObjectFacts.fst:ranked_mk`, `ranked_bump_left`, verified. Relied on by R3.10b. |
+| F21 | An slprop `let` may take a **meta-argument-defaulted** permission binder, as `Box.pts_to` does: `let inv (this: C) (#[T.exact (`1.0R)] p: perm) (m: M) : slprop`. `inv x m` then *means* `inv x #1.0R m`. So indexing every class invariant by a permission changes no existing emission — full ownership stays what you get by not asking. | `test/pulse_facts/ObjectFacts.fst:frac__inv`, `frac_default_is_full`, verified. Relied on by R3.10c. |
+| F22 | A per-class `share` is provable from `Box.share`, `Array.share` and each sub-object's own `share`. Each closing `fold` **must** be preceded by an `assert` naming the resources it consumes: the invariant's existentials are solved by matching against the context, and after a share the context holds two candidates for every one of them. | `test/pulse_facts/ObjectFacts.fst:frac__inv_share`, `frac_outer__inv_share`, verified. Relied on by R3.10d. |
+| F23 | A per-class `gather` proves the two models **equal**. Not an extra hypothesis and not a choice: R3.9's invariant pins `m` to the abstraction function of the representation, `Box.gather` proves the two representations equal, and a function of equal arguments is equal. Two read-only aliases of one object therefore necessarily agree about it. It composes only if the two permissions are **explicit** parameters and the second view is renamed onto the first with `pts_to_injective_eq` *before* either is gathered — both matching problems, invisible at one level of nesting. | `test/pulse_facts/ObjectFacts.fst:frac__inv_gather_gen` and `frac_outer__inv_gather_gen` (a class owning a class, the smallest configuration that catches it), verified. Relied on by R3.10d. |
+| F24 | Pulse normalises `p /. 2.0R +. p /. 2.0R` to `p` for `pts_to`, which has prover support, but **not** for a user-defined slprop, which is matched syntactically. | `test/pulse_facts/ObjectFacts.fst:frac__inv_gather` needs the arithmetic discharged by an explicit `rewrite`; `PermProbe`-style `Box.share; Box.gather` round-trips without one. Relied on by R3.10d, which states `gather` as `share`'s exact inverse so the arithmetic is discharged once. |
+| F25 | Pulse does **not** split a permission at a call site. `f s s`, where `f` takes two independently-fractional parameters, fails with `Cannot prove: …__inv s _` against a context holding exactly that resource — for an object *and* for an array. Splitting is a proof step, and Pulse does not guess it. | `test/pulse_facts/ObjectFacts.fst:frac_alias`, `frac_alias_array`, verified with the `share` and failing without it. Relied on by R5.13. |
+| F27 | **Two** views of one object may be in scope at once; **three** may not. Matching an slprop against the context is a search for a *unique* candidate, so after a second `share` there are three resources with the same head and the same name and the next call is refused. Two is what read-only aliasing needs, and more is reached by nesting share/use/gather. The permission itself splits without bound — it is simultaneity that is limited. | `test/pulse_facts/ObjectFacts.fst:frac_two_views` (verified), `frac_three_views` (`expect_failure`), `frac_split_thrice` (verified). Relied on by R3.10e. |
+| F26 | Generalising a **read-only** method over the permission is a *pure* generalisation: a caller holding full ownership calls it unchanged, because Pulse instantiates the binder at `1.0R`. It is also **necessary for composition** — R3.10c propagates the outer fraction into a sub-object's invariant, so an owner's reader can only call its parts' readers if those are generalised too. | `test/pulse_facts/ObjectFacts.fst:frac_peek`, `frac_full_owner_reads`, `frac_outer_peek`, verified. Relied on by R4.11b. |
 | F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
 | F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 
@@ -578,6 +585,119 @@ for the invariant to hold and nothing for a constructor to allocate. A field of 
 that declares no `[Model]` is **PALCS0500**, with a message saying so: it fails the type
 map rather than the ownership rule.
 
+**R3.10c (the invariant is indexed by a permission).** Every class invariant takes a
+**meta-argument-defaulted** permission binder, and the permission propagates to every
+resource conjunct — the box, each array field, and each sub-object's own invariant:
+
+```fstar
+let class_C__inv (this: class_C) (#[T.exact (`1.0R)] p: perm) (m: class_C__model) : slprop =
+  exists* (r: class_C__raw) (contents_f: Seq.seq ⟦T⟧) (model_g: Class_D.class_D__model).
+    B.pts_to this #p r **
+    A.pts_to r.fld_f #p contents_f **
+    Class_D.class_D__inv r.fld_g #p model_g **
+    pure (…)
+```
+
+`class_C__inv this m` still *means* `class_C__inv this #1.0R m` (F21), so this rule changes
+no other rule's output: full ownership is what you get by not asking for anything, which is
+what every existing contract says. The whole feature is reached by asking.
+
+Three things about the shape are forced.
+
+* **The propagation is uniform, and it has to be.** A fraction that stopped at the box
+  would let two observers of one object disagree about its array, which is exactly the
+  unsoundness the box's fraction was preventing. An object at permission `p` is an object
+  every part of which is held at `p`; there is no other coherent reading, and it is why
+  `[Frac]` on a *field* is not a thing the language offers. A field's permission is the
+  enclosing invariant's, always.
+* **The model index is unaffected.** A fraction weakens what you may *do* with the object,
+  not what you may *know* about it: an observer still names `this.Count` and still gets a
+  postcondition about it. That is the point of separating the model from the
+  representation — the model was never ownership in the first place.
+* **The permission is not part of the model.** Nothing in a `[Model]`, an `[Invariant]` or
+  a contract can mention `p`; it is a binder the translation introduces and the user names
+  only through `[Frac]`. A specification that could talk about its own permission would be
+  talking about the proof rather than the program.
+
+**R3.10d (share and gather).** Each class additionally emits three ghost lemmas:
+
+```fstar
+ghost fn class_C__inv_share (this: class_C) (#p: perm) (#m: class_C__model)
+  requires class_C__inv this #p m
+  ensures  class_C__inv this #(p /. 2.0R) m ** class_C__inv this #(p /. 2.0R) m
+
+[@@allow_ambiguous]
+ghost fn class_C__inv_gather_gen (this: class_C) (p q: perm) (#m #m': class_C__model)
+  requires class_C__inv this #p m ** class_C__inv this #q m'
+  ensures  class_C__inv this #(p +. q) m ** pure (m == m')
+
+[@@allow_ambiguous]
+ghost fn class_C__inv_gather (this: class_C) (#p: perm) (#m #m': class_C__model)
+  requires class_C__inv this #(p /. 2.0R) m ** class_C__inv this #(p /. 2.0R) m'
+  ensures  class_C__inv this #p m ** pure (m == m')
+```
+
+They are emitted per class rather than written once in the support library because their
+proofs recurse into the class's own structure: `share` shares the box, then each array,
+then calls **each sub-object's `share`** (F22). A generic lemma would have to quantify over
+that structure, and there is nothing to quantify over — the invariant is a `let`, not an
+instance of an interface.
+
+Six details are forced, and each was found by a probe rather than assumed.
+
+* **Every `fold` in the proofs is preceded by an `assert` naming what it consumes** (F22).
+  The invariant's existentials are solved by matching against the context, and after a
+  share the context holds two candidates for each of them. This is the emitter emitting
+  the *scheme*, not rescuing a proof: the lemma's body is fixed by the rule and does not
+  vary with the program, exactly as R4.10's fold/unfold bracket does.
+* **`gather` proves the two models equal** (F23), and that is not an extra hypothesis. R3.9
+  pins `m` to the abstraction function of the representation, `Box.gather` proves the two
+  representations equal, and a function of equal arguments is equal. Two read-only aliases
+  of one object *necessarily* agree about it — which is the entire reason to allow them.
+  A scheme in which they could disagree would be one in which the model was not an
+  abstraction function, and F17 already rules that out.
+* **`gather` is stated as `share`'s exact inverse**, with the general form kept alongside
+  it. Pulse normalises `p /. 2.0R +. p /. 2.0R` to `p` for `pts_to` but not for a
+  user-defined slprop (F24), so without this the arithmetic would surface as a `rewrite`
+  the user had to write at every call site — a proof step about the *encoding*, which is
+  precisely what a proof annotation language must not make anyone write. Discharging it
+  once, inside the emitted lemma, is the alternative.
+* **`gather_gen` takes its two permissions as *explicit* parameters**, and `gather` calls
+  it as `class_C__inv_gather_gen this (p /. 2.0R) (p /. 2.0R)`. Left implicit they are
+  solved by matching, and a *nested* gather could then return at `q +. p` where its
+  caller's `fold` wanted `p +. q` — the same permission, but a user-defined slprop gets no
+  normalisation (F24) and matching is syntactic. Naming them at the call site fixes the
+  order once and the nesting composes. Nothing one level deep can detect this, which is
+  why F23's pin is a class owning a class.
+* **The second view is renamed onto the first *before* anything is gathered**, using
+  `Box.pts_to_injective_eq` rather than `Box.gather`. `gather` is `allow_ambiguous` and its
+  `ensures` keeps whichever of the two values it matched first, so a subsequent `fold`
+  naming the other one fails against a resource provably equal to what it asked for.
+  Learning `r == alt_r` without consuming either view, and rewriting first, leaves exactly
+  one candidate for every existential — after which the closing `fold` needs no `assert`
+  at all, because there is nothing left to disambiguate.
+* **A class with no `[Model]` gets none of them**, because it has no invariant to share.
+
+**R3.10e (`share` needs no permission left over).** Nothing bounds how far a permission may
+be split: `share` halves whatever it is given, and halving is always possible. The only
+thing a program can never do is *write* through a fraction — a write needs `1.0R`, which no
+proper fraction can reach and which `gather` recovers only by collecting every piece back.
+That asymmetry is fractional permissions working, not a limitation of the translation, and
+it is what makes read-only aliasing safe to allow where R3.13's aliasing was not.
+
+What *is* bounded is how many views may be live at once, and the bound is **two** (F27).
+Matching an slprop against the context is a search for a unique candidate, so a second
+`Share` on a name that already has two views leaves three resources with the same head and
+the same name, and the next call is refused — with an error that lists the very thing it
+wanted, three times over. More than two observers is reached by nesting: `Share`, use both
+halves, `Gather`, and only then `Share` again.
+
+This is worth being precise about, because it is a fact about Pulse's matcher and not about
+permissions, and the two are easy to confuse. The permission really does split arbitrarily
+far; `test/pulse_facts`'s `frac_split_thrice` halves twice and recombines twice with nothing
+in between. It is *simultaneity* that is limited, and pal-csharp says nothing about it —
+the refusal arrives from Pulse, on the C# call site, through R2.3.
+
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
 contract), and `Box.pts_to_not_null` proves that a live object is non-null.
@@ -741,7 +861,39 @@ mechanically, and neither is a choice:
   assignment. A fractional permission is exactly the right to read.
 
 What this buys, and what nothing else does: the same array may be passed to two parameters
-at once, because the caller splits its permission rather than surrendering it.
+at once — provided the caller splits its permission first, which is `Pal.Share` (R5.13).
+
+**R4.9a (an observed object).** `[Frac("p")]` on a **class-typed** parameter weakens its
+resource the same way, from `class_C__inv a m` to `class_C__inv a #p m`:
+
+```csharp
+public static bool SameSize([Frac("pa")] Stack a, [Frac("pb")] Stack b) => …
+```
+⟶
+```
+fn func_Cmp_SameSize (var_a: Class_Stack.class_Stack) (var_b: Class_Stack.class_Stack)
+                     (#pa: perm) (#pb: perm)
+                     (#pre_a: erased Class_Stack.class_Stack__model)
+                     (#pre_b: erased Class_Stack.class_Stack__model)
+  preserves Class_Stack.class_Stack__inv var_a #pa pre_a
+  preserves Class_Stack.class_Stack__inv var_b #pb pre_b
+  …
+```
+
+The consequences are R4.9's, one word changed, and one of them is new.
+
+* **The model cannot change**, so — as for an array — the one binder stands for the pre-
+  and the post-state. An observed object contributes no existential to the postcondition,
+  which is why `SameSize`'s `ensures` can say `Result == (a.Count == b.Count)` with no
+  `Old` and no frame reasoning.
+* **The two permissions are independent binders**, which is exactly what makes `a` and `b`
+  allowed to be the same object. Giving both parameters one binder would forbid it again
+  by construction.
+* **A mutating method may not be called on it**, and pal-csharp does not say so — Pulse
+  does, because `Push` requires `class_Stack__inv this m` and the context holds
+  `class_Stack__inv this #p m`. This is §0 rule 3's other direction working as intended:
+  the frontend would have to know which methods mutate, which is a question about
+  contracts, and the contracts are already in front of the prover.
 
 ### 4.5 Instance methods
 
@@ -860,6 +1012,36 @@ Every one of these errs strict when it errs: the permissive direction would tell
 the model did not move when it did, which is unsound, while the strict direction only costs
 the caller an existential — exactly what it would have had without R4.11 at all.
 
+**R4.11b (a read-only method is observed, not owned).** The same analysis decides one more
+thing: a method that gets `preserves` also gets a permission binder, and its receiver is
+held at that permission rather than at `1.0R`:
+
+```
+fn func_C_M (var_this: Class_C.class_C) (#p: perm) (#m: erased Class_C.class_C__model)
+  preserves Class_C.class_C__inv var_this #p m
+```
+
+No annotation is involved, and none is offered. Three reasons this is inference where
+R4.9a is annotation.
+
+* **It is a pure generalisation** (F26). A caller holding full ownership is unaffected:
+  Pulse instantiates the binder at `1.0R` and the call site is textually what it was. So
+  unlike `[Frac]` on a parameter — which *weakens* what the callee may do and therefore has
+  to be the author's decision — this weakens nothing and can be given for free.
+* **It is forced by R3.10c** rather than merely allowed. The fraction propagates into
+  sub-object invariants, so a read-only method of an owner holds its parts at *its own*
+  permission. If a part's readers were fixed at `1.0R`, no fractional owner could read its
+  own parts, and R3.10b's composition would stop at the first fraction. Generalising is not
+  an optimisation here; it is what makes the two rules compose.
+* **It is decided by the same analysis, so it cannot disagree with `preserves`.** A method
+  that may move its model needs full ownership and a method that cannot does not, and those
+  are the same question asked once. Two analyses could drift apart; one cannot.
+
+What this rule does **not** do is decide anything about a *call*. Whether a caller has
+enough permission for the method it is calling is a separation-logic question, and R3.13's
+lesson applies: it is asked and answered by Pulse, against the contracts, and the answer
+arrives on the C# call site through R2.3.
+
 **R4.11a (fold witness).** R4.10's closing `fold` must name the model it re-establishes,
 and the term to name follows from the same write-set split:
 
@@ -920,6 +1102,23 @@ the postcondition asks for `inv var_c _`, and the frame rule cannot bridge the t
 though the equality is trivially true (`Error 228`). The emitter therefore emits a call
 that initialises an object local *into that local's binder* rather than into a temporary
 the local then aliases.
+
+**R4.14b (an object local that is an alias).** `C x = y;` where `y` already names an object
+allocates nothing. It binds a second C# name to one object, so the translation is to bind a
+second *slot* to one Pulse binder: `x` and `y` denote the same term, and nothing at all is
+emitted for the declaration.
+
+That is forced from both sides. R4.14 would otherwise discard `x`'s invariant at the end of
+the method — but `x` owns nothing, the invariant belongs to `y`, and the discard would take
+the resource the method has to hand back. And emitting `let var_x = var_y;` would not help:
+the context would hold `inv var_y _` while every later mention asked for `inv var_x _`,
+which is the same syntactic gap R4.14's last paragraph closes for a returned object, in the
+other direction.
+
+Sharing the slot also makes R5.13 do the right thing without knowing about aliases at all.
+`Pal.Share(x)` becomes the lemma applied to `var_y`, because that is the object there is —
+and the case where an alias is what makes the split worth writing is exactly the case
+`test/frac_alias`'s variant is built around.
 
 **R4.14a (where an object may be allocated).** R4.14's discard lands at the end of the
 block that declares the object — which is where C# says the name goes out of scope, and
@@ -1169,6 +1368,52 @@ existentials) arriving as a consequence rather than as a special case.
 record fixed, length carried) and `Max` writes nothing (everything fixed, so R4.11a's
 `preserves` re-fold goes through). `BagVariant.cs` writes both loops as `for` loops and
 gets, modulo names, the same Pulse.
+
+**R5.13 (splitting and recombining a permission).** `Pal.Share(x)` and `Pal.Gather(x)` are
+ghost statements, `[Conditional]` like every other, and they translate by what `x` is:
+
+| `x` | `Pal.Share(x)` | `Pal.Gather(x)` |
+|---|---|---|
+| an object of class `C` | `Class_C.class_C__inv_share ⟦x⟧;` | `Class_C.class_C__inv_gather ⟦x⟧;` |
+| an array | `A.share ⟦x⟧;` | `A.gather ⟦x⟧;` |
+
+They exist because **Pulse does not split a permission on its own** (F25). Passing one
+object to two observed parameters fails with `Cannot prove: class_C__inv s _` against a
+context holding exactly that resource, and the same is true of an array — so R4.9's
+standing claim that "the same array may be passed to two parameters at once" was, until
+this rule, not actually reachable. `test/pulse_facts` now pins both halves.
+
+The design question this rule answers is *who* writes the split, and there were two
+candidates.
+
+*The emitter could insert it*, at a call site passing the same argument twice. That is
+§0 rule 3's forbidden move in its purest form: a proof step invented by the translator in
+response to the shape of one call. It also could not work — the emitter would have to
+recognise the aliasing to know when to split, which is exactly the recognition R3.13 has
+just finished establishing that a frontend cannot do. Two objects reached through fields,
+or aliased three statements earlier, need the same split and present no syntactic sign of
+it.
+
+*Or the user writes it*, which is the choice, and it is the ordinary one: a split is a
+proof step, proof steps come from the user's annotations, and `Pal.Share` sits beside
+`Pal.Assert` and a `[Lemma]` call as one more of them. It costs a line, and the line says
+something true about the program that was not otherwise written down — that from here on
+this object is being read, not owned.
+
+Four consequences.
+
+* **`Gather` is `Share`'s exact inverse, so the pair round-trips with nothing in between.**
+  This is what R3.10d's third lemma buys (F24): without it every `Gather` would be followed
+  by a `rewrite` about `p /. 2.0R +. p /. 2.0R`, which is a fact about the encoding and not
+  about the program.
+* **`Gather` proves the two views agreed** (F23), so nothing needs to be re-established
+  after one. A caller that shared, observed through both halves, and gathered knows the
+  model is the one it started with.
+* **Sharing more than twice is sharing twice, twice.** `Share` halves; three observers take
+  two shares and two gathers. Nothing bounds the depth.
+* **`Pal.Share(this)` inside an instance method is Pulse's to refuse.** R4.15 says the
+  receiver's invariant is unfolded there, so the lemma's precondition is precisely what the
+  context does not hold. The frontend says nothing about it — §0 rule 3, other direction.
 
 ---
 
@@ -1629,6 +1874,36 @@ Rules are recorded here as they are validated.
   it owes both `this`'s invariant and the parameter's back. The line map got that right
   without being told, which is the evidence that R2.3's containment rule is the right one
   and not a rounding.
+
+* **Object invariants are indexed by a permission** (R3.10c–R3.10e, R4.9a, R4.11b, R5.13),
+  so an object can be *observed* rather than owned, and two names can observe one object at
+  once. `test/frac_alias` is the acceptance test: two `[Frac]` object parameters called on
+  one object, an owner observed through a fraction whose two parts are read through the
+  same fraction, the array case that closes `test/compare_elements`'s standing gap, and a
+  variant that reaches the alias through a local.
+
+  The feature is textually additive, and F21 is why: the permission binder is
+  *meta-argument-defaulted*, exactly as `Box.pts_to`'s is, so `class_C__inv x m` still means
+  full ownership and every rule that existed before this one emits what it emitted before.
+  Every class test verified unchanged.
+
+  Four things the probes forced, none of them anticipated. **F23's composition**: a nested
+  `gather` needs its permissions as *explicit* parameters and needs the second view renamed
+  onto the first with `pts_to_injective_eq` *before* either is gathered — both are matching
+  problems, both are invisible at one level of nesting, and a class owning a class is the
+  smallest thing that catches them. **F25**: Pulse does not split a permission at a call
+  site, for objects or for arrays, which means R4.9's claim since M1 that "the same array
+  may be passed to two parameters at once" was never actually reachable; R5.13's
+  `Pal.Share`/`Pal.Gather` is what makes it so. **F26**: generalising read-only methods over
+  the permission is not an optimisation but the thing that makes R3.10c compose, because a
+  fractional owner reads its own parts at its own permission. **F27**: two simultaneous
+  views are the limit — a third makes the matcher ambiguous — so more observers are reached
+  by nesting share/use/gather, and R3.10e says so rather than claiming otherwise.
+
+  One rule was found by the variant test rather than by design. **R4.14b**: `C x = y;` binds
+  a second name to one object, so it emits nothing and shares the slot. Before that, R4.14
+  discarded the alias's invariant at the end of the method — taking the resource the method
+  had to hand back. The §7.2 detector doing exactly what it is for.
 
 ### Not yet done
 
