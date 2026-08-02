@@ -723,6 +723,22 @@ though the equality is trivially true (`Error 228`). The emitter therefore emits
 that initialises an object local *into that local's binder* rather than into a temporary
 the local then aliases.
 
+**R4.15 (a loop inside an instance method is refused).** `PALCS0001`.
+
+R4.10's `unfold`/`fold` bracket is open across the whole body, so a loop in an instance
+method sits where the invariant does not hold. R5.8 would then have to state the loop
+invariant over the *representation* — `B.pts_to var_this r`, one `A.pts_to` per array field,
+`r` and each contents sequence existentially quantified — and the user's `Pal.Invariant`
+clauses would have to read against the fields rather than the model. That is a sub-scheme,
+and it is not written. Two designs are plausible (carry the unfolded state through the
+loop; or re-fold at the loop boundary and unfold once per iteration) and neither has been
+chosen, so §0 rule 3 says refuse: emitting the folded invariant instead produces Pulse that
+cannot verify, and whose failure points at generated code rather than at the source.
+
+The workaround is the one M1 already supports and `test/insertion_sort` already uses: put
+the loop in a static method taking the array. `test/ring_class` shows how little is lost —
+a container's own methods are usually O(1), and it is its *clients* that iterate.
+
 **R4.13 (rejections).** M2 supports `sealed` classes only. `virtual`, `abstract`,
 `override`, and interface implementations are **PALCS0521**: a per-class `class_C__inv`
 cannot express behavioural subtyping without existential packages, and admitting them
@@ -1113,6 +1129,12 @@ Rules are recorded here as they are validated.
   record, and R3.6 writes a whole record per assignment, so there is no way to write both
   fields at once and dodge the question. The intermediate state is visible in the output as
   two `B.op_Colon_Equals` with no `fold` between them.
+* **R4.10a and R4.10b are enforced** (`PALCS0526`, `PALCS0525`). Roslyn reports both as
+  errors about a static method in a namespace the user has never heard of, because that is
+  what the shim is; the remapping states them in terms of the annotation surface instead —
+  "write `@this`", and "a contract may name only what a client could name". Every other
+  binding error is still passed through verbatim, because Roslyn words it better than we
+  would.
 * **R3.13 is enforced** (`PALCS0520`). A call passing one object — or one non-`[Frac]`
   array — to two owned parameters is refused before it is emitted, with the reason. It is
   a diagnostic and not a proof step: the translation of the call is unchanged. `Bank.Transfer`
@@ -1137,7 +1159,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — nineteen cases, each
+  `test/diagnostics` is its counterpart to the verification tests — twenty-one cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1212,7 +1234,7 @@ Rules are recorded here as they are validated.
   and needs no F\* `friend`, but it requires a module shape the emitter does not have
   today, and C# `private` already hides the representation at the source level. The step is
   available when proof performance or genuine information hiding demands it.
-* **A loop inside an instance method is refused** (`PALCS0001`). R4.10's bracket is open
+* **A loop inside an instance method is refused** (R4.15, `PALCS0001`). R4.10's bracket is open
   across the whole body, so the loop sits where the invariant does not hold, and R5.8's
   loop rule would have to carry the *representation* — `B.pts_to this r`, one `A.pts_to`
   per array field, `r` and the contents existentially quantified — with the user's

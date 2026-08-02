@@ -80,7 +80,7 @@ public sealed class CodeEmitter(
             ? [self]
             : [];
 
-        // R4.10b. A loop inside the `unfold`/`fold` window is refused, not approximated.
+        // R4.15. A loop inside the `unfold`/`fold` window is refused, not approximated.
         // Pulse needs the loop's invariant to name every resource the body touches, and
         // inside the window those are the *unfolded* ones — `B.pts_to this r` and one
         // `A.pts_to` per array field, with `r` and the contents existentially quantified —

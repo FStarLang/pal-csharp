@@ -104,8 +104,8 @@ public static class SpecBinder
             foreach (var d in model.GetDiagnostics())
             {
                 if (d.Severity != DiagnosticSeverity.Error) continue;
-                diagnostics.Error("PALCS0100", MapBack(d.Location, map, groupSites),
-                    $"in specification: {d.GetMessage()}");
+                var (code, message) = Remap(d);
+                diagnostics.Error(code, MapBack(d.Location, map, groupSites), message);
             }
 
             var byName = tree.GetRoot()
@@ -124,6 +124,34 @@ public static class SpecBinder
 
         return result.ToImmutable();
     }
+
+    /// <summary>
+    /// R4.10a and R4.10b. Two C# errors are, inside a spec string, always the same two
+    /// mistakes about the shim, and Roslyn's wording describes the shim rather than the
+    /// contract the user wrote — it talks about a static method the user has never seen.
+    /// Both are remapped to a message phrased in terms of the annotation surface. Every
+    /// other error is genuinely about the user's expression and is reported verbatim,
+    /// because Roslyn says it better than we would.
+    /// </summary>
+    private static (string Code, string Message) Remap(Diagnostic d) => d.Id switch
+    {
+        // CS0026: 'this' is not valid in a static method. R4.10a: the receiver of a
+        // contract is an ordinary parameter named `this`, so it is written `@this`.
+        "CS0026" => ("PALCS0526",
+            "in specification: write `@this` for the receiver. A contract is bound as a "
+            + "static method, so a bare `this` does not resolve; `@this` is the verbatim "
+            + "identifier naming the receiver parameter (R4.10a)."),
+
+        // CS0122: inaccessible. R4.10b: the shim is a separate namespace, so a contract
+        // sees only what a client sees.
+        "CS0122" => ("PALCS0525",
+            $"in specification: {d.GetMessage()} A contract may name only members a client "
+            + "could name, so a `[Spec]` member used in one must be at least `internal`. "
+            + "`[Model]` is exempt — it is read inside the class, where the fields are "
+            + "visible (R4.10b)."),
+
+        _ => ("PALCS0100", $"in specification: {d.GetMessage()}"),
+    };
 
     /// <summary>
     /// Emits one shim method per spec site. The spec text is placed alone on a line so
