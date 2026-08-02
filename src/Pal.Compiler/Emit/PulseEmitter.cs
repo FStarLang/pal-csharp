@@ -340,8 +340,18 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // one, or F*'s dependency scan reads the module as depending on itself.
         var repScope = new SpecScope();
         foreach (var f in c.Fields)
-            repScope.Bind(f.Name, new Term(
-                $"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+        {
+            // R3.10a. An array field denotes two different things in the two halves of the
+            // invariant: the reference in the `A.pts_to`, and its *contents* everywhere in
+            // the `pure`. Binding the field name to the contents is what makes
+            // `items.Length` and `Pal.Contents(items)` mean in a class-level clause exactly
+            // what they mean in a method contract about an array parameter (R4.4).
+            var term = f.Type is IrArrayType
+                ? new Term(Names.Contents(f.Name), TermKind.Seq, f.Type)
+                : new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type);
+            repScope.Bind(f.Name, term);
+        }
+        var arrays = c.Fields.Where(f => f.Type is IrArrayType).ToImmutableArray();
 
         // R3.9d: the model refinement is stated over the model value, which a [Refine]
         // on the [Model] member names `Result`, as an [Ensures] does.
@@ -363,6 +373,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             ? _spec.Math(c.ModelBody, repScope)
             : _spec.Emit(c.ModelBody, repScope).Text;
         var conjuncts = new List<string>();
+        // R3.10a. A C# array's length is an `int`, so this bound is a fact about the
+        // source type and not an assumption: it enters at `new T[n]`, whose length
+        // argument is already an `int`, and rides round every fold from there. It is
+        // stated first because it is what makes arithmetic on an index into the array
+        // provably non-overflowing.
+        foreach (var f in arrays)
+            conjuncts.Add($"Seq.length {Names.Contents(f.Name)} <= 2147483647");
         conjuncts.AddRange(c.Invariants.Select(i => _spec.AsProp(_spec.Emit(i, repScope))));
         conjuncts.Add($"m == {abstraction}");
 
@@ -402,8 +419,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // the post-state to the pre-state — memory safety and nothing more.
         sb.AppendLine($"let {Names.ClassInv(c.Name)} " +
                       $"(this: {Names.ClassType(c.Name)}) (m: {Names.ClassModel(c.Name)}) : slprop =");
-        sb.AppendLine($"  exists* (r: {Names.ClassRaw(c.Name)}).");
+        var existentials = new List<string> { $"(r: {Names.ClassRaw(c.Name)})" };
+        existentials.AddRange(arrays.Select(f =>
+            $"({Names.Contents(f.Name)}: Seq.seq {Types.Render(((IrArrayType)f.Type).Element)})"));
+        sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
         sb.AppendLine("    B.pts_to this r **");
+        foreach (var f in arrays)
+            sb.AppendLine($"    A.pts_to r.{Names.Field(f.Name)} {Names.Contents(f.Name)} **");
         sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
 
         // R3.9c: each [Spec] member is a pure function of the model, never of the
@@ -530,6 +552,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrElement el: CollectExpr(el.Array); CollectExpr(el.Index); return;
                 case IrLength l: CollectExpr(l.Array); return;
                 case IrOld o: CollectExpr(o.Operand); return;
+                case IrNewArray na: CollectExpr(na.Length); return;
                 case IrContents ct: CollectExpr(ct.Array); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
                 case IrQuantifier q: CollectExpr(q.Body); return;

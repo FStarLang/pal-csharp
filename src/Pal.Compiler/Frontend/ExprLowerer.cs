@@ -70,12 +70,37 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
+            ArrayCreationExpressionSyntax a => LowerArrayCreation(a, loc),
             ObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             ImplicitObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             _ => Unsupported(node, loc),
         };
 
         return type is null ? result : result with { Type = type };
+    }
+
+    /// <summary>
+    /// R6.9. <c>new T[n]</c>. The CLR zero-fills, so the initial contents are known and
+    /// the allocation needs no separate initialisation loop; an explicit initialiser list
+    /// would be one, and is refused rather than silently unrolled.
+    /// </summary>
+    private IrExpr LowerArrayCreation(ArrayCreationExpressionSyntax node, IrLoc loc)
+    {
+        if (node.Initializer is not null)
+        {
+            diagnostics.Unsupported(loc, "An array initializer",
+                "Allocate with `new T[n]` and assign the elements, so that each write is a " +
+                "statement the translation can put a specification between.");
+            return new IrLiteral(loc, null);
+        }
+
+        if (known.MapType(model.GetTypeInfo(node).Type) is not IrArrayType array ||
+            node.Type.RankSpecifiers is not [{ Sizes: [var size] }])
+        {
+            return Unsupported(node, loc);
+        }
+
+        return new IrNewArray(loc, array.Element, Lower(size)) { Type = array };
     }
 
     /// <summary>

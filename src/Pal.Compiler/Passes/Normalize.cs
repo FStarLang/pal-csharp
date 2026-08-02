@@ -252,6 +252,7 @@ public static class Normalize
             case IrConvert cv: Free(cv.Operand, into); return;
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
+            case IrNewArray na: Free(na.Length, into); return;
             case IrContents ct: Free(ct.Array, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
             case IrQuantifier q:

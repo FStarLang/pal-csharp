@@ -321,11 +321,26 @@ public sealed class CodeEmitter(
         var scope = new SpecScope();
         foreach (var field in decl.Fields)
         {
+            var projection = $"{raw}.{Names.ClassProjection(decl.Name, field.Name)}";
+            if (field.Type is IrArrayType)
+            {
+                // R3.10a. The abstraction reads an array field's *contents*, and the
+                // contents are an existential the context is holding rather than anything
+                // this method named — the array has been written since the `unfold`, so
+                // even the binder the `unfold` produced is stale. `with c. assert p`
+                // names what is actually there, which is the same device R4.14 needs.
+                var contents = FreshValue(field.Name);
+                Line($"with {contents}. assert (A.pts_to {projection} {contents});");
+                scope.Bind(field.Name, new Term(contents, TermKind.Seq, field.Type));
+                continue;
+            }
             scope.Bind(field.Name, new Term(
-                $"{raw}.{Names.ClassProjection(decl.Name, field.Name)}",
-                MethodPlan.KindOf(field.Type), field.Type));
+                projection, MethodPlan.KindOf(field.Type), field.Type));
         }
-        return spec.Math(decl.ModelBody, scope);
+
+        return MethodPlan.KindOf(decl.ModelType) == TermKind.Math
+            ? spec.Math(decl.ModelBody, scope)
+            : $"({spec.Emit(decl.ModelBody, scope).Text})";
     }
 
     // =======================================================================
@@ -855,6 +870,17 @@ public sealed class CodeEmitter(
                 var index = Expr(el.Index);
                 var t = Fresh();
                 Line($"let {t} = read {array} {index};");
+                return t;
+            }
+
+            // R6.9. `new T[n]`. `Pulse.Lib.CSharp.Array.alloc` is where the garbage
+            // collector is assumed: it carries no deallocation obligation, unlike
+            // `Pulse.Lib.Array.alloc`, which is a stack allocation.
+            case IrNewArray na:
+            {
+                var length = Expr(na.Length);
+                var t = Fresh();
+                Line($"let {t} = alloc {length} {Default(na.Element)};");
                 return t;
             }
 

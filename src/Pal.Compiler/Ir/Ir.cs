@@ -206,6 +206,12 @@ public sealed record IrBinder(string Name, IrType Type);
 public sealed record IrQuantifier(
     IrLoc Loc, bool IsForall, ImmutableArray<IrBinder> Binders, IrExpr Body) : IrExpr(Loc);
 
+/// <summary>
+/// <c>new T[n]</c> (R6.9). Executable only: an array is a resource, so it has no meaning
+/// in a specification.
+/// </summary>
+public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrExpr(Loc);
+
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 

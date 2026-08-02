@@ -28,12 +28,18 @@ public static class Check
     {
         CheckModuleNames(program, diagnostics);
 
+        // R3.9a. A `[Spec]` struct is erased, so it is spec-only wherever it appears —
+        // and unlike the built-in spec-only types that is a fact about the *program*, not
+        // about the IR node, so the set has to be collected before anything is checked.
+        var specOnlyStructs = program.Declarations
+            .OfType<IrStruct>().Where(t => t.IsSpecOnly).Select(t => t.Name).ToImmutableHashSet();
+
         foreach (var decl in program.Declarations)
         {
             switch (decl)
             {
                 case IrMethod m when m.IsLemma: CheckLemma(m, diagnostics); break;
-                case IrMethod m: CheckMethod(m, diagnostics); break;
+                case IrMethod m: CheckMethod(m, specOnlyStructs, diagnostics); break;
                 case IrSpecFunction s: CheckSpecFunction(s, program, diagnostics); break;
             }
         }
@@ -70,18 +76,20 @@ public static class Check
     // Executable methods
     // -----------------------------------------------------------------------
 
-    private static void CheckMethod(IrMethod m, DiagnosticBag diagnostics)
+    private static void CheckMethod(
+        IrMethod m, ImmutableHashSet<string> specOnlyStructs, DiagnosticBag diagnostics)
     {
         // An executable method's signature is read with the *program* meaning of each
         // type (R4.2). A spec-only type has no program meaning, so it cannot appear.
-        if (SpecOnly(m.ReturnType) is { } badReturn)
+        if (SpecOnly(m.ReturnType, specOnlyStructs) is { } badReturn)
             diagnostics.Error("PALCS0500", m.Loc,
                 $"`{m.Name}` returns `{badReturn}`, which exists only in specifications. " +
                 "Mark the method `[Spec]` to make it a specification function, " +
                 "or return a program type.");
 
         foreach (var p in m.Parameters)
-            if (!p.IsGhost && p.Type is not IrGhostType && SpecOnly(p.Type) is { } bad)
+            if (!p.IsGhost && p.Type is not IrGhostType &&
+                SpecOnly(p.Type, specOnlyStructs) is { } bad)
                 diagnostics.Error("PALCS0500", p.Loc,
                     $"The parameter `{p.Name}` has type `{bad}`, which exists only in " +
                     "specifications. Wrap it as `Ghost<...>` to pass it as a ghost " +
@@ -218,11 +226,12 @@ public static class Check
     // -----------------------------------------------------------------------
 
     /// <summary>The spec-only type in <paramref name="t"/>, or null if it is a program type.</summary>
-    private static IrType? SpecOnly(IrType t) => t switch
+    private static IrType? SpecOnly(IrType t, ImmutableHashSet<string> specOnlyStructs) => t switch
     {
         IrPrim p when p.IsSpecNumeric || p.Kind == PrimKind.SlProp => t,
         IrSeqType => t,
-        IrArrayType a => SpecOnly(a.Element) is null ? null : t,
+        IrNamedType n when specOnlyStructs.Contains(n.Name) => t,
+        IrArrayType a => SpecOnly(a.Element, specOnlyStructs) is null ? null : t,
         _ => null,
     };
 
@@ -269,6 +278,7 @@ public static class Check
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],
+            IrNewArray n => [n.Length],
             IrContents c => [c.Array],
             IrSeqOp s => s.Args,
             _ => [],

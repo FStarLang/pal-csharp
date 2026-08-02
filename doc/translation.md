@@ -243,9 +243,10 @@ update of `g`.
 
 ### 3.4 Classes
 
-**Status: specified, not yet implemented.** This subsection is the scheme the object
-support will implement; per §0 it is written before the code. Every shape below is pinned
-by `test/pulse_facts/ObjectFacts.fst`, which verifies against the pinned toolchain.
+**Status: implemented.** Every rule below was written before the emitter, per §0, and every
+shape is pinned by `test/pulse_facts/ObjectFacts.fst`, which verifies against the pinned
+toolchain. `test/counter_class`, `test/counter_client` and `test/stack_class` are the
+acceptance tests.
 
 A class is the construct M1 could not express at all. R3.4 forbids a struct field of
 reference type (PALCS0511) because copying the struct would duplicate ownership, which is
@@ -286,7 +287,9 @@ inside the invariant's existential, so a client could not state "the stack is no
 
 **R3.9a (spec-only structs).** `[Spec]` on a `struct` declaration makes it a *spec-only
 type*: it is erased, it never appears in executable code, and — unlike an ordinary struct
-(R3.4) — its fields may be spec-only types such as `Seq<T>` and `SpecInt`.
+(R3.4) — its fields may be spec-only types such as `Seq<T>` and `SpecInt`. It may still not
+own a resource: an array or class-typed field is PALCS0511 here as it is there, because a
+ghost value cannot be an owner either.
 
 This is a new requirement that R3.9 forces, not a convenience. The built-in spec-only types
 of §8 are all atomic, so without a way to *declare* one there is no way to write a model
@@ -401,6 +404,48 @@ Two properties of this shape are load-bearing.
   window in which they may be broken. Using one mechanism for both would be wrong. This
   concerns the **representation** only; a fact about the model alone must go the other way,
   as a refinement on the model type, for the reason R3.9d and F17 give.
+
+**R3.10a (a class owns its arrays).** For each field of array type, the invariant gains an
+existential for its contents, an `A.pts_to` conjunct, and a length bound:
+
+```fstar
+let class_C__inv (this: class_C) (m: class_C__model) : slprop =
+  exists* (r: class_C__raw) (contents_f: Seq.seq ⟦T⟧).
+    B.pts_to this r **
+    A.pts_to r.fld_f contents_f **
+    pure (Seq.length contents_f <= 2147483647 /\ … )
+```
+
+This is the rule R3.4 could not have. A struct is a value, so a field owning a resource
+would make every copy a second owner (PALCS0511) — which is why `test/circular_buffer` has
+to pass its storage *alongside* the struct describing it, leaving the two connected only
+by a convention the type system does not enforce. A class is a heap cell with identity, so
+there is exactly one owner and the array can go inside. The consequence is that the
+storage becomes genuinely private: a client never names it and, by F16's linearity, cannot
+alias it.
+
+Three details are forced.
+
+* **The field name denotes the *contents* in every specification, and the reference only in
+  the `A.pts_to`.** `items.Length` is `Seq.length contents_items` and `Pal.Contents(items)`
+  is `contents_items`, so a class-level clause reads exactly as a method contract about an
+  array parameter already does (R4.4). Nothing new has to be learned to write one.
+* **The length bound is emitted for every array field.** It is a fact about the C# type —
+  an array's length is an `int` — and not an assumption: it enters at `new T[n]`, whose
+  argument is already an `int`, and is re-proved at every fold from there. It is stated
+  first because it is what makes arithmetic on an index into the array provably
+  non-overflowing: `top < items.Length` bounds `top + 1` only once `items.Length` is known
+  to be bounded.
+* **A field of *class* type remains PALCS0531.** The difference from an array is not effort.
+  An array's resource is a `pts_to`, which has no window of its own; another object's is an
+  abstraction with its own `unfold`/`fold` discipline, so nesting it raises a question the
+  scheme does not answer — when may the outer object open the inner one? Refusing it is
+  the honest outcome until that is written down.
+
+The obligation this creates lands at the `fold` of R4.11a, and needs one extra device
+there. After a method has written into the array, the contents the `unfold` produced are
+stale, and the emitter never named the new ones. `with c. assert (A.pts_to …f c);` binds
+them — the same device R4.14 needs, for the same reason.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
@@ -926,6 +971,21 @@ must be existentially quantified in an enclosing loop's invariant. Missing one d
 produce an unsound proof — it produces an invariant asserting the call changed nothing,
 which simply fails to re-establish.
 
+**R6.11 (array allocation).** `new T[n]` ⟶ `alloc ⟦n⟧ ⟦default(T)⟧`, using
+`Pulse.Lib.CSharp.Array.alloc`.
+
+Two things are being read off the CLR rather than off Pulse. The allocation always
+succeeds and imposes no deallocation obligation, which is why `Pulse.Lib.Array.alloc` —
+a *stack* allocation that must not outlive its frame — is not what is called; and the
+result is zero-filled, which is why the initial contents are `Seq.create (v n) 0` and no
+initialisation loop is emitted. Both live in the one MODELING AXIOM inside
+`Pulse.Lib.CSharp.Array.alloc`, where they can be read, rather than being spread across the
+emitter.
+
+An explicit initialiser list, `new[] { 1, 2, 3 }`, is refused. It is an initialisation
+loop written as an expression, and unrolling it would put writes into the translation that
+no C# statement corresponds to, with nowhere to attach a specification between them.
+
 ---
 
 ## 7. Worked derivation
@@ -986,7 +1046,23 @@ Rules are recorded here as they are validated.
   by special-casing the example**, and the probe's one *annotation* failure — the invariant
   `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
   is exactly where §0 rule 3 says it belongs.
-* **The class emitter implements R3.7–R3.13 and R4.10–R4.12, and reproduces
+* **A class owns its array** (R3.10a, R3.9a, R6.11). `test/stack_class` is the test M1
+  could not have written: a `Stack` whose `int[]` lives *inside* its invariant, so the
+  storage is unreachable to a client and cannot be aliased. It needed three rules and no
+  special cases. R3.9a makes `[Spec]` on a `struct` declare a spec-only type, which R3.9
+  forces — a bounded container's model is a product of contents and capacity, and every
+  built-in ghost type is atomic. R3.10a puts the array's `A.pts_to` in the invariant and
+  binds the field name to its *contents* in every specification, so a class-level clause
+  reads exactly as an array parameter's contract does. R6.11 translates `new T[n]`.
+
+  The specifications are functional, not structural: `Push` and `Pop` each fix the new
+  contents element by element and relate them to the old, and the model refinement
+  `Elems.Length <= Capacity` is what makes "there is room" statable by a caller who cannot
+  see inside. Sixteen modules verify, including a client that allocates a stack, uses it
+  and drops it, and `PileVariant.cs` — the same class with its members in the opposite
+  order, different field names, `this.` written out and `++`/`--` in place of assignment —
+  whose output is identical modulo those names and the declaration order they induce.
+* **The class emitter implements R3.7–R3.13 and R4.10–R4.14, and reproduces
   `test/objects_probe` from source.** `test/counter_class` translates `Counter.cs` — the
   probe's own source — and all five generated modules verify: the class module, the
   constructor, the mutator, the read-only method and the client that observes F17. The
@@ -1025,7 +1101,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — sixteen cases, each
+  `test/diagnostics` is its counterpart to the verification tests — seventeen cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1089,13 +1165,11 @@ Rules are recorded here as they are validated.
 * A struct field must be a value — a scalar or another translated struct. An array or
   class field is **PALCS0511**, and that is the model rather than a shortcut: a struct
   copy would duplicate ownership of the same memory. Storage therefore travels alongside
-  the state it describes, as in `test/circular_buffer`.
-* Classes and objects, generics, interfaces, `string`, and `float`/`double`.
-  **Classes are specified but not yet implemented**: §3.4 (R3.7–R3.13, including the
-  user-declared ghost model R3.9 and the spec-only structs R3.9a it requires) and §4.5
-  (R4.10–R4.13) are the scheme, and `test/pulse_facts/ObjectFacts.fst` pins every Pulse
-  shape they name against the pinned toolchain. Generics, interfaces, `string` and floats
-  remain unspecified as well as unimplemented.
+  the state it describes, as in `test/circular_buffer`. A *class* has no such restriction
+  (R3.10a), so `test/stack_class` is what `test/circular_buffer` wanted to be.
+* Generics, interfaces, `string`, and `float`/`double` remain unspecified as well as
+  unimplemented. Classes are implemented; what is still missing inside §3.4 is a class
+  field of *class* type (R3.10a, PALCS0531) — the array case is done.
 * **Object abstraction is deliberately deferred.** `class_C__inv` is specified as a
   *concrete* definition in the class's own module. Hiding it behind an `.fsti`
   (`val class_C : Type0`, `val class_C__inv : class_C -> model_M -> slprop`) works

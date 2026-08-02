@@ -184,7 +184,8 @@ public static class FrontendPass
         StructDeclarationSyntax Syntax,
         INamedTypeSymbol Symbol,
         ImmutableArray<StructField> Fields,
-        ImmutableArray<string> Usings);
+        ImmutableArray<string> Usings,
+        bool IsSpecOnly);
 
     private static ImmutableArray<StructCandidate> CollectStructs(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
@@ -197,6 +198,14 @@ public static class FrontendPass
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
+
+                // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
+                // it never appears in executable code, and so — unlike R3.4's ordinary
+                // struct — its fields may be spec-only types. That is not a convenience:
+                // R3.9 requires the model of a bounded container to be a product of its
+                // contents and its capacity, and every built-in spec-only type is atomic,
+                // so without this there is no way to write one at all.
+                var specOnly = Declarations.Has(symbol, known.SpecAttribute);
 
                 var loc = Locations.From(syntax.Identifier);
                 var fields = ImmutableArray.CreateBuilder<StructField>();
@@ -218,15 +227,19 @@ public static class FrontendPass
                     if (name is null || type is null) continue;
 
                     var mapped = known.MapType(type);
-                    if (mapped is null || !IsValueField(mapped))
+                    if (mapped is null || !(specOnly ? IsSpecField(mapped) : IsValueField(mapped)))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
                         // predicate discipline this rule exists to avoid.
                         diagnostics.Error("PALCS0511",
                             Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
-                            $"The field `{symbol.Name}.{name}` has type `{type}`, which a struct cannot hold. " +
-                            "A translated struct's fields must be values: scalars, or other translated " +
-                            "structs. Pass an array alongside the struct rather than inside it.");
+                            $"The field `{symbol.Name}.{name}` has type `{type}`, which a " +
+                            (specOnly ? "spec-only struct" : "struct") + " cannot hold. " +
+                            (specOnly
+                                ? "A [Spec] struct is a ghost value, so its fields must be ghost: scalars, " +
+                                  "`SpecInt`, `Seq<T>`, or other structs. It cannot own a resource."
+                                : "A translated struct's fields must be values: scalars, or other translated " +
+                                  "structs. Pass an array alongside the struct rather than inside it."));
                         ok = false;
                         continue;
                     }
@@ -237,7 +250,7 @@ public static class FrontendPass
                 if (symbol.Name.Length == 0) continue;
                 _ = loc;
                 result.Add(new StructCandidate(
-                    syntax, symbol, fields.ToImmutable(), BuildTypeUsings(syntax, symbol)));
+                    syntax, symbol, fields.ToImmutable(), BuildTypeUsings(syntax, symbol), specOnly));
             }
         }
         return result.ToImmutable();
@@ -249,6 +262,13 @@ public static class FrontendPass
 
     /// <summary>R3.4: the field types a struct may hold.</summary>
     private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType;
+
+    /// <summary>
+    /// R3.9a: the field types a <c>[Spec]</c> struct may hold. Wider than R3.4 by exactly
+    /// the spec-only types, and no wider: a ghost value still cannot own a resource, so an
+    /// array or a class reference is refused here as it is there.
+    /// </summary>
+    private static bool IsSpecField(IrType type) => type is IrPrim or IrNamedType or IrSeqType;
 
     /// <summary>
     /// R3.4: a refinement is bound with the struct's fields in scope as simple names,
@@ -311,7 +331,10 @@ public static class FrontendPass
                     .Lower(spec.Expression));
 
         return new IrStruct(
-            Locations.From(s.Syntax.Identifier), s.Symbol.Name, fields, refinements.ToImmutable());
+            Locations.From(s.Syntax.Identifier), s.Symbol.Name, fields, refinements.ToImmutable())
+        {
+            IsSpecOnly = s.IsSpecOnly,
+        };
     }
 
     private static ImmutableArray<string> BuildTypeUsings(
@@ -494,17 +517,18 @@ public static class FrontendPass
                 continue;
             }
 
-            // A class may own an array where a struct may not (R3.7), but owning one
-            // means the invariant carries its `A.pts_to` and every method must thread
-            // its contents. That is specified and not yet built, so it is refused
-            // rather than mistranslated.
-            if (mapped is not (IrPrim or IrNamedType))
+            // R3.7. A class may own an array where a struct may not (PALCS0511): a class
+            // is a heap cell rather than a value, so copying it cannot duplicate
+            // ownership. The invariant then carries the array's `A.pts_to` (R3.10a).
+            // A field of *class* type is a different matter — it would nest one invariant
+            // inside another — and is still refused.
+            if (mapped is not (IrPrim or IrNamedType or IrArrayType))
             {
                 diagnostics.Error("PALCS0531",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
-                    $"The field `{symbol.Name}.{name}` has type `{type}`. A class may own a resource in " +
-                    "principle (doc/translation.md R3.7), but pal-csharp does not carry one through the " +
-                    "object invariant yet. Fields must be scalars or translated structs for now.");
+                    $"The field `{symbol.Name}.{name}` has type `{type}`. A class may own an array " +
+                    "(doc/translation.md R3.10a), but not another object: its invariant would have to " +
+                    "contain the other's, and nothing in the scheme says when that one may be opened.");
                 ok = false;
                 continue;
             }
@@ -621,6 +645,7 @@ public static class FrontendPass
                 case IrConvert cv: Walk(cv.Operand); return;
                 case IrOld o2: Walk(o2.Operand); return;
                 case IrLive lv: Walk(lv.Operand); return;
+                case IrNewArray na: Walk(na.Length); return;
                 case IrContents ct: Walk(ct.Array); return;
                 case IrQuantifier q: Walk(q.Body); return;
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;

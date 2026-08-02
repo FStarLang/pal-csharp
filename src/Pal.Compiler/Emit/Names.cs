@@ -71,6 +71,13 @@ public static class Names
     public static string Observation(string className, string member) =>
         "spec_" + className + "_" + member;
 
+    /// <summary>
+    /// R3.10a. The invariant's existential for the contents of an array field. The field
+    /// itself is the reference; this is what it points to, and it is what every
+    /// specification mentioning the field actually denotes.
+    /// </summary>
+    public static string Contents(string field) => "contents_" + field;
+
     /// <summary>The class-qualified field projection <c>e.Class_C.fld_f</c> (F10).</summary>
     public static string ClassProjection(string className, string field) =>
         ClassModule(className) + "." + Field(field);
