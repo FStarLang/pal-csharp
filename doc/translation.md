@@ -1086,6 +1086,15 @@ Rules are recorded here as they are validated.
   reader and the members declared in reverse order. It produces output **byte-identical**
   to `Counter.cs`'s modulo the names, with no emitter change — the strongest evidence
   available that the class rules are compositional rather than fitted to one example.
+* **R3.13 is enforced** (`PALCS0520`). A call passing one object — or one non-`[Frac]`
+  array — to two owned parameters is refused before it is emitted, with the reason. It is
+  a diagnostic and not a proof step: the translation of the call is unchanged. `Bank.Transfer`
+  in `test/account_class` is the shape it protects, and `test/diagnostics` the misuse.
+* **Conservation across two objects verifies.** `test/account_class` proves
+  `from.Balance + to.Balance` is unchanged by a transfer. Nothing asserts that the two
+  accounts are distinct or that the second call left the first alone; separation supplies
+  both, and the property is statable at all only because each object carries its own model
+  binder (R3.10).
 * **R3.9d is mechanically enforced.** `PALCS0527` refuses an `[Invariant]` clause that
   mentions no field. Such a clause is a fact about the model alone, and F17 shows it is
   unreachable from inside the invariant: it verifies where it is written and fails much
@@ -1101,7 +1110,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — seventeen cases, each
+  `test/diagnostics` is its counterpart to the verification tests — eighteen cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
