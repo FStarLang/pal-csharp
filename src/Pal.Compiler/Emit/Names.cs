@@ -78,6 +78,14 @@ public static class Names
     /// </summary>
     public static string Contents(string field) => "contents_" + field;
 
+    /// <summary>
+    /// R3.10b. The invariant's existential for the model of an object field. Exactly
+    /// parallel to <see cref="Contents"/>: the field itself is the reference, and this is
+    /// what every specification mentioning the field denotes — a sub-object is summarised
+    /// by its model as an array is summarised by its contents.
+    /// </summary>
+    public static string SubModel(string field) => "model_" + field;
+
     /// <summary>The class-qualified field projection <c>e.Class_C.fld_f</c> (F10).</summary>
     public static string ClassProjection(string className, string field) =>
         ClassModule(className) + "." + Field(field);

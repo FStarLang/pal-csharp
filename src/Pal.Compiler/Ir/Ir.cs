@@ -177,6 +177,14 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
     /// </summary>
     public bool MutatesReceiver { get; init; }
 
+    /// <summary>
+    /// Whether <c>Args[0]</c> is a receiver rather than an ordinary argument. R5.12 needs
+    /// the distinction that <see cref="MutatesReceiver"/> alone cannot draw: a *read-only*
+    /// instance call and a static call both leave it false, and only the first is known to
+    /// leave its first argument's model where it was.
+    /// </summary>
+    public bool HasReceiver { get; init; }
+
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
 

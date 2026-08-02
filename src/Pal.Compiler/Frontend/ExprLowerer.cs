@@ -429,6 +429,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         {
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
+            HasReceiver = receiver is not null,
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };
     }

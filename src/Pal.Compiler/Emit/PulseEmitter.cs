@@ -334,6 +334,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// type: the representation, the object-reference type, the refined model type, the
     /// invariant, and each <c>[Spec]</c> observation. Method modules open it.
     /// </summary>
+    /// <summary>R3.10b. The sub-object's invariant, qualified by its own module.</summary>
+    internal static string SubInv(IrType t) =>
+        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInv(((IrClassType)t).Name)}";
+
+    /// <summary>R3.10b. The sub-object's model type, qualified by its own module.</summary>
+    internal static string SubModelType(IrType t) =>
+        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassModel(((IrClassType)t).Name)}";
+
     private EmittedModule EmitClass(IrClass c)
     {
         // R3.7: inside the defining module a field needs no qualifier, and must not have
@@ -346,12 +354,22 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             // the `pure`. Binding the field name to the contents is what makes
             // `items.Length` and `Pal.Contents(items)` mean in a class-level clause exactly
             // what they mean in a method contract about an array parameter (R4.4).
-            var term = f.Type is IrArrayType
-                ? new Term(Names.Contents(f.Name), TermKind.Seq, f.Type)
-                : new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type);
+            //
+            // R3.10b does the same for an object field, and for the same reason: the
+            // reference goes in the sub-invariant, and the *model* is what a clause about
+            // the field can say anything about. `left.Count` in an [Invariant] then means
+            // `spec_D_Count model_left`, which is what it means in a client's contract
+            // about an object parameter — one reading of a member access, everywhere.
+            var term = f.Type switch
+            {
+                IrArrayType => new Term(Names.Contents(f.Name), TermKind.Seq, f.Type),
+                IrClassType => new Term(Names.SubModel(f.Name), TermKind.Math, f.Type),
+                _ => new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type),
+            };
             repScope.Bind(f.Name, term);
         }
         var arrays = c.Fields.Where(f => f.Type is IrArrayType).ToImmutableArray();
+        var objects = c.Fields.Where(f => f.Type is IrClassType).ToImmutableArray();
 
         // R3.9d: the model refinement is stated over the model value, which a [Refine]
         // on the [Model] member names `Result`, as an [Ensures] does.
@@ -422,10 +440,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var existentials = new List<string> { $"(r: {Names.ClassRaw(c.Name)})" };
         existentials.AddRange(arrays.Select(f =>
             $"({Names.Contents(f.Name)}: Seq.seq {Types.Render(((IrArrayType)f.Type).Element)})"));
+        existentials.AddRange(objects.Select(f =>
+            $"({Names.SubModel(f.Name)}: {SubModelType(f.Type)})"));
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
         sb.AppendLine("    B.pts_to this r **");
         foreach (var f in arrays)
             sb.AppendLine($"    A.pts_to r.{Names.Field(f.Name)} {Names.Contents(f.Name)} **");
+        // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
+        // conjunct: the outer invariant does not restate the inner one, it *contains* it,
+        // so an inner class's [Invariant] clauses are proved once, where they were written.
+        foreach (var f in objects)
+            sb.AppendLine($"    {SubInv(f.Type)} r.{Names.Field(f.Name)} {Names.SubModel(f.Name)} **");
         sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
 
         // R3.9c: each [Spec] member is a pure function of the model, never of the

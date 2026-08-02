@@ -72,6 +72,11 @@ public sealed class CodeEmitter(
 
         if (method is { IsConstructor: true, ReturnType: IrClassType built })
         {
+            // R4.2 applies here too, and the prologue has to precede the initialisers: a
+            // constructor's parameter becomes a cell on the same conservative test as any
+            // other method's, and until R3.10b nothing had ever handed one to a call, so
+            // the omission was unreachable rather than absent.
+            foreach (var (cell, source) in plan.Prologue) Line($"let mut {cell} = {source};");
             Construct(method, built);
             return _sb.ToString();
         }
@@ -296,7 +301,7 @@ public sealed class CodeEmitter(
         List<(string Name, string Resource)> fixedNames)
     {
         var klass = (IrClassType)receiver.Type;
-        var (writesRecord, writtenArrays) = ReceiverWrites(body);
+        var (writesRecord, written) = ReceiverWrites(body);
 
         var record = FreshValue("rep");
         var recordResource = $"B.pts_to {receiver.Binder} {record}";
@@ -320,12 +325,26 @@ public sealed class CodeEmitter(
         foreach (var f in decl.Fields)
         {
             var projection = $"{record}.{Names.ClassProjection(klass.Name, f.Name)}";
+            if (f.Type is IrClassType)
+            {
+                // R3.10b. A sub-object is carried by its invariant, at its model, exactly
+                // as an array is carried by its `A.pts_to` at its contents. Inside the
+                // loop it is still *folded*, so the body may call its methods.
+                var sub = FreshValue(Names.SubModel(f.Name));
+                var subResource = $"{PulseEmitter.SubInv(f.Type)} {projection} {sub}";
+                resources.Add(subResource);
+                var settled = !writesRecord && !written.Contains(f.Name);
+                if (settled) fixedNames.Add((sub, subResource));
+                else existentials.Add(sub);
+                BindBoth($"{Names.This}.{f.Name}", new Term(sub, TermKind.Math, f.Type), settled);
+                continue;
+            }
             if (f.Type is IrArrayType)
             {
                 var contents = FreshValue(Names.Contents(f.Name));
                 var resource = $"A.pts_to {projection} {contents}";
                 resources.Add(resource);
-                var stable = !writesRecord && !writtenArrays.Contains(f.Name);
+                var stable = !writesRecord && !written.Contains(f.Name);
                 if (stable)
                 {
                     fixedNames.Add((contents, resource));
@@ -388,10 +407,23 @@ public sealed class CodeEmitter(
             }
 
             foreach (var node in Check.Expressions(stmt).SelectMany(Check.Subexpressions))
-                if (node is IrCall call)
-                    foreach (var arg in call.Args)
-                        if (arg is IrField { Receiver: IrVar { Name: Names.This }, Field: var h })
-                            arrays.Add(h);
+            {
+                if (node is not IrCall call) continue;
+                for (var i = 0; i < call.Args.Length; i++)
+                {
+                    if (call.Args[i] is not IrField { Receiver: IrVar { Name: Names.This }, Field: var h })
+                        continue;
+
+                    // The one case a field survives being handed to a callee: it is the
+                    // receiver of an instance method R4.11 has already found read-only, so
+                    // the callee's own postcondition says its model did not move. Anything
+                    // else — an array passed as data, a mutating method, a static callee —
+                    // is assumed to write it, which is the strict direction and costs only
+                    // an existential.
+                    if (i == 0 && call.HasReceiver && !call.MutatesReceiver) continue;
+                    arrays.Add(h);
+                }
+            }
         }
 
         return (record, arrays);
@@ -495,6 +527,18 @@ public sealed class CodeEmitter(
                 var contents = FreshValue(field.Name);
                 Line($"with {contents}. assert (A.pts_to {projection} {contents});");
                 scope.Bind(field.Name, new Term(contents, TermKind.Seq, field.Type));
+                continue;
+            }
+            if (field.Type is IrClassType)
+            {
+                // R3.10b, and the same device for the same reason. A sub-object's model
+                // may have moved since the `unfold` — that is what calling a method on it
+                // does — so the abstraction reads whatever model the context is now
+                // holding for it, not the one the `unfold` produced.
+                var subModel = FreshValue(Names.SubModel(field.Name));
+                Line($"with {subModel}. assert " +
+                     $"({PulseEmitter.SubInv(field.Type)} {projection} {subModel});");
+                scope.Bind(field.Name, new Term(subModel, TermKind.Math, field.Type));
                 continue;
             }
             scope.Bind(field.Name, new Term(

@@ -510,25 +510,34 @@ public static class FrontendPass
             var mapped = known.MapType(type);
             if (mapped is null)
             {
+                // R3.10b makes this the likely first mistake: a class is translated exactly
+                // when it declares a [Model], so a field of an *unannotated* class type
+                // fails the type map rather than the ownership rule, and the generic
+                // message would send the user looking in the wrong place.
+                var why = type is INamedTypeSymbol { TypeKind: TypeKind.Class }
+                    ? $"`{type}` declares no [Model] member, so it has no model for this class's " +
+                      "invariant to own (doc/translation.md R3.10b). Give it one, or hold something else."
+                    : "which has no translation.";
                 diagnostics.Error("PALCS0500",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
-                    $"The field `{symbol.Name}.{name}` has type `{type}`, which has no translation.");
+                    $"The field `{symbol.Name}.{name}` has type `{type}`: {why}");
                 ok = false;
                 continue;
             }
 
             // R3.7. A class may own an array where a struct may not (PALCS0511): a class
             // is a heap cell rather than a value, so copying it cannot duplicate
-            // ownership. The invariant then carries the array's `A.pts_to` (R3.10a).
-            // A field of *class* type is a different matter — it would nest one invariant
-            // inside another — and is still refused.
-            if (mapped is not (IrPrim or IrNamedType or IrArrayType))
+            // ownership. The invariant then carries the array's `A.pts_to` (R3.10a), and by
+            // R3.10b it carries a sub-object's `class_D__inv` the same way. What is still
+            // refused is a field with no ownership story at all — a `Seq`, a `Ghost`, an
+            // unannotated class — because there is nothing for the invariant to hold.
+            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType))
             {
                 diagnostics.Error("PALCS0531",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
-                    $"The field `{symbol.Name}.{name}` has type `{type}`. A class may own an array " +
-                    "(doc/translation.md R3.10a), but not another object: its invariant would have to " +
-                    "contain the other's, and nothing in the scheme says when that one may be opened.");
+                    $"The field `{symbol.Name}.{name}` has type `{type}`. A class may own a value, " +
+                    "an array (doc/translation.md R3.10a) or another annotated object (R3.10b), but " +
+                    $"`{type}` is none of those, so its invariant has nothing to hold.");
                 ok = false;
                 continue;
             }

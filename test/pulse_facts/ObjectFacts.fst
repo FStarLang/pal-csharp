@@ -314,3 +314,113 @@ fn allocate_in_a_returning_branch (b: bool) (capacity: I32.t { I32.v capacity >=
     0l
   }
 }
+
+/// ---------------------------------------------------------------------------
+/// F20. An object's invariant may CONTAIN another object's, and nesting needs no
+/// new device: the outer invariant existentially quantifies the sub-object's
+/// *model*, exactly as R3.10a quantifies an array's *contents*.
+///
+///     pair__inv this m =
+///       exists* r ml mr.
+///         B.pts_to this r **
+///         counter__inv r.fld_l ml **      <-- the sub-object, folded
+///         counter__inv r.fld_r mr **
+///         pure (<clauses over ml and mr> /\ m == <abstraction> ml mr)
+///
+/// Three consequences, all of them load-bearing, and all of them checked below.
+///
+///  1. Inside the outer object's unfold window the sub-object is still FOLDED, so
+///     calling one of its methods is an ordinary call. The outer window opens the
+///     outer box; it does not open what the box holds. This is what makes the
+///     nesting compositional rather than merely nested -- an inner class's
+///     [Invariant] clauses are proved once, where they were written.
+///
+///  2. The closing `fold` needs the sub-models, and a method the outer object
+///     called may have moved one. So they are named where the fold happens, with
+///     F18's idiom used to read rather than to discard. Reusing the binder the
+///     `unfold` produced would be wrong: it is stale exactly when it matters.
+///
+///  3. A bound on a sub-model has to be a REFINEMENT ON THE MODEL TYPE, which is
+///     F17 again and is not optional here. `ranked_bump_left` below needs
+///     `ml.m_n < 2147483647` to call `counter_bump`. Stating it as a `pure`
+///     conjunct inside `counter__inv` does not reach: at the call site the
+///     sub-invariant is a folded slprop, so its pure part is not in the context.
+///     Removing `counter__model__pred` makes exactly this proof fail, with
+///     `Failed to prove pure property: _ml.m_n < 2147483647`.
+/// ---------------------------------------------------------------------------
+
+noeq type counter__raw = { fld_k: I32.t }
+let counter = B.box counter__raw
+
+noeq type counter__model__raw = { m_n: int }
+/// F20.3. The bound lives here, on the type, or it does not reach a caller.
+let counter__model__pred (m: counter__model__raw) : prop = 0 <= m.m_n /\ m.m_n <= 2147483647
+type counter__model = m: counter__model__raw { counter__model__pred m }
+
+let counter__inv (this: counter) (m: counter__model) : slprop =
+  exists* (r: counter__raw).
+    B.pts_to this r **
+    pure (0 <= I32.v r.fld_k /\ m == { m_n = I32.v r.fld_k })
+
+fn counter_mk (k: I32.t)
+  requires pure (0 <= I32.v k)
+  returns  c: counter
+  ensures  exists* m. counter__inv c m ** pure (m.m_n == I32.v k)
+{
+  let c = B.alloc ({ fld_k = k });
+  fold counter__inv c ({ m_n = I32.v k });
+  c
+}
+
+fn counter_bump (this: counter) (#pre: erased counter__model)
+  requires counter__inv this pre ** pure ((reveal pre).m_n < 2147483647)
+  ensures  exists* post. counter__inv this post ** pure (post.m_n == (reveal pre).m_n + 1)
+{
+  unfold counter__inv this pre;
+  let t0 = B.op_Bang this;
+  B.op_Colon_Equals this ({ fld_k = I32.add t0.fld_k 1l });
+  let t1 = B.op_Bang this;
+  fold counter__inv this ({ m_n = I32.v t1.fld_k });
+}
+
+noeq type ranked__raw = { fld_l: counter; fld_r: counter }
+let ranked = B.box ranked__raw
+noeq type ranked__model = { m_l: int; m_r: int }
+
+/// The conjoined invariant: a fact relating two sub-objects, which neither of them
+/// could state. This is what composition is for.
+let ranked__inv (this: ranked) (m: ranked__model) : slprop =
+  exists* (r: ranked__raw) (ml: counter__model) (mr: counter__model).
+    B.pts_to this r **
+    counter__inv r.fld_l ml **
+    counter__inv r.fld_r mr **
+    pure (ml.m_n <= mr.m_n /\ m == { m_l = ml.m_n; m_r = mr.m_n })
+
+/// F20, construction: two sub-objects are built folded and handed straight to the
+/// composite's fold. Their invariants are consumed, not re-proved.
+fn ranked_mk (lo: I32.t) (hi: I32.t)
+  requires pure (0 <= I32.v lo /\ I32.v lo <= I32.v hi)
+  returns  p: ranked
+  ensures  exists* m. ranked__inv p m ** pure (m.m_l == I32.v lo /\ m.m_r == I32.v hi)
+{
+  let l = counter_mk lo;
+  let r = counter_mk hi;
+  let p = B.alloc ({ fld_l = l; fld_r = r });
+  with ml mr. assert (counter__inv l ml ** counter__inv r mr);
+  fold ranked__inv p ({ m_l = ml.m_n; m_r = mr.m_n });
+  p
+}
+
+/// F20.1 and F20.2 together: an ordinary call on a sub-object inside the outer
+/// window, and a fold that names the sub-models where they are, not where they were.
+fn ranked_bump_left (this: ranked) (#pre: erased ranked__model)
+  requires ranked__inv this pre ** pure ((reveal pre).m_l < (reveal pre).m_r)
+  ensures  exists* post. ranked__inv this post **
+           pure (post.m_l == (reveal pre).m_l + 1 /\ post.m_r == (reveal pre).m_r)
+{
+  unfold ranked__inv this pre;
+  let t0 = B.op_Bang this;
+  counter_bump t0.fld_l;
+  with ml' mr'. assert (counter__inv t0.fld_l ml' ** counter__inv t0.fld_r mr');
+  fold ranked__inv this ({ m_l = ml'.m_n; m_r = mr'.m_n });
+}

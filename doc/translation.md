@@ -70,6 +70,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
 | F18 | F15's affinity is a **permission to discard, not an automatic discard**. A method that allocates an object and does not return it still holds the invariant when it ends: `Error 228: Leftover resources: class_C__inv x _`. Writing the discard needs a name for the model the context holds — an existential witness the emitter never chose — which `with m. assert p;` binds. | `test/pulse_facts/ObjectFacts.fst:allocate_and_discard`, verified; the failure was reproduced by `test/counter_client`'s `FreshIsZero` before R4.14 existed. Relied on by R4.14. |
+| F20 | An object's invariant may **contain** another's, and nesting needs no new device: the outer invariant existentially quantifies the sub-object's *model* exactly as R3.10a quantifies an array's *contents*. Inside the outer `unfold` window the sub-object stays **folded**, so calling its methods is an ordinary call. The closing `fold` must re-name the sub-models where it happens, because a call may have moved one. A bound on a sub-model reaches a call site only as a **refinement on the model type** — F17 again, and not optional: as a `pure` conjunct inside the sub-invariant it is behind a folded slprop and does not reach. | `test/pulse_facts/ObjectFacts.fst:ranked_mk`, `ranked_bump_left`, verified. Relied on by R3.10b. |
 | F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
 | F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 
@@ -437,16 +438,65 @@ Three details are forced.
   first because it is what makes arithmetic on an index into the array provably
   non-overflowing: `top < items.Length` bounds `top + 1` only once `items.Length` is known
   to be bounded.
-* **A field of *class* type remains PALCS0531.** The difference from an array is not effort.
-  An array's resource is a `pts_to`, which has no window of its own; another object's is an
-  abstraction with its own `unfold`/`fold` discipline, so nesting it raises a question the
-  scheme does not answer — when may the outer object open the inner one? Refusing it is
-  the honest outcome until that is written down.
+* **A field of *class* type is R3.10b's business**, and the same shape.
 
 The obligation this creates lands at the `fold` of R4.11a, and needs one extra device
 there. After a method has written into the array, the contents the `unfold` produced are
 stale, and the emitter never named the new ones. `with c. assert (A.pts_to …f c);` binds
 them — the same device R4.14 needs, for the same reason.
+
+**R3.10b (a class owns its objects).** For each field of class type the invariant gains an
+existential for the sub-object's **model** and a conjunct holding the sub-object's own
+invariant:
+
+```fstar
+let class_C__inv (this: class_C) (m: class_C__model) : slprop =
+  exists* (r: class_C__raw) (model_g: Class_D.class_D__model).
+    B.pts_to this r **
+    Class_D.class_D__inv r.fld_g model_g **
+    pure (… /\ m == ⟦abstraction⟧)
+```
+
+This is R3.10a with one word changed. An array field contributes its *contents*; an object
+field contributes its *model*; in both cases the field's **reference** appears only in the
+resource, and the field name denotes the summary everywhere in the `pure`. So
+`low.N` in an `[Invariant]` is `spec_D_N model_low`, which is what `low.N` means in a
+client's contract about an object parameter. One reading of a member access, everywhere.
+
+Four things follow.
+
+* **The outer invariant contains the inner one; it does not restate it.** An inner class's
+  `[Invariant]` clauses are proved once, where they were written. What the outer class adds
+  is what only it can say — a clause relating two sub-objects, such as `low.N <= high.N`.
+  That is what composition is *for*, and it is the reason the sub-model rather than the
+  sub-object is what the invariant quantifies: a fact about two objects has to be a fact
+  about two values.
+* **Inside R4.10's window the sub-object is still folded** (F20). The window opens the
+  outer box; it does not open what the box holds. So `low.Bump()` in a method of `Range` is
+  an ordinary call, needing `Counter`'s precondition and nothing else — and it is *not* a
+  self-call, because the receiver is a different object. The question the old refusal said
+  the scheme could not answer — when may the outer object open the inner one? — turns out
+  not to arise: it never opens it.
+* **How an owner names a whole sub-model** is the existing `[Spec]` mechanism doing an
+  extra job. A `[Spec]` member of `D` returning `D`'s model type makes `low.State` mean
+  `spec_D_State model_low`, so a composite model can hold sub-models rather than
+  re-projecting each scalar. No new annotation was required.
+* **A bound on a sub-model must be a `[Refine]` on the sub-class's `[Model]`.** F17 is not
+  optional here: at a call site the sub-invariant is a folded slprop, so a `pure` conjunct
+  inside it is not in the context, and `low.N <= 2147483647` will not be available to
+  discharge `Bump`'s precondition. The refinement travels with the model type and is
+  therefore always in scope.
+
+The `fold` needs the same extra device R3.10a's arrays need, and for the same reason: a
+method may have called something that moved a sub-model, so the binder the `unfold`
+produced is stale. `with model_g. assert (Class_D.class_D__inv …fld_g model_g);` names
+what the context is actually holding.
+
+What is *still* PALCS0531 is a field whose type is spec-only — a `Seq`, a `Ghost`. Those
+are mathematical values with no runtime representation and no resource, so there is nothing
+for the invariant to hold and nothing for a constructor to allocate. A field of a class
+that declares no `[Model]` is **PALCS0500**, with a message saying so: it fails the type
+map rather than the ownership rule.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
@@ -684,7 +734,26 @@ optimisation, and it is the read-only case that needs it. Under R4.10's existent
 read-only method says only "*some* model holds afterwards"; the caller loses the fact that
 the object is unchanged unless the user writes `[Ensures("@this.X == Old(@this.X)")]` for
 every observation. `preserves` states it once, for all of them. The distinction is decided
-by the existing write-set analysis (Normalize), not by a heuristic.
+by a write-set analysis, not by a heuristic.
+
+*What counts as a write*, precisely, because two of the three were learned the hard way:
+
+1. A **field assignment**. The original rule, and the only obvious one.
+2. A **write into an array the object owns**. `items[i] = v` assigns no field symbol, but
+   R3.10a says the contents *are* part of the model, so a method doing only this moves its
+   model and must not be given `preserves`. The test peels an assignment target down to its
+   root before asking whether it is a field. Handing an owned array to any callee counts
+   too: it may come back written.
+3. A **call to an instance method that is not itself read-only**. This one *follows the
+   call*, and R3.10b is why it must. An owner reads its state by calling its sub-objects'
+   read-only methods, so a rule counting any instance call as a write would classify every
+   such reader as a mutator — and its caller would be handed a result related to a model it
+   knows nothing about. That is not a conservative approximation, it is a useless answer.
+   Recursion terminates by treating a cycle as a write.
+
+Every one of these errs strict when it errs: the permissive direction would tell a caller
+the model did not move when it did, which is unsound, while the strict direction only costs
+the caller an existential — exactly what it would have had without R4.11 at all.
 
 **R4.11a (fold witness).** R4.10's closing `fold` must name the model it re-establishes,
 and the term to name follows from the same write-set split:
@@ -944,6 +1013,7 @@ invariant is unfolded, so what it carries is the **representation**, not the obj
 |---|---|
 | `B.pts_to var_this r` | the record cell R3.6 gave the class |
 | `A.pts_to r.Class_C.fld_f c_f` | each array field `f`, whose contents R3.10a makes part of the model |
+| `Class_D.class_D__inv r.Class_C.fld_g model_g` | each object field `g`, still **folded**, so the body may call its methods (R3.10b, F20) |
 
 Each field is bound in the invariant's scope under the key `this.f`, so that a user writing
 `Pal.Invariant(n <= items.Length)` inside the method means the representation's `n` and the
@@ -959,6 +1029,11 @@ not an optimisation:
 * An **element write** — or handing an owned array to a callee, which may write it —
   unsettles only that array's contents. The record survives, because a record update is
   definitionally equal to the original in every field it does not mention.
+* A **call on a sub-object** unsettles only that sub-object's model, and only if the callee
+  is not read-only. This is the one case in which a field survives being handed to a
+  callee, and it needs a distinction `MutatesReceiver` alone cannot draw — a read-only
+  instance call and a static call both leave it false — so the IR records whether a call's
+  first argument is a receiver at all.
 * Anything the loop leaves alone is **named before the loop** with R5.8b's `with … assert`
   rather than quantified inside it. For the receiver that is essential rather than
   convenient: a read-only method re-folds its invariant at the model it was *handed*
@@ -1226,6 +1301,23 @@ Rules are recorded here as they are validated.
   order, renamed fields, `this.` written out, compound assignment and expression bodies —
   and the output is identical modulo names and declaration order. Wrap-around is
   translated as arithmetic, not recognised as a shape.
+* **An object may own other objects** (R3.10b, `test/nested_class`). The outer invariant
+  quantifies each sub-object's *model* and holds each sub-object's own invariant, which is
+  R3.10a's rule for arrays with one word changed — and, like it, needed no new annotation.
+  `Range` owns two `Counter`s and states `low.N <= high.N`, a fact neither `Counter` could
+  express; that is what composition is for. Inside R4.10's window a sub-object stays
+  **folded**, so `low.Bump()` is an ordinary call and the question the old refusal could
+  not answer — when may the outer object open the inner one? — turns out not to arise, as
+  it never opens it. A client of `Range` names no field at any depth, and separation gives
+  it that advancing one `Range` leaves another alone *through two levels of ownership*.
+  `AdvanceBy` puts a loop over a sub-object, which is R5.12 and R3.10b at once: `low` is
+  written so its model is quantified, `high` is not so its model is named before the loop.
+
+  Two pre-existing defects surfaced. R4.2's prologue was never emitted for a **constructor**
+  — unreachable until a constructor first handed a parameter to a call, which is what
+  `new Counter(from)` does. And R4.11's read-only test counted *any* instance call as a
+  write, which would have made every composite reader a mutator and its result unusable to
+  a caller; it now follows the call, treating a cycle as a write.
 * **A loop inside an instance method works** (R5.12, `test/bag_class`). This was refused
   until the sub-scheme was written, and writing it turned out to need one idea: inside
   R4.10's window a loop carries the *representation*, and which half of it is
@@ -1278,7 +1370,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — twenty-one cases, each
+  `test/diagnostics` is its counterpart to the verification tests — twenty-two cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1345,8 +1437,11 @@ Rules are recorded here as they are validated.
   the state it describes, as in `test/circular_buffer`. A *class* has no such restriction
   (R3.10a), so `test/stack_class` is what `test/circular_buffer` wanted to be.
 * Generics, interfaces, `string`, and `float`/`double` remain unspecified as well as
-  unimplemented. Classes are implemented; what is still missing inside §3.4 is a class
-  field of *class* type (R3.10a, PALCS0531) — the array case is done.
+  unimplemented. §3.4 itself is now complete for the field kinds it admits: a class field
+  may be a value, an array (R3.10a) or another annotated object (R3.10b). What is refused
+  is a spec-only field type (PALCS0531) and a class with no `[Model]` (PALCS0500), and
+  neither is a gap — there is no resource to own in the first case and no model in the
+  second.
 * **Object abstraction is deliberately deferred.** `class_C__inv` is specified as a
   *concrete* definition in the class's own module. Hiding it behind an `.fsti`
   (`val class_C : Type0`, `val class_C__inv : class_C -> model_M -> slprop`) works

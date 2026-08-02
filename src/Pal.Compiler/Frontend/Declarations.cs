@@ -50,22 +50,40 @@ public static class Declarations
     /// body rather than from an annotation.
     /// </summary>
     /// <remarks>
-    /// The test is deliberately syntactic and one level deep: a method is read-only when
-    /// it assigns no field and calls no instance method. Anything deeper would need a
-    /// fixpoint over the call graph, and getting it wrong in the permissive direction is
-    /// unsound — a caller would be told the model did not move when it did. Getting it
-    /// wrong in the strict direction only costs the caller an existential, which is
-    /// exactly what it would have had without R4.11 at all.
+    /// The test is syntactic but it <em>follows calls</em>, because R3.10b made the
+    /// one-level version useless: an owner reads its state by calling its sub-objects'
+    /// read-only methods, so a rule that counted any instance call as a mutation would
+    /// classify every such reader as a mutator, and its caller would be handed a result
+    /// related to a model it knows nothing about. That is not a conservative
+    /// approximation, it is a useless answer.
+    ///
+    /// Recursion is bounded by treating a cycle as mutating. Getting this wrong in the
+    /// permissive direction would be unsound — a caller would be told the model did not
+    /// move when it did — so every case that is not demonstrably read-only is not.
     /// </remarks>
-    public static bool IsReadOnly(IMethodSymbol method, Compilation compilation)
+    public static bool IsReadOnly(IMethodSymbol method, Compilation compilation) =>
+        IsReadOnly(method, compilation, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default));
+
+    private static bool IsReadOnly(
+        IMethodSymbol method, Compilation compilation, HashSet<IMethodSymbol> visiting)
     {
         if (method.MethodKind == MethodKind.Constructor) return false;
 
-        var syntax = method.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
-        if (syntax is null || !compilation.ContainsSyntaxTree(syntax.SyntaxTree)) return false;
-        var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+        // A method already on the stack is one this analysis cannot finish, and an
+        // unfinished answer is a mutating one.
+        if (!visiting.Add(method.OriginalDefinition)) return false;
+        try
+        {
+            var syntax = method.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+            if (syntax is null || !compilation.ContainsSyntaxTree(syntax.SyntaxTree)) return false;
+            var model = compilation.GetSemanticModel(syntax.SyntaxTree);
 
-        return !Mutates(syntax, model);
+            return !Mutates(syntax, model, visiting);
+        }
+        finally
+        {
+            visiting.Remove(method.OriginalDefinition);
+        }
     }
 
     /// <summary>
@@ -74,7 +92,11 @@ public static class Declarations
     /// its model as a scalar field is (R3.10a) — and calling an instance method or handing
     /// an owned array to a callee that might write it.
     /// </summary>
-    public static bool Mutates(SyntaxNode syntax, SemanticModel model)
+    public static bool Mutates(SyntaxNode syntax, SemanticModel model) =>
+        Mutates(syntax, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default));
+
+    private static bool Mutates(
+        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting)
     {
         foreach (var node in syntax.DescendantNodes())
         {
@@ -98,7 +120,8 @@ public static class Declarations
             if (node is InvocationExpressionSyntax call)
             {
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
-                        { IsStatic: false, MethodKind: MethodKind.Ordinary })
+                        { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
+                    !IsReadOnly(callee, model.Compilation, visiting))
                     return true;
 
                 // An owned array handed to a callee may come back written. Assuming it
