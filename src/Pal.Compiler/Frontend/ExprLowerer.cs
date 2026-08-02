@@ -168,14 +168,19 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var fields = ImmutableArray.CreateBuilder<IrFieldInit>();
         foreach (var (field, type) in StructFields(symbol))
         {
+            var declared = known.MapType(type);
             var supplied = given.FirstOrDefault(g => g.Field == field);
-            if (supplied is not null) { fields.Add(supplied); continue; }
+            if (supplied is not null)
+            {
+                fields.Add(supplied with { FieldType = declared });
+                continue;
+            }
             if (Zero(loc, type) is not { } zero)
             {
                 diagnostics.Unsupported(loc, $"The default value of `{name}.{field}`");
                 return new IrLiteral(loc, null);
             }
-            fields.Add(new IrFieldInit(field, zero));
+            fields.Add(new IrFieldInit(field, zero) { FieldType = declared });
         }
 
         foreach (var g in given)

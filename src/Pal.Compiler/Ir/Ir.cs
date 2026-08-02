@@ -146,7 +146,16 @@ public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(
 public sealed record IrObserve(
     IrLoc Loc, string Class, string Member, IrExpr Receiver) : IrExpr(Loc);
 
-public sealed record IrFieldInit(string Field, IrExpr Value);
+public sealed record IrFieldInit(string Field, IrExpr Value)
+{
+    /// <summary>
+    /// The field's <em>declared</em> type. R3.5 lets a field be a spec-only type
+    /// (R3.9a), so an <c>int</c> initialiser may have to cross into the mathematical
+    /// world; §6's rule is that the conversion goes where the target type says so, and
+    /// only the declaration knows that.
+    /// </summary>
+    public IrType? FieldType { get; init; }
+}
 
 /// <summary>
 /// <c>new S { … }</c>, <c>new S()</c> or <c>default(S)</c> (R3.5). Every field of the

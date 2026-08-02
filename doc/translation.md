@@ -1086,6 +1086,13 @@ Rules are recorded here as they are validated.
   reader and the members declared in reverse order. It produces output **byte-identical**
   to `Counter.cs`'s modulo the names, with no emitter change — the strongest evidence
   available that the class rules are compositional rather than fitted to one example.
+* **The transiently broken invariant is exercised.** `test/interval_class`'s `Shift`
+  writes `lo` and then `hi`; between the two the object is a well-formed
+  `class_Interval__raw` whose `lo <= hi` is false. R3.10's choice of a `pure` conjunct over
+  a refinement is what admits it — a refinement would have to hold of that intermediate
+  record, and R3.6 writes a whole record per assignment, so there is no way to write both
+  fields at once and dodge the question. The intermediate state is visible in the output as
+  two `B.op_Colon_Equals` with no `fold` between them.
 * **R3.13 is enforced** (`PALCS0520`). A call passing one object — or one non-`[Frac]`
   array — to two owned parameters is refused before it is emitted, with the reason. It is
   a diagnostic and not a proof step: the translation of the call is unchanged. `Bank.Transfer`
@@ -1110,7 +1117,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — eighteen cases, each
+  `test/diagnostics` is its counterpart to the verification tests — nineteen cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1185,6 +1192,15 @@ Rules are recorded here as they are validated.
   and needs no F\* `friend`, but it requires a module shape the emitter does not have
   today, and C# `private` already hides the representation at the source level. The step is
   available when proof performance or genuine information hiding demands it.
+* **A loop inside an instance method is refused** (`PALCS0001`). R4.10's bracket is open
+  across the whole body, so the loop sits where the invariant does not hold, and R5.8's
+  loop rule would have to carry the *representation* — `B.pts_to this r`, one `A.pts_to`
+  per array field, `r` and the contents existentially quantified — with the user's
+  `Pal.Invariant` clauses read against the fields rather than the model. That is a
+  sub-scheme and it is not written; emitting the folded invariant instead produces Pulse
+  that cannot verify and whose failure points at generated code. The workaround is the one
+  M1 already supports: put the loop in a static method taking the array. This is the
+  largest single gap in §3.4.
 * **Object lifecycle and re-entrancy are unspecified.** A class with two-phase
   initialisation or `Dispose` wants a *state*-indexed invariant, and calling a method on
   `this` while its invariant is unfolded (R4.10) requires either re-establishing the

@@ -168,7 +168,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return new Term(
                     "({ " + string.Join("; ", n.Fields.Select((f, i) =>
                         (i == 0 ? Names.Projection(n.Struct, f.Field) : Names.Field(f.Field))
-                        + " = " + FieldValue(f.Value, scope))) + " })",
+                        + " = " + FieldValue(f.Value, f.FieldType, scope))) + " })",
                     TermKind.Other, n.Type);
 
             case IrQuantifier q:
@@ -381,9 +381,17 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             ? text
             : $"({text})";
 
-    private string FieldValue(IrExpr expr, SpecScope scope) => expr switch
+    /// <summary>
+    /// R3.5. A field initialiser is read at the field's <em>declared</em> type, not at the
+    /// initialiser's own: assigning an <c>int</c> field to a <c>SpecInt</c> one is C#'s
+    /// implicit conversion, and in Pulse it is the `I32.v` that §6 puts on every machine
+    /// integer entering the mathematical world.
+    /// </summary>
+    private string FieldValue(IrExpr expr, IrType? fieldType, SpecScope scope) => expr switch
     {
-        IrLiteral l => Types.Literal(l.Value, expr.Type),
+        IrLiteral l when fieldType is IrPrim { IsSpecNumeric: false } => Types.Literal(l.Value, expr.Type),
+        IrLiteral l when fieldType is null => Types.Literal(l.Value, expr.Type),
+        _ when fieldType is IrPrim { IsSpecNumeric: true } => AsMath(Emit(expr, scope)),
         _ => Emit(expr, scope).Text,
     };
 

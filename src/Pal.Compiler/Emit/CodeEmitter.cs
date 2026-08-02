@@ -80,6 +80,25 @@ public sealed class CodeEmitter(
             ? [self]
             : [];
 
+        // R4.10b. A loop inside the `unfold`/`fold` window is refused, not approximated.
+        // Pulse needs the loop's invariant to name every resource the body touches, and
+        // inside the window those are the *unfolded* ones — `B.pts_to this r` and one
+        // `A.pts_to` per array field, with `r` and the contents existentially quantified —
+        // while the user's `Pal.Invariant` clauses would have to be read against the
+        // representation rather than the model. That is a sub-scheme, and it is not
+        // written. Emitting the folded invariant instead, which is what the loop rule
+        // would do unaided, produces Pulse that cannot verify and whose failure points at
+        // generated code; refusing it here points at the loop.
+        if (_objects.Length > 0 && method.Body is not null && HasLoop(method.Body))
+        {
+            diagnostics.Unsupported(method.Loc,
+                $"A loop inside the instance method `{method.Name}`",
+                "The object's invariant is open across the whole body, so the loop would " +
+                "have to carry the representation rather than the model. Move the loop " +
+                "into a static method taking the array, or out into the caller.");
+            return _sb.ToString();
+        }
+
         // The invariant is abstract to the caller, so the body cannot touch a field until
         // it is unfolded, and the matching `fold` on each exit path re-establishes it.
         foreach (var obj in _objects) Line(Unfold(obj) + ";");
@@ -248,6 +267,14 @@ public sealed class CodeEmitter(
         Line($"fold {Inv(built)} {Names.Result} {ModelWitness(decl, slot)};");
         Line(Names.Result);
     }
+
+    private static bool HasLoop(IrStmt stmt) => stmt switch
+    {
+        IrWhile or IrFor => true,
+        IrBlock b => b.Statements.Any(HasLoop),
+        IrIf i => HasLoop(i.Then) || (i.Else is not null && HasLoop(i.Else)),
+        _ => false,
+    };
 
     private bool IsObjectBinder(string text) =>
         _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text);
