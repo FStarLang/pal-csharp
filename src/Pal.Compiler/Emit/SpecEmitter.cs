@@ -149,6 +149,23 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrSeqOp s:
                 return SeqOp(s, scope);
 
+            // R5.12. Inside R4.10's window the receiver is a representation, and a loop
+            // invariant naming a field means that representation's field. The binding is
+            // put there by the loop emitter, which is the only place that knows the
+            // record's name; here it is an ordinary lookup.
+            case IrField { Receiver: IrVar { Name: Names.This } } tf
+                when scope.TryGet($"{Names.This}.{tf.Field}", out var repField):
+                return repField;
+
+            case IrField { Receiver.Type: IrClassType oc } cf:
+                diagnostics.Unsupported(cf.Loc,
+                    $"The field `{cf.Field}` in this specification",
+                    $"A field of `{oc.Name}` can be named in a loop invariant inside the " +
+                    "class's own instance method, where R4.10 has the representation open. " +
+                    "In a contract, name a `[Spec]` observation instead — a caller holds " +
+                    "the model, not the fields (R3.9c).");
+                return new Term("()", TermKind.Other);
+
             case IrField f:
             {
                 // R3.5. The struct name comes from the receiver's C# type, which is what

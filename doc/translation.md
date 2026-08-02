@@ -735,21 +735,11 @@ one. So an object local may be declared in the method's own block, or in a branc
 returns; in a block that *closes* around it — a statement-position `if`, a loop body — it
 is **PALCS0001**. The message says where to move it.
 
-**R4.15 (a loop inside an instance method is refused).** `PALCS0001`.
-
-R4.10's `unfold`/`fold` bracket is open across the whole body, so a loop in an instance
-method sits where the invariant does not hold. R5.8 would then have to state the loop
-invariant over the *representation* — `B.pts_to var_this r`, one `A.pts_to` per array field,
-`r` and each contents sequence existentially quantified — and the user's `Pal.Invariant`
-clauses would have to read against the fields rather than the model. That is a sub-scheme,
-and it is not written. Two designs are plausible (carry the unfolded state through the
-loop; or re-fold at the loop boundary and unfold once per iteration) and neither has been
-chosen, so §0 rule 3 says refuse: emitting the folded invariant instead produces Pulse that
-cannot verify, and whose failure points at generated code rather than at the source.
-
-The workaround is the one M1 already supports and `test/insertion_sort` already uses: put
-the loop in a static method taking the array. `test/ring_class` shows how little is lost —
-a container's own methods are usually O(1), and it is its *clients* that iterate.
+**R4.15 (statements inside the window).** R4.10's bracket is open across the whole body,
+so every statement in an instance method runs where the object's invariant does *not* hold
+and the receiver is a representation rather than an object. Two rules follow from that, and
+both live in §5 because they are rules about statements: R5.11a for a ghost statement and
+**R5.12** for a loop.
 
 **R4.13 (rejections).** M2 supports `sealed` classes only. `virtual`, `abstract`,
 `override`, and interface implementations are **PALCS0521**: a per-class `class_C__inv`
@@ -901,6 +891,81 @@ Four points are worth stating because each is forced, not chosen:
 **R5.11 (ghost statements).** `Pal.Assert(p)` ⟶ `assert (⟦p⟧)`. A call to a `[Lemma]`
 method ⟶ the corresponding ghost call. `Pal.GhostStmt("…")` ⟶ the string verbatim, after
 antiquotation expansion.
+
+A ghost statement is a proposition about values, and the context holds resources, so the
+values have to be named first. The emitter emits `with v₁ … vₙ. assert (r₁ ** … ** rₙ);`
+over everything the method owns, and binds each `vᵢ` in the scope the proposition is
+elaborated in — F18's idiom, used to *read* rather than to discard.
+
+**R5.11a (a ghost statement inside R4.10's window).** In an instance method the receiver is
+not among those resources: R4.15 says the invariant is unfolded, so `class_C__inv this m`
+is precisely what the context does not hold and asserting it would fail. R5.12's
+representation is named instead — the same `B.pts_to`, the same one `A.pts_to` per array
+field, the same `this.f` scope bindings — which is also what lets the proposition mention a
+field:
+
+```csharp
+Pal.Assert(n <= items.Length);
+```
+⟶
+```
+with vrep vcontents_items. assert (B.pts_to var_this vrep **
+                                   A.pts_to vrep.Class_Bag.fld_items vcontents_items);
+assert (pure ((I32.v vrep.Class_Bag.fld_n) <= (Seq.length vcontents_items)));
+```
+
+**R5.12 (a loop inside R4.10's window).** A loop in an instance method sits where the
+invariant is unfolded, so what it carries is the **representation**, not the object:
+
+| carried | for |
+|---|---|
+| `B.pts_to var_this r` | the record cell R3.6 gave the class |
+| `A.pts_to r.Class_C.fld_f c_f` | each array field `f`, whose contents R3.10a makes part of the model |
+
+Each field is bound in the invariant's scope under the key `this.f`, so that a user writing
+`Pal.Invariant(n <= items.Length)` inside the method means the representation's `n` and the
+representation's contents — the same reading R3.9b gives a class-level `[Invariant]`, and
+for the same reason. A scalar field denotes its projection out of `r`; an array field
+denotes its contents sequence.
+
+*Which halves are existential* is decided by what the body writes, and the distinction is
+not an optimisation:
+
+* A **field assignment** replaces the whole record (R3.6), so it unsettles `r` and, with
+  it, every array reference projected out of `r`.
+* An **element write** — or handing an owned array to a callee, which may write it —
+  unsettles only that array's contents. The record survives, because a record update is
+  definitionally equal to the original in every field it does not mention.
+* Anything the loop leaves alone is **named before the loop** with R5.8b's `with … assert`
+  rather than quantified inside it. For the receiver that is essential rather than
+  convenient: a read-only method re-folds its invariant at the model it was *handed*
+  (R4.11a), and an existentially quantified record could not possibly abstract to it.
+
+Two pure conjuncts are the emitter's, and only two, because both come from C#'s array type
+rather than from anything the user wrote:
+
+* `Seq.length c_f <= 2147483647` — R3.10a's bound, restated because an existential remembers
+  nothing.
+* `Seq.length c_f == Seq.length c⁰_f` where the contents are existential but the record is
+  not — no C# operation changes the length of an array it has been handed, so a loop that
+  writes only elements leaves the length where it was. `c⁰_f` is named before the loop, for
+  the same reason and by the same mechanism as the fixed binders above.
+
+What is **not** carried is the class's own `[Invariant]` clauses. They may be transiently
+false — that is what the window is for — so a loop that needs `n <= items.Length` says so,
+in a `Pal.Invariant` of its own. That is R5.8's rule unchanged: the resources are the
+emitter's, the propositions are the user's.
+
+*Interaction with F3.* A `decreases` measure may name a field only where the loop leaves
+that field alone, because only then does the field have a binder from *before* the loop.
+Where the loop writes it, the binding is simply absent from the measure's scope and naming
+it is refused — which is F3's rule (a measure may not mention the invariant's
+existentials) arriving as a consequence rather than as a special case.
+
+`test/bag_class` is the acceptance test: `Fill` writes elements (contents existential,
+record fixed, length carried) and `Max` writes nothing (everything fixed, so R4.11a's
+`preserves` re-fold goes through). `BagVariant.cs` writes both loops as `for` loops and
+gets, modulo names, the same Pulse.
 
 ---
 
@@ -1138,6 +1203,21 @@ Rules are recorded here as they are validated.
   order, renamed fields, `this.` written out, compound assignment and expression bodies —
   and the output is identical modulo names and declaration order. Wrap-around is
   translated as arithmetic, not recognised as a shape.
+* **A loop inside an instance method works** (R5.12, `test/bag_class`). This was refused
+  until the sub-scheme was written, and writing it turned out to need one idea: inside
+  R4.10's window a loop carries the *representation*, and which half of it is
+  existentially quantified is read off what the body writes — a field assignment unsettles
+  the record, an element write unsettles only that array's contents, and anything the loop
+  leaves alone is named *before* the loop instead. That last part is not an optimisation:
+  `Bag.Max` is read-only, so R4.11a re-folds at the model it was handed, which an
+  existentially quantified record could never satisfy. `Bag.Fill` is the other side — it
+  writes elements, and needs the contents to move while the record does not.
+  Implementing it also found a real unsoundness in R4.11's read-only test: it asked
+  whether the body assigned a *field*, and `items[i] = v` assigns none, so a method that
+  demonstrably moves its model was being given `preserves`. R3.10a says the contents are
+  part of the model, so writing one is a mutation, and the test now peels an assignment
+  target down to its root. `BagVariant.cs` writes both loops as `for` loops and gets,
+  modulo names, the same Pulse.
 * **The transiently broken invariant is exercised.** `test/interval_class`'s `Shift`
   writes `lo` and then `hi`; between the two the object is a well-formed
   `class_Interval__raw` whose `lo <= hi` is false. R3.10's choice of a `pure` conjunct over
@@ -1175,7 +1255,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — twenty-two cases, each
+  `test/diagnostics` is its counterpart to the verification tests — twenty-one cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1255,15 +1335,10 @@ Rules are recorded here as they are validated.
   workaround — allocate in the method's block, or in a branch that returns — is usually
   what the code wanted anyway. `test/ring_class/RingScope.cs` covers what does work,
   including two buffers on two arms of one `if`.
-* **A loop inside an instance method is refused** (R4.15, `PALCS0001`). R4.10's bracket is open
-  across the whole body, so the loop sits where the invariant does not hold, and R5.8's
-  loop rule would have to carry the *representation* — `B.pts_to this r`, one `A.pts_to`
-  per array field, `r` and the contents existentially quantified — with the user's
-  `Pal.Invariant` clauses read against the fields rather than the model. That is a
-  sub-scheme and it is not written; emitting the folded invariant instead produces Pulse
-  that cannot verify and whose failure points at generated code. The workaround is the one
-  M1 already supports: put the loop in a static method taking the array. This is the
-  largest single gap in §3.4.
+* **A field is not yet nameable in a spec position outside a loop or a ghost statement.**
+  R5.11a and R5.12 bind `this.f` where the emitter has just named the representation; a
+  `[Requires]` or `[Ensures]` still reads against the model (R3.9c), which is right, but
+  there is no third context in which a field is in scope. Nothing so far has wanted one.
 * **Object lifecycle and re-entrancy are unspecified.** A class with two-phase
   initialisation or `Dispose` wants a *state*-indexed invariant, and calling a method on
   `this` while its invariant is unfolded (R4.10) requires either re-establishing the

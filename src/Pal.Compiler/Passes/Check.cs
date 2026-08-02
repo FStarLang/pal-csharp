@@ -134,7 +134,7 @@ public static class Check
     {
         if (m.Body is null) return;
 
-        foreach (var call in Walk(m.Body).SelectMany(Expressions).SelectMany(Walk).OfType<IrCall>())
+        foreach (var call in Statements(m.Body).SelectMany(Expressions).SelectMany(Subexpressions).OfType<IrCall>())
         {
             if (!methods.TryGetValue(call.Callee, out var callee)) continue;
 
@@ -228,7 +228,7 @@ public static class Check
             .OfType<IrMethod>().Where(m => !m.IsLemma).Select(m => m.Name)
             .ToImmutableHashSet();
 
-        foreach (var call in Walk(s.Body).OfType<IrCall>())
+        foreach (var call in Subexpressions(s.Body).OfType<IrCall>())
             if (call.Kind == CalleeKind.Method && programMethods.Contains(call.Callee))
                 diagnostics.Error("PALCS0508", call.Loc,
                     $"The `[Spec]` function `{s.Name}` calls the executable method " +
@@ -237,7 +237,7 @@ public static class Check
     }
 
     private static bool MentionsSelf(IrSpecFunction s) =>
-        Walk(s.Body).OfType<IrCall>().Any(c => c.Callee == s.Name);
+        Subexpressions(s.Body).OfType<IrCall>().Any(c => c.Callee == s.Name);
 
     // -----------------------------------------------------------------------
     // Bodies
@@ -245,7 +245,7 @@ public static class Check
 
     private static void CheckBody(IrStmt body, DiagnosticBag diagnostics)
     {
-        foreach (var stmt in Walk(body))
+        foreach (var stmt in Statements(body))
         {
             switch (stmt)
             {
@@ -287,33 +287,39 @@ public static class Check
         _ => null,
     };
 
-    private static IEnumerable<IrStmt> Walk(IrStmt stmt)
+    /// <summary>
+    /// Every statement in a body, outermost first. Shared with the emitter, which needs
+    /// the same traversal to decide what a loop does to its enclosing object (R5.12).
+    /// </summary>
+    internal static IEnumerable<IrStmt> Statements(IrStmt stmt)
     {
         yield return stmt;
         switch (stmt)
         {
             case IrBlock b:
                 foreach (var s in b.Statements)
-                    foreach (var r in Walk(s)) yield return r;
+                    foreach (var r in Statements(s)) yield return r;
                 break;
             case IrIf i:
-                foreach (var r in Walk(i.Then)) yield return r;
+                foreach (var r in Statements(i.Then)) yield return r;
                 if (i.Else is not null)
-                    foreach (var r in Walk(i.Else)) yield return r;
+                    foreach (var r in Statements(i.Else)) yield return r;
                 break;
             case IrWhile w:
-                foreach (var r in Walk(w.Body)) yield return r;
+                foreach (var r in Statements(w.Body)) yield return r;
+                foreach (var step in w.Step)
+                    foreach (var r in Statements(step)) yield return r;
                 break;
             case IrFor f:
                 foreach (var s in f.Init.Concat(f.Step))
-                    foreach (var r in Walk(s)) yield return r;
-                foreach (var r in Walk(f.Body)) yield return r;
+                    foreach (var r in Statements(s)) yield return r;
+                foreach (var r in Statements(f.Body)) yield return r;
                 break;
         }
     }
 
     /// <summary>The expressions a statement holds directly, not counting its substatements.</summary>
-    private static IEnumerable<IrExpr> Expressions(IrStmt stmt) => stmt switch
+    internal static IEnumerable<IrExpr> Expressions(IrStmt stmt) => stmt switch
     {
         IrLocalDecl d => d.Init is null ? [] : [d.Init],
         IrAssign a => [a.Target, a.Value],
@@ -325,7 +331,8 @@ public static class Check
         _ => [],
     };
 
-    private static IEnumerable<IrExpr> Walk(IrExpr expr)
+    /// <summary>Every subexpression of an expression, outermost first.</summary>
+    internal static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
         yield return expr;
         IEnumerable<IrExpr> kids = expr switch
@@ -349,6 +356,6 @@ public static class Check
             _ => [],
         };
         foreach (var kid in kids)
-            foreach (var r in Walk(kid)) yield return r;
+            foreach (var r in Subexpressions(kid)) yield return r;
     }
 }

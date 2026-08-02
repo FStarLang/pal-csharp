@@ -69,8 +69,10 @@ public static class Declarations
     }
 
     /// <summary>
-    /// Whether a body assigns an instance field or calls an instance method — the two ways
-    /// it can move an object's model.
+    /// Whether a body moves an object's model. Three ways: assigning an instance field,
+    /// writing through one — an element of an array the object owns is as much a part of
+    /// its model as a scalar field is (R3.10a) — and calling an instance method or handing
+    /// an owned array to a callee that might write it.
     /// </summary>
     public static bool Mutates(SyntaxNode syntax, SemanticModel model)
     {
@@ -85,16 +87,43 @@ public static class Declarations
                     || p.IsKind(SyntaxKind.PostDecrementExpression) => p.Operand,
                 _ => null,
             };
-            if (target is not null && model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false })
+            // `items[i] = v` assigns no field symbol — the target is an element access —
+            // but R3.10a says the array's contents *are* part of the model, so writing one
+            // moves the model exactly as `n = n + 1` does. Peeling to the root is what
+            // distinguishes it from a write into an unrelated local array.
+            if (target is not null &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
                 return true;
 
-            if (node is InvocationExpressionSyntax call &&
-                model.GetSymbolInfo(call).Symbol is IMethodSymbol
-                    { IsStatic: false, MethodKind: MethodKind.Ordinary })
-                return true;
+            if (node is InvocationExpressionSyntax call)
+            {
+                if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
+                        { IsStatic: false, MethodKind: MethodKind.Ordinary })
+                    return true;
+
+                // An owned array handed to a callee may come back written. Assuming it
+                // does is the strict direction, and the strict direction costs a caller an
+                // existential; the permissive one would be a lie.
+                foreach (var argument in call.ArgumentList.Arguments)
+                    if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
+                        return true;
+            }
         }
         return false;
     }
+
+    /// <summary>
+    /// The expression an assignment or an argument ultimately reaches through: indexing and
+    /// parentheses are peeled away, so that <c>this.items[i]</c> and <c>items[i]</c> both
+    /// arrive at the field <c>items</c>.
+    /// </summary>
+    private static ExpressionSyntax RootOf(ExpressionSyntax expression) => expression switch
+    {
+        ElementAccessExpressionSyntax e => RootOf(e.Expression),
+        ParenthesizedExpressionSyntax p => RootOf(p.Expression),
+        _ => expression,
+    };
 
     /// <summary>
     /// Whether the member carries any annotation that only means something to pal-csharp.

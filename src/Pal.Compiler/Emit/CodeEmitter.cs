@@ -1,3 +1,4 @@
+using Pal.Compiler.Passes;
 using System.Collections.Immutable;
 using System.Text;
 using Pal.Compiler.Diagnostics;
@@ -86,25 +87,6 @@ public sealed class CodeEmitter(
                    self.Kind == SlotKind.Object
             ? [self]
             : [];
-
-        // R4.15. A loop inside the `unfold`/`fold` window is refused, not approximated.
-        // Pulse needs the loop's invariant to name every resource the body touches, and
-        // inside the window those are the *unfolded* ones — `B.pts_to this r` and one
-        // `A.pts_to` per array field, with `r` and the contents existentially quantified —
-        // while the user's `Pal.Invariant` clauses would have to be read against the
-        // representation rather than the model. That is a sub-scheme, and it is not
-        // written. Emitting the folded invariant instead, which is what the loop rule
-        // would do unaided, produces Pulse that cannot verify and whose failure points at
-        // generated code; refusing it here points at the loop.
-        if (_objects.Length > 0 && method.Body is not null && HasLoop(method.Body))
-        {
-            diagnostics.Unsupported(method.Loc,
-                $"A loop inside the instance method `{method.Name}`",
-                "The object's invariant is open across the whole body, so the loop would " +
-                "have to carry the representation rather than the model. Move the loop " +
-                "into a static method taking the array, or out into the caller.");
-            return _sb.ToString();
-        }
 
         // The invariant is abstract to the caller, so the body cannot touch a field until
         // it is unfolded, and the matching `fold` on each exit path re-establishes it.
@@ -275,19 +257,146 @@ public sealed class CodeEmitter(
         Line(Names.Result);
     }
 
-    private static bool HasLoop(IrStmt stmt) => stmt switch
-    {
-        IrWhile or IrFor => true,
-        IrBlock b => b.Statements.Any(HasLoop),
-        IrIf i => HasLoop(i.Then) || (i.Else is not null && HasLoop(i.Else)),
-        _ => false,
-    };
 
     private bool IsObjectBinder(string text) =>
         _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text);
 
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
+
+    /// <summary>
+    /// R5.12. The receiver's resources <em>as R4.10 left them</em>: a <c>Box</c> holding the
+    /// representation record, and one <c>A.pts_to</c> for every array the class owns.
+    ///
+    /// A loop in the unfolded window has to carry exactly these, because they are what its
+    /// body touches. All of them are existential: R3.6 writes a whole record, so the record
+    /// binder changes on any field write, and an element write changes an array's contents.
+    /// The array *references* survive that, because a record update is definitionally equal
+    /// to the original in every field it does not mention.
+    ///
+    /// Each field is bound in the invariant's scope under <c>this.f</c>, so a user writing
+    /// <c>Pal.Invariant("i &lt;= top")</c> inside the method means the representation's
+    /// <c>top</c> — the same reading R3.9b gives a class-level <c>[Invariant]</c>, and for
+    /// the same reason. An array field denotes its contents (R3.10a).
+    ///
+    /// What is <em>not</em> carried is the class's own <c>[Invariant]</c> clauses. They may
+    /// be transiently false — that is what the window is for — so the emitter states only
+    /// what it owns: the resources, and the length bound that comes from C#'s array type
+    /// rather than from anything the user wrote. Every other proposition the loop needs is
+    /// the user's to state, which is R5.8's rule unchanged.
+    /// </summary>
+    private void Representation(
+        Slot receiver,
+        IrStmt body,
+        SpecScope scope,
+        SpecScope measureScope,
+        ImmutableArray<string>.Builder resources,
+        ImmutableArray<string>.Builder existentials,
+        ImmutableArray<string>.Builder pure,
+        List<(string Name, string Resource)> fixedNames)
+    {
+        var klass = (IrClassType)receiver.Type;
+        var (writesRecord, writtenArrays) = ReceiverWrites(body);
+
+        var record = FreshValue("rep");
+        var recordResource = $"B.pts_to {receiver.Binder} {record}";
+        resources.Add(recordResource);
+        if (writesRecord) existentials.Add(record);
+        else fixedNames.Add((record, recordResource));
+
+        // F3. A `decreases` measure may name a field only when the loop leaves it alone,
+        // because then the record has a name from before the loop. A loop that writes a
+        // field quantifies the record existentially, and F3 forbids a measure that mentions
+        // the invariant's existentials — so the binding is simply absent, and naming the
+        // field in a measure is refused where it is written.
+        void BindBoth(string key, Term term, bool stable)
+        {
+            scope.Bind(key, term);
+            if (stable) measureScope.Bind(key, term);
+        }
+
+        if (classes is null || !classes.TryGetValue(klass.Name, out var decl)) return;
+
+        foreach (var f in decl.Fields)
+        {
+            var projection = $"{record}.{Names.ClassProjection(klass.Name, f.Name)}";
+            if (f.Type is IrArrayType)
+            {
+                var contents = FreshValue(Names.Contents(f.Name));
+                var resource = $"A.pts_to {projection} {contents}";
+                resources.Add(resource);
+                var stable = !writesRecord && !writtenArrays.Contains(f.Name);
+                if (stable)
+                {
+                    fixedNames.Add((contents, resource));
+                }
+                else
+                {
+                    existentials.Add(contents);
+
+                    // No C# operation changes the length of an array it has been handed, so
+                    // a loop that only writes *elements* leaves the length where it was. The
+                    // invariant has to say so all the same, because the contents are
+                    // existentially quantified and an existential remembers nothing. Naming
+                    // the length before the loop is what gives it something to be equal to.
+                    // Like the bound below, this conjunct comes from C#'s array type rather
+                    // than from anything the user wrote, which is why the emitter states it.
+                    if (!writesRecord)
+                    {
+                        var entry = FreshValue(Names.Contents(f.Name));
+                        fixedNames.Add((entry, resource.Replace(contents, entry)));
+                        pure.Add($"Seq.length {contents} == Seq.length {entry}");
+                    }
+                }
+                pure.Add($"Seq.length {contents} <= 2147483647");
+                BindBoth($"{Names.This}.{f.Name}", new Term(contents, TermKind.Seq, f.Type), stable);
+            }
+            else
+            {
+                BindBoth($"{Names.This}.{f.Name}",
+                    new Term(projection, MethodPlan.KindOf(f.Type), f.Type), !writesRecord);
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a loop body does to the receiver, which decides which halves of R5.12's
+    /// representation have to be existentially quantified. A field assignment replaces the
+    /// whole record (R3.6), so it unsettles everything; an element write unsettles only
+    /// that array's contents; handing an owned array to a callee is treated as an element
+    /// write, because the callee may write it.
+    /// </summary>
+    private (bool Record, HashSet<string> Arrays) ReceiverWrites(IrStmt body)
+    {
+        var arrays = new HashSet<string>(StringComparer.Ordinal);
+        var record = false;
+
+        foreach (var stmt in Check.Statements(body))
+        {
+            if (stmt is IrAssign a)
+            {
+                switch (a.Target)
+                {
+                    case IrField { Receiver: IrVar { Name: Names.This }, Field: var f }:
+                        record = true;
+                        arrays.Add(f);
+                        break;
+                    case IrElement { Array: IrField { Receiver: IrVar { Name: Names.This }, Field: var g } }:
+                        arrays.Add(g);
+                        break;
+                }
+            }
+
+            foreach (var node in Check.Expressions(stmt).SelectMany(Check.Subexpressions))
+                if (node is IrCall call)
+                    foreach (var arg in call.Args)
+                        if (arg is IrField { Receiver: IrVar { Name: Names.This }, Field: var h })
+                            arrays.Add(h);
+        }
+
+        return (record, arrays);
+    }
+
 
     private static string Unfold(Slot obj) =>
         $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PreModel}";
@@ -696,8 +805,13 @@ public sealed class CodeEmitter(
     /// <summary>R5.6, R5.8, R5.8b, R5.9.</summary>
     private void While(IrWhile w, MethodPlan plan)
     {
+        // R5.12. The unfolded receiver is not among the ordinary live slots: inside R4.10's
+        // window it is a representation, not an object, and its folded invariant is exactly
+        // the thing that does not hold here.
         var live = w.Live.Where(n => _slots.TryGetValue(n, out var s) && s.Owns)
-            .Select(n => _slots[n]).ToImmutableArray();
+            .Select(n => _slots[n])
+            .Where(s => !_objects.Any(o => o.Name == s.Name))
+            .ToImmutableArray();
         var unassigned = w.Unassigned.ToImmutableHashSet();
 
         // Name the values the loop will *not* change, so the invariant can say they are
@@ -717,11 +831,26 @@ public sealed class CodeEmitter(
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
         }
 
-        var toFix = live.Where(s => unassigned.Contains(s.Name)).ToImmutableArray();
-        if (toFix.Length > 0)
+        // R5.12. Everything R4.10 opened has to be carried across the loop.
+        var pure = ImmutableArray.CreateBuilder<string>();
+        var repFixed = new List<(string Name, string Resource)>();
+        var measureScope = DerefScope();
+        foreach (var receiver in _objects)
+            Representation(receiver, w.Body, scope, measureScope, resources, existentials, pure, repFixed);
+
+        // R5.8b, and R5.12 with it: a binder the loop cannot change is *named* before the
+        // loop rather than existentially quantified inside it, so that what comes out is
+        // known to be what went in. For the receiver that is not an optimisation — a
+        // read-only method re-folds its invariant at the model it was handed (R4.11a), and
+        // an existentially quantified representation could not possibly satisfy it.
+        var fixedAll = repFixed
+            .Concat(live.Where(s => unassigned.Contains(s.Name))
+                        .Select(s => (Name: fixedNames[s.Name], Resource: s.Resource(fixedNames[s.Name]))))
+            .ToList();
+        if (fixedAll.Count > 0)
         {
-            Line($"with {string.Join(" ", toFix.Select(s => fixedNames[s.Name]))}. " +
-                 $"assert ({string.Join(" ** ", toFix.Select(s => s.Resource(fixedNames[s.Name])))});");
+            Line($"with {string.Join(" ", fixedAll.Select(f => f.Name))}. " +
+                 $"assert ({string.Join(" ** ", fixedAll.Select(f => f.Resource))});");
         }
 
         // R5.10. Flags are allocated only for the forms the body actually uses, so a
@@ -759,12 +888,13 @@ public sealed class CodeEmitter(
         _indent--;
         Line(")");
 
-        var invariants = w.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))).ToImmutableArray();
-        Line("invariant " + MethodPlan.Clause(resources.ToImmutable(), invariants, existentials.ToImmutable()));
+        pure.AddRange(w.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))));
+        Line("invariant " + MethodPlan.Clause(
+            resources.ToImmutable(), pure.ToImmutable(), existentials.ToImmutable()));
 
         if (w.Decreases is not null)
         {
-            var measure = spec.Math(w.Decreases, DerefScope());
+            var measure = spec.Math(w.Decreases, measureScope);
             // The iteration that breaks need not decrease the user's measure — it exits
             // instead. Adding one while the flag is still clear restores the decrease
             // uniformly, and stays linear: F9 forbids a dereference inside a branch of an
@@ -847,16 +977,36 @@ public sealed class CodeEmitter(
     /// </summary>
     private void Ghost(IrGhostStmt g, MethodPlan plan)
     {
-        var owned = _slots.Values.Where(s => s.Owns).ToImmutableArray();
+        // R5.12, again: inside R4.10's window the receiver is a representation, so its
+        // folded invariant is not what the context holds and asserting it would fail. The
+        // representation is named instead, which is also what lets a ghost statement in an
+        // instance method mention a field.
+        var owned = _slots.Values
+            .Where(s => s.Owns && !_objects.Any(o => o.Name == s.Name))
+            .ToImmutableArray();
         var scope = new SpecScope(plan.PreScope) { Pre = plan.PreScope };
 
-        if (owned.Length > 0)
+        var named = new List<(string Name, string Resource)>();
+        var here = new IrBlock(g.Loc, ImmutableArray<IrStmt>.Empty);
+        foreach (var receiver in _objects)
         {
-            var names = owned.ToDictionary(s => s.Name, s => FreshValue(s.Name));
-            foreach (var slot in owned)
-                scope.Bind(slot.Name, new Term(names[slot.Name], MethodPlan.KindOf(slot.Type), slot.Type));
-            Line($"with {string.Join(" ", owned.Select(s => names[s.Name]))}. " +
-                 $"assert ({string.Join(" ** ", owned.Select(s => s.Resource(names[s.Name])))});");
+            Representation(
+                receiver, here, scope, new SpecScope(),
+                ImmutableArray.CreateBuilder<string>(), ImmutableArray.CreateBuilder<string>(),
+                ImmutableArray.CreateBuilder<string>(), named);
+        }
+
+        foreach (var slot in owned)
+        {
+            var value = FreshValue(slot.Name);
+            named.Add((value, slot.Resource(value)));
+            scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+        }
+
+        if (named.Count > 0)
+        {
+            Line($"with {string.Join(" ", named.Select(n => n.Name))}. " +
+                 $"assert ({string.Join(" ** ", named.Select(n => n.Resource))});");
         }
 
         foreach (var slot in _slots.Values.Where(s => !s.Owns))
