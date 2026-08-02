@@ -224,7 +224,7 @@ public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrEx
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
-public enum SeqOpKind { Length, Index, SetAt, Slice, IsPermutation }
+public enum SeqOpKind { Length, Index, SetAt, Slice, Rotate, IsPermutation }
 
 /// <summary>An operation on ghost sequences.</summary>
 public sealed record IrSeqOp(IrLoc Loc, SeqOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);

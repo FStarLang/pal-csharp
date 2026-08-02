@@ -453,6 +453,8 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 return new IrSeqOp(loc, SeqOpKind.SetAt, [Arg(0), Arg(1), Arg(2)]);
             case nameof(PalLang.Pal.Slice):
                 return new IrSeqOp(loc, SeqOpKind.Slice, [Arg(0), Arg(1), Arg(2)]);
+            case nameof(PalLang.Pal.Rotate):
+                return new IrSeqOp(loc, SeqOpKind.Rotate, [Arg(0), Arg(1)]);
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             case nameof(PalLang.Pal.InlinePulse) when ConstantString(args[0].Expression) is { } text:

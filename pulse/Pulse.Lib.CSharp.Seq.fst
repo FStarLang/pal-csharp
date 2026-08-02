@@ -13,6 +13,7 @@ module Pulse.Lib.CSharp.Seq
 /// algorithm.
 
 module Seq = FStar.Seq
+module Math = FStar.Math.Lemmas
 open FStar.Seq
 
 /// `Pal.IsPermutation(s1, s2)`.
@@ -103,3 +104,75 @@ let upd_same (#a:Type) (s: Seq.seq a) (i: nat { i < Seq.length s })
   : Lemma (Seq.upd s i (Seq.index s i) == s)
           [SMTPat (Seq.upd s i (Seq.index s i))]
   = Seq.lemma_eq_intro (Seq.upd s i (Seq.index s i)) s
+
+// ---------------------------------------------------------------------------
+// Rotation. A ring buffer stores its elements starting at an arbitrary offset
+// and wrapping round, so its abstraction function is "read `s` from `n`,
+// wrapping" -- and that is a fact about sequences, not about ring buffers.
+// Stated here over arbitrary `s` and `n`, with no reference to why anyone would
+// want it.
+// ---------------------------------------------------------------------------
+
+/// `Pal.Rotate(s, n)`.
+let rotate (#a:Type) (s: Seq.seq a) (n: nat) : Seq.seq a =
+  if Seq.length s = 0 then s
+  else
+    let m = n % Seq.length s in
+    Seq.append (Seq.slice s m (Seq.length s)) (Seq.slice s 0 m)
+
+let rotate_length (#a:Type) (s: Seq.seq a) (n: nat)
+  : Lemma (Seq.length (rotate s n) == Seq.length s)
+          [SMTPat (Seq.length (rotate s n))]
+  = ()
+
+/// The characteristic equation, and the only thing a client ever needs: reading
+/// the rotation at `k` is reading the original at `n + k`, modulo the length.
+/// The pattern is on the left-hand side, so it fires exactly where a
+/// specification mentions a rotated element.
+let rotate_index (#a:Type) (s: Seq.seq a) (n: nat) (k: nat { k < Seq.length s })
+  : Lemma (Seq.index (rotate s n) k == Seq.index s ((n + k) % Seq.length s))
+          [SMTPat (Seq.index (rotate s n) k)]
+  = let len = Seq.length s in
+    let m = n % len in
+    let front = Seq.slice s m len in
+    let back = Seq.slice s 0 m in
+    if k < len - m
+    then begin
+      Seq.lemma_index_app1 front back k;
+      Seq.lemma_index_slice s m len k;
+      Math.lemma_mod_plus_distr_l n k len;
+      Math.small_mod (m + k) len
+    end
+    else begin
+      Seq.lemma_index_app2 front back k;
+      Seq.lemma_index_slice s 0 m (k - (len - m));
+      Math.lemma_mod_plus_distr_l n k len;
+      Math.lemma_mod_sub (m + k) len 1
+    end
+
+/// Two offsets less than a period apart have different residues.
+///
+/// This is what makes a moving origin sound: the cells a `count`-long window
+/// covers are distinct as long as the window is shorter than the period, so a
+/// write at one of them leaves the rest alone. The pattern is conjunctive --- it
+/// fires only when both residues are already in play --- and the precondition
+/// travels with it, so the lemma is inert everywhere it does not apply.
+let mod_distinct_within_period (len: pos) (x: nat) (y: nat)
+  : Lemma (requires x <= y /\ y - x < len)
+          (ensures  (x % len == y % len ==> x == y))
+          [SMTPat (x % len); SMTPat (y % len)]
+  = if x % len = y % len
+    then begin
+      Math.lemma_mod_sub_distr y x len;
+      Math.small_mod (y - x) len
+    end
+
+/// Residues one full period apart coincide. The companion to the above: an
+/// origin that has just wrapped names the same cells as one that has not.
+let mod_one_period_apart (len: pos) (x: nat) (y: nat)
+  : Lemma (requires x + len == y \/ y + len == x)
+          (ensures  x % len == y % len)
+          [SMTPat (x % len); SMTPat (y % len)]
+  = if x + len = y
+    then Math.lemma_mod_plus x 1 len
+    else Math.lemma_mod_plus y 1 len

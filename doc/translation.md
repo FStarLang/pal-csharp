@@ -937,6 +937,15 @@ sides of `Old`: under `forall (int k)`, `Old(a[k])` reads the pre-state array at
 same `k` the postcondition speaks of. Emit therefore extends the pre-state scope with
 the binder as well as the current one.
 
+**R6.7a (sequence vocabulary).** `Pal.Slice(s, i, j)` ⟶ `Seq.slice ⟦s⟧ ⟦i⟧ ⟦j⟧`,
+`Pal.SetAt(s, i, v)` ⟶ `Seq.upd`, `Pal.IsPermutation` ⟶ `CS.is_permutation`, and
+`Pal.Rotate(s, n)` ⟶ `CS.rotate ⟦s⟧ ⟦n⟧`, the sequence read from `n` and wrapping. Each is
+a direct name for an `FStar.Seq` or `Pulse.Lib.CSharp.Seq` function; the emitter adds
+nothing. `rotate` is there because it is the abstraction function of any container that
+stores its elements at a moving origin, and because its characteristic equation
+`⟦Rotate(s, n)[k]⟧ == ⟦s[(n + k) % s.Length]⟧` is a fact about sequences that §0 rule 3
+places in the library rather than in the emitter or in one program's annotations.
+
 **R6.8 (projection receivers).** `⟦e.f⟧ = ⟦e⟧′.Struct_S.fld_f`, where `⟦e⟧′` is `⟦e⟧`
 parenthesised unless it is already atomic. This is not cosmetic: `!var_s.M.fld` parses in
 Pulse as `!(var_s.M.fld)`, a dereference of a projection *out of* a reference, which is
@@ -1086,6 +1095,17 @@ Rules are recorded here as they are validated.
   reader and the members declared in reverse order. It produces output **byte-identical**
   to `Counter.cs`'s modulo the names, with no emitter change — the strongest evidence
   available that the class rules are compositional rather than fitted to one example.
+* **`test/circular_buffer` has been done again, properly** (`test/ring_class`). M1's
+  version is a struct beside an array the caller carries, with every specification written
+  against `head`, `count` and raw indices, because a struct can hide nothing. The class
+  version owns the array (R3.10a), and its model is a queue of `Elems` with room for
+  `Capacity` — the wrap-around appears once, in the abstraction function
+  `Slice(Rotate(Contents(buf), head), 0, count)`, and nowhere else. A client proves FIFO
+  order, and proves that filling, draining and refilling a capacity-two buffer is
+  unobservable, without naming a field. The proof needed three general sequence facts —
+  `rotate`'s characteristic equation and two modular ones — and they went into
+  `Pulse.Lib.CSharp.Seq` over arbitrary sequences, which is §0 rule 3 working as designed:
+  every module verified on the first attempt once the library had them.
 * **The transiently broken invariant is exercised.** `test/interval_class`'s `Shift`
   writes `lo` and then `hi`; between the two the object is a well-formed
   `class_Interval__raw` whose `lo <= hi` is false. R3.10's choice of a `pure` conjunct over

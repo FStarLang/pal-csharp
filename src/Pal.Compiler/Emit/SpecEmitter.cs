@@ -324,6 +324,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.Slice => new Term(
             $"(Seq.slice {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)} {Math(s.Args[2], scope)})",
             TermKind.Seq),
+        SeqOpKind.Rotate => new Term(
+            $"(CS.rotate {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)})",
+            TermKind.Seq),
         SeqOpKind.IsPermutation => new Term(
             $"(CS.is_permutation {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})",
             TermKind.Prop),

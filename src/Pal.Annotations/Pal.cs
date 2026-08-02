@@ -118,6 +118,13 @@ public static class Pal
     /// <summary>The ghost subsequence <c>[from, to)</c>.</summary>
     public static Seq<T> Slice<T>(Seq<T> s, int from, int to) => throw Ghost();
 
+    /// <summary>
+    /// The ghost sequence <paramref name="s"/> read starting at <paramref name="offset"/>
+    /// and wrapping round: <c>Rotate(s, n)[k] == s[(n + k) % s.Length]</c>. The abstraction
+    /// function of anything that stores its elements at a moving origin.
+    /// </summary>
+    public static Seq<T> Rotate<T>(Seq<T> s, int offset) => throw Ghost();
+
     // -- Separation-logic propositions -------------------------------------
 
     /// <summary>The points-to resource for a location, Pulse's <c>pts_to</c>.</summary>
