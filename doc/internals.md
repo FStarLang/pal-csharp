@@ -26,8 +26,8 @@ Read `translation.md` §0 first. It is short, and it constrains every decision b
 | Check | `Passes/Check.cs` | whole-IR well-formedness; reports, never rewrites |
 | Emit | `Emit/PulseEmitter.cs` + `MethodPlan`, `CodeEmitter`, `SpecEmitter` | one module per declaration |
 
-Driven by `Pal.Tool/Program.cs`, which is also where the three output artefacts are
-written: the modules, `diagnostics.json`, `source_range_info.json`, and the
+Driven by `Pal.Tool/Program.cs`, which is also where the output artefacts are written: the
+modules, `diagnostics.json`, `source_range_info.json`, `line_map.json`, and the
 `TranslationErrors.fst` sentinel.
 
 The stage boundaries are not cosmetic. Normalize's output is still recognisably the source
@@ -190,6 +190,29 @@ unrelated class never renames an existing module.
 Files are written only when their contents change, which keeps F\*'s checked-file cache
 warm across runs — the single largest factor in test wall-clock time.
 
+Alongside them, four JSON/text artefacts:
+
+| File | Written by | Read by |
+|---|---|---|
+| `diagnostics.json` | every pass, via `DiagnosticBag` | editors, `test/diagnostics` |
+| `source_range_info.json` | Emit (R2.2) | `test/provenance-lint.sh` |
+| `line_map.json` | Emit (R2.3) | `palcs report` |
+| `verification.txt` | `palcs report` | `Pal.Analyzers`, via `AdditionalFiles` |
+
+`line_map.json` is the inverse of `source_range_info.json`: the latter says which C# span a
+*construct* came from, the former which C# location each generated *line* was emitted for.
+`CodeEmitter` keeps its buffer as a list of lines rather than a `StringBuilder` precisely so
+that this survives — the `Capture` helper used to snapshot a character offset, extract text
+and re-append it elsewhere, which no character-level map could have followed. Lines that are
+never joined cannot come apart.
+
+`palcs report` closes the loop. It reads F\*'s `--message_format json` on stdin, maps each
+message's range through `line_map.json` by containment (the last origin at or before the
+line: one C# statement becomes several Pulse ones, and the temporaries in between belong to
+the statement that caused them), and writes `verification.txt`. It reproduces the message
+verbatim — only the location changes — and always exits 0, leaving the verdict to F\*'s own
+exit status, which `set -o pipefail` in `test/verify.mk` preserves through the pipe.
+
 ---
 
 ## 8. The Pulse support library
@@ -286,3 +309,12 @@ In order of likelihood:
 5. A recursive spec function needs unfolding inside a loop invariant; supply a `[Lemma]`.
 
 None of those is fixed in the translator. That is the point.
+
+You do not have to read the generated Pulse to start. `make` runs F\* through
+`palcs report`, so the failure is printed against the C# line it came from, in F\*'s words,
+and the same message appears in the editor next time Roslyn re-analyses the file. When the
+message is about a resource — `Cannot prove: class_C__inv var_s _` — the C# line is usually
+the whole answer: it is a call that asked for an object's invariant when something else
+already held it. `test/pulse_refusals` collects three programs of exactly that kind, each
+pinned to the reason it fails and the line it fails on, so the round-trip is tested rather
+than asserted.

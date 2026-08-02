@@ -11,6 +11,16 @@ namespace Pal.Compiler.Emit;
 /// </summary>
 public sealed record Provenance(string Construct, IrLoc Loc);
 
+/// <summary>One line of a generated module, and the C# it was emitted for.</summary>
+public readonly record struct EmittedLine(string Text, IrLoc? Loc);
+
+/// <summary>
+/// A one-based line of a generated module, and the C# it came from. This is the map an
+/// F* error is read through: F* reports a range in a `.fst` nobody wrote, and the only
+/// thing that knows what that line was *for* is the emitter that produced it.
+/// </summary>
+public sealed record LineOrigin(int Line, IrLoc Source);
+
 /// <summary>A generated Pulse module.</summary>
 public sealed record EmittedModule(string Name, string Text)
 {
@@ -23,6 +33,14 @@ public sealed record EmittedModule(string Name, string Text)
     /// numbered rule in doc/translation.md.
     /// </summary>
     public ImmutableArray<Provenance> Origin { get; init; } = ImmutableArray<Provenance>.Empty;
+
+    /// <summary>
+    /// Where in this module each piece of C# ended up, ascending by line. Coarse by
+    /// design: a statement, a clause of a contract, a declaration. Finer would be a
+    /// promise the emitter cannot keep, because one C# statement routinely becomes
+    /// several Pulse ones and the interesting failures are about the ones in between.
+    /// </summary>
+    public ImmutableArray<LineOrigin> Origins { get; init; } = ImmutableArray<LineOrigin>.Empty;
 }
 
 /// <summary>
@@ -497,13 +515,24 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
 
+        var origins = ImmutableArray.CreateBuilder<LineOrigin>();
+
+        origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.Append("fn ").Append(Names.Function(method.Name));
         foreach (var b in plan.Binders) sb.Append(' ').Append(b);
         sb.AppendLine();
+
+        // The contract lines get their own origins, and they are the ones that pay: an
+        // unproved postcondition is reported by F* against the `ensures` of the generated
+        // `fn`, which is a line the user did not write. Pointing it at the `[Ensures]`
+        // they did write is the whole difference between a usable message and a puzzle.
+        origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Requires) ?? method.Loc));
         sb.AppendLine($"  requires {plan.Requires}");
         if (method.ReturnType is not IrPrim { Kind: PrimKind.Void })
             sb.AppendLine($"  returns  {Names.Result}: {Types.Render(method.ReturnType)}");
+        origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Ensures) ?? method.Loc));
         sb.AppendLine($"  ensures  {plan.Ensures}");
+        origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.AppendLine("{");
 
         if (method.Admit)
@@ -512,18 +541,45 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
         else if (method.PulseBody is { } raw)
         {
+            // Raw Pulse is the user's own text, so every line of it is theirs. There is
+            // no finer answer available: the block is opaque to the translator by
+            // construction (R4.8).
             foreach (var line in Antiquotation.Expand(raw, plan.PreScope).Split('\n'))
+            {
+                origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
                 sb.AppendLine("  " + line.TrimEnd());
+            }
         }
         else if (method.Body is not null)
         {
+            var offset = Lines(sb);
             sb.Append(body.EmitBody(method, plan));
+            foreach (var o in body.Origins())
+                origins.Add(o with { Line = o.Line + offset });
         }
 
         sb.AppendLine("}");
 
-        return new EmittedModule(Names.FunctionModule(method.Name), sb.ToString());
+        return new EmittedModule(Names.FunctionModule(method.Name), sb.ToString())
+        {
+            Origins = origins.ToImmutable(),
+        };
     }
+
+    /// <summary>
+    /// How many complete lines the module text holds so far, so that the next
+    /// <c>AppendLine</c> can be numbered before it is written.
+    /// </summary>
+    private static int Lines(StringBuilder sb)
+    {
+        var n = 0;
+        for (var i = 0; i < sb.Length; i++) if (sb[i] == '\n') n++;
+        return n;
+    }
+
+    /// <summary>The span of a contract, which is the first clause the user wrote of it.</summary>
+    private static IrLoc? Clause(ImmutableArray<IrExpr> clauses) =>
+        clauses.IsDefaultOrEmpty ? null : clauses[0].Loc;
 
     /// <summary>
     /// Modules this declaration's translation must <c>open</c>: one per <c>[Spec]</c>

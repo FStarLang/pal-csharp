@@ -74,7 +74,13 @@ public sealed class PalAnalyzer : DiagnosticAnalyzer
         {
             var analysis = new Lazy<ImmutableArray<PalDiagnostic>>(
                 () => Run(start.Compilation), isThreadSafe: true);
-            start.RegisterSemanticModelAction(model => Report(model, analysis.Value));
+            var verification = new Lazy<ImmutableArray<VerificationDiagnostic>>(
+                () => Verification(start.Options), isThreadSafe: true);
+            start.RegisterSemanticModelAction(model =>
+            {
+                Report(model, analysis.Value);
+                ReportVerification(model, verification.Value);
+            });
         });
     }
 
@@ -87,6 +93,51 @@ public sealed class PalAnalyzer : DiagnosticAnalyzer
             if (!Descriptors.TryGetValue(d.Id, out var descriptor)) continue;
             context.ReportDiagnostic(Diagnostic.Create(descriptor, Span(tree, d.Location), d.Message));
         }
+    }
+
+    /// <summary>
+    /// What Pulse said last time it was asked. Absent until something runs the proof,
+    /// which is the honest state of affairs and not an error: a project that has never
+    /// been verified has no verification results, and inventing some would be worse.
+    /// </summary>
+    private static ImmutableArray<VerificationDiagnostic> Verification(AnalyzerOptions options)
+    {
+        var found = ImmutableArray.CreateBuilder<VerificationDiagnostic>();
+        foreach (var file in options.AdditionalFiles)
+        {
+            if (!file.Path.EndsWith(VerificationDiagnostic.FileName, StringComparison.Ordinal)) continue;
+            if (file.GetText() is not { } text) continue;
+            found.AddRange(VerificationDiagnostic.Read(text.ToString()));
+        }
+        return found.ToImmutable();
+    }
+
+    private static void ReportVerification(
+        SemanticModelAnalysisContext context, ImmutableArray<VerificationDiagnostic> found)
+    {
+        if (found.IsEmpty) return;
+        var tree = context.SemanticModel.SyntaxTree;
+        foreach (var d in found)
+        {
+            // `palcs` records the path it was given, which is whatever the *build* called
+            // the file; the IDE knows it by an absolute path. Comparing the tails is what
+            // makes the two agree without either having to know about the other.
+            if (!SameFile(d.File, tree.FilePath)) continue;
+            if (!Descriptors.TryGetValue(d.Id, out var descriptor)) continue;
+            context.ReportDiagnostic(Diagnostic.Create(
+                descriptor,
+                Span(tree, new IrLoc(d.File, d.Line, d.Column, d.EndLine, d.EndColumn)),
+                d.Message));
+        }
+    }
+
+    private static bool SameFile(string reported, string open)
+    {
+        if (string.Equals(reported, open, StringComparison.Ordinal)) return true;
+        var name = reported.Replace('\\', '/');
+        var path = open.Replace('\\', '/');
+        var cut = path.Length - name.Length;
+        return cut > 0 && path[cut - 1] == '/' && path.EndsWith(name, StringComparison.Ordinal);
     }
 
     private static ImmutableArray<PalDiagnostic> Run(Compilation compilation)

@@ -66,8 +66,9 @@ public static class Bank
     /// only be proved because the second call cannot have disturbed the first object.
     /// Neither fact is asserted anywhere — separation supplies both.
     ///
-    /// <c>Transfer(a, a, 1)</c> is <b>PALCS0520</b>. It is not unsound, it is unprovable
-    /// (R3.13): the call asks for one account's invariant twice.
+    /// <c>Transfer(a, a, 1)</c> translates, and Pulse then refuses it: the call asks for
+    /// one account's invariant twice (R3.13). It is not unsound, it is unprovable, and
+    /// saying which is the prover's job. <c>test/pulse_refusals</c> holds that case.
     /// </summary>
     [Requires("0 <= amount")]
     [Requires("amount <= @from.Balance")]

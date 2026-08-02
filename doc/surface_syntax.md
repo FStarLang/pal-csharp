@@ -339,9 +339,12 @@ model.** Had `Capacity` been left out of `StackModel`, `Push`'s
 verify and be useless. You find this out at the declaration, not at a call site.
 
 **An object is owned, so two parameters are two different objects.** `Merge(Stack a, Stack
-b)` may not be called as `Merge(s, s)`; that is reported as `PALCS0520`. Ownership also
-means a live object is never `null`, so no method needs a null check to satisfy the
-translator.
+b)` may not be called as `Merge(s, s)`. That is not a compiler error — it translates
+perfectly well — it is an unprovable one, and Pulse reports it as `Cannot prove:
+class_Stack__inv var_s _` on the calling line. pal-csharp refuses what it cannot translate;
+what cannot be *proved* is the prover's to say, and keeping that boundary sharp is why the
+frontend is small. Ownership also means a live object is never `null`, so no method needs
+a null check to satisfy the translator.
 
 **M2 is `sealed` classes only.** `virtual`, `abstract`, `override` and interface
 implementations are rejected (`PALCS0521`), because a per-class invariant cannot express

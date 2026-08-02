@@ -22,7 +22,20 @@ public sealed class CodeEmitter(
     DiagnosticBag diagnostics,
     IReadOnlyDictionary<string, IrClass>? classes = null)
 {
-    private readonly StringBuilder _sb = new();
+    /// <summary>
+    /// The output, one line at a time, each remembering the C# it came from.
+    ///
+    /// A list of lines rather than a <c>StringBuilder</c> because <see cref="Capture"/>
+    /// emits into this buffer, takes the text back out and re-appends it somewhere else,
+    /// and doing that to a character buffer means splitting text back into lines to move
+    /// it — which is exactly the operation that would silently misalign a position map.
+    /// Lines that are never joined cannot come apart.
+    /// </summary>
+    private readonly List<EmittedLine> _lines = [];
+
+    /// <summary>The C# a line is currently being emitted for; see <see cref="Statement"/>.</summary>
+    private IrLoc? _loc;
+
     private readonly Dictionary<string, Slot> _slots = [];
     private int _indent = 1;
     private int _temp;
@@ -64,7 +77,27 @@ public sealed class CodeEmitter(
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
-    private void Line(string text) => _sb.Append(new string(' ', _indent * 2)).Append(text).Append('\n');
+    private void Line(string text) =>
+        _lines.Add(new EmittedLine(new string(' ', _indent * 2) + text + "\n", _loc));
+
+    private string Text() => string.Concat(_lines.Select(l => l.Text));
+
+    /// <summary>
+    /// What line of the emitted body each C# construct produced, for mapping an F* error
+    /// back to the source. Line numbers are one-based and relative to the body, which is
+    /// all this class knows; <c>PulseEmitter</c> shifts them by where the body was placed.
+    /// </summary>
+    public ImmutableArray<LineOrigin> Origins()
+    {
+        var origins = ImmutableArray.CreateBuilder<LineOrigin>();
+        var line = 1;
+        foreach (var emitted in _lines)
+        {
+            if (emitted.Loc is { } loc) origins.Add(new LineOrigin(line, loc));
+            line += emitted.Text.Count(c => c == '\n');
+        }
+        return origins.ToImmutable();
+    }
 
     public string EmitBody(IrMethod method, MethodPlan plan)
     {
@@ -78,7 +111,7 @@ public sealed class CodeEmitter(
             // the omission was unreachable rather than absent.
             foreach (var (cell, source) in plan.Prologue) Line($"let mut {cell} = {source};");
             Construct(method, built);
-            return _sb.ToString();
+            return Text();
         }
 
         // R4.10. Only the *receiver* of the class's own methods is opened. An object that
@@ -102,7 +135,7 @@ public sealed class CodeEmitter(
 
         var statements = method.Body is IrBlock b ? b.Statements : [method.Body!];
         EmitSequence(statements, method, plan);
-        return _sb.ToString();
+        return Text();
     }
 
     /// <summary>
@@ -141,6 +174,13 @@ public sealed class CodeEmitter(
     /// closes with <c>()</c>, which is well typed exactly when the method returns void.
     /// </summary>
     private void Tail(IrStmt stmt, IrMethod method, MethodPlan plan)
+    {
+        var outer = _loc;
+        _loc = stmt.Loc;
+        try { TailCore(stmt, method, plan); } finally { _loc = outer; }
+    }
+
+    private void TailCore(IrStmt stmt, IrMethod method, MethodPlan plan)
     {
         switch (stmt)
         {
@@ -556,6 +596,17 @@ public sealed class CodeEmitter(
 
     private void Statement(IrStmt stmt, MethodPlan plan)
     {
+        // Every line emitted from here down belongs to this statement, unless a nested
+        // statement claims it first. Saving and restoring rather than just assigning is
+        // what keeps a block's closing lines attributed to the block and not to whatever
+        // it happened to contain last.
+        var outer = _loc;
+        _loc = stmt.Loc;
+        try { StatementCore(stmt, plan); } finally { _loc = outer; }
+    }
+
+    private void StatementCore(IrStmt stmt, MethodPlan plan)
+    {
         switch (stmt)
         {
             // R3.8. An object local binds a reference. C# can rebind it, but nothing in
@@ -916,7 +967,7 @@ public sealed class CodeEmitter(
         var guard = Capture(() => Expr(w.Cond));
         Line("while (");
         _indent++;
-        foreach (var line in guard.Lines) _sb.Append(line);
+        _lines.AddRange(guard.Lines);
         if (brkCell is null)
         {
             Line(guard.Term);
@@ -1295,7 +1346,7 @@ public sealed class CodeEmitter(
     // Capturing sub-blocks
     // =======================================================================
 
-    private readonly record struct Captured(ImmutableArray<string> Lines, string Term);
+    private readonly record struct Captured(ImmutableArray<EmittedLine> Lines, string Term);
 
     /// <summary>
     /// Emits into a scratch buffer, so that a sub-block's let-bindings can be placed
@@ -1304,13 +1355,11 @@ public sealed class CodeEmitter(
     /// </summary>
     private Captured Capture(Func<string> emit)
     {
-        var saved = _sb.Length;
+        var saved = _lines.Count;
         var term = emit();
-        var text = _sb.ToString(saved, _sb.Length - saved);
-        _sb.Length = saved;
-        return new Captured(
-            text.Length == 0 ? [] : [.. text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l + "\n")],
-            term);
+        var captured = _lines.GetRange(saved, _lines.Count - saved);
+        _lines.RemoveRange(saved, _lines.Count - saved);
+        return new Captured([.. captured], term);
     }
 
     /// <summary>
@@ -1325,12 +1374,12 @@ public sealed class CodeEmitter(
         var t = Fresh();
         Line($"let {t} = if ({cond}) {{");
         _indent++;
-        foreach (var line in whenTrue.Lines) _sb.Append(line);
+        _lines.AddRange(whenTrue.Lines);
         Line(whenTrue.Term);
         _indent--;
         Line("} else {");
         _indent++;
-        foreach (var line in whenFalse.Lines) _sb.Append(line);
+        _lines.AddRange(whenFalse.Lines);
         Line(whenFalse.Term);
         _indent--;
         Line("};");

@@ -36,6 +36,17 @@ comes from exactly two places:
 
 A special case in the emitter is never a legitimate fix.
 
+The rule reads in both directions, and the second one is easier to forget: **the frontend
+never invents a refusal.** pal-csharp refuses what it cannot *translate* — a construct with
+no image in Pulse, a measure it would have to guess, a field with no ownership story. What
+cannot be *proved* is the prover's to say. A check that inspects a program and predicts the
+proof will fail is doing separation logic in a pass that does not have it, and will
+therefore be a silhouette of the rule rather than the rule: it fires on the shapes it was
+written for and misses the rest. It also costs more than it looks, because a refusal hides
+everything behind it — a program refused in the frontend is never emitted, so nothing else
+wrong with it is ever discovered. R3.13 is the worked example; `test/pulse_refusals` is
+where programs that translate faithfully and fail honestly are kept.
+
 **Rule 4 — No example is nameable from inside the compiler.** `Pal.Compiler` contains no
 identifier drawn from the test suite. Enforced by `test/no-example-names.sh`.
 
@@ -130,6 +141,45 @@ justified as a numbered rule in this document rather than as a response to one e
 An emitter that *forgets* to record a construct therefore fails exactly as loudly as one
 that invents it. The lint runs in `make -C test` and in CI, alongside
 `test/no-example-names.sh`; together they are §7.2's two mechanical detectors.
+
+**R2.3 (reading the verifier's answer back).** R2.2 answers "what does this construct come
+from". The other direction — "what is this *line* about" — is what turns an F* error into
+something a C# programmer can act on, and it is the reason the frontend does not need to
+pre-empt the prover.
+
+The emitter records, for each line of each generated module, the `IrLoc` it was emitting
+for, written to `line_map.json` as `{file, fallback, lines: [{line, source}]}`. A statement,
+a clause of a contract and a declaration each claim a line; the temporaries, folds and
+discards between them claim none, and are read as belonging to the last construct that
+started at or before them. `palcs report` consumes F*'s `--message_format json` on stdin,
+maps each message through that, and writes `verification.txt` — a flat tab-separated file,
+not JSON, because it is read inside a Roslyn analyzer where a dependency that fails to load
+is a silently missing feature rather than an exception.
+
+Three properties are deliberate:
+
+* **The message is F*'s, verbatim.** Only the location changes. A tool that rewrote a
+  prover's explanation into something friendlier would be paraphrasing a proof it did not
+  perform, and the first time the paraphrase was wrong there would be no way to tell.
+* **The reporter passes judgement on nothing.** It exits zero whatever it read; `pipefail`
+  in `test/verify.mk` is what keeps a failed proof a failed build. A filter that could also
+  fail the build would make a passing build depend on it having understood the output. For
+  the same reason it never consumes what it did not recognise: F*'s prose ("Verified
+  module: M") goes through untouched, and a message it could not place is printed at the
+  location F* gave it. A filter standing in a build's only output stream may relocate, but
+  it may not silence.
+* **A warning that maps only to the module's fallback is dropped.** F* warns about its own
+  caches and options against ranges in files nobody wrote; claiming those are about a
+  particular class would be an invention. An *error* is reported wherever it lands, because
+  an error the user cannot see is worse than one in roughly the right place.
+
+The line map is a separate file from `source_range_info.json` rather than a field in it:
+they answer different questions, one is read by the provenance lint and the other by the
+reporter, and a single file answering both is one neither reader can skim.
+
+For how this reaches an editor, see §8: the analyzer reads `verification.txt` through
+Roslyn's `AdditionalFiles`, which is change-tracked, so re-running `make` updates the
+squiggles and nothing has to invalidate a cache by hand.
 
 ---
 
@@ -520,8 +570,7 @@ resource its own postcondition also returns, and Pulse reports `Cannot prove:
 class_Cell__inv var_x pre_x`. That is the same disposition as a self-call: the translation
 is faithful, the program is wrong, and the prover is the one to say it. Sub-objects are
 therefore built by the constructor that owns them, which is also why no owner can alias
-two of its fields. Aliasing at a *call* is a different matter and stays PALCS0520, whose
-message a reader of `Merge(s, s)` can act on.
+two of its fields. Aliasing at a *call* is the same disposition again — see R3.13.
 
 What is *still* PALCS0531 is a field whose type is spec-only — a `Seq`, a `Ghost`. Those
 are mathematical values with no runtime representation and no resource, so there is nothing
@@ -551,13 +600,38 @@ being garbage collected is thus a genuine simplification over PAL's C, not merel
 different set of obligations.
 
 **R3.13 (aliasing).** An object resource is linear, so two owned parameters are necessarily
-distinct objects. Aliasing is therefore not unsound — it is *unprovable*.
+distinct objects. Aliasing is therefore not unsound — it is *unprovable*, and Pulse is what
+says so: `Merge(s, s)` gets `Cannot prove: class_C__inv var_s _`.
 
-That is the correct outcome, but F* reports it as a bare `Cannot prove: class_C__inv a _`,
-which means nothing to a C# programmer who has just written `Merge(s, s)`. The emitter must
-therefore detect a call passing syntactically equal object arguments to two owned
-parameters and reject it as **PALCS0520** with an explanatory message. This is a
-diagnostic, not a proof step, so it does not violate §0 rule 3.
+This rule used to say the opposite. The emitter detected a call passing syntactically equal
+object arguments to two owned parameters and refused it as `PALCS0520`, on the reasoning
+that F*'s message means nothing to someone who has just written `Merge(s, s)` and that a
+diagnostic is not a proof step, so §0 rule 3 was untouched. The reasoning was wrong in two
+ways, and both are worth keeping written down.
+
+*It put a rule about separation logic in a pass that does not do separation logic.* The
+check could see `f(a, a)` and nothing else. It could not see `f(a, a.Inner)`, or an alias
+established three statements earlier, or two paths to one object through a field — all of
+which are the same mistake and none of which it caught. So it was never the rule; it was a
+syntactic silhouette of the rule, and the difference between those is exactly where a
+frontend starts lying. §0 rule 3 says the emitter never invents a proof step. The same
+rule points the other way too: **the checker never invents a refusal.** What pal-csharp
+refuses is what it cannot *translate*. What Pulse refuses is what cannot be *proved*, and
+that boundary is the only reason the frontend is small enough to trust.
+
+*And a refusal hides everything behind it.* `test/diagnostics/cases/AliasedObjects.cs`
+carried a second bug for as long as it existed — its `Transfer` required a bound on `from`
+while depositing into `to`, so the method did not verify on its own account. Nobody found
+out, because the file was refused before it was ever emitted. A frontend that answers
+questions the verifier should answer does not merely answer them worse; it stops the
+verifier from being asked.
+
+What remains true is the original complaint: `Cannot prove: class_C__inv var_s _` is a poor
+thing to show a C# programmer. That is a problem about *where the message appears*, not
+about who should produce it, and R2.3 is how it is solved — the message is F*'s, reported
+on the C# line that caused it. The case now lives in `test/pulse_refusals`, which checks
+all three things at once: that the translation is clean, that Pulse refuses it for the
+stated reason, and that the refusal lands on the line the reader is looking at.
 
 ---
 
@@ -1382,10 +1456,11 @@ Rules are recorded here as they are validated.
   "write `@this`", and "a contract may name only what a client could name". Every other
   binding error is still passed through verbatim, because Roslyn words it better than we
   would.
-* **R3.13 is enforced** (`PALCS0520`). A call passing one object — or one non-`[Frac]`
-  array — to two owned parameters is refused before it is emitted, with the reason. It is
-  a diagnostic and not a proof step: the translation of the call is unchanged. `Bank.Transfer`
-  in `test/account_class` is the shape it protects, and `test/diagnostics` the misuse.
+* **R3.13 is Pulse's** (no diagnostic). A call passing one object — or one non-`[Frac]`
+  array — to two owned parameters is translated faithfully and refused by the prover, which
+  is the only thing that can tell an alias from a coincidence. `Bank.Transfer` in
+  `test/account_class` is the shape it protects; `test/pulse_refusals` is the misuse, and
+  checks that the refusal arrives on the calling line.
 * **Conservation across two objects verifies.** `test/account_class` proves
   `from.Balance + to.Balance` is unchanged by a transfer. Nothing asserts that the two
   accounts are distinct or that the second call left the first alone; separation supplies
@@ -1493,6 +1568,16 @@ Rules are recorded here as they are validated.
   reason `palcs` does it, that reporting a binding error a second time in worse terms
   helps nobody.
 
+  What Pulse said arrives rather than being computed. An analyzer cannot run a prover — it
+  is asked to answer between keystrokes — but it can read the last answer, and Roslyn has
+  a sanctioned way to depend on a file: `AdditionalFiles`, which it tracks for changes and
+  re-runs analysis over. So `palcs report` writes `verification.txt` when the proof runs
+  (R2.3), `test/pal-tests.props` lists it, and the analyzer reports each message at the
+  C# span it was mapped to, as `PALCS0600`. Run `make`, watch the squiggles change. The
+  alternative — an analyzer opening the file itself — reads something Roslyn does not know
+  it depends on, so the result gets cached against a key that does not include it and the
+  squiggles go quietly stale, which is the one failure mode worse than having none.
+
   Two things had to be arranged, and neither is a translation concern. A Roslyn analyzer
   is loaded into whatever process is compiling, which may be .NET Framework, so it must be
   `netstandard2.0`; `Pal.Compiler` was `net10.0` for no better reason than that it was the
@@ -1523,6 +1608,27 @@ Rules are recorded here as they are validated.
   `fst-configs.sh --check`, and for the same reason: an editor that disagrees with the
   build about what a directory contains is worse than an editor that knows nothing about
   it.
+
+* **A refusal that was in the wrong place is gone** (`test/pulse_refusals`). `PALCS0520`
+  detected an aliased call and refused it, so that F* would not have to explain itself in
+  Pulse names. R3.13 records why that was a mistake in full; the short version is that a
+  syntactic check for `f(a, a)` is not the rule it was standing in for, and that the case
+  it guarded had been hiding a second bug for as long as it existed. The rule is now
+  Pulse's, and what was really wanted — the message on the right C# line — is R2.3.
+
+  `test/pulse_refusals` is the suite that became possible once refusing was not the
+  answer: three programs that translate cleanly, fail in F*, and must fail *for the stated
+  reason* and *on the marked line*. Aliasing, a self-call with the invariant unfolded, and
+  ownership transfer into a field — the last two had been documented in this file for
+  milestones without ever being executed, because there was nowhere to put a test whose
+  expected outcome was a proof failure. Its check that each case still compiles as ordinary
+  C# is the same core invariant every other test directory asserts.
+
+  The third case is worth singling out. Its message lands on the *constructor*, not on the
+  assignment inside it, because what cannot be discharged is the constructor's exit — where
+  it owes both `this`'s invariant and the parameter's back. The line map got that right
+  without being told, which is the evidence that R2.3's containment rule is the right one
+  and not a rounding.
 
 ### Not yet done
 

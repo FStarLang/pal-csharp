@@ -17,6 +17,10 @@ namespace Pal.Tool;
 /// <para>
 /// Usage: <c>palcs [-o OUT] [--print-ir] [--time-passes] [-q] &lt;files…&gt;</c>
 /// </para>
+/// <para>
+/// <c>palcs report -o OUT</c> is the other direction: F*'s JSON messages on stdin, said
+/// again against the C# they are about. See <see cref="Report"/>.
+/// </para>
 /// </summary>
 public static class Program
 {
@@ -24,6 +28,8 @@ public static class Program
     {
         var sources = new List<string>();
         var output = ".";
+        var report = args.Length > 0 && args[0] == "report";
+        if (report) args = [.. args.Skip(1)];
         var printIr = false;
         var timePasses = false;
         var quiet = false;
@@ -43,6 +49,8 @@ public static class Program
                     break;
             }
         }
+
+        if (report) return Report.Run(output, quiet);
 
         if (sources.Count == 0) { Usage(); return 2; }
 
@@ -86,6 +94,7 @@ public static class Program
         WriteIfChanged(Path.Combine(output, "TranslationErrors.fst"), TranslationErrors(diagnostics));
         WriteIfChanged(Path.Combine(output, "diagnostics.json"), diagnostics.ToJson());
         WriteIfChanged(Path.Combine(output, "source_range_info.json"), Provenance(modules));
+        WriteIfChanged(Path.Combine(output, "line_map.json"), LineMap(modules));
 
         if (diagnostics.Items.Length > 0) Console.Error.Write(diagnostics.Render());
         if (!quiet)
@@ -135,6 +144,38 @@ public static class Program
             })),
             new JsonSerializerOptions { WriteIndented = true });
 
+    /// <summary>
+    /// Which C# each *line* of each generated module came from, so that an F* error —
+    /// which arrives as a range in a `.fst` nobody wrote — can be reported against the
+    /// source. `source_range_info.json` answers a different question, "what does this
+    /// module declare and why", which the provenance lint reads; keeping them apart keeps
+    /// each one readable.
+    ///
+    /// A module also carries a fallback: an error on a line with no origin of its own —
+    /// a preamble, an `open`, a brace — is still an error about that declaration, and
+    /// saying so is better than saying nothing.
+    /// </summary>
+    private static string LineMap(ImmutableArray<EmittedModule> modules) =>
+        JsonSerializer.Serialize(
+            modules.Where(m => !m.Origins.IsDefaultOrEmpty || !m.Origin.IsDefaultOrEmpty)
+                .Select(m => new
+                {
+                    file = m.FileName,
+                    fallback = m.Origin.IsDefaultOrEmpty ? null : Range(m.Origin[0].Loc),
+                    lines = m.Origins.Select(o => new { line = o.Line, source = Range(o.Source) }),
+                }),
+            new JsonSerializerOptions { WriteIndented = true });
+
+    private static object Range(IrLoc loc) => new
+    {
+        file = loc.File,
+        range = new
+        {
+            start = new { line = loc.Line - 1, character = loc.Column - 1 },
+            end = new { line = loc.EndLine - 1, character = loc.EndColumn - 1 },
+        },
+    };
+
     private static string TranslationErrors(DiagnosticBag diagnostics)
     {
         var sb = new StringBuilder();
@@ -154,6 +195,11 @@ public static class Program
         palcs — translate annotated C# to Pulse
 
           palcs [options] <file.cs>...
+          palcs report -o DIR          < fstar --message_format json output
+
+        The second form maps F*'s messages about the generated Pulse back onto the C# they
+        came from, writing `DIR/verification.txt` for an editor and printing them for a
+        person. Verification is Pulse's job; this only says where.
 
         Options:
           -o, --output DIR   where to write the generated modules (default: .)

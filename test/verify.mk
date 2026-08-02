@@ -12,6 +12,9 @@
 # known until `palcs` has run: the first phase translates, the second re-enters
 # make with the generated file list and an F*-computed dependency order.
 
+# pipefail, so a failed proof stays a failed build when its output is piped.
+SHELL      := /bin/bash
+
 PAL_ROOT   := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 TEST_NAME  := $(notdir $(CURDIR))
 
@@ -26,7 +29,11 @@ CACHE_DIR  ?= _cache
 
 SOURCES    ?= $(sort $(wildcard *.cs))
 
-FSTAR_OPTIONS := --cache_checked_modules --cache_dir $(CACHE_DIR) \
+# `--message_format json` so that a failure can be read by `palcs report` and said again
+# against the C# it came from. F* still prints nothing else, so a passing run is as quiet
+# as it ever was; the pipeline below only has work to do when there is a failure.
+FSTAR_OPTIONS := --message_format json \
+                 --cache_checked_modules --cache_dir $(CACHE_DIR) \
                  --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
                  --include $(CACHE_DIR) --include $(OUT) \
                  --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR)
@@ -69,15 +76,20 @@ ifneq ($(GENERATED),)
 # verifies in the right order without the harness knowing anything about it.
 $(CACHE_DIR)/.depend: $(GENERATED)
 	@mkdir -p $(CACHE_DIR)
-	@$(FSTAR_EXE) $(FSTAR_OPTIONS) --dep full $(GENERATED) --output_deps_to $@
+	@$(FSTAR_EXE) $(FSTAR_OPTIONS) --message_format human --dep full $(GENERATED) \
+	    --output_deps_to $@
 
 include $(CACHE_DIR)/.depend
 endif
 endif
 
+# F*'s messages go through `palcs report`, which maps each one back to the C# line that
+# produced the Pulse it is about. The exit status has to be F*'s, not the reporter's --
+# `pipefail` is what keeps a failed proof a failed build.
 %.checked:
 	@mkdir -p $(CACHE_DIR)
-	$(FSTAR_EXE) $(FSTAR_OPTIONS) $<
+	@echo "$(FSTAR_EXE) $(FSTAR_OPTIONS) $<"
+	@set -o pipefail; $(FSTAR_EXE) $(FSTAR_OPTIONS) $< 2>&1 | $(PALCS) report -q -o $(OUT)
 
 clean:
 	rm -rf $(OUT) $(CACHE_DIR) bin obj

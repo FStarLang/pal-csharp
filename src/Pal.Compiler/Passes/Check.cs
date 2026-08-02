@@ -34,12 +34,8 @@ public static class Check
         var specOnlyStructs = program.Declarations
             .OfType<IrStruct>().Where(t => t.IsSpecOnly).Select(t => t.Name).ToImmutableHashSet();
 
-        var methods = program.Declarations.OfType<IrMethod>()
-            .ToImmutableDictionary(m => m.Name, m => m);
-
         foreach (var decl in program.Declarations)
         {
-            if (decl is IrMethod method) CheckAliasing(method, methods, diagnostics);
             switch (decl)
             {
                 case IrMethod m when m.IsLemma: CheckLemma(m, diagnostics); break;
@@ -116,54 +112,6 @@ public static class Check
                 $"`{m.Name}` is `[Admit]`ed: its contract is assumed, not proved.");
 
         if (m.Body is not null) CheckBody(m.Body, diagnostics);
-    }
-
-    /// <summary>
-    /// R3.13. A resource is linear, so passing one object — or one array — to two owned
-    /// parameters of the same call is not unsound, it is <em>unprovable</em>: the callee
-    /// asks for `inv a _ ** inv a _` and the caller has one of them.
-    ///
-    /// That is the right outcome and the wrong message. F* reports a bare
-    /// `Cannot prove: class_C__inv a _`, pointing at generated Pulse, which says nothing
-    /// to someone who has just written `Merge(s, s)`. Catching it here is a diagnostic and
-    /// not a proof step, so §0 rule 3 is untouched — the translation of the call is
-    /// unchanged, it is simply refused before it is emitted.
-    /// </summary>
-    private static void CheckAliasing(
-        IrMethod m, ImmutableDictionary<string, IrMethod> methods, DiagnosticBag diagnostics)
-    {
-        if (m.Body is null) return;
-
-        foreach (var call in Statements(m.Body).SelectMany(Expressions).SelectMany(Subexpressions).OfType<IrCall>())
-        {
-            if (!methods.TryGetValue(call.Callee, out var callee)) continue;
-
-            for (var i = 0; i < call.Args.Length; i++)
-            {
-                if (Owned(callee, i) is not { } first) continue;
-                for (var j = i + 1; j < call.Args.Length; j++)
-                {
-                    if (Owned(callee, j) is not { } second) continue;
-                    if (call.Args[i] is not IrVar { Name: var a } ||
-                        call.Args[j] is not IrVar { Name: var b } || a != b) continue;
-
-                    diagnostics.Error("PALCS0520", call.Loc,
-                        $"`{a}` is passed to both `{first}` and `{second}` of `{call.Callee}`. " +
-                        "Each of those parameters is owned, and ownership is exclusive, so the " +
-                        "call asks for the same resource twice and can never be proved. Pass " +
-                        "two distinct objects, or give the callee one parameter and let it do " +
-                        "both jobs.");
-                }
-            }
-        }
-
-        // Ownership is exclusive exactly when there is no permission left over to share:
-        // an object always, an array unless `[Frac]` made it read-only (R4.9).
-        static string? Owned(IrMethod callee, int index) =>
-            index < callee.Parameters.Length && callee.Parameters[index] is { IsGhost: false } p &&
-            (p.Type is IrClassType || (p.Type is IrArrayType && p.Fraction is null))
-                ? p.Name
-                : null;
     }
 
     private static void CheckLemma(IrMethod m, DiagnosticBag diagnostics)

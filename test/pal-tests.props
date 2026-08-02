@@ -48,4 +48,20 @@
     <Analyzer Include="$(PalAnalyzerDir)/Pal.Annotations.dll" />
   </ItemGroup>
 
+  <!--
+    What Pulse said, last time it was asked. `make` writes this; the analyzer reads it and
+    puts each message on the C# line it is about.
+
+    `AdditionalFiles` rather than the analyzer opening the file itself: an analyzer that
+    does its own I/O is reading something Roslyn does not know it depends on, so the
+    result is cached against a key that does not include it and the squiggles go stale.
+    Listed this way, re-running `make` is enough to update them.
+
+    `Condition` on existence, because a directory that has never been verified has no
+    results, and that is a normal state rather than a missing file.
+  -->
+  <ItemGroup>
+    <AdditionalFiles Include="out/verification.txt" Condition="Exists('out/verification.txt')" />
+  </ItemGroup>
+
 </Project>
