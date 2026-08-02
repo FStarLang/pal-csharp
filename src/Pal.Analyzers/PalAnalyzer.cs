@@ -6,6 +6,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.Text;
 using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Emit;
 using Pal.Compiler.Frontend;
 using Pal.Compiler.Ir;
 using Pal.Compiler.Passes;
@@ -15,17 +16,24 @@ namespace Pal.Analyzers;
 /// <summary>
 /// pal-csharp's diagnostics, in the editor.
 ///
-/// The analyzer states no rule of its own. It runs the compiler's own passes — the
-/// frontend, the normaliser and the checker — over the compilation the IDE already has,
-/// and turns each <c>PalDiagnostic</c> into a Roslyn one. Everything that
-/// <c>palcs</c> refuses, the editor underlines, in the same words and at the same span;
-/// everything <c>palcs</c> accepts, the editor leaves alone. There is no second copy of
-/// the subset to drift out of step, which is the same reason a self-call gets a Pulse
-/// error rather than a compiler refusal.
+/// The analyzer states no rule of its own. It runs the compiler's own passes over the
+/// compilation the IDE already has, and turns each <c>PalDiagnostic</c> into a Roslyn one.
+/// Everything that <c>palcs</c> refuses, the editor underlines, in the same words and at
+/// the same span; everything <c>palcs</c> accepts, the editor leaves alone. There is no
+/// second copy of the subset to drift out of step, which is the same reason a self-call
+/// gets a Pulse error rather than a compiler refusal.
 ///
-/// It stops short of the emitter, so it neither writes files nor runs F*. Verification is
-/// a separate, slow, deliberate act; what an editor can give for free is the answer to "is
-/// this program inside the language at all", and that is what this gives.
+/// That parity is why the emitter runs too, and why its output is then thrown away. Eight
+/// of the refusals — an unbridgeable type, a measure over an array, an unsupported
+/// specification term — are only discovered while emitting, and an editor that reported
+/// the other twenty-eight would be worse than one that reported none: it would tell a user
+/// who had cleared every squiggle that the program was ready, and the build would then
+/// disagree. Emission is string building over an IR that is already in hand, so the
+/// parity costs little.
+///
+/// It stops short of writing anything and of running F*. Verification is a separate, slow,
+/// deliberate act; what an editor can give for free is the answer to "is this program
+/// inside the language at all", and that is what this gives.
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class PalAnalyzer : DiagnosticAnalyzer
@@ -102,7 +110,8 @@ public sealed class PalAnalyzer : DiagnosticAnalyzer
         {
             var program = FrontendPass.Run(cs, bag);
             program = Normalize.Run(program, bag);
-            Check.Run(program, bag);
+            program = Check.Run(program, bag);
+            new PulseEmitter(bag).Emit(program);
         }
         catch (Exception)
         {

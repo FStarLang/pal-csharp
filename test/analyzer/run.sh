@@ -32,12 +32,32 @@ mkdir -p out
 
 # A subset, not all of them: each case costs a full MSBuild, and what is under test here
 # is the analyzer's plumbing rather than the rules, which `test/diagnostics` already
-# covers case by case. The four are chosen to come from four different places — the
-# frontend's type map, the checker's whole-program pass, the spec binder's rewriting of a
-# C# binding error, and a warning rather than an error — so that a break in the reporting
-# path shows up wherever it is.
-CASES="StructOwnsArray AliasedObjects PrivateSpecMember AssumeIsUnsound"
+# covers case by case. They are chosen to come from different places — the frontend's type
+# map, the checker's whole-program pass, the spec binder's rewriting of a C# binding error,
+# a warning rather than an error, and the emitter — so that a break in the reporting path
+# shows up wherever it is. The last of those is the one that is easy to lose: the analyzer
+# has to run the emitter to see it, and an analyzer that stopped at the checker would still
+# pass every other case here while quietly under-reporting.
+CASES="StructOwnsArray AliasedObjects PrivateSpecMember AssumeIsUnsound ArrayInMeasure"
 GOOD="$ROOT/test/counter_class/Counter.cs"
+
+# ...and "different places" is checked, not asserted. Every directory of the compiler that
+# raises an id must be represented, so a pass added later — or one the analyzer stops
+# running — cannot go unnoticed here.
+for pass_dir in "$ROOT"/src/Pal.Compiler/*/; do
+    [ "$(basename "$pass_dir")" = "Diagnostics" ] && continue   # the catalog, not a pass
+    ids=$(grep -rhoE '"PALCS[0-9]+"' "$pass_dir" 2>/dev/null | tr -d '"' | sort -u)
+    [ -z "$ids" ] && continue
+    covered=0
+    for name in $CASES; do
+        want=$(sed -n 's|^// EXPECT: *||p' "$ROOT/test/diagnostics/cases/$name.cs" 2>/dev/null | head -1)
+        printf '%s\n' "$ids" | grep -qx "$want" && covered=1
+    done
+    if [ "$covered" = 0 ]; then
+        echo "analyzer: no case covers src/Pal.Compiler/$(basename "$pass_dir")/"
+        fail=1
+    fi
+done
 
 build_and_report() {
     local dir=$1 source=$2

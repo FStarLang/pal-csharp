@@ -1,0 +1,33 @@
+{
+  // Load the whole tree, tests included. `Pal.slnx` is the product and is what `make
+  // build` and CI compile; this one adds a project per test directory, so that opening a
+  // test file shows what `palcs` would say about it while you type. See
+  // `test/pal-tests.props` for how the analyzer is wired in, and `test/cs-projects.sh`
+  // for what generates both.
+  //
+  // `test/diagnostics/cases` will be full of errors. That is what it is for: every file
+  // in it is a program pal-csharp is supposed to refuse, and its `// EXPECT:` header says
+  // which refusal. Red squiggles there mean the tests pass.
+  "dotnet.defaultSolution": "Pal.Tests.sln",
+
+  // Analyze the whole solution, not only the files that happen to be open, so that the
+  // Problems panel is a list of every pal-csharp complaint in the tree. Compiler
+  // diagnostics get the same treatment, since a test whose C# no longer compiles has
+  // broken the core invariant and should be as visible as one whose specification is
+  // wrong.
+  //
+  // This is more work than the default. Every diagnostic here comes from running the
+  // translator's front end and emitter over the compilation, and the tree is small; if it
+  // ever stops feeling instant, "openFiles" is the setting to turn back down.
+  "dotnet.backgroundAnalysis.analyzerDiagnosticsScope": "fullSolution",
+  "dotnet.backgroundAnalysis.compilerDiagnosticsScope": "fullSolution",
+
+  // F*'s caches and the pinned toolchain are machine output; the generated Pulse under
+  // `out/` is not, and stays searchable, since reading what the emitter produced is a
+  // normal thing to want to do here.
+  "search.exclude": {
+    "**/_cache": true,
+    "**/*.checked": true,
+    "tools/fstar": true
+  }
+}

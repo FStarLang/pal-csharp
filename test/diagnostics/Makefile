@@ -5,4 +5,4 @@ all:
 	@bash run.sh
 
 clean:
-	@rm -rf out
+	@rm -rf out cases/bin cases/obj
