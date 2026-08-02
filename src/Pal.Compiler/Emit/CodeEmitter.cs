@@ -53,6 +53,13 @@ public sealed class CodeEmitter(
     /// </summary>
     private readonly List<Slot> _objectLocals = [];
 
+    /// <summary>
+    /// How many enclosing blocks would have to discard what they declared as they close
+    /// (F19). Zero means the nearest enclosing block ends at the method's exit, where the
+    /// postcondition is known.
+    /// </summary>
+    private int _closingBlocks;
+
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
@@ -178,7 +185,7 @@ public sealed class CodeEmitter(
             }
 
             case IrBlock b:
-                EmitSequence(b.Statements, method, plan);
+                Scoped(() => EmitSequence(b.Statements, method, plan), dropAtEnd: false);
                 return;
 
             case IrIf { Else: not null } i:
@@ -300,9 +307,29 @@ public sealed class CodeEmitter(
     /// hand back. <c>with m. assert …</c> names the existential witness the context is
     /// holding, which <c>drop_</c> needs because it takes an slprop and not a name.
     /// </summary>
-    private void DropLocals(string? returned)
+    /// <summary>
+    /// R4.14's scope rule. An object local's resource is discarded where C# says its name
+    /// goes out of scope — at the end of the block that declares it — and not merely at
+    /// the end of the method. A block that is *not* in tail position drops what it
+    /// declared as it closes; one that is leaves the discard to the return, which knows
+    /// which object is being handed back.
+    ///
+    /// Either way the block's declarations leave the list on the way out. Without that,
+    /// an object allocated in one arm of an `if` would be dropped in the other, where its
+    /// binder does not exist.
+    /// </summary>
+    private void Scoped(Action emit, bool dropAtEnd)
     {
-        foreach (var local in _objectLocals)
+        var mark = _objectLocals.Count;
+        if (dropAtEnd) _closingBlocks++;
+        emit();
+        if (dropAtEnd) { _closingBlocks--; DropLocals(null, mark); }
+        _objectLocals.RemoveRange(mark, _objectLocals.Count - mark);
+    }
+
+    private void DropLocals(string? returned, int from = 0)
+    {
+        foreach (var local in _objectLocals.Skip(from))
         {
             if (local.Binder == returned) continue;
             var klass = (IrClassType)local.Type;
@@ -383,6 +410,22 @@ public sealed class CodeEmitter(
             // handed to a callee that consumes and returns its invariant.
             case IrLocalDecl { Type: IrClassType oc, Init: not null } d:
             {
+                // F19. The discard would land at this block's close, where Pulse is still
+                // solving for the block's postcondition and cannot open the object's
+                // model existential. Refused rather than emitted (§0 rule 3).
+                if (_closingBlocks > 0)
+                {
+                    diagnostics.Unsupported(d.Loc,
+                        $"`new {oc.Name}()` in a nested block",
+                        "An object allocated here would be discarded where the enclosing " +
+                        "block closes (R4.14), and a block in statement position has no " +
+                        "postcondition of its own for the discard to be checked against: " +
+                        "Pulse reports `Cannot find witness` for the object's model (F19). " +
+                        "Allocate it in the method's own block, or in a branch that " +
+                        "returns.");
+                    return;
+                }
+
                 var binder = Names.Local(d.Name);
 
                 // The initialiser is emitted *into* the local's binder rather than into a
@@ -399,7 +442,7 @@ public sealed class CodeEmitter(
             }
 
             case IrBlock b:
-                Sequence(b.Statements, plan);
+                Scoped(() => Sequence(b.Statements, plan), dropAtEnd: true);
                 return;
 
             case IrLocalDecl d:

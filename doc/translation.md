@@ -70,6 +70,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
 | F18 | F15's affinity is a **permission to discard, not an automatic discard**. A method that allocates an object and does not return it still holds the invariant when it ends: `Error 228: Leftover resources: class_C__inv x _`. Writing the discard needs a name for the model the context holds — an existential witness the emitter never chose — which `with m. assert p;` binds. | `test/pulse_facts/ObjectFacts.fst:allocate_and_discard`, verified; the failure was reproduced by `test/counter_client`'s `FreshIsZero` before R4.14 existed. Relied on by R4.14. |
+| F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
 | F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
@@ -723,6 +724,17 @@ though the equality is trivially true (`Error 228`). The emitter therefore emits
 that initialises an object local *into that local's binder* rather than into a temporary
 the local then aliases.
 
+**R4.14a (where an object may be allocated).** R4.14's discard lands at the end of the
+block that declares the object — which is where C# says the name goes out of scope, and
+not merely at the end of the method: an object allocated in one arm of an `if` must not be
+discarded in the other, where its binder does not exist.
+
+F19 then bounds where the declaration may appear. The discard has to be checked against
+the enclosing block's postcondition, and only a block that ends at the method's exit has
+one. So an object local may be declared in the method's own block, or in a branch that
+returns; in a block that *closes* around it — a statement-position `if`, a loop body — it
+is **PALCS0001**. The message says where to move it.
+
 **R4.15 (a loop inside an instance method is refused).** `PALCS0001`.
 
 R4.10's `unfold`/`fold` bracket is open across the whole body, so a loop in an instance
@@ -1159,7 +1171,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — twenty-one cases, each
+  `test/diagnostics` is its counterpart to the verification tests — twenty-two cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1234,6 +1246,11 @@ Rules are recorded here as they are validated.
   and needs no F\* `friend`, but it requires a module shape the emitter does not have
   today, and C# `private` already hides the representation at the source level. The step is
   available when proof performance or genuine information hiding demands it.
+* **An object may not be allocated in a block that closes around it** (R4.14a,
+  `PALCS0001`). F19 is a limitation of Pulse's inference, not of the scheme, and the
+  workaround — allocate in the method's block, or in a branch that returns — is usually
+  what the code wanted anyway. `test/ring_class/RingScope.cs` covers what does work,
+  including two buffers on two arms of one `if`.
 * **A loop inside an instance method is refused** (R4.15, `PALCS0001`). R4.10's bracket is open
   across the whole body, so the loop sits where the invariant does not hold, and R5.8's
   loop rule would have to carry the *representation* — `B.pts_to this r`, one `A.pts_to`

@@ -277,3 +277,40 @@ fn allocate_and_discard (capacity: I32.t { I32.v capacity >= 0 })
   drop_ (class_Stack__inv x m);
   capacity
 }
+
+/// F19: F18's idiom only works where the postcondition is *known*.
+///
+/// R4.14 discards an abandoned object at the end of the block that declares it. At the
+/// end of a method that block's postcondition is the method's, and everything below
+/// typechecks. Inside an `if` in statement position it is not: Pulse is still solving for
+/// the branch's postcondition, the object's model is an existential in the context, and
+/// unifying an existential against a uvar is exactly what it will not do --
+///     Error 339: Cannot find witness for ...; Cannot check relation with uvars
+/// The error does not even land on the discard. In the version this fact was extracted
+/// from it landed on an assignment to an unrelated local *after* the allocation, because
+/// that is the first step that has to look through the unopened existential.
+///
+/// Three repairs were tried and rejected: binding the witness at the allocation instead
+/// of at the discard, discarding the existential slprop directly
+/// (`drop_ (exists* m. inv x m)`), and annotating the branch `ensures emp`. The first two
+/// fail identically. The third succeeds only when the branch touches nothing else -- add
+/// one assignment to an enclosing local and it is `Error 228`, because the annotation is
+/// then simply wrong, and computing the right one is the emitter inventing a proof step.
+///
+/// So the scheme refuses: R4.14a. An object may be allocated in a method's own block, or
+/// in a branch that returns; not in a block that closes around it. Below is the shape
+/// that works, and it is the one the emitter is allowed to produce.
+fn allocate_in_a_returning_branch (b: bool) (capacity: I32.t { I32.v capacity >= 0 })
+  requires emp
+  returns  n : I32.t
+  ensures  pure (I32.v n >= 0)
+{
+  if b {
+    let x = alloc_without_free capacity;
+    with m. assert (class_Stack__inv x m);
+    drop_ (class_Stack__inv x m);
+    capacity
+  } else {
+    0l
+  }
+}
