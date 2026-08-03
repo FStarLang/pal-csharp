@@ -1993,10 +1993,84 @@ in the compilation; it does not support separate compilation or open extension. 
 standing recommendation is still to do **interfaces first**, where there is no
 representation to inherit and no `base` call to model.
 
-Not probed, and to be probed before any rule is written: calling a virtual method from
-within another method of the same class, `base.M()`, a class holding a `Shape` *field*
-(boxable per F29, but nested-invariant composition à la R3.10b is untested), `is`/`as`
-downcasts, `protected`, and `sealed override`.
+#### Depth three: `test/pulse_facts/DeepHierarchy.fst`
+
+The two-level study leaves the central question of inheritance untouched, because a
+leaf class is only ever a subclass. `DeepHierarchy.fst` is the same encoding taken to
+
+    Shape
+     +-- Circle
+     +-- Quadrilateral            (abstract, with methods of its own)
+          +-- Square
+          +-- Rectangle
+
+so that `Quadrilateral` is a subclass *and* a superclass at once: it is packaged into
+its parent's vtable and is itself a vtable that further classes instantiate. It
+verifies, including a heterogeneous `Shape[]` whose elements sit at two different
+depths, a client written against `Quadrilateral` that names no leaf class, and an
+end-to-end `demo` proving the concrete result `66`.
+
+Three things had to change, and each is a finding.
+
+1. **The reference is always `mkdyn`'d at the root's object record.** A dyn is made at
+   exactly one witness type, so a value made at `quad__obj` can never be viewed as one
+   made at `shape__obj` — that is `mkdyn` injectivity again, which finding 3 above rules
+   out. An upcast therefore cannot rebuild the dyn, and `Quadrilateral` cannot have a
+   reference type of its own. `quad` and `shape` are the *same* F\* value; only the
+   invariant differs, which is exactly the C# semantics of a reference conversion.
+2. **The root object record needs one extension point**, a single `sub: Dn.dyn` field
+   that `Shape` declares and says nothing about. An intermediate class stores its own
+   object record there and its own invariant says what is in it. This is what keeps the
+   scheme open-world: `Shape` is compiled once and admits subclasses that do not exist
+   yet, which a sum over the known subclasses would not. It hangs off the *object*, not
+   the vtable, because what a descendant must recover is a vtable already applied to a
+   representation — recovering a bare vtable would leave its `impl` only propositionally
+   equal to `pkg.impl` and every use would need a coercion.
+3. **An intermediate vtable lists every method visible at its level**, inherited ones
+   included, read at *its* model — as a real vtable re-lists the slots it inherits.
+   That is what lets a `Quadrilateral`-typed reference call `Area()` and keep its
+   bounding box, which a client that upcast to `Shape` and back could not. The four
+   inherited slots are then derived **once**, generically, by `quad_as_shape_pkg`, so
+   `Square` and `Rectangle` implement the quadrilateral vtable only and get their
+   `Shape` vtable for free. That derivation is what "inherits" means here.
+
+Dispatch at level *k* costs *k* recoveries — one to reach the root object, one per
+`sub` hop — and each is a cast on the same reference. F31's let-binding rule applies at
+every hop.
+
+Two further findings came out of writing it.
+
+* **A virtual method's precondition, written at the base model, must be strong enough
+  for every subclass's model.** `Shape.Double` requires `ok32 (4 * Area)`, and from that
+  a quadrilateral can prove its *bounding box* doubles safely (`2*W <= 4*W*H` when
+  `W, H >= 1` — the same argument `double_fits` makes for a radius), but it cannot prove
+  anything about a *perimeter*: isoperimetry gives `P^2 >= 16*A` and no upper bound at
+  all, so a 1-by-n rectangle has perimeter about twice its area. `Quadrilateral`'s model
+  is a bounding box for exactly this reason. Where a subclass genuinely needs more, the
+  base must either state the precondition abstractly (a vtable-supplied predicate over
+  the representation) or expose a virtual query — `if (s.CanDouble()) s.Double();`. A C#
+  surface should push users towards models whose quantities are bounded by the base's.
+* **A non-virtual method of an intermediate class needs nothing new.**
+  `quad_semi_perimeter` calls the virtual `Perimeter()` on its own receiver and is an
+  ordinary `fn` over `quad__inv` — no vtable slot, no recovery of its own, and it works
+  for subclasses written later. This is also the first place in either study where a
+  method calls a virtual method on `this`, which was on the not-probed list; it is
+  settled, and settled by R4.10 doing nothing special.
+
+**The downcast is where the study stops**, and `downcast_is_not_free` pins it as an
+`expect_failure`. Holding `shape__inv s #p m` says `s` is some root object and says
+nothing about whether it is a quadrilateral; the information was discarded by the
+existential when the reference was upcast, which is what an upcast means. C#'s `is`/`as`
+is a runtime test against the object header, so it would need `recover` strengthened to
+report failure when the dynamic type does not match — strictly more than is assumed
+here, and nothing in either study needs it.
+
+Not probed, and to be probed before any rule is written: `base.M()`; `protected`; a
+class that overrides some methods and inherits others (every class in the study supplies
+a full vtable, which is correct but says nothing about building one from a partial
+`override` list); an `abstract` class with fields, and hence a constructor chain; a
+class holding a `Shape` *field* (boxable per F29, but nested-invariant composition à la
+R3.10b is untested); and `is`/`as` downcasts.
 
 ### Not yet done
 
