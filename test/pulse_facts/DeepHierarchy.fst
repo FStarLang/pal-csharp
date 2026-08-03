@@ -698,6 +698,24 @@ let shape_view (qo: quad__obj) : shape__obj =
 let quad__inv (s: shape) (#[T.exact (`1.0R)] p: perm) (qm: quad__model) : slprop =
   exists* (qo: quad__obj). pure (s == Dn.mkdyn (shape_view qo)) ** quad__at qo p qm
 
+/// The same invariant with the implementation package **named**, as `shape__inv_at`
+/// names it in the two-level study. There it was forced by `gather`; here it turns out
+/// to be the same thing a caller needs to perform a **checked downcast** (section 14),
+/// which is a pleasing coincidence and not really a coincidence at all: both ask the
+/// client to know *which* implementation it is holding, and both are satisfied by
+/// remembering rather than by testing.
+let quad__inv_at (s: shape) (qo: erased quad__obj) (p: perm) (qm: quad__model) : slprop =
+  pure (s == Dn.mkdyn (shape_view (reveal qo))) ** quad__at qo p qm
+
+ghost fn quad_forget_impl (s: shape) (qo: erased quad__obj)
+                          (#p: perm) (#qm: erased quad__model)
+  requires quad__inv_at s qo p qm
+  ensures  quad__inv s #p qm
+{
+  unfold (quad__inv_at s qo p qm);
+  fold (quad__inv s #p qm);
+}
+
 /// ```csharp
 /// Shape s = q;          // q : Quadrilateral
 /// ```
@@ -723,6 +741,32 @@ ghost fn upcast_quad (s: shape) (#p: perm) (#qm: erased quad__model)
 /// object, one to follow `sub` to the quadrilateral object. In extracted terms both are
 /// casts on the same reference. F31's let-binding rule applies to the inner slot just
 /// as it does to the outer one.
+fn quad_perimeter_at (s: shape) (#qo: erased quad__obj) (#p: perm)
+                     (#qm: erased quad__model)
+  requires quad__inv_at s qo p qm **
+           pure (ok32 (2 * ((reveal qm).q_w + (reveal qm).q_h)))
+  returns  v: I32.t
+  ensures  quad__inv_at s qo p qm **
+           pure (I32.v v == 2 * ((reveal qm).q_w + (reveal qm).q_h))
+{
+  unfold (quad__inv_at s qo p qm);
+  let ob = recover #shape__obj #(hide (shape_view (reveal qo))) s;
+  assert (pure (ob.sub == Dn.mkdyn (reveal qo)));
+  let qob = recover #quad__obj #qo ob.sub;
+  rewrite (quad__at qo p qm) as (quad__at qob p qm);
+  unfold (quad__at qob p qm);
+  let f = qob.qpkg.qperim;
+  let v = f qob.qrep #p #qm;
+  fold (quad__at qob p qm);
+  rewrite (quad__at qob p qm) as (quad__at qo p qm);
+  fold (quad__inv_at s qo p qm);
+  v
+}
+
+/// The unindexed method is the indexed one composed with forgetting -- which is the
+/// general recipe, and the reason indexing costs nothing in expressiveness: a client
+/// that never downcasts simply forgets at every call, and a client that will downcast
+/// keeps the index and calls the primitive. Only the primitive dispatches.
 fn quad_perimeter (s: shape) (#p: perm) (#qm: erased quad__model)
   requires quad__inv s #p qm **
            pure (ok32 (2 * ((reveal qm).q_w + (reveal qm).q_h)))
@@ -732,16 +776,9 @@ fn quad_perimeter (s: shape) (#p: perm) (#qm: erased quad__model)
 {
   unfold (quad__inv s #p qm);
   with qo. assert (quad__at qo p qm);
-  let ob = recover #shape__obj #(hide (shape_view qo)) s;
-  assert (pure (ob.sub == Dn.mkdyn (reveal qo)));
-  let qob = recover #quad__obj #qo ob.sub;
-  rewrite (quad__at qo p qm) as (quad__at qob p qm);
-  unfold (quad__at qob p qm);
-  let f = qob.qpkg.qperim;
-  let v = f qob.qrep #p #qm;
-  fold (quad__at qob p qm);
-  rewrite (quad__at qob p qm) as (quad__at qo p qm);
-  fold (quad__inv s #p qm);
+  fold (quad__inv_at s (hide qo) p qm);
+  let v = quad_perimeter_at s #(hide qo) #p #qm;
+  quad_forget_impl s (hide qo);
   v
 }
 
@@ -752,14 +789,14 @@ fn quad_perimeter (s: shape) (#p: perm) (#qm: erased quad__model)
 /// the quadrilateral vtable rather than the root one, which is why the bounding box
 /// survives the call: a client that upcast to `Shape` and called `Area()` there would
 /// keep only the area.
-fn quad_area (s: shape) (#p: perm) (#qm: erased quad__model)
-  preserves quad__inv s #p qm
+fn quad_area_at (s: shape) (#qo: erased quad__obj) (#p: perm)
+                (#qm: erased quad__model)
+  preserves quad__inv_at s qo p qm
   returns  v: I32.t
   ensures  pure (I32.v v == quad__forget qm)
 {
-  unfold (quad__inv s #p qm);
-  with qo. assert (quad__at qo p qm);
-  let ob = recover #shape__obj #(hide (shape_view qo)) s;
+  unfold (quad__inv_at s qo p qm);
+  let ob = recover #shape__obj #(hide (shape_view (reveal qo))) s;
   let qob = recover #quad__obj #qo ob.sub;
   rewrite (quad__at qo p qm) as (quad__at qob p qm);
   unfold (quad__at qob p qm);
@@ -767,7 +804,20 @@ fn quad_area (s: shape) (#p: perm) (#qm: erased quad__model)
   let v = f qob.qrep #p #qm;
   fold (quad__at qob p qm);
   rewrite (quad__at qob p qm) as (quad__at qo p qm);
-  fold (quad__inv s #p qm);
+  fold (quad__inv_at s qo p qm);
+  v
+}
+
+fn quad_area (s: shape) (#p: perm) (#qm: erased quad__model)
+  preserves quad__inv s #p qm
+  returns  v: I32.t
+  ensures  pure (I32.v v == quad__forget qm)
+{
+  unfold (quad__inv s #p qm);
+  with qo. assert (quad__at qo p qm);
+  fold (quad__inv_at s (hide qo) p qm);
+  let v = quad_area_at s #(hide qo) #p #qm;
+  quad_forget_impl s (hide qo);
   v
 }
 
@@ -951,12 +1001,24 @@ let square__obj (c: square) : quad__obj = { qpkg = t_square; qrep = c }
 /// Quadrilateral q = sq;     // sq : Square
 /// ```
 /// The upcast across the *outer* edge. Composing it with `upcast_quad` gets a `Shape`.
+ghost fn upcast_square_at (c: square) (#p: perm) (#qm: erased quad__model)
+  requires square__as_quad c #p qm
+  ensures  quad__inv_at (Dn.mkdyn (shape_view (square__obj c)))
+                        (hide (square__obj c)) p qm
+{
+  rewrite (square__as_quad c #p qm) as (quad__at (square__obj c) p qm);
+  fold (quad__inv_at (Dn.mkdyn (shape_view (square__obj c)))
+                     (hide (square__obj c)) p qm);
+}
+
+/// The same upcast with the implementation forgotten -- which is what a client that
+/// will never downcast wants, and what makes `Square` and `Rectangle` interchangeable.
 ghost fn upcast_square (c: square) (#p: perm) (#qm: erased quad__model)
   requires square__as_quad c #p qm
   ensures  quad__inv (Dn.mkdyn (shape_view (square__obj c))) #p qm
 {
-  rewrite (square__as_quad c #p qm) as (quad__at (square__obj c) p qm);
-  fold (quad__inv (Dn.mkdyn (shape_view (square__obj c))) #p qm);
+  upcast_square_at c #p #qm;
+  quad_forget_impl (Dn.mkdyn (shape_view (square__obj c))) (hide (square__obj c));
 }
 
 /// ```csharp
@@ -1116,12 +1178,20 @@ let t_rect : t_quad = {
 
 let rect__obj (c: rect) : quad__obj = { qpkg = t_rect; qrep = c }
 
+ghost fn upcast_rect_at (c: rect) (#p: perm) (#qm: erased quad__model)
+  requires rect__as_quad c #p qm
+  ensures  quad__inv_at (Dn.mkdyn (shape_view (rect__obj c))) (hide (rect__obj c)) p qm
+{
+  rewrite (rect__as_quad c #p qm) as (quad__at (rect__obj c) p qm);
+  fold (quad__inv_at (Dn.mkdyn (shape_view (rect__obj c))) (hide (rect__obj c)) p qm);
+}
+
 ghost fn upcast_rect (c: rect) (#p: perm) (#qm: erased quad__model)
   requires rect__as_quad c #p qm
   ensures  quad__inv (Dn.mkdyn (shape_view (rect__obj c))) #p qm
 {
-  rewrite (rect__as_quad c #p qm) as (quad__at (rect__obj c) p qm);
-  fold (quad__inv (Dn.mkdyn (shape_view (rect__obj c))) #p qm);
+  upcast_rect_at c #p #qm;
+  quad_forget_impl (Dn.mkdyn (shape_view (rect__obj c))) (hide (rect__obj c));
 }
 
 /// ```csharp
@@ -1358,8 +1428,8 @@ fn demo ()
 /// Shape s = ...;
 /// Quadrilateral q = (Quadrilateral) s;      // NOT modelled
 /// ```
-/// The upcasts above are all ghost, and rightly so. The **downcast is not**, and this
-/// is where the study stops.
+/// The upcasts above are all ghost, and rightly so. An **unchecked** downcast is not
+/// merely non-ghost -- it is impossible.
 ///
 /// Holding `shape__inv s #p m` tells you `s` is `mkdyn o` for some root object; it
 /// tells you nothing about whether that object is the `shape_view` of a quadrilateral,
@@ -1372,13 +1442,12 @@ let downcast_is_not_free (s: shape) (o: shape__obj)
           (ensures  exists (qo: quad__obj). o == shape_view qo)
   = ()
 
-/// C#'s answer is `is` / `as` / a checked cast, which is a *runtime* test against the
-/// object header -- so in this encoding it would be another use of the `recover` axiom,
-/// returning an option, with the axiom strengthened to say that the recovery fails
-/// exactly when the dynamic type does not match. That is a strictly stronger assumption
-/// than the one made here, and nothing above needs it: `Square` and `Rectangle` reach
-/// `Quadrilateral`'s methods by *never* forgetting they are quadrilaterals, which is
-/// what a static type is for.
+/// Section 14 gives the downcast a *precondition* instead, and gets it with no new
+/// assumption. What is genuinely missing is a **failing** cast -- `q as Square`
+/// returning `null`, or a checked cast throwing -- which is a runtime test whose
+/// negative answer must be trusted, and so would need `recover` strengthened to report
+/// a mismatch rather than merely to succeed. Nothing here needs it, and it is not
+/// assumed.
 ///
 /// Also untouched, and each a real question for a C# surface:
 ///
@@ -1392,3 +1461,188 @@ let downcast_is_not_free (s: shape) (o: shape__obj)
 ///     supplies a full vtable, which is correct but says nothing about how an emitter
 ///     should *build* one from a partial `override` list.
 ///   * `abstract` classes with fields, and hence a constructor chain.
+
+
+// =================================================================================
+// 14. The checked downcast: `is` and `(Square) q`
+// =================================================================================
+
+/// Section 13 says the downcast throws information away and cannot be undone by
+/// wishing. It can be undone by *remembering*, and that is what C#'s cast operators
+/// really are: `(Square) q` succeeds exactly when the object's dynamic type is
+/// `Square`, and a caller who cannot say why it should be is writing a cast that may
+/// throw.
+///
+/// So the model is a downcast whose **precondition is the knowledge**. It never fails,
+/// which is the point: a verified program does not write casts it cannot justify. The
+/// knowledge is carried by `quad__inv_at`, the same ghost index `gather` needed.
+///
+/// The runtime part is a chain of `recover`s, one per level, because in this encoding
+/// each level's object record is a *distinct value*. The CLR does the whole thing with
+/// one header check; that difference is the price of erasing the dynamic type into
+/// `dyn`, and it is paid in casts, not in memory.
+
+/// The leaf representation, re-erased. Reading it out of the recovered object record
+/// directly would need a coercion across `qo.qpkg.qimpl == square`, which is only
+/// propositionally true; going back through `mkdyn` keeps everything a `dyn`, and
+/// congruence on `quad_box` then delivers the equation the next `recover` wants.
+let quad_box (qo: quad__obj) : Dn.dyn = Dn.mkdyn qo.qrep
+
+/// The class-independent half of a downcast: walk the chain and hand back the leaf
+/// representation, still erased. Every leaf's downcast is this plus one `recover`.
+fn quad_rep (s: shape) (#qo: erased quad__obj) (#p: perm) (#qm: erased quad__model)
+  preserves quad__inv_at s qo p qm
+  returns  d: Dn.dyn
+  ensures  pure (d == quad_box qo)
+{
+  unfold (quad__inv_at s qo p qm);
+  let ob = recover #shape__obj #(hide (shape_view (reveal qo))) s;
+  let qob = recover #quad__obj #qo ob.sub;
+  fold (quad__inv_at s qo p qm);
+  quad_box qob
+}
+
+/// ```csharp
+/// Square sq = (Square) q;       // q : Quadrilateral, known to be a Square
+/// ```
+/// The precondition names the object the caller is holding, so the cast is justified
+/// before it is written. The postcondition hands back `Square`'s own invariant, so
+/// `Square`-only members become callable -- which is the only reason to downcast.
+fn downcast_square (s: shape) (#c: erased square) (#p: perm) (#qm: erased quad__model)
+  requires quad__inv_at s (hide (square__obj (reveal c))) p qm
+  returns  r: square
+  ensures  square__as_quad r #p qm ** pure (r == reveal c)
+{
+  let d = quad_rep s #(hide (square__obj (reveal c))) #p #qm;
+  let r = recover #square #c d;
+  unfold (quad__inv_at s (hide (square__obj (reveal c))) p qm);
+  rewrite (quad__at (hide (square__obj (reveal c))) p qm) as (square__as_quad r #p qm);
+  r
+}
+
+fn downcast_rect (s: shape) (#c: erased rect) (#p: perm) (#qm: erased quad__model)
+  requires quad__inv_at s (hide (rect__obj (reveal c))) p qm
+  returns  r: rect
+  ensures  rect__as_quad r #p qm ** pure (r == reveal c)
+{
+  let d = quad_rep s #(hide (rect__obj (reveal c))) #p #qm;
+  let r = recover #rect #c d;
+  unfold (quad__inv_at s (hide (rect__obj (reveal c))) p qm);
+  rewrite (quad__at (hide (rect__obj (reveal c))) p qm) as (rect__as_quad r #p qm);
+  r
+}
+
+/// ```csharp
+/// q is Square
+/// ```
+/// `is` is the *proposition* `downcast_square`'s precondition asks for, with the
+/// witness left anonymous -- which is how a caller would naturally state it, since it
+/// has no name for the box inside.
+let is_square (qo: quad__obj) : prop = exists (c: square). qo == square__obj c
+
+let is_rect (qo: quad__obj) : prop = exists (c: rect). qo == rect__obj c
+
+/// Turning the proposition back into the named index. Ghost and free: the witness is
+/// recovered by classical choice, never computed.
+ghost fn as_square (s: shape) (#qo: erased quad__obj) (#p: perm) (#qm: erased quad__model)
+  requires quad__inv_at s qo p qm ** pure (is_square qo)
+  returns  c: erased square
+  ensures  quad__inv_at s (hide (square__obj (reveal c))) p qm
+{
+  let c : erased square =
+    hide (FStar.IndefiniteDescription.indefinite_description_ghost
+            square (fun (c: square) -> reveal qo == square__obj c));
+  rewrite (quad__inv_at s qo p qm)
+       as (quad__inv_at s (hide (square__obj (reveal c))) p qm);
+  c
+}
+
+/// A `Square`-only member: `Quadrilateral` has no name for a side, and this is what
+/// the downcast was for.
+///
+/// ```csharp
+/// [Ensures("Result == @this.W")] public int Side();     // in Square
+/// ```
+fn square_side (c: square) (#p: perm) (#qm: erased quad__model)
+  preserves square__as_quad c #p qm
+  returns v: I32.t
+  ensures pure (I32.v v == (reveal qm).q_w)
+{
+  unfold (square__as_quad c #p qm);
+  with sm. assert (square__inv c #p sm);
+  unfold (square__inv c #p sm);
+  let r = B.op_Bang c;
+  let v = r.fld_side;
+  fold (square__inv c #p sm);
+  fold (square__as_quad c #p qm);
+  v
+}
+
+/// A constructor that *keeps* the knowledge, so that a caller may downcast later.
+/// `new_square` is this one with the index forgotten -- and forgetting it is what
+/// makes the result interchangeable with a `Rectangle`.
+fn new_square_at (n: I32.t)
+  requires pure (1 <= I32.v n /\ ok32 (I32.v n * I32.v n))
+  returns  s: shape
+  ensures  exists* (c: square).
+             quad__inv_at s (hide (square__obj c)) 1.0R
+                          ({ q_w = I32.v n; q_h = I32.v n })
+{
+  let c = B.alloc ({ fld_side = n });
+  fold (square__inv c #1.0R ({ s_side = I32.v n }));
+  fold (square__as_quad c #1.0R ({ q_w = I32.v n; q_h = I32.v n }));
+  upcast_square_at c;
+  Dn.mkdyn (shape_view (square__obj c))
+}
+
+/// Forgetting the index is **irreversible**, even to a client that can say what the
+/// index was. Unfolding `quad__inv s` yields some anonymous `qo'` with
+/// `s == mkdyn (shape_view qo')`; the hypothesis gives `s == mkdyn (shape_view qo)`;
+/// concluding `qo' == qo` is injectivity of `mkdyn`, which section 3 of
+/// `ShapeHierarchy.fst` pins as unavailable. So a client really must decide at the
+/// upcast whether it intends to come back, and that is the honest reading of C#: a
+/// `Quadrilateral`-typed variable carries no static evidence of its dynamic type, and
+/// recovering it needs a *runtime* test, which is exactly the strengthened axiom above.
+[@@expect_failure]
+ghost fn quad_remember_impl (s: shape) (qo: erased quad__obj)
+                            (#p: perm) (#qm: erased quad__model)
+  requires quad__inv s #p qm ** pure (s == Dn.mkdyn (shape_view (reveal qo)))
+  ensures  quad__inv_at s qo p qm
+{
+  unfold (quad__inv s #p qm);
+  fold (quad__inv_at s qo p qm);
+}
+
+/// And the knowledge cannot be *invented*: no `Rectangle` is a `Square`, but neither is
+/// that provable here -- F\* has no general way to refute an equation between values of
+/// two abstract representation types, so `is_square` on a rectangle is simply
+/// undecided. That is sound (the caller still cannot downcast) and is the right pin:
+/// what makes a cast safe in this encoding is a *positive* record of the construction,
+/// never the failure of an attempt to disprove it.
+[@@expect_failure]
+let a_rectangle_is_not_a_square (c: rect)
+  : Lemma (~ (is_square (rect__obj c)))
+  = ()
+
+/// ```csharp
+/// Quadrilateral q = new Square(7);
+/// int a    = q.Area();          // 49, dispatched at Quadrilateral
+/// Square sq = (Square) q;       // checked cast, justified by construction
+/// int side  = sq.Side();        // 7,  a Square-only member
+/// return a + side;              // 56
+/// ```
+/// The whole point in one function: the reference is used at the intermediate static
+/// type, then narrowed, then used at the leaf type -- and the narrowing is justified by
+/// what the client did to build the object, not by a test it hopes will pass.
+fn downcast_demo ()
+  requires emp
+  returns  v: I32.t
+  ensures  pure (I32.v v == 56)
+{
+  let s = new_square_at 7l;
+  let a = quad_area_at s;
+  let sq = downcast_square s;
+  let side = square_side sq;
+  drop_ (square__as_quad sq #1.0R ({ q_w = 7; q_h = 7 }));
+  I32.add a side
+}

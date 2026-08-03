@@ -2057,20 +2057,58 @@ Two further findings came out of writing it.
   method calls a virtual method on `this`, which was on the not-probed list; it is
   settled, and settled by R4.10 doing nothing special.
 
-**The downcast is where the study stops**, and `downcast_is_not_free` pins it as an
-`expect_failure`. Holding `shape__inv s #p m` says `s` is some root object and says
-nothing about whether it is a quadrilateral; the information was discarded by the
-existential when the reference was upcast, which is what an upcast means. C#'s `is`/`as`
-is a runtime test against the object header, so it would need `recover` strengthened to
-report failure when the dynamic type does not match — strictly more than is assumed
-here, and nothing in either study needs it.
+**An *unchecked* downcast is impossible, and a *checked* one is free.** `§13` pins the
+first as `downcast_is_not_free`: holding `shape__inv s #p m` says `s` is some root
+object and says nothing about whether it is a quadrilateral, because the information was
+discarded by the existential when the reference was upcast, which is what an upcast
+means. `§14` then supplies the second, and it needs no new assumption:
+
+* **The precondition *is* the knowledge, and it is the ghost index `gather` already
+  forced.** `quad__inv_at s qo p qm` names the object record; `downcast_square` requires
+  it at `square__obj c` and returns `Square`'s own invariant plus `r == c`. This is not
+  a coincidence: `gather` needs a client to know *which* implementation the two halves
+  came from, and a cast needs it to know *which* implementation it is narrowing to. Both
+  are satisfied by remembering rather than by testing, which is why the checked cast
+  costs no axiom. A constructor that keeps the index (`new_square_at`) and one that
+  forgets it (`new_square`) are the same code plus one ghost step.
+* **The indexed method is the primitive and the plain one is derived.** `quad_area_at`
+  dispatches; `quad_area` is `quad_area_at` composed with `quad_forget_impl`. Indexing
+  therefore costs nothing in expressiveness — a client that never downcasts forgets at
+  every call — and a C# emitter can generate one dispatching body per virtual method,
+  not two.
+* **Forgetting is irreversible even to a client that can say what it forgot.**
+  `quad_remember_impl` is pinned `expect_failure`: from `quad__inv s` you get an
+  anonymous `qo'` with `s == mkdyn (shape_view qo')`, and equating it with a known `qo`
+  is `mkdyn` injectivity. So an upcast is a real, one-way commitment, and the C# reading
+  is exact — a `Quadrilateral`-typed variable carries no static evidence of its dynamic
+  type.
+* **A checked cast is a chain of recoveries, one per level**, because each level's
+  object record is a distinct value: `quad_rep` recovers the root object, follows `sub`
+  to the quadrilateral object, and re-boxes its representation with
+  `quad_box qo = mkdyn qo.qrep` so that congruence — not a `coerce_eq` across a merely
+  propositional type equation — delivers the equality the final `recover` wants. The CLR
+  does the whole thing with one header check; that gap is the price of erasing the
+  dynamic type into `dyn`, and it is paid in casts, not in memory.
+* **`is` is a proposition, and only ever a positive one.**
+  `is_square qo = exists (c: square). qo == square__obj c`; `as_square` turns it back
+  into the named index by classical choice, free and ghost. The negative direction is
+  *not* available — `a_rectangle_is_not_a_square` is pinned `expect_failure`, since F\*
+  cannot generally refute an equation between values of two abstract representation
+  types. That is sound (the caller still cannot cast) and is the right shape: what makes
+  a cast safe here is a positive record of the construction, never the failure of an
+  attempt to disprove it.
+* **A *failing* cast is still out of reach.** `q as Square` returning `null`, or a
+  checked cast throwing, is a runtime test whose *negative* answer must be trusted, and
+  would need `recover` strengthened to report a mismatch. Nothing in either study needs
+  it and it is not assumed — which fits M1's exception-freedom stance (§5.2): a verified
+  cast is one that cannot throw.
 
 Not probed, and to be probed before any rule is written: `base.M()`; `protected`; a
 class that overrides some methods and inherits others (every class in the study supplies
 a full vtable, which is correct but says nothing about building one from a partial
 `override` list); an `abstract` class with fields, and hence a constructor chain; a
 class holding a `Shape` *field* (boxable per F29, but nested-invariant composition à la
-R3.10b is untested); and `is`/`as` downcasts.
+R3.10b is untested); and a cast that may fail.
 
 ### Not yet done
 
