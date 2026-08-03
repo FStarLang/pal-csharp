@@ -73,4 +73,35 @@ public static class Shapes
         Shape s = new Square(5);
         return s.GetArea();
     }
+
+    /// <summary>
+    /// R9.16. A checked downcast, and what it costs. The reference is grown through the
+    /// base — a virtual call — and then cast back to reach a <c>Square</c>-only member.
+    ///
+    /// <para>The postcondition is stated as a square, not as <c>Result == 10</c>, and that
+    /// is not a weakness of the proof but the meaning of the upcast: from the moment `s`
+    /// is a <c>Shape</c>, its side is known only through its area. C# says exactly the
+    /// same thing, and the cast recovers the <em>type</em>, never the lost knowledge.</para>
+    /// </summary>
+    /// <summary>
+    /// R9.16. Two references converted and then handed to a method that takes them at the
+    /// base. The index R9.15a kept is in the way here — the callee was promised the plain
+    /// invariant — so it is dropped at the call, which is the one place that wants it gone.
+    /// </summary>
+    [Ensures("Result == 31")]
+    public static int MakeAndSum()
+    {
+        Shape a = new Circle(3);
+        Shape b = new Square(2);
+        return SumAreas(a, b);
+    }
+
+    [Ensures("Result * Result == 100")]
+    public static int GrowAndMeasureSide()
+    {
+        Shape s = new Square(5);
+        s.Double();
+        Square sq = (Square)s;
+        return sq.GetSide();
+    }
 }

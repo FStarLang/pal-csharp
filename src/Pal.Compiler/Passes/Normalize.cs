@@ -194,11 +194,24 @@ public static class Normalize
         Assigned(loop.Body, assigned);
         foreach (var st in loop.Step) Assigned(st, assigned);
 
+        // R4.11, inside a loop. `Assigned` answers "which names need a cell", and answers
+        // it by assuming a call writes everything it is handed. For an object that is
+        // ruinous rather than merely conservative: the loop would re-quantify its model on
+        // every turn, so a method whose postcondition names the model it was *given* could
+        // not prove it after the loop, and the shape a client passed in would come back
+        // anonymous. `Mutated` is the precise rule, and it is used only for objects.
+        var mutated = new HashSet<string>();
+        Mutated(loop.Body, mutated);
+        foreach (var st in loop.Step) Mutated(st, mutated);
+        var objects = Objects(loop);
+
         // R5.8: ownership of everything the loop touches that it did not itself declare.
         var live = mentioned.Where(outer.Contains).OrderBy(n => n, StringComparer.Ordinal).ToImmutableArray();
 
         // R5.8b: a local the loop never assigns keeps its value across the loop.
-        var unassigned = live.Where(n => !assigned.Contains(n)).ToImmutableArray();
+        var unassigned = live
+            .Where(n => objects.Contains(n) ? !mutated.Contains(n) : !assigned.Contains(n))
+            .ToImmutableArray();
 
         return loop with
         {
@@ -302,6 +315,97 @@ public static class Normalize
     /// Names a statement assigns. Writing through <c>a[i]</c> counts as assigning
     /// <c>a</c>: the array's contents are what the invariant quantifies over.
     /// </summary>
+    /// <summary>The object-typed names a loop mentions.</summary>
+    private static HashSet<string> Objects(IrWhile loop) =>
+        [.. Check.Statements(loop.Body).Concat(loop.Step)
+                .SelectMany(Check.Expressions)
+                .Concat(loop.Invariants)
+                .Append(loop.Cond)
+                .SelectMany(Check.Subexpressions)
+                .OfType<IrVar>()
+                .Where(v => v.Type is IrClassType)
+                .Select(v => v.Name)];
+
+    /// <summary>
+    /// R4.11. The names whose model a statement may move: an assignment target, a name
+    /// passed by reference, and anything handed to a callee — except the receiver of an
+    /// instance method the frontend has already found read-only, whose own postcondition
+    /// says its model did not move.
+    ///
+    /// <para>This is the one place that rule is written. <see cref="Assigned"/> answers a
+    /// different question (R4.2: which names need a mutable cell) and may safely
+    /// over-approximate; this one may not, because an object wrongly called mutable loses
+    /// its model to an existential and takes the caller's reasoning with it.</para>
+    /// </summary>
+    public static void Mutated(IrStmt? stmt, HashSet<string> into)
+    {
+        switch (stmt)
+        {
+            case null: return;
+            case IrBlock b: foreach (var x in b.Statements) Mutated(x, into); return;
+            case IrLocalDecl d: MutatedIn(d.Init, into); return;
+            case IrAssign a:
+                switch (a.Target)
+                {
+                    case IrVar v: into.Add(v.Name); break;
+                    case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;
+                    case IrField { Receiver: IrVar rec }: into.Add(rec.Name); break;
+                }
+                MutatedIn(a.Target, into);
+                MutatedIn(a.Value, into);
+                return;
+            case IrIf i:
+                MutatedIn(i.Cond, into);
+                Mutated(i.Then, into);
+                Mutated(i.Else, into);
+                return;
+            case IrWhile w:
+                MutatedIn(w.Cond, into);
+                Mutated(w.Body, into);
+                foreach (var st in w.Step) Mutated(st, into);
+                return;
+            case IrFor f:
+                foreach (var st in f.Init.Concat(f.Step)) Mutated(st, into);
+                Mutated(f.Body, into);
+                return;
+            case IrReturn r: MutatedIn(r.Value, into); return;
+            case IrExprStmt e: MutatedIn(e.Expr, into); return;
+            default: return;
+        }
+    }
+
+    private static void MutatedIn(IrExpr? expr, HashSet<string> into)
+    {
+        switch (expr)
+        {
+            case null: return;
+            case IrCall c:
+                for (var i = 0; i < c.Args.Length; i++)
+                {
+                    var readOnlyReceiver = i == 0 && c.HasReceiver && !c.MutatesReceiver;
+                    switch (c.Args[i])
+                    {
+                        case IrVar v when !readOnlyReceiver: into.Add(v.Name); break;
+                        case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
+                    }
+                    MutatedIn(c.Args[i], into);
+                }
+                return;
+            case IrUnary u: MutatedIn(u.Operand, into); return;
+            case IrBinary b: MutatedIn(b.Left, into); MutatedIn(b.Right, into); return;
+            case IrConditional c2:
+                MutatedIn(c2.Cond, into);
+                MutatedIn(c2.Then, into);
+                MutatedIn(c2.Else, into);
+                return;
+            case IrConvert cv: MutatedIn(cv.Operand, into); return;
+            case IrRefArg ra: MutatedIn(ra.Operand, into); return;
+            case IrElement el: MutatedIn(el.Array, into); MutatedIn(el.Index, into); return;
+            case IrField f: MutatedIn(f.Receiver, into); return;
+            default: return;
+        }
+    }
+
     public static void Assigned(IrStmt? stmt, HashSet<string> into)
     {
         switch (stmt)

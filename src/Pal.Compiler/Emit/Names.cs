@@ -146,6 +146,25 @@ public static class Names
         "class_" + name + "__to_" + baseName;
 
     /// <summary>
+    /// R9.15a. The upcast as a value, <em>keeping</em> the index. This is the one the
+    /// emitter uses: the plain form is one <c>forget_impl</c> away and the index is not
+    /// recoverable once dropped, so the conversion hands back the more informative
+    /// resource and R9.16's downcast is what makes use of it.
+    /// </summary>
+    public static string UpcastToAt(string name, string baseName) =>
+        UpcastTo(name, baseName) + "_at";
+
+    /// <summary>R9.16. The leaf representation, re-erased so the next <c>recover</c> has its equation.</summary>
+    public static string ClassBox(string name) => "class_" + name + "__box";
+
+    /// <summary>R9.16. The chain walker: recovers the object record and hands back its representation.</summary>
+    public static string ClassRep(string name) => "class_" + name + "__rep";
+
+    /// <summary>R9.16. The checked downcast from <paramref name="baseName"/> to this class.</summary>
+    public static string DowncastFrom(string name, string baseName) =>
+        "class_" + name + "__from_" + baseName;
+
+    /// <summary>
     /// A member's own name, undoing the type qualifier <c>Naming.Of</c> prefixes. The
     /// qualifier is what keeps two classes' <c>Area</c> methods in distinct modules; the
     /// bare name is what a vtable slot and a dispatching wrapper are named after.

@@ -1012,6 +1012,18 @@ Every one of these errs strict when it errs: the permissive direction would tell
 the model did not move when it did, which is unsound, while the strict direction only costs
 the caller an existential — exactly what it would have had without R4.11 at all.
 
+**R4.11c (`Assigned` is not `Mutated`).** The same three-part test answers a second
+question — *which objects in a body have moved by the time the postcondition is stated*, and
+which of a loop's objects R5.8b may hold fixed — and it must be the one that answers it.
+The tempting shortcut is `Normalize.Assigned`, which is already there; but `Assigned`
+answers R4.2, "which names need a mutable cell", where saying yes too often costs a
+`let mut` and nothing else. Here it costs the *model*: an object wrongly called mutable is
+re-quantified, and a postcondition like `Result == a.TheArea + b.TheArea` becomes
+unstateable at the very call site that needs it. The rule therefore lives in exactly one
+place, `Normalize.Mutated`, and `Assigned` is never used to answer it. Note also that
+"errs strict" reverses here: for a *loop*, holding an object fixed is the strong reading,
+so the two consumers need the same precise answer for opposite reasons.
+
 **R4.11b (a read-only method is observed, not owned).** The same analysis decides one more
 thing: a method that gets `preserves` also gets a permission binder, and its receiver is
 held at that permission rather than at `1.0R`:
@@ -1231,6 +1243,12 @@ Without it, nothing connects the local's value before and after the loop. The
 insertion-sort probe found this the hard way: the outer loop's step `i = i + 1` could not
 be shown to decrease the measure, because the *inner* loop had existentially rebound `i`
 even though it never touches it.
+
+For an **object**, "assigned" is R4.11c's question, not `Assigned`'s: a loop that only
+*reads* an object through a read-only method holds its model fixed. The same shape, one
+level up, as the defect R4.11c describes — a loop that dispatches a reader on a shape it
+was handed must still be able to return that shape to its caller with the model the caller
+named.
 
 **R5.9 (`decreases` obligation).** By F2 every emitted `while` **must** carry `decreases`.
 The measure is obtained, in order:
@@ -2404,14 +2422,14 @@ afterwards: the only way back is R9.16, which requires the index.
 **R9.15a — The conversion also has a value form, and that is what a statement uses.**
 Pulse matches resources by name, so a ghost upcast followed by `let x = mkdyn (…)` leaves
 the invariant attached to the term and not to `x` (Error 228, the same fact R3.8's object
-locals are already shaped by). `class_C__to_P` is the ghost step followed by the reference,
-returning it, so the conversion is one operation:
+locals are already shaped by). `class_C__to_P_at` is the ghost step followed by the
+reference, returning it, so the conversion is one operation:
 
 ```
 let t0 = func_Square__ctor 5l;
 with vs_0. assert (class_Square__inv t0 vs_0);
 fold (class_Square__as_Shape t0 (class_Square__forget vs_0));
-let var_s = Vtbl_Square.class_Square__to_Shape t0;
+let var_s = Vtbl_Square.class_Square__to_Shape_at t0;
 ```
 
 The `with` is not a proof step but the naming R9.6 needs: the view is folded at the
@@ -2419,6 +2437,26 @@ forgetting of *whatever model the constructor established*, and only the prover 
 that. Currently inserted at a local declaration whose declared type is the immediate base;
 the other three positions and longer chains are refused with a diagnostic rather than
 emitted untested.
+
+**R9.15b — The conversion keeps the index, and the *emitter* is what drops it.** The
+`_at` form ensures `class_P__inv_at s (hide (class_C__obj_of t)) p m`, not the anonymous
+`exists* o. inv_at s o p m` that R9.3's reference is. Keeping it is what makes R9.16
+provable at all, and dropping it is a separate, explicit step, `class_P__forget_impl s o`,
+because an indexed reference cannot be handed to a method (whose parameter is anonymous by
+R9.3), stored, or returned. The emitter therefore forgets the index of
+
+* every argument of a call except a receiver it is dispatching on,
+* a returned object,
+* an object local at the end of its scope (R3.8's drop, at the indexed resource).
+
+`class_P__forget_impl` takes the object record explicitly and **leaves both its permission
+and its model to inference**: naming the model with a `with` would bind an opaque witness
+and sever the link to the constructor's post-state, which is F34/R4.11a again.
+
+A reference conversion the emitter does not have a rule for is **PALCS0546** at the
+argument, `return` or assignment that asks for it, and a class-typed cast in expression
+position is **PALCS0547** — both diagnosed at the C# construct rather than left to fail as
+an unreadable resource mismatch in Pulse.
 
 A base-typed array is therefore heterogeneous with no extra machinery (`shape_slot` in
 both studies), and `total_area` traverses one at a fraction.
@@ -2428,6 +2466,47 @@ both studies), and `total_area` traverses one at a fraction.
 **R9.16 — A cast to a derived type requires the ghost index naming the object.** It is
 emitted as the chain walker plus one `recover`, and it needs no assumption beyond R9.13.
 The precondition *is* the knowledge, and it is the same index `gather` already forced.
+
+The base emits two constructs for it, next to `share`/`gather`:
+
+```
+let class_P__box (o: class_P__obj) : Dn.dyn = Dn.mkdyn o.rep
+fn  class_P__rep (s: class_P) (#o: erased class_P__obj) …
+      requires class_P__inv_at s o p m ensures … ** pure (d == class_P__box o)
+```
+
+`rep` walks the chain — `unfold inv_at; recover; fold inv_at` — and returns the box rather
+than `o.rep` itself, because reading the field needs a coercion across `o.pkg.impl ==
+class_C`, which is only propositionally true. Each leaf emits the cast:
+
+```
+fn class_C__from_P (s: class_P) (#c: erased class_C) (#p: perm) (#m: erased class_P__model)
+  requires class_P__inv_at s (hide (class_C__obj_of (reveal c))) p m
+  returns  r: class_C
+  ensures  class_C__as_P r #p m ** pure (r == reveal c)
+```
+
+and the client is R9.15b's index followed by that cast and R3.8's unfold:
+
+```
+let var_s = Vtbl_Square.class_Square__to_Shape_at t0;
+let t1 = class_Shape_Double_at var_s;
+with vs_1. assert (Class_Shape.class_Shape__inv_at var_s (hide (…__obj_of t0)) 1.0R vs_1);
+let var_sq = Vtbl_Square.class_Square__from_Shape var_s;
+unfold (Class_Square.class_Square__as_Shape var_sq vs_1);
+with vsq_2. assert (Class_Square.class_Square__inv var_sq vsq_2);
+```
+
+The `pure (r == reveal c)` is what makes the round trip an identity, so a `Square` cast up
+and back is the same reference. Using a name after it has been cast is **PALCS0548**: C#
+would let both names live, the encoding does not, and saying so at the C# use is better
+than a resource mismatch at the Pulse one.
+
+**The cast recovers the type, never the model.** After `Shape s = new Square(5)` only the
+observations R9.6's forgetting kept survive, so `GrowAndMeasureSide` can conclude
+`Result * Result == 100` and not `Result == 10`. That is C#'s semantics, not a weakness of
+the encoding: an upcast really does lose static knowledge, and a program that needs it back
+should not have upcast.
 
 Be precise about what this proves. `recover` has no failure mode: it is not "test the
 header and maybe fail" but "given a proof the header matches, hand back the value". So the
@@ -2452,7 +2531,10 @@ declaration that asks for it, never a prediction about a proof:
 | a virtual method taking or returning a non-value | R9.9a |
 | an upcast anywhere but a base-typed local, or across more than one level | R9.15a |
 | `interface`, multiple bases, generics | not probed |
-| `as`, `is`, a cast that may fail | R9.16 |
+| a reference conversion at an argument, `return` or assignment | PALCS0546, R9.15a |
+| a class-typed cast in expression position | PALCS0547, R9.15b |
+| a use of a reference after it has been cast | PALCS0548, R9.16 |
+| `as`, `is`, a cast that may fail; `Pal.Is<T>` in a contract | R9.16 |
 
 ### 9.9 Status
 
@@ -2472,5 +2554,20 @@ existed; that is a true statement about the program, not a gap in the scheme.
 the emitter was complete, with a different representation, a different forgetting function
 and a nonlinear observation, and needed no emitter change at all.
 
+The checked downcast R9.16 is implemented too, and verified by `Shapes.MakeAndSum` (two
+upcast locals whose indices are forgotten at a call) and `Shapes.GrowAndMeasureSide` (upcast,
+virtual call at the index, downcast, then a `Square`-only method) — both, again, in the
+variant as well.
+
+Building it uncovered a *pre-existing* defect that R9.15b's forgetting made visible: a
+read-only object parameter's postcondition was unusable by callers, because the mutation
+analysis asked `Normalize.Assigned`, whose answer is "which names need a mutable cell"
+(R4.2) and which may therefore say "everything a call touches". For a model that is not a
+conservative approximation but a loss: the object comes back anonymous and
+`Result == a.TheArea + b.TheArea` cannot be stated. R4.11's rule now lives in exactly one
+place, `Normalize.Mutated`, and is used both for a method's parameters and — this is the
+same fact one level down — for deciding which of a loop's objects R5.8b may hold fixed.
+
 Not yet implemented: depth ≥ 3 (the `sub: Dn.dyn` field of R9.9, designed in
-`DeepHierarchy.fst`), the checked downcast R9.16, and heterogeneous arrays.
+`DeepHierarchy.fst`), heterogeneous arrays, and the *cross-method* downcast, where the
+index travels in a contract (`Pal.Is<T>`) rather than within one body.

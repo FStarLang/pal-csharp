@@ -69,6 +69,14 @@ public static class Declarations
     {
         if (method.MethodKind == MethodKind.Constructor) return false;
 
+        // R9.7/R4.11b. An abstract method has no body, so there is no write set to read
+        // the answer off: `[Frac]` on the declaration is what says it, exactly as R4.9a
+        // says it of a parameter. Falling through to the syntax scan would find no
+        // assignment in a declaration that has no statements at all and call every
+        // virtual method read-only — including the mutating ones.
+        if (method.IsAbstract)
+            return method.GetAttributes().Any(a => a.AttributeClass?.Name == "FracAttribute");
+
         // A method already on the stack is one this analysis cannot finish, and an
         // unfinished answer is a mutating one.
         if (!visiting.Add(method.OriginalDefinition)) return false;

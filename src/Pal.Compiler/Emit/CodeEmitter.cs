@@ -202,7 +202,14 @@ public sealed class CodeEmitter(
                 // re-binding it would leave the context holding its invariant under the
                 // old name, which the frame rule cannot match (Error 228). Everything else
                 // is let-bound so the epilogue can be interposed before the block's value.
-                if (IsObjectBinder(text)) { CloseObjects(method, plan, text); Line(text); return; }
+                if (IsObjectBinder(text))
+                {
+                    if (_objectLocals.FirstOrDefault(l => l.Binder == text) is { Index: not null } ix)
+                        Forget(ix);
+                    CloseObjects(method, plan, text);
+                    Line(text);
+                    return;
+                }
 
                 var t = Fresh();
                 Line($"let {t} = {text};");
@@ -510,11 +517,93 @@ public sealed class CodeEmitter(
         Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} " +
              $"({mod}.{Names.ClassForget(derived)} {own}));");
         Line($"let {binder} = {Names.VtblModule(derived)}." +
-             $"{Names.UpcastTo(derived, target.Name)} {impl};");
+             $"{Names.UpcastToAt(derived, target.Name)} {impl};");
 
-        var local = new Slot(d.Name, target, SlotKind.Object, binder);
+        // R9.16. The conversion keeps the index, so the object record this reference
+        // stands for stays known and a later cast back is provable. Where the plain
+        // invariant is wanted instead, `Forget` drops it — one ghost step, at the point
+        // that wants it, and nothing recovers it afterwards.
+        var index = $"(hide ({Names.VtblModule(derived)}.{Names.ClassObjOf(derived)} {impl}))";
+        var local = new Slot(d.Name, target, SlotKind.Object, binder) { Index = index };
         _slots[d.Name] = local;
         _objectLocals.Add(local);
+    }
+
+    /// <summary>
+    /// R9.16. <c>D x = (D) b;</c>. The cast is justified by <paramref name="source"/>'s
+    /// index — the object record it is known to stand for — which is exactly the knowledge
+    /// C# would test for at runtime, and which R9.15a's conversion kept. A base reference
+    /// with no index is one whose dynamic type the translation does not know, and the cast
+    /// is refused rather than emitted for Pulse to fail on.
+    ///
+    /// <para>The result is handed back at the base's model, through R9.14's view; opening
+    /// that view immediately turns it into an ordinary M2 object local, and leaves in
+    /// context the equation relating the two models — which is what lets the caller keep
+    /// reasoning about the value it cast.</para>
+    /// </summary>
+    private void Downcast(IrLocalDecl d, IrClassType target, IrVar source, string binder)
+    {
+        if (Lookup(source.Name) is not { Kind: SlotKind.Object, Type: IrClassType from } obj ||
+            classes is null || !classes.TryGetValue(target.Name, out var sub) ||
+            sub.BaseClass != from.Name)
+        {
+            diagnostics.Unsupported(d.Loc, $"Casting a `{Lookup(source.Name)?.Type}` to `{target.Name}`",
+                "R9.16 casts a reference to its immediate subclass and nothing else.");
+            return;
+        }
+
+        if (obj.Index is null)
+        {
+            diagnostics.Error("PALCS0547", d.Loc,
+                $"`{source.Name}` is not known to be a `{target.Name}`, so this cast might " +
+                "throw. R9.16 proves only the casts whose runtime test is redundant: the " +
+                $"reference must have been converted from a `{target.Name}` in this method.");
+            return;
+        }
+
+        // The model the reference is held at has to be named before the cast: the view the
+        // cast hands back is indexed by it, and only the prover knows what it is.
+        var pre = FreshValue(source.Name);
+        Line($"with {pre}. assert ({obj.Resource(pre)});");
+        Line($"let {binder} = {Names.VtblModule(target.Name)}." +
+             $"{Names.DowncastFrom(target.Name, from.Name)} {obj.Binder};");
+
+        var own = FreshValue(d.Name);
+        var mod = Names.ClassModule(target.Name);
+        Line($"unfold ({mod}.{Names.ClassAsBase(target.Name, from.Name)} " +
+             $"{binder} {obj.PermArg}{pre});");
+        Line($"with {own}. assert ({mod}.{Names.ClassInv(target.Name)} {binder} {obj.PermArg}{own});");
+
+        // The base reference owns nothing now: its invariant *became* the derived one.
+        // C# would let it be read again, so saying so is the emitter's job (PALCS0548).
+        _slots[source.Name] = obj with { Kind = SlotKind.Value, Index = null, Cast = target.Name };
+        _objectLocals.RemoveAll(s => s.Binder == obj.Binder);
+
+        var local = new Slot(d.Name, target, SlotKind.Object, binder)
+        { Fraction = obj.Fraction, PreModel = own, PostModel = own };
+        _slots[d.Name] = local;
+        _objectLocals.Add(local);
+    }
+
+    /// <summary>
+    /// R9.16. Drops a slot's index, where what wants the resource wants the plain
+    /// invariant: an argument at a base-typed parameter, or a returned reference. One
+    /// ghost step, and irreversible — which is why it is emitted at the point that needs
+    /// it and not at the conversion.
+    /// </summary>
+    private void Forget(Slot obj)
+    {
+        // The model is left implicit on purpose. Naming it with a `with` first would bind
+        // it to an opaque witness, and everything the context knew about the model — that
+        // it is *this* leaf's forgetting of *that* constructor's post-state — would be cut
+        // at exactly the point a caller still needs it (F34's lesson, one level up).
+        var klass = (IrClassType)obj.Type;
+        Line($"{Names.ClassModule(klass.Name)}.{Names.ClassForgetImpl(klass.Name)} " +
+             $"{obj.Binder} {obj.Index};");
+        var plain = obj with { Index = null };
+        _slots[obj.Name] = plain;
+        for (var i = 0; i < _objectLocals.Count; i++)
+            if (_objectLocals[i].Binder == obj.Binder) _objectLocals[i] = plain;
     }
 
     private static string Unfold(Slot obj) =>
@@ -577,10 +666,9 @@ public sealed class CodeEmitter(
         foreach (var local in _objectLocals.Skip(from))
         {
             if (local.Binder == returned) continue;
-            var klass = (IrClassType)local.Type;
             var m = FreshValue(local.Name);
-            Line($"with {m}. assert ({Inv(klass)} {local.Binder} {m});");
-            Line($"drop_ ({Inv(klass)} {local.Binder} {m});");
+            Line($"with {m}. assert ({local.Resource(m)});");
+            Line($"drop_ ({local.Resource(m)});");
         }
     }
 
@@ -752,6 +840,14 @@ public sealed class CodeEmitter(
                 if (Source(d.Init) is { } derived && derived != oc.Name)
                 {
                     Upcast(d, d.Init, derived, oc, binder);
+                    return;
+                }
+
+                // R9.16. `D x = (D) b;`, the checked downcast.
+                if (d.Init is IrConvert { Operand: IrVar source } cast &&
+                    cast.Target is IrClassType)
+                {
+                    Downcast(d, oc, source, binder);
                     return;
                 }
 
@@ -1310,6 +1406,14 @@ public sealed class CodeEmitter(
             case IrLiteral l:
                 return Types.Literal(l.Value, l.Type);
 
+            // R9.16. The cast moved this reference's invariant onto the derived name.
+            case IrVar v when _slots.TryGetValue(v.Name, out var cast) && cast.Cast is { } to:
+                diagnostics.Error("PALCS0548", v.Loc,
+                    $"`{v.Name}` cannot be used after it is cast to `{to}`. The cast moved " +
+                    $"what `{v.Name}` owned onto the `{to}` reference (R9.16), which is the " +
+                    "same object: use that name instead.");
+                return "()";
+
             case IrVar v when _slots.TryGetValue(v.Name, out var slot):
                 if (slot.Kind is SlotKind.Cell or SlotKind.RefParam)
                 {
@@ -1422,14 +1526,30 @@ public sealed class CodeEmitter(
     /// <summary>Emits a call, binding its result to <paramref name="binder"/>.</summary>
     private string Call(IrCall call, string binder)
     {
+        var owner = PulseEmitter.DispatchOwner(classes, call.Callee);
+
+        // R9.16. An indexed reference is owned through `class_C__inv_at`, and that is what
+        // a dispatching wrapper's `_at` form asks for; anything else — a base-typed
+        // parameter of an ordinary method, an argument passed as data — asks for the plain
+        // invariant, so the index is dropped here, where it is in the way.
+        var indexed = false;
+        for (var i = 0; i < call.Args.Length; i++)
+        {
+            if (call.Args[i] is not IrVar av || Lookup(av.Name) is not { Index: not null } ix) continue;
+            if (i == 0 && call.HasReceiver && owner is not null) { indexed = true; continue; }
+            Forget(ix);
+        }
+
         var args = call.Args.Select(Expr).ToImmutableArray();
         // R9.12. A call resolved to an `abstract` declaration is a virtual call: it goes
         // to the dispatching wrapper, which recovers the object and runs its vtable slot.
         // Nothing else about the call changes — the arguments, the implicit model binder
         // and the permission are found by the same rules as for a direct call, because
         // R9.9 gives the wrapper the same contract shape a direct method has.
-        var callee = PulseEmitter.DispatchOwner(classes, call.Callee) is { } owner
-            ? Names.Dispatch(owner, Names.Member(call.Callee, owner))
+        var callee = owner is not null
+            ? indexed
+                ? Names.DispatchAt(owner, Names.Member(call.Callee, owner))
+                : Names.Dispatch(owner, Names.Member(call.Callee, owner))
             : Names.Function(call.Callee);
         Line($"let {binder} = {callee} " +
              (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
@@ -1502,6 +1622,17 @@ public sealed class CodeEmitter(
 
     private string Convert(IrConvert cv)
     {
+        // R9.16. A cast between reference types is a statement, not an expression: it
+        // moves a resource, and the name it moves it to is the one every later mention
+        // has to use. Anywhere else it would silently be the identity.
+        if (cv.Target is IrClassType target)
+        {
+            diagnostics.Error("PALCS0547", cv.Loc,
+                $"A cast to `{target.Name}` is emitted only as the initialiser of a local " +
+                $"declaration (R9.16): write `{target.Name} x = …;` and use `x`.");
+            return "()";
+        }
+
         var operand = Expr(cv.Operand);
         var from = (cv.Operand.Type as IrPrim)?.Kind;
         var to = (cv.Target as IrPrim)?.Kind;

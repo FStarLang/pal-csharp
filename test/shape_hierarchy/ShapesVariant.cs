@@ -47,4 +47,22 @@ public static class ShapesVariant
         int a = s.GetArea();
         return a;
     }
+
+    [Ensures("Result == 31")]
+    public static int MakeAndSum()
+    {
+        Shape one = new Square(2);
+        Shape two = new Circle(3);
+        int total = SumAreas(two, one);
+        return total;
+    }
+
+    [Ensures("Result * Result == 400")]
+    public static int GrowAndMeasureSide()
+    {
+        Shape s = new Square(10);
+        Square sq = (Square)s;
+        int side = sq.GetSide();
+        return 2 * side;
+    }
 }

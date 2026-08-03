@@ -25,6 +25,9 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     private const string Perm = "p";
     private const string Model = "m";
     private const string Obj = "o";
+
+    /// <summary>R9.16. The erased leaf value a downcast names: the caller's knowledge.</summary>
+    private const string Witness = "c";
     private const string Ret = "ret";
 
     /// <summary>The permission a mutating slot demands: all of it.</summary>
@@ -131,6 +134,27 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         sb.AppendLine("{");
         sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
         sb.AppendLine($"  fold ({inv} s #{Perm} {Model});");
+        sb.AppendLine("}");
+        sb.AppendLine();
+
+        // R9.16, the class-independent half of a downcast: recover the object record and
+        // hand back its representation, re-erased. Reading `o.rep` out directly would need
+        // a coercion across `o.pkg.impl == class_D`, which is only propositionally true;
+        // going back through `mkdyn` keeps everything a dyn, and congruence on the box
+        // then delivers the equation the leaf's own `recover` asks for.
+        sb.AppendLine($"let {Names.ClassBox(c.Name)} (o: {obj}) : Dn.dyn = Dn.mkdyn o.rep");
+        sb.AppendLine();
+
+        sb.AppendLine($"fn {Names.ClassRep(c.Name)} (s: {self}) (#{Obj}: erased {obj})" +
+                      $" (#{Perm}: perm) (#{Model}: erased {model})");
+        sb.AppendLine($"  preserves {invAt} s {Obj} {Perm} {Model}");
+        sb.AppendLine("  returns  d: Dn.dyn");
+        sb.AppendLine($"  ensures  pure (d == {Names.ClassBox(c.Name)} {Obj})");
+        sb.AppendLine("{");
+        sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
+        sb.AppendLine($"  let ob = CAs.recover #{obj} #{Obj} s;");
+        sb.AppendLine($"  fold ({invAt} s {Obj} {Perm} {Model});");
+        sb.AppendLine($"  {Names.ClassBox(c.Name)} ob");
         sb.AppendLine("}");
         sb.AppendLine();
 
@@ -430,28 +454,42 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         sb.AppendLine($"  fold ({pInvAt} {made} (hide ({Names.ClassObjOf(c.Name)} x)) {Perm} {Model});");
         sb.AppendLine("}");
         sb.AppendLine();
-        sb.AppendLine($"ghost fn {Names.Upcast(c.Name)} (x: {mod}.{self}) (#{Perm}: perm)" +
-                      $" (#{Model}: erased {pModel})");
-        sb.AppendLine($"  requires {asBase} x #{Perm} {Model}");
-        sb.AppendLine($"  ensures  {pMod}.{Names.ClassInv(parent.Name)} {made} #{Perm} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  {Names.UpcastAt(c.Name)} x #{Perm} #{Model};");
-        sb.AppendLine($"  {pMod}.{Names.ClassForgetImpl(parent.Name)} {made}" +
-                      $" (hide ({Names.ClassObjOf(c.Name)} x)) #{Perm} #{Model};");
-        sb.AppendLine("}");
-        sb.AppendLine();
-
-        // R9.15. The value form. A C# reference conversion produces a reference, and the
+        // R9.15a. The value form. A C# reference conversion produces a reference, and the
         // name it is bound to is the one every later resource must be attached to, so the
-        // ghost step and the rebinding are one operation and not two.
-        sb.AppendLine($"fn {Names.UpcastTo(c.Name, parent.Name)} (x: {mod}.{self})" +
+        // ghost step and the rebinding are one operation and not two. It keeps the index:
+        // dropping it is one `forget_impl` wherever the plain form is wanted, and nothing
+        // recovers it once dropped, so the informative resource is the one to hand back.
+        var objOf = $"({Names.ClassObjOf(c.Name)} x)";
+        sb.AppendLine($"fn {Names.UpcastToAt(c.Name, parent.Name)} (x: {mod}.{self})" +
                       $" (#{Perm}: perm) (#{Model}: erased {pModel})");
         sb.AppendLine($"  requires {asBase} x #{Perm} {Model}");
         sb.AppendLine($"  returns  s: {pMod}.{Names.ClassType(parent.Name)}");
-        sb.AppendLine($"  ensures  {pMod}.{Names.ClassInv(parent.Name)} s #{Perm} {Model}");
+        sb.AppendLine($"  ensures  {pInvAt} s (hide {objOf}) {Perm} {Model}");
         sb.AppendLine("{");
-        sb.AppendLine($"  {Names.Upcast(c.Name)} x #{Perm} #{Model};");
+        sb.AppendLine($"  {Names.UpcastAt(c.Name)} x #{Perm} #{Model};");
         sb.AppendLine($"  {made}");
+        sb.AppendLine("}");
+        sb.AppendLine();
+
+        // R9.16. The checked downcast. Its precondition *is* the knowledge C# would test
+        // for at runtime: the index names the object record, so `recover` — which has no
+        // failure mode — is given the equation it asks for at each hop. The cast therefore
+        // cannot fail, not because a runtime test is proved to succeed, but because only
+        // the casts whose test is redundant can be written at all.
+        var cRep = $"({Names.ClassObjOf(c.Name)} (reveal {Witness}))";
+        sb.AppendLine($"fn {Names.DowncastFrom(c.Name, parent.Name)}" +
+                      $" (s: {pMod}.{Names.ClassType(parent.Name)}) (#{Witness}: erased {mod}.{self})" +
+                      $" (#{Perm}: perm) (#{Model}: erased {pModel})");
+        sb.AppendLine($"  requires {pInvAt} s (hide {cRep}) {Perm} {Model}");
+        sb.AppendLine($"  returns  r: {mod}.{self}");
+        sb.AppendLine($"  ensures  {asBase} r #{Perm} {Model} ** pure (r == reveal {Witness})");
+        sb.AppendLine("{");
+        sb.AppendLine($"  let d = {pMod}.{Names.ClassRep(parent.Name)} s" +
+                      $" #(hide {cRep}) #{Perm} #{Model};");
+        sb.AppendLine($"  let r = CAs.recover #{mod}.{self} #{Witness} d;");
+        sb.AppendLine($"  unfold ({pInvAt} s (hide {cRep}) {Perm} {Model});");
+        sb.AppendLine($"  rewrite ({pAt} {cRep} {Perm} {Model}) as ({asBase} r #{Perm} {Model});");
+        sb.AppendLine("  r");
         sb.AppendLine("}");
         return sb.ToString();
     }

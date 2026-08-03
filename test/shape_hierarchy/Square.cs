@@ -51,4 +51,14 @@ public sealed class Square : Shape
     {
         side = 2 * side;
     }
+
+    /// <summary>
+    /// A <c>Square</c>-only member. A <c>Shape</c> has no name for a side, so this is
+    /// what a downcast (R9.16) is <em>for</em>.
+    /// </summary>
+    [Ensures("Result == @this.SideLength")]
+    public int GetSide()
+    {
+        return side;
+    }
 }

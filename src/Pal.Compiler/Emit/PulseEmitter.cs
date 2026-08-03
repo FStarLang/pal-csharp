@@ -84,12 +84,30 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// <summary>R9.14. The binder for this class's own model inside an <c>override</c>.</summary>
     public string OwnModel => "own_" + Name;
 
+    /// <summary>
+    /// R9.16. For a hierarchy-typed slot whose object record is known: the term naming it.
+    /// A slot that has one is owned through <c>class_C__inv_at</c> rather than the plain
+    /// invariant, which is what makes a checked downcast writable — and it is the only
+    /// difference, because R9.10 emits every dispatching wrapper at the index too.
+    /// </summary>
+    public string? Index { get; init; }
+
+    /// <summary>
+    /// R9.16. The class this reference was cast to. C# leaves the base name usable after
+    /// a cast; the encoding does not, because the cast <em>moved</em> the invariant onto
+    /// the derived reference. A later mention is reported against the C#.
+    /// </summary>
+    public string? Cast { get; init; }
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
         SlotKind.Cell => $"R.pts_to {Binder} {value}",
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
+        SlotKind.Object when Type is IrClassType c && Index is not null =>
+            $"{Names.ClassModule(c.Name)}.{Names.ClassInvAt(c.Name)} {Binder} {Index} " +
+            $"{(Fraction ?? "1.0R")} {value}",
         SlotKind.Object when Type is IrClassType c =>
             $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} {Binder} {Perm}{value}",
         _ => "",
@@ -195,6 +213,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInv(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvAt(ab.Name), decl.Loc),
                     new Provenance(Names.ClassForgetImpl(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassBox(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassRep(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name) + "_at", decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvGather(ab.Name) + "_at", decl.Loc),
@@ -256,8 +276,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                         new Provenance(Names.ClassVtblValue(leaf.Name), decl.Loc),
                         new Provenance(Names.ClassObjOf(leaf.Name), decl.Loc),
                         new Provenance(Names.UpcastAt(leaf.Name), decl.Loc),
-                        new Provenance(Names.Upcast(leaf.Name), decl.Loc),
-                        new Provenance(Names.UpcastTo(leaf.Name, baseName), decl.Loc),
+                        new Provenance(Names.UpcastToAt(leaf.Name, baseName), decl.Loc),
+                        new Provenance(Names.DowncastFrom(leaf.Name, baseName), decl.Loc),
                     ],
                 });
             }
