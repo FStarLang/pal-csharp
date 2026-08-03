@@ -2057,11 +2057,24 @@ Two further findings came out of writing it.
   method calls a virtual method on `this`, which was on the not-probed list; it is
   settled, and settled by R4.10 doing nothing special.
 
-**An *unchecked* downcast is impossible, and a *checked* one is free.** `§13` pins the
-first as `downcast_is_not_free`: holding `shape__inv s #p m` says `s` is some root
-object and says nothing about whether it is a quadrilateral, because the information was
-discarded by the existential when the reference was upcast, which is what an upcast
-means. `§14` then supplies the second, and it needs no new assumption:
+**An *unchecked* downcast is impossible; a *checked* one needs no new assumption.**
+`§13` pins the first as `downcast_is_not_free`: holding `shape__inv s #p m` says `s` is
+some root object and says nothing about whether it is a quadrilateral, because the
+information was discarded by the existential when the reference was upcast, which is
+what an upcast means. `§14` then supplies the second.
+
+Be precise about what "checked" means here, because it is *not* "we prove the runtime
+test succeeds". `recover` has no failure mode — it is not "test the header and maybe
+fail" but "given a proof the header matches, hand back the value", its argument refined
+by `d == mkdyn x`. `quad__inv_at` carries that refinement at each hop, so the cast
+cannot fail; but it cannot fail because the encoding only lets you *write* the casts
+whose test is redundant. A cast that might fail is not one this study proves safe, it is
+one this study cannot express. That is the right stance for a verifier — a verified cast
+is one that cannot throw, consistent with M1's exception-freedom (§5.2) — but it is a
+restriction on the source language, not a theorem about C#.
+
+Nor is the cast free at *runtime*: depth `k` costs `k` recoveries where the CLR does one
+header check. What is free is the **proof**, and the details are:
 
 * **The precondition *is* the knowledge, and it is the ghost index `gather` already
   forced.** `quad__inv_at s qo p qm` names the object record; `downcast_square` requires
@@ -2097,11 +2110,12 @@ means. `§14` then supplies the second, and it needs no new assumption:
   types. That is sound (the caller still cannot cast) and is the right shape: what makes
   a cast safe here is a positive record of the construction, never the failure of an
   attempt to disprove it.
-* **A *failing* cast is still out of reach.** `q as Square` returning `null`, or a
-  checked cast throwing, is a runtime test whose *negative* answer must be trusted, and
-  would need `recover` strengthened to report a mismatch. Nothing in either study needs
-  it and it is not assumed — which fits M1's exception-freedom stance (§5.2): a verified
-  cast is one that cannot throw.
+* **A *failing* cast is still out of reach**, per the caveat above: `q as Square`
+  returning `null`, or a checked cast throwing, is a runtime test whose *negative*
+  answer must be trusted, and would need `recover` strengthened to report a mismatch.
+  Nothing in either study needs it and it is not assumed. A C# surface therefore has a
+  real choice to make — reject `as` and failing casts outright, or admit them and pay
+  for the stronger axiom.
 
 Not probed, and to be probed before any rule is written: `base.M()`; `protected`; a
 class that overrides some methods and inherits others (every class in the study supplies

@@ -1473,13 +1473,26 @@ let downcast_is_not_free (s: shape) (o: shape__obj)
 /// `Square`, and a caller who cannot say why it should be is writing a cast that may
 /// throw.
 ///
-/// So the model is a downcast whose **precondition is the knowledge**. It never fails,
-/// which is the point: a verified program does not write casts it cannot justify. The
-/// knowledge is carried by `quad__inv_at`, the same ghost index `gather` needed.
+/// So the model is a downcast whose **precondition is the knowledge**, carried by
+/// `quad__inv_at` -- the same ghost index `gather` needed.
+///
+/// Be precise about what that buys. `recover` has **no failure mode**: it is not "test
+/// the header and maybe fail", it is "given a proof that the header matches, hand back
+/// the value", and its argument is refined by `d == mkdyn x`. `quad__inv_at` carries
+/// exactly that refinement at each hop, so the cast below cannot fail -- but not
+/// because anything proves a runtime test succeeds. It cannot fail because the encoding
+/// only lets you *write* the casts whose test is redundant. A cast that might fail is
+/// not a cast this study proves safe; it is a cast this study cannot express (section
+/// 13), and giving it a meaning needs `recover` strengthened to report a mismatch.
+///
+/// That is the right stance for a verifier -- a verified cast is one that cannot
+/// throw -- but it is a restriction on the source language, not a theorem about C#.
 ///
 /// The runtime part is a chain of `recover`s, one per level, because in this encoding
-/// each level's object record is a *distinct value*. The CLR does the whole thing with
-/// one header check; that difference is the price of erasing the dynamic type into
+/// each level's object record is a *distinct value*. So the cast is **not** free at
+/// runtime: depth `k` costs `k` recoveries where the CLR does one header check. What is
+/// free is the *proof* -- no assumption beyond the `recover` already needed for ordinary
+/// virtual dispatch. That difference is the price of erasing the dynamic type into
 /// `dyn`, and it is paid in casts, not in memory.
 
 /// The leaf representation, re-erased. Reading it out of the recovered object record
