@@ -1905,6 +1905,99 @@ Rules are recorded here as they are validated.
   discarded the alias's invariant at the end of the method — taking the resource the method
   had to hand back. The §7.2 detector doing exactly what it is for.
 
+### Inheritance: a design study, not yet a scheme
+
+M2 translates `sealed` classes only (R4.13). Before proposing a C# surface for
+`abstract`/`virtual`/`override`, the encoding was worked out **directly in Pulse** and
+verified end to end: `test/pulse_facts/ShapeHierarchy.fst` is a complete
+`Shape`/`Circle`/`Square` hierarchy with a heterogeneous `Shape[]`, and
+`test/pulse_facts/InheritanceFacts.fst` pins the facts (F28–F34) it rests on. Every
+construct in the study carries the C# it stands for in a comment. **No rule below is
+approved; this section records what the target must be, so that §0's "facts first" is
+satisfied before any emitter work.**
+
+The encoding, in one line: a class is a **vtable record** carrying its representation
+type, its invariant and its methods, and an object is that record paired with its
+representation, **lowered to `Type0` through `FStar.Dyn`**.
+
+| C# | Pulse | Cost |
+|---|---|---|
+| `abstract class Shape` | `t_shape`, a record of `impl: Type0`, `inv: impl -> perm -> model -> slprop`, and one field per virtual member | — |
+| a `Shape` reference | `shape = FStar.Dyn.dyn`, i.e. `Type0` — so it is boxable, arrayable, and a legal field | one axiom (below) |
+| `shape__inv s #p m` | `exists* o. pure (s == mkdyn o) ** o.pkg.inv o.rep p m` | — |
+| `class Circle : Shape` | a concrete invariant `circle__inv` plus a packaged `t_circle` | both faces are needed |
+| `Circle`'s own model | its own record, plus a pure forgetful map to `Shape`'s model | F17 one level up |
+| `override int Area()` | a field of the vtable | — |
+| `s.Area()` | project the slot, **let-bind it**, then apply | F31 |
+| upcast `Shape s = c;` | a `ghost fn` | free at runtime, as C# requires |
+| `new Circle(r)` | a *static* `fn`: allocate, fold the concrete invariant, upcast | a constructor is not a vtable slot |
+| `Shape[] a` | `A.pts_to a sq ** forall+ k. shape__inv sq[k] #p ms[k]` | `Pulse.Lib.ForEvery.Range` |
+| `Pal.Share(s)` / `Pal.Gather(s)` | `stt_ghost` vtable slots | ghost, so aliasing a `Shape` is free |
+
+Five findings that the study settled, each of which would otherwise have been guessed:
+
+1. **The model may not be fixed per hierarchy.** A subclass keeps its own model and
+   supplies a pure forgetful map; the base invariant is
+   `exists* cm. sub__inv c #p cm ** pure (forget cm == m)`. This is exactly R3.9's
+   abstraction function, applied one level up.
+2. **`share`/`gather` are not derivable from `inv`** — how a permission distributes over
+   an object's parts is the implementation's business — so any hierarchy that supports
+   read-only aliasing must carry them in the vtable. They can be `stt_ghost`, and a
+   `ghost fn` can project the ghost package and run them, so §3.10e's aliasing story
+   survives inheritance at zero runtime cost. This was the main open question and it
+   resolved favourably.
+3. **`gather` forces a ghost index.** Two views of one `Shape` unfold to two *separate*
+   existential witnesses, related only by `s == mkdyn o1` and `s == mkdyn o2`; concluding
+   `o1 == o2` is injectivity of `mkdyn`, which is Cantor-inconsistent and which
+   `FStar.Dyn` therefore omits. The fix is not another axiom but an extra ghost index —
+   `shape__inv_at s o p m` names the implementation package, so two views are at the same
+   `o` by construction. `shape_gather_unindexed` is pinned as an `expect_failure` and
+   `shape_gather_at` verifies. This also states something true: a CLR object's dynamic
+   type is fixed for its lifetime. **Methods must therefore be stated at the indexed
+   invariant and the plain form derived**, because a client that passes through the plain
+   form loses the index and can never gather again.
+4. **A mutating traversal cannot borrow.** `total_area` borrows each element with
+   `range_focus` and closes the trade; `double_all` cannot, because the model changes and
+   the trade will not close, so it carries two ranges and peels/appends. Both verify.
+5. **`null` is a real open problem.** `new Shape[3]` fills with `default(Shape)`, of
+   which no object invariant holds. The study allocates with a `null_shape` placeholder
+   and immediately overwrites every slot; a C# surface needs either definite-assignment
+   analysis over array initialisation or an explicit `null` model.
+
+**The one thing assumed** is `recover`, which belongs in `Pulse.Lib.CSharp.Assumptions`
+but in its own section, because unlike `SizeTFitsU32` it is a *computation*, not a
+`Lemma`:
+
+```fstar
+val recover (#a: Type u#a) (#x: erased a) (d: dyn { d == mkdyn (reveal x) })
+  : stt a emp (fun y -> pure (y == reveal x))
+```
+
+*The CLR object header faithfully records the dynamic type.* It is needed because
+ownership is about a *particular* value: without `y == x` you hold a well-typed reference
+owning nothing, and the proof does not fail conservatively — it does not go through. It
+is unprovable rather than merely unstated, since `FStar.Dyn.undyn` returns in `Dv` and
+`Dv` results cannot be equated in specifications (F30). Stating it in `stt` rather than
+`stt_div` matters: `stt_div a emp post` is inhabited for *every* `post` (F30b, verified
+by a hang), so an `stt_div` axiom would be free and worthless, and F2 already requires
+every emitted `while` to carry `decreases` precisely to stay in `stt`. It does **not**
+imply injectivity of `mkdyn`, because each `recover` is a separate computation — which is
+why finding 3 above is a genuine constraint and not a consequence.
+
+**Consequences for a future scheme.** A class will need *both* faces — a concrete
+invariant for its own methods (R4.10) and a package for its clients — and the choice must
+be **pay-as-you-go**: a `sealed` class must keep today's translation verbatim, or M2's
+"textually additive" property is lost. The cheaper alternative, which needs no axiom at
+all, is a **closed-world sum of representations** for a hierarchy whose subclasses are all
+in the compilation; it does not support separate compilation or open extension. The
+standing recommendation is still to do **interfaces first**, where there is no
+representation to inherit and no `base` call to model.
+
+Not probed, and to be probed before any rule is written: calling a virtual method from
+within another method of the same class, `base.M()`, a class holding a `Shape` *field*
+(boxable per F29, but nested-invariant composition à la R3.10b is untested), `is`/`as`
+downcasts, `protected`, and `sealed override`.
+
 ### Not yet done
 
 * **Packaging the analyzer as a NuGet package.** It is wired into `test/analyzer` as
