@@ -478,55 +478,88 @@ public sealed class CodeEmitter(
     }
 
 
-    /// <summary>
-    /// R9.15. The class an initialiser actually produces, when the frontend recorded one.
-    /// A reference conversion is invisible in C# and has to be read off the two types.
-    /// </summary>
-    private static string? Source(IrExpr? init) => init switch
-    {
-        IrCall { ResultType: IrClassType c } => c.Name,
-        _ => null,
-    };
+    /// <summary>R9.15. Whether <paramref name="derived"/>'s immediate base is <paramref name="baseName"/>.</summary>
+    private bool Extends(string? derived, string? baseName) =>
+        derived is not null && baseName is not null && classes is not null &&
+        classes.TryGetValue(derived, out var c) && c.BaseClass == baseName;
 
     /// <summary>
-    /// R9.15. <c>B x = new D(...);</c>. The object is allocated at its own class, its
-    /// invariant is read at the base's model through R9.14's view, and the upcast returns
-    /// the reference the base-typed name is bound to.
+    /// R9.15. The upcast, wherever C# inserts a reference conversion: the object is held
+    /// at its own class, its invariant is read at the base's model through R9.14's view,
+    /// and the conversion returns the reference the base-typed context is given.
+    ///
+    /// <para>It is written once and used at every conversion site — a local declaration,
+    /// an argument, a <c>return</c> — because that is what the frontend now records
+    /// (R9.15) and what makes those three positions the same rule rather than three.</para>
+    ///
+    /// <para>The conversion <b>consumes</b> the derived reference. C# would leave both
+    /// names usable, but the derived object's invariant *becomes* the base's, so the old
+    /// name owns nothing afterwards; it is marked cast, and PALCS0548 says so at the next
+    /// use rather than letting Pulse fail on a resource that is no longer there.</para>
     /// </summary>
-    private void Upcast(IrLocalDecl d, IrExpr init, string derived, IrClassType target, string binder)
+    private Slot? Upcast(IrLoc loc, IrExpr operand, IrClassType target, string name, string binder)
     {
-        if (classes is null || !classes.TryGetValue(derived, out var sub) ||
-            sub.BaseClass != target.Name)
+        var derived = (operand.Type as IrClassType)?.Name;
+        if (!Extends(derived, target.Name))
         {
-            diagnostics.Unsupported(d.Loc,
+            diagnostics.Unsupported(loc,
                 $"Converting a `{derived}` to a `{target.Name}`",
                 "R9.15 inserts an upcast only from a class to its immediate base; " +
                 "a longer chain would need one upcast per level, which \u00a79 has not probed.");
-            return;
+            return null;
         }
 
-        var impl = Fresh();
-        if (init is IrCall { Kind: CalleeKind.Method } call) Call(call, impl);
-        else Line($"let {impl} = {Expr(init)};");
+        string impl;
+        if (operand is IrVar v && Lookup(v.Name) is { Kind: SlotKind.Object } src)
+        {
+            if (_objects.Any(o => o.Binder == src.Binder))
+            {
+                diagnostics.Error("PALCS0549", loc,
+                    $"`{v.Name}` is this method's own object, and converting it to " +
+                    $"`{target.Name}` would give away the invariant its specification " +
+                    "promises to return (R4.10). Allocate the base-typed reference from a " +
+                    "value this method owns outright.");
+                return null;
+            }
 
-        // The view is folded at the forgetting of whatever model the constructor
-        // established, which is the same expression R9.6 read off the `[Model]` override.
-        var own = FreshValue(d.Name);
-        var mod = Names.ClassModule(derived);
-        Line($"with {own}. assert ({mod}.{Names.ClassInv(derived)} {impl} {own});");
-        Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} " +
-             $"({mod}.{Names.ClassForget(derived)} {own}));");
-        Line($"let {binder} = {Names.VtblModule(derived)}." +
-             $"{Names.UpcastToAt(derived, target.Name)} {impl};");
+            impl = src.Binder;
+            _slots[v.Name] = src with { Kind = SlotKind.Value, Index = null, Cast = target.Name };
+            _objectLocals.RemoveAll(l => l.Binder == src.Binder);
+        }
+        else if (operand is IrCall { Kind: CalleeKind.Method } call) { impl = Fresh(); Call(call, impl); }
+        else { impl = Fresh(); Line($"let {impl} = {Expr(operand)};"); }
+
+        // The view is folded at the forgetting of whatever model the value is held at,
+        // which is the same expression R9.6 read off the `[Model]` override. Only the
+        // prover can name that model, which is what the `with` is for: it is the naming
+        // R9.6 needs, not a proof step.
+        var own = FreshValue(name);
+        var mod = Names.ClassModule(derived!);
+        Line($"with {own}. assert ({mod}.{Names.ClassInv(derived!)} {impl} {own});");
+        Line($"fold ({mod}.{Names.ClassAsBase(derived!, target.Name)} {impl} " +
+             $"({mod}.{Names.ClassForget(derived!)} {own}));");
+        Line($"let {binder} = {Names.VtblModule(derived!)}." +
+             $"{Names.UpcastToAt(derived!, target.Name)} {impl};");
 
         // R9.16. The conversion keeps the index, so the object record this reference
         // stands for stays known and a later cast back is provable. Where the plain
         // invariant is wanted instead, `Forget` drops it — one ghost step, at the point
         // that wants it, and nothing recovers it afterwards.
-        var index = $"(hide ({Names.VtblModule(derived)}.{Names.ClassObjOf(derived)} {impl}))";
-        var local = new Slot(d.Name, target, SlotKind.Object, binder) { Index = index };
-        _slots[d.Name] = local;
-        _objectLocals.Add(local);
+        var index = $"(hide ({Names.VtblModule(derived!)}.{Names.ClassObjOf(derived!)} {impl}))";
+        return new Slot(name, target, SlotKind.Object, binder) { Index = index };
+    }
+
+    /// <summary>
+    /// R9.15, in expression position. The conversion is a statement — it moves a resource
+    /// and binds a new name — so the value it produces is an anonymous object local: owned
+    /// here, dropped where the block closes unless it is returned.
+    /// </summary>
+    private string UpcastExpr(IrConvert cv, IrClassType target)
+    {
+        var binder = Fresh();
+        if (Upcast(cv.Loc, cv.Operand, target, binder, binder) is not { } slot) return "()";
+        _objectLocals.Add(slot);
+        return binder;
     }
 
     /// <summary>
@@ -544,8 +577,7 @@ public sealed class CodeEmitter(
     private void Downcast(IrLocalDecl d, IrClassType target, IrVar source, string binder)
     {
         if (Lookup(source.Name) is not { Kind: SlotKind.Object, Type: IrClassType from } obj ||
-            classes is null || !classes.TryGetValue(target.Name, out var sub) ||
-            sub.BaseClass != from.Name)
+            !Extends(target.Name, from.Name))
         {
             diagnostics.Unsupported(d.Loc, $"Casting a `{Lookup(source.Name)?.Type}` to `{target.Name}`",
                 "R9.16 casts a reference to its immediate subclass and nothing else.");
@@ -833,21 +865,32 @@ public sealed class CodeEmitter(
 
                 var binder = Names.Local(d.Name);
 
-                // R9.15. A C# reference conversion: the initialiser produces a subclass and
-                // the name is declared at a base class. The conversion is what makes the
-                // object's own invariant readable as the base's, so it is emitted here,
-                // where C# performs it, and nowhere else.
-                if (Source(d.Init) is { } derived && derived != oc.Name)
+                // R9.15/R9.16. A reference conversion, which C# writes silently when it
+                // goes up and explicitly when it comes back down. The two directions are
+                // told apart by the hierarchy, not by the syntax, because `Shape s = sq;`
+                // and `Square q = (Square) s;` are the same IR node.
+                if (d.Init is IrConvert { Target: IrClassType } conv)
                 {
-                    Upcast(d, d.Init, derived, oc, binder);
-                    return;
-                }
+                    var from = (conv.Operand.Type as IrClassType)?.Name;
+                    if (Extends(from, oc.Name))
+                    {
+                        if (Upcast(d.Loc, conv.Operand, oc, d.Name, binder) is { } up)
+                        {
+                            _slots[d.Name] = up;
+                            _objectLocals.Add(up);
+                        }
+                        return;
+                    }
 
-                // R9.16. `D x = (D) b;`, the checked downcast.
-                if (d.Init is IrConvert { Operand: IrVar source } cast &&
-                    cast.Target is IrClassType)
-                {
-                    Downcast(d, oc, source, binder);
+                    if (conv.Operand is IrVar source && Extends(oc.Name, from))
+                    {
+                        Downcast(d, oc, source, binder);
+                        return;
+                    }
+
+                    diagnostics.Unsupported(d.Loc,
+                        $"Converting a `{from}` to a `{oc.Name}`",
+                        "R9.15 converts between a class and its immediate base only.");
                     return;
                 }
 
@@ -1386,6 +1429,15 @@ public sealed class CodeEmitter(
         : _objectLocals.FirstOrDefault(l => l.Name == name);
 
     /// <summary>
+    /// The object a Pulse binder stands for, if any. A conversion (R9.15) produces a
+    /// reference with no C# name at all, so the binder — not the source name — is what
+    /// identifies it once it has been emitted.
+    /// </summary>
+    private Slot? SlotByBinder(string binder) =>
+        _objectLocals.FirstOrDefault(l => l.Binder == binder)
+        ?? _slots.Values.FirstOrDefault(l => l.Kind == SlotKind.Object && l.Binder == binder);
+
+    /// <summary>
     /// R4.7: a lemma is applied to the values the program holds, so its arguments are
     /// passed with their program types and receive no <c>Int32.v</c> coercion.
     /// </summary>
@@ -1532,15 +1584,17 @@ public sealed class CodeEmitter(
         // a dispatching wrapper's `_at` form asks for; anything else — a base-typed
         // parameter of an ordinary method, an argument passed as data — asks for the plain
         // invariant, so the index is dropped here, where it is in the way.
+        // The arguments are computed first, because one of them may *be* a conversion
+        // (R9.15) and the reference it produces is what the index has to be read off.
+        var args = call.Args.Select(Expr).ToImmutableArray();
+
         var indexed = false;
-        for (var i = 0; i < call.Args.Length; i++)
+        for (var i = 0; i < args.Length; i++)
         {
-            if (call.Args[i] is not IrVar av || Lookup(av.Name) is not { Index: not null } ix) continue;
+            if (SlotByBinder(args[i]) is not { Index: not null } ix) continue;
             if (i == 0 && call.HasReceiver && owner is not null) { indexed = true; continue; }
             Forget(ix);
         }
-
-        var args = call.Args.Select(Expr).ToImmutableArray();
         // R9.12. A call resolved to an `abstract` declaration is a virtual call: it goes
         // to the dispatching wrapper, which recovers the object and runs its vtable slot.
         // Nothing else about the call changes — the arguments, the implicit model binder
@@ -1627,9 +1681,15 @@ public sealed class CodeEmitter(
         // has to use. Anywhere else it would silently be the identity.
         if (cv.Target is IrClassType target)
         {
+            // R9.15's conversion has a value, so it is an expression like any other. R9.16's
+            // does too, but it also binds the *model equation* the caller reasons with, and
+            // that equation needs a name — so the downcast stays a local declaration.
+            if (Extends((cv.Operand.Type as IrClassType)?.Name, target.Name))
+                return UpcastExpr(cv, target);
+
             diagnostics.Error("PALCS0547", cv.Loc,
-                $"A cast to `{target.Name}` is emitted only as the initialiser of a local " +
-                $"declaration (R9.16): write `{target.Name} x = …;` and use `x`.");
+                $"A cast down to `{target.Name}` is emitted only as the initialiser of a " +
+                $"local declaration (R9.16): write `{target.Name} x = …;` and use `x`.");
             return "()";
         }
 

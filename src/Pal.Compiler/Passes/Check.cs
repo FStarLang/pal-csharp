@@ -37,6 +37,12 @@ public static class Check
         var methods = program.Declarations.OfType<IrMethod>()
             .GroupBy(m => m.Name).ToImmutableDictionary(g => g.Key, g => g.First());
 
+        // R9.15. Which conversions have an image under the scheme is a fact about the
+        // hierarchy, so the hierarchy has to be in hand before any body is checked.
+        var bases = program.Declarations.OfType<IrClass>()
+            .Where(c => c.BaseClass is not null)
+            .ToImmutableDictionary(c => c.Name, c => c.BaseClass!);
+
         foreach (var decl in program.Declarations)
         {
             switch (decl)
@@ -47,7 +53,7 @@ public static class Check
             }
 
             if (decl is IrMethod { Body: not null } withBody)
-                CheckConversions(withBody, methods, diagnostics);
+                CheckConversions(withBody, methods, bases, diagnostics);
         }
 
         return program;
@@ -238,7 +244,8 @@ public static class Check
     /// wrote. This reports it against the C# instead, per the sentinel property.
     /// </summary>
     private static void CheckConversions(
-        IrMethod m, ImmutableDictionary<string, IrMethod> methods, DiagnosticBag diagnostics)
+        IrMethod m, ImmutableDictionary<string, IrMethod> methods,
+        ImmutableDictionary<string, string> bases, DiagnosticBag diagnostics)
     {
         foreach (var stmt in Statements(m.Body!))
         {
@@ -270,12 +277,18 @@ public static class Check
 
         void Report(IrExpr value, IrType? target, string position)
         {
-            if (value.Type is not IrClassType from || target is not IrClassType to) return;
-            if (from.Name == to.Name) return;
+            // The frontend records the conversion (R9.15) and the emitter has one rule for
+            // it, so what is left to refuse is the conversion the *hierarchy* puts out of
+            // reach: a jump of more than one level, which would need one upcast per level
+            // and has not been probed.
+            var from = (value.Type as IrClassType)?.Name;
+            if (from is null || target is not IrClassType to || from == to.Name) return;
+            if (bases.TryGetValue(from, out var immediate) && immediate == to.Name) return;
+
             diagnostics.Error("PALCS0546", value.Loc,
-                $"A `{from.Name}` cannot be {position} at type `{to.Name}` here. " +
-                "R9.15 inserts the upcast only at a local declaration whose declared type " +
-                $"is the base: bind `{to.Name} x = …;` first and pass `x`.");
+                $"A `{from}` cannot be {position} at type `{to.Name}`: R9.15 converts a " +
+                "class to its immediate base and nothing else, so a longer chain has to be " +
+                "written one step at a time.");
         }
     }
 

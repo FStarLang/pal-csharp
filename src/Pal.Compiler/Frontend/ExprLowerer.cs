@@ -47,7 +47,8 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     public IrExpr Lower(ExpressionSyntax node)
     {
         var loc = Locations.From(node);
-        var type = known.MapType(model.GetTypeInfo(node).Type);
+        var info = model.GetTypeInfo(node);
+        var type = known.MapType(info.Type);
 
         IrExpr result = node switch
         {
@@ -76,7 +77,20 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             _ => Unsupported(node, loc),
         };
 
-        return type is null ? result : result with { Type = type };
+        if (type is not null) result = result with { Type = type };
+
+        // R9.15. C# inserts a reference conversion silently wherever a derived reference
+        // meets a base-typed context — an argument, a `return`, an assignment. The scheme's
+        // image of one is a ghost step with a runtime value, so it cannot stay invisible:
+        // it is recorded here, at exactly the positions the C# compiler itself inserts it,
+        // and the emitter then has a single rule for it wherever it appears.
+        if (type is IrClassType && known.MapType(info.ConvertedType) is IrClassType converted &&
+            converted.Name != ((IrClassType)type).Name)
+        {
+            result = new IrConvert(loc, converted, result) { Type = converted };
+        }
+
+        return result;
     }
 
     /// <summary>

@@ -44,14 +44,24 @@ public sealed class MethodPlan
         var prologue = ImmutableArray.CreateBuilder<(string Cell, string Source)>();
 
         var pre = new SpecScope();
-        // `Result` denotes the value the method returns, so it carries that value's kind.
-        // Defaulting it to `Machine` is right for the common case and wrong for a `bool`,
-        // which is already a proposition and must not be coerced with `Int32.v`.
+
+        // R4.12/R9.15. A method that returns an object returns a *reference*, and a
+        // reference is not something a specification can say anything about: what the
+        // caller reasons with is the model the postcondition owns it at. So `Result`
+        // denotes that model, not the binder — the same substitution R4.10 makes for
+        // `this`, and the reason `Result.TheArea` means anything at all.
+        var returnsObject = method.ReturnType is IrClassType;
+        var resultModel = "post_" + (method.IsConstructor ? Names.This : Names.Result);
+
+        // Otherwise `Result` denotes the value the method returns, so it carries that
+        // value's kind. Defaulting it to `Machine` is right for the common case and wrong
+        // for a `bool`, which is already a proposition and must not be coerced with
+        // `Int32.v`.
         var post = new SpecScope
         {
             Pre = pre,
-            ResultTerm = Names.Result,
-            ResultKind = KindOf(method.ReturnType),
+            ResultTerm = returnsObject ? resultModel : Names.Result,
+            ResultKind = returnsObject ? TermKind.Math : KindOf(method.ReturnType),
         };
         var slots = ImmutableDictionary.CreateBuilder<string, Slot>();
 
@@ -236,13 +246,16 @@ public sealed class MethodPlan
         // contract names that object, so a constructor's `[Ensures]` reads exactly like
         // any other method's. Freshness comes free from the frame rule (F15): the caller's
         // other objects are in the frame, so the new one cannot be any of them.
-        if (method is { IsConstructor: true, ReturnType: IrClassType built })
+        //
+        // R9.15 makes this every method's rule, not the constructor's: once a reference
+        // conversion can happen at a `return`, an ordinary method can hand back an object
+        // too, and the only difference is the name its contract calls it by.
+        if (method.ReturnType is IrClassType built)
         {
-            var postModel = "post_" + Names.This;
             postResources.Add(
-                $"{Names.ClassModule(built.Name)}.{Names.ClassInv(built.Name)} {Names.Result} {postModel}");
-            postExistentials.Add(postModel);
-            post.Bind(Names.This, new Term(postModel, TermKind.Math, built));
+                $"{Names.ClassModule(built.Name)}.{Names.ClassInv(built.Name)} {Names.Result} {resultModel}");
+            postExistentials.Add(resultModel);
+            if (method.IsConstructor) post.Bind(Names.This, new Term(resultModel, TermKind.Math, built));
         }
 
         // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method

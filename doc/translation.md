@@ -1091,6 +1091,12 @@ is R3.10's weak-specification failure relocated to the constructor. A constructo
 `[Ensures]` is therefore a warning (`PALCS0903`): it is legal, and almost never what was
 meant.
 
+The rule is not the constructor's, it is *the class-typed return's* — R9.15d — and the
+constructor is its first instance. Any method whose return type is a class owns the
+returned object in its postcondition, existentially at its model; the constructor differs
+only in binding that model to `this`, which is what lets its `[Ensures]` read like every
+other method's.
+
 Freshness is free and needs no emitter work: the frame rule gives every caller
 `frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
 everything that already existed.
@@ -2419,6 +2425,15 @@ reference conversion does not. That is a property of the encoding, not of the so
 program, and it is invisible to the C# semantics because the box is unreachable
 afterwards: the only way back is R9.16, which requires the index.
 
+**R9.15 is recorded by the frontend, not found by the emitter.** C# performs the
+conversion silently and Roslyn already says where: at every expression whose
+`ConvertedType` is a class other than its `Type`. The lowerer wraps exactly those in an
+`IrConvert`, so the emitter has *one* rule applied wherever the node appears — a local
+declaration, an argument, a `return` — rather than one rule per position, and a position
+nobody thought of is a position that already works. `Shape s = sq;` and
+`Square q = (Square) s;` are then the same IR node, told apart by the hierarchy rather
+than by the syntax.
+
 **R9.15a — The conversion also has a value form, and that is what a statement uses.**
 Pulse matches resources by name, so a ghost upcast followed by `let x = mkdyn (…)` leaves
 the invariant attached to the term and not to `x` (Error 228, the same fact R3.8's object
@@ -2453,10 +2468,23 @@ R9.3), stored, or returned. The emitter therefore forgets the index of
 and its model to inference**: naming the model with a `with` would bind an opaque witness
 and sever the link to the constructor's post-state, which is F34/R4.11a again.
 
-A reference conversion the emitter does not have a rule for is **PALCS0546** at the
-argument, `return` or assignment that asks for it, and a class-typed cast in expression
-position is **PALCS0547** — both diagnosed at the C# construct rather than left to fail as
-an unreadable resource mismatch in Pulse.
+**R9.15c — The conversion consumes the derived reference.** C# leaves both names usable;
+the encoding cannot, because the derived object's invariant *becomes* the base's. The old
+name is marked cast and its next use is **PALCS0548**. Converting a name the method does
+not own outright — its own receiver, or an object parameter — would give away the invariant
+R4.10 promises to return, and is **PALCS0549** at the conversion. What is left is
+**PALCS0546**, the conversion the hierarchy puts out of reach: more than one level at once,
+which would need one upcast per level and has not been probed. A cast *down* in expression
+position stays **PALCS0547**, because unlike the upcast it also binds the model equation
+the caller reasons with, and an equation needs a name.
+
+**R9.15d — A method may return an object, and R4.12 is where that was already written.**
+A constructor's postcondition owns the object it built and calls it `this`; an ordinary
+method's owns the object it returns and calls it `Result`. That is the only difference, so
+the rule is stated once for both: a class-typed return adds
+`exists* post_result. class_P__inv var_result post_result` to the `ensures`, and `Result`
+in the contract denotes *the model*, never the reference — `Result.TheArea` means something
+only under that reading, and a reference is a thing no specification can say anything about.
 
 A base-typed array is therefore heterogeneous with no extra machinery (`shape_slot` in
 both studies), and `total_area` traverses one at a fraction.
@@ -2531,9 +2559,10 @@ declaration that asks for it, never a prediction about a proof:
 | a virtual method taking or returning a non-value | R9.9a |
 | an upcast anywhere but a base-typed local, or across more than one level | R9.15a |
 | `interface`, multiple bases, generics | not probed |
-| a reference conversion at an argument, `return` or assignment | PALCS0546, R9.15a |
-| a class-typed cast in expression position | PALCS0547, R9.15b |
-| a use of a reference after it has been cast | PALCS0548, R9.16 |
+| a reference conversion across more than one level | PALCS0546, R9.15c |
+| a cast *down* in expression position | PALCS0547, R9.15c |
+| a use of a reference after it has been converted | PALCS0548, R9.15c |
+| converting this method's own receiver or object parameter | PALCS0549, R9.15c |
 | `as`, `is`, a cast that may fail; `Pal.Is<T>` in a contract | R9.16 |
 
 ### 9.9 Status
@@ -2568,6 +2597,14 @@ conservative approximation but a loss: the object comes back anonymous and
 place, `Normalize.Mutated`, and is used both for a method's parameters and — this is the
 same fact one level down — for deciding which of a loop's objects R5.8b may hold fixed.
 
+The conversion now happens wherever C# performs one. `Shapes.SumFresh` converts a fresh
+object and a named local at two argument positions; `Shapes.MakeShape` returns one. Both
+have variants that convert at the other argument, the other class and the other position,
+and needed no emitter change — which is the §7.2 detector doing its job, and is the payoff
+of recording the conversion in the frontend rather than recognising it at one privileged
+site.
+
 Not yet implemented: depth ≥ 3 (the `sub: Dn.dyn` field of R9.9, designed in
-`DeepHierarchy.fst`), heterogeneous arrays, and the *cross-method* downcast, where the
-index travels in a contract (`Pal.Is<T>`) rather than within one body.
+`DeepHierarchy.fst`), heterogeneous arrays — an array of a base type needs R6's array rules
+to carry an object invariant per element, which §6 has not probed — and the *cross-method*
+downcast, where the index travels in a contract (`Pal.Is<T>`) rather than within one body.

@@ -57,6 +57,25 @@ public static class ShapesVariant
         return total;
     }
 
+    /// <summary>§7.2's variant of <c>Shapes.SumFresh</c>: the conversions are at the other
+    /// argument and at the other class, and one of them is a named local.</summary>
+    [Ensures("Result == 31")]
+    public static int SumFresh()
+    {
+        Circle c = new Circle(3);
+        int total = SumAreas(c, new Square(2));
+        return total;
+    }
+
+    /// <summary>§7.2's variant of <c>Shapes.MakeShape</c>: the conversion happens at the
+    /// declaration and the <c>return</c> hands back a name, not a fresh object.</summary>
+    [Ensures("Result.TheArea == 48")]
+    public static Shape MakeShape()
+    {
+        Shape r = new Circle(4);
+        return r;
+    }
+
     [Ensures("Result * Result == 400")]
     public static int GrowAndMeasureSide()
     {
