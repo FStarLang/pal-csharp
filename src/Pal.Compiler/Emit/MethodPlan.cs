@@ -109,7 +109,20 @@ public sealed class MethodPlan
                 {
                     var preModel = "pre_" + p.Name;
                     var postModel = "post_" + p.Name;
-                    var modelType = $"{Names.ClassModule(klass.Name)}.{Names.ClassModel(klass.Name)}";
+
+                    // R9.7/R9.14. An `override`'s receiver is owned through
+                    // `class_C__as_B`, not through `class_C__inv`: the vtable slot it fills
+                    // is typed at *B*'s model, so the contract it inherited talks about B's
+                    // model and the body must still see C's fields. `as_B` is exactly that
+                    // — C's own invariant, indexed by B's model. Both predicates have the
+                    // same shape `inv x #p m`, which is why one substitution suffices and
+                    // no other rule below changes.
+                    var view = p.Name == Names.This && method.Overrides is { } b ? b : klass.Name;
+                    var modelType = $"{Names.ClassModule(view)}.{Names.ClassModel(view)}";
+                    var inv = view == klass.Name
+                        ? $"{Names.ClassModule(klass.Name)}.{Names.ClassInv(klass.Name)}"
+                        : $"{Names.ClassModule(klass.Name)}.{Names.ClassAsBase(klass.Name, view)}";
+                    var seen = view == klass.Name ? p.Type : new IrClassType(view);
 
                     binders.Add($"({name}: {Types.Render(p.Type)})");
                     ghostBinders.Add($"(#{preModel}: erased ({modelType}))");
@@ -132,7 +145,6 @@ public sealed class MethodPlan
                     // binder stands for the pre- and the post-state.
                     var observed = fraction is not null;
 
-                    var inv = $"{Names.ClassModule(klass.Name)}.{Names.ClassInv(klass.Name)}";
                     preResources.Add($"{inv} {name} {perm}{preModel}");
 
                     // R4.11. A method that changes no field cannot change the model, so
@@ -145,20 +157,21 @@ public sealed class MethodPlan
                     {
                         postResources.Add($"{inv} {name} {postModel}");
                         postExistentials.Add(postModel);
-                        post.Bind(p.Name, new Term(postModel, TermKind.Math, p.Type));
+                        post.Bind(p.Name, new Term(postModel, TermKind.Math, seen));
                     }
                     else
                     {
                         postResources.Add($"{inv} {name} {perm}{preModel}");
-                        post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
+                        post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));
                     }
 
-                    pre.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, p.Type));
+                    pre.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Object, name)
                     {
                         Fraction = fraction,
                         PreModel = preModel,
                         PostModel = moves ? postModel : preModel,
+                        ViewBase = view == klass.Name ? null : view,
                     };
                     break;
                 }
@@ -321,7 +334,7 @@ public sealed class MethodPlan
     /// still in scope in the postcondition, and the caller has just discharged it,
     /// so <c>PRE ==&gt; POST</c> gives the caller exactly <c>POST</c>.
     /// </summary>
-    private static ImmutableArray<string> UnderPrecondition(
+    public static ImmutableArray<string> UnderPrecondition(
         ImmutableArray<string> pre, ImmutableArray<string> post)
     {
         var hypotheses = pre.Where(p => p.Length > 0).ToImmutableArray();

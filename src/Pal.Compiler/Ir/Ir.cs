@@ -370,11 +370,26 @@ public sealed record IrMethod(
     public bool IsConstructor { get; init; }
 
     /// <summary>
+    /// R9.9. An <c>abstract</c> method of an abstract class: a vtable slot rather than a
+    /// module. It is an ordinary <see cref="IrMethod"/> with no <see cref="Body"/>, so its
+    /// contract is bound and lowered by exactly the machinery every other method uses —
+    /// which is the point, since R9.7 makes this the only place that contract is written.
+    /// </summary>
+    public bool IsAbstract { get; init; }
+
+    /// <summary>
     /// R4.11: the method assigns no field, so its contract collapses to
     /// <c>preserves class_C__inv this m</c> and its closing <c>fold</c> names the
     /// pre-state model binder rather than a recomputed model (R4.11a).
     /// </summary>
     public bool IsReadOnly { get; init; }
+
+    /// <summary>
+    /// R9.7. An <c>override</c> of a base class's <c>abstract</c> method. Its receiver is
+    /// owned through <c>class_C__as_B</c> at <em>B</em>'s model, not through its own
+    /// invariant, because the vtable slot it fills is typed at the base's model.
+    /// </summary>
+    public string? Overrides { get; init; }
 }
 
 /// <summary>A <c>[Spec]</c> pure function: emitted as <c>Let_&lt;Name&gt;.fst</c> (R4.6).</summary>
@@ -442,10 +457,34 @@ public sealed record IrClass(
     ImmutableArray<IrFieldDecl> Fields,
     string ModelMember,
     IrType ModelType,
-    IrExpr ModelBody,
+    IrExpr? ModelBody,
     ImmutableArray<IrExpr> ModelRefinements,
     ImmutableArray<IrExpr> Invariants,
-    ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name);
+    ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name)
+{
+    /// <summary>
+    /// R9.1. The translated class this one derives from, if any. Non-null and
+    /// <see cref="IsAbstract"/> false is a leaf; null and abstract is a root.
+    /// </summary>
+    public string? BaseClass { get; init; }
+
+    /// <summary>
+    /// R9.1/R9.2. An <c>abstract class</c>: no representation, no
+    /// <see cref="ModelBody"/>, and a vtable rather than a record.
+    /// </summary>
+    public bool IsAbstract { get; init; }
+
+    /// <summary>
+    /// R9.6. The <c>override</c> of the base's <c>[Model]</c> member: the base's model
+    /// as an expression over <em>this</em> class's model. It is the forgetting function,
+    /// and it is what makes a subclass a refinement of its parent rather than merely a
+    /// class that happens to have the same methods.
+    /// </summary>
+    public IrExpr? ForgetBody { get; init; }
+
+    /// <summary>True when this class participates in the M3 encoding rather than M2's.</summary>
+    public bool InHierarchy => IsAbstract || BaseClass is not null;
+}
 
 /// <summary>Raw Pulse pulled in via <c>[assembly: IncludePulse]</c>.</summary>
 public sealed record IrIncludePulse(IrLoc Loc, string Module, string Text) : IrDecl(Loc, Module);

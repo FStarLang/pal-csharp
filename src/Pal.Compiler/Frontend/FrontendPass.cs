@@ -47,8 +47,67 @@ public static class FrontendPass
         foreach (var include in CollectIncludes(compilation, known))
             declarations.Add(include);
 
+        InheritContracts(declarations, diagnostics);
         return new IrProgram(declarations.ToImmutable());
     }
+
+    /// <summary>
+    /// R9.7. A virtual method's contract is written once, on the <c>abstract</c>
+    /// declaration, and every <c>override</c> is checked against it. So the override's IR
+    /// is given its parent's clauses here, before anything downstream can see the
+    /// difference — the emitter never has to ask which of the two a clause came from, and
+    /// there is no way for a subclass to weaken what its callers were promised.
+    /// </summary>
+    private static void InheritContracts(
+        ImmutableArray<IrDecl>.Builder declarations, DiagnosticBag diagnostics)
+    {
+        var byName = declarations.OfType<IrMethod>()
+            .Where(m => m.IsAbstract && m.DeclaringClass is not null)
+            .ToDictionary(m => m.Name);
+
+        for (var i = 0; i < declarations.Count; i++)
+        {
+            if (declarations[i] is not IrMethod
+                { Overrides: { } baseName, DeclaringClass: not null } o) continue;
+            if (!byName.TryGetValue($"{baseName}_{Member(o)}", out var v)) continue;
+
+            if (o.Requires.Length + o.Ensures.Length + o.Preserves.Length > 0)
+            {
+                diagnostics.Error("PALCS0544", o.Loc,
+                    $"`{o.Name}` overrides `{v.Name}` and carries its own contract. A virtual " +
+                    "method's contract belongs on the `abstract` declaration, where it is written " +
+                    "once and every caller of the base class can see it; a contract here would be " +
+                    "one the caller has no way to know applies (doc/translation.md R9.7).");
+                continue;
+            }
+
+            var mismatched = false;
+            for (var k = 0; k < Math.Min(o.Parameters.Length, v.Parameters.Length); k++)
+            {
+                if (o.Parameters[k].Name == v.Parameters[k].Name) continue;
+                diagnostics.Error("PALCS0544", o.Parameters[k].Loc,
+                    $"`{o.Name}` names its parameter `{o.Parameters[k].Name}` where `{v.Name}` " +
+                    $"names it `{v.Parameters[k].Name}`. The inherited contract is written in terms " +
+                    "of the base declaration's parameter names, so the two must agree.");
+                mismatched = true;
+            }
+            if (mismatched) continue;
+
+            declarations[i] = o with
+            {
+                Requires = v.Requires,
+                Ensures = v.Ensures,
+                Preserves = v.Preserves,
+                IsReadOnly = v.IsReadOnly,
+            };
+        }
+    }
+
+    /// <summary>The member's own name, with the qualifier <see cref="Naming.Of"/> added.</summary>
+    private static string Member(IrMethod m) =>
+        m.DeclaringClass is { } c && m.Name.StartsWith(c + "_", StringComparison.Ordinal)
+            ? m.Name[(c.Length + 1)..]
+            : m.Name;
 
     // -----------------------------------------------------------------------
     // Collect
@@ -374,9 +433,20 @@ public static class FrontendPass
         ImmutableArray<StructField> Fields,
         ISymbol ModelSymbol,
         IrType ModelType,
-        ExpressionSyntax ModelBody,
+        ExpressionSyntax? ModelBody,
         ImmutableArray<ObservationMember> Observations,
-        ImmutableArray<string> Usings);
+        ImmutableArray<string> Usings)
+    {
+        /// <summary>R9.1. The translated base class, if this class derives from one.</summary>
+        public INamedTypeSymbol? BaseSymbol { get; init; }
+
+        /// <summary>R9.2. An <c>abstract class</c>: a vtable rather than a record.</summary>
+        public bool IsAbstract { get; init; }
+
+        /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
+        public ExpressionSyntax? ForgetBody { get; init; }
+
+    }
 
     /// <summary>
     /// Collects every annotated <c>sealed class</c>. A class is annotated when it carries
@@ -432,14 +502,16 @@ public static class FrontendPass
                     continue;
                 }
 
-                // R4.13: a per-class invariant cannot express behavioural subtyping, so
-                // M2 is sealed classes only.
-                if (!symbol.IsSealed)
+                // R9.1/R9.4. A class is either a leaf — `sealed`, with a representation —
+                // or `abstract`, with a vtable and none. Anything else is a vtable value
+                // and a vtable type at once, which neither design study builds.
+                if (!symbol.IsSealed && !symbol.IsAbstract)
                 {
                     diagnostics.Error("PALCS0521", Locations.From(syntax.Identifier),
-                        $"`{symbol.Name}` is not `sealed`. pal-csharp translates sealed classes only: " +
-                        "a per-class invariant cannot express what an overriding method would have to " +
-                        "promise, so inheritance has no sound reading in the scheme.");
+                        $"`{symbol.Name}` is neither `sealed` nor `abstract`. A translated class is " +
+                        "either a leaf, which owns a representation, or an abstract base, which owns a " +
+                        "vtable (doc/translation.md R9.4). A class that is both would have to be its " +
+                        "own subclass's vtable type and one of its values at the same time.");
                     continue;
                 }
 
@@ -498,6 +570,9 @@ public static class FrontendPass
 
             if (SymbolEqualityComparer.Default.Equals(member, modelSymbol)) continue;
             if (member is IMethodSymbol { AssociatedSymbol: not null }) continue;
+            // R9.6. The override of the base's [Model] is the forgetting function, not a
+            // field and not an observation; it is collected separately below.
+            if (member.IsOverride && OverriddenChainHasModel(member, known)) continue;
 
             var (name, type) = member switch
             {
@@ -545,13 +620,123 @@ public static class FrontendPass
             fields.Add(new StructField(member, name, type, mapped));
         }
 
-        if (Body(modelSymbol) is not { } modelBody || ReturnTypeOf(modelSymbol) is not { } modelReturn)
+        // R9.2. An abstract class has no representation: the fields are entirely the
+        // leaf's. A base field would make a leaf's representation an extension of the
+        // base's and force a constructor chain, which neither design study probed.
+        if (symbol.IsAbstract && fields.Count > 0)
+        {
+            diagnostics.Error("PALCS0541",
+                Locations.From(fields[0].Symbol.Locations.FirstOrDefault() ?? Location.None),
+                $"`{symbol.Name}.{fields[0].Name}` is a field of an `abstract` class. An abstract " +
+                "class in the scheme owns a vtable and no representation (doc/translation.md R9.2), " +
+                "so there is nothing for this field to live in. Move it to each subclass, or make " +
+                "it an `abstract` member of the model.");
+            ok = false;
+        }
+
+        // R9.1. What this class inherits from, and whether the scheme can see it.
+        INamedTypeSymbol? baseSymbol = null;
+        if (symbol.BaseType is { SpecialType: not SpecialType.System_Object } b
+            && b.TypeKind == TypeKind.Class)
+        {
+            if (!known.HasModel(b))
+            {
+                diagnostics.Error("PALCS0540", Locations.From(syntax.Identifier),
+                    $"`{symbol.Name}` derives from `{b.Name}`, which declares no `[Model]` member and " +
+                    "so is not translated. A base class is a model together with a vtable " +
+                    "(doc/translation.md R9.5); one with no model has neither.");
+                ok = false;
+            }
+            else if (!b.IsAbstract)
+            {
+                diagnostics.Error("PALCS0540", Locations.From(syntax.Identifier),
+                    $"`{symbol.Name}` derives from `{b.Name}`, which is not `abstract`. A base class " +
+                    "supplies a vtable *type*, and a concrete class supplies a vtable *value*; " +
+                    "doc/translation.md R9.4 keeps those apart.");
+                ok = false;
+            }
+            else baseSymbol = b;
+        }
+
+        // R9.3. Every virtual method is abstract. A `virtual` method with a body would be
+        // inherited by a subclass that does not override it, and a base method body can
+        // only run against a representation the base does not have. The abstract ones are
+        // not collected here: they are ordinary method candidates with no body, so their
+        // contracts are bound by the machinery every other method's contract uses.
+        foreach (var m in symbol.GetMembers().OfType<IMethodSymbol>()
+                     .Where(m => m.MethodKind == MethodKind.Ordinary))
+        {
+            if (m.IsVirtual && !m.IsAbstract)
+            {
+                diagnostics.Error("PALCS0542",
+                    Locations.From(m.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{m.Name}` is `virtual` with a body. A method body runs against a " +
+                    "representation, and an abstract class has none (doc/translation.md R9.3), so a " +
+                    "subclass that did not override this would have nothing to run. Make it " +
+                    "`abstract`, or make it non-virtual and let every subclass share it.");
+                ok = false;
+            }
+        }
+
+        // R9.6. A derived class supplies its parent's model by overriding the parent's
+        // [Model] member with an expression over its own. That override *is* the
+        // forgetting function, and without it the two models are unrelated.
+        ExpressionSyntax? forgetBody = null;
+        if (baseSymbol is not null)
+        {
+            var forget = symbol.GetMembers()
+                .FirstOrDefault(m => m.IsOverride && OverriddenChainHasModel(m, known));
+            if (forget is null)
+            {
+                diagnostics.Error("PALCS0543", Locations.From(syntax.Identifier),
+                    $"`{symbol.Name}` does not override `{baseSymbol.Name}`'s `[Model]` member. That " +
+                    "override is how a subclass says what its parent's model *is* in terms of its own " +
+                    "(doc/translation.md R9.6); without it a `" + baseSymbol.Name + "`-typed reference " +
+                    $"to a `{symbol.Name}` would have a model nothing could compute.");
+                ok = false;
+            }
+            else if (Body(forget) is not { } fb)
+            {
+                diagnostics.Error("PALCS0543",
+                    Locations.From(forget.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{forget.Name}` overrides `{baseSymbol.Name}`'s `[Model]` member " +
+                    "but has no expression body. The forgetting function must be a single expression " +
+                    "over this class's model.");
+                ok = false;
+            }
+            else forgetBody = fb;
+        }
+
+        // R9.2/R9.5: only a class with a representation has an abstraction function.
+        ExpressionSyntax? modelBody = null;
+        if (!symbol.IsAbstract)
+        {
+            if (Body(modelSymbol) is not { } concreteBody)
+            {
+                diagnostics.Error("PALCS0524",
+                    Locations.From(modelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}`'s `[Model]` member has no expression body. The abstraction function " +
+                    "must be a single expression over the fields, because it *is* the connection between " +
+                    "the representation and the model.");
+                return false;
+            }
+            modelBody = concreteBody;
+        }
+        else if (Body(modelSymbol) is not null)
+        {
+            diagnostics.Error("PALCS0541",
+                Locations.From(modelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                $"`{symbol.Name}`'s `[Model]` member has an expression body, but `{symbol.Name}` is " +
+                "`abstract` and has no fields for it to read (doc/translation.md R9.5). An abstract " +
+                "class declares only the model's *type*; each subclass supplies the value.");
+            ok = false;
+        }
+
+        if (ReturnTypeOf(modelSymbol) is not { } modelReturn)
         {
             diagnostics.Error("PALCS0524",
                 Locations.From(modelSymbol.Locations.FirstOrDefault() ?? Location.None),
-                $"`{symbol.Name}`'s `[Model]` member has no expression body. The abstraction function " +
-                "must be a single expression over the fields, because it *is* the connection between " +
-                "the representation and the model.");
+                $"`{symbol.Name}`'s `[Model]` member has no type.");
             return false;
         }
 
@@ -568,8 +753,32 @@ public static class FrontendPass
 
         candidate = new ClassCandidate(
             syntax, symbol, fields.ToImmutable(), modelSymbol, modelType, modelBody,
-            observations.ToImmutable(), BuildClassUsings(syntax, symbol));
+            observations.ToImmutable(), BuildClassUsings(syntax, symbol))
+        {
+            BaseSymbol = baseSymbol,
+            IsAbstract = symbol.IsAbstract,
+            ForgetBody = forgetBody,
+        };
         return true;
+    }
+
+    /// <summary>
+    /// R9.6. Whether an <c>override</c> member overrides — transitively — a member marked
+    /// <c>[Model]</c>. C# does not inherit attributes onto an override, so the attribute
+    /// is only ever on the original declaration.
+    /// </summary>
+    private static bool OverriddenChainHasModel(ISymbol member, WellKnown known)
+    {
+        for (var m = Overridden(member); m is not null; m = Overridden(m))
+            if (Declarations.Has(m, known.ModelAttribute)) return true;
+        return false;
+
+        static ISymbol? Overridden(ISymbol s) => s switch
+        {
+            IPropertySymbol p => p.OverriddenProperty,
+            IMethodSymbol mm => mm.OverriddenMethod,
+            _ => null,
+        };
     }
 
     /// <summary>The expression body of a <c>[Model]</c> or <c>[Spec]</c> member.</summary>
@@ -693,8 +902,19 @@ public static class FrontendPass
         var fieldNames = c.Fields.Select(f => f.Name).ToImmutableHashSet();
         var modelName = ImmutableHashSet.Create(c.ModelSymbol.Name);
 
-        var modelBody = new ExprLowerer(classModel, known, diagnostics, specPosition: true)
-        { ClassMembers = fieldNames }.Lower(c.ModelBody);
+        // R9.2. An abstract class has no abstraction function: there are no fields to
+        // abstract from, and each leaf supplies the model instead.
+        var modelBody = c.ModelBody is null
+            ? null
+            : new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+              { ClassMembers = fieldNames }.Lower(c.ModelBody);
+
+        // R9.6. The forgetting function reads *this* class's model, exactly as an
+        // observation does — it is the base's model written in terms of this one.
+        var forgetBody = c.ForgetBody is null
+            ? null
+            : new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+              { ClassMembers = ImmutableHashSet.Create(c.ModelSymbol.Name) }.Lower(c.ForgetBody);
 
         var invariants = ImmutableArray.CreateBuilder<IrExpr>();
         var invariantTexts = ClassInvariants(c).ToImmutableArray();
@@ -739,7 +959,13 @@ public static class FrontendPass
 
         return new IrClass(
             Locations.From(c.Syntax.Identifier), c.Symbol.Name, fields,
-            c.ModelSymbol.Name, c.ModelType, modelBody, refinements.ToImmutable(), invariants.ToImmutable(), observations);
+            c.ModelSymbol.Name, c.ModelType, modelBody, refinements.ToImmutable(),
+            invariants.ToImmutable(), observations)
+        {
+            BaseClass = c.BaseSymbol?.Name,
+            IsAbstract = c.IsAbstract,
+            ForgetBody = forgetBody,
+        };
     }
 
     private static ImmutableArray<string> BuildClassUsings(
@@ -950,9 +1176,17 @@ public static class FrontendPass
             Preserves = specs.Preserves,
             DeclaringClass = declaringClass,
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
+            // R4.11b derives this from the write set. R9.7: an abstract method has no
+            // write set, so [Frac] on the method says it instead — the same statement
+            // R4.9a makes about a parameter, made about the receiver.
             IsReadOnly = declaringClass is not null &&
                 symbol.MethodKind != MethodKind.Constructor &&
-                !Declarations.Mutates(candidate.Syntax, model),
+                (Declarations.Has(symbol, known.FracAttribute) ||
+                 (!symbol.IsAbstract && !Declarations.Mutates(candidate.Syntax, model))),
+            IsAbstract = symbol.IsAbstract,
+            Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
+                ? baseName
+                : null,
         };
     }
 

@@ -18,6 +18,12 @@ public sealed class SpecScope
     public string? ResultTerm { get; init; }
 
     /// <summary>
+    /// The class whose module this specification is being emitted into, if any. An
+    /// observation of *that* class is then written unqualified (R3.7).
+    /// </summary>
+    public string? DefiningClass { get; init; }
+
+    /// <summary>
     /// What kind of value <c>Result</c> denotes. A method's result is a machine value,
     /// but a <c>[Refine]</c> on a <c>[Model]</c> member names the *model* (R3.9d), which
     /// is a ghost value and carries no <c>Int32.v</c>.
@@ -31,6 +37,7 @@ public sealed class SpecScope
         _values = new Dictionary<string, Term>(other._values);
         Pre = other.Pre;
         ResultTerm = other.ResultTerm;
+        DefiningClass = other.DefiningClass;
         ResultKind = other.ResultKind;
     }
 
@@ -81,8 +88,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrObserve ob:
             {
                 var receiver = Emit(ob.Receiver, scope);
+                // R3.7's rule about field qualifiers applies to observations too: inside
+                // the class's own module the qualifier is not merely redundant, it makes
+                // F*'s dependency scan read the module as depending on itself.
+                var qualifier = scope.DefiningClass == ob.Class
+                    ? "" : Names.ClassModule(ob.Class) + ".";
                 return new Term(
-                    $"({Names.ClassModule(ob.Class)}.{Names.Observation(ob.Class, ob.Member)} {receiver.Text})",
+                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)} {receiver.Text})",
                     MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
             }
 

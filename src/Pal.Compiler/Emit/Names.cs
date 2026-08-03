@@ -89,6 +89,72 @@ public static class Names
     public static string ClassModel(string name) => "class_" + name + "__model";
     public static string ClassModelPred(string name) => "class_" + name + "__model__pred";
 
+    // -----------------------------------------------------------------------
+    // §9. Inheritance. An abstract class emits a vtable, an object record, the dyn it
+    // is reached through, and the two invariants (indexed and plain); a leaf emits the
+    // M2 constructs unchanged plus a forgetting function, a base-model view of its own
+    // invariant, a vtable value and an upcast.
+    // -----------------------------------------------------------------------
+
+    /// <summary>R9.9. The vtable type of an abstract class.</summary>
+    public static string ClassVtbl(string name) => "class_" + name + "__vtbl";
+
+    /// <summary>R9.9. A vtable slot for a virtual method.</summary>
+    public static string VtblSlot(string method) => "vfn_" + method;
+
+    /// <summary>R9.9. The fully applied object: a vtable together with a representation.</summary>
+    public static string ClassObj(string name) => "class_" + name + "__obj";
+
+    /// <summary>R9.9. Ownership of a <em>known</em> object record, named apart so a fold has a witness (F34).</summary>
+    public static string ClassAt(string name) => "class_" + name + "__at";
+
+    /// <summary>R9.10. The invariant with the object record named — the primitive form.</summary>
+    public static string ClassInvAt(string name) => "class_" + name + "__inv_at";
+
+    /// <summary>R9.10. Throwing the index away, which is one ghost step and irreversible.</summary>
+    public static string ClassForgetImpl(string name) => "class_" + name + "__forget_impl";
+
+    /// <summary>R9.12. The dispatching wrapper for a virtual method, at the index and plain.</summary>
+    public static string Dispatch(string className, string method) =>
+        "class_" + className + "_" + method;
+    public static string DispatchAt(string className, string method) =>
+        Dispatch(className, method) + "_at";
+
+    /// <summary>R9.6. The base's model as a function of this class's model.</summary>
+    public static string ClassForget(string name) => "class_" + name + "__forget";
+
+    /// <summary>R9.14. This class's invariant seen at its base's model.</summary>
+    public static string ClassAsBase(string name, string baseName) =>
+        "class_" + name + "__as_" + baseName;
+
+    /// <summary>R9.14. The vtable <em>value</em>, and the object record built from it.</summary>
+    public static string VtblModule(string name) => "Vtbl_" + name;
+    public static string ClassVtblValue(string name) => "class_" + name + "__vtbl_value";
+    public static string ClassObjOf(string name) => "class_" + name + "__obj_of";
+
+    /// <summary>R9.15. The upcast, at the index and plain.</summary>
+    public static string UpcastAt(string name) => "class_" + name + "__upcast_at";
+    public static string Upcast(string name) => "class_" + name + "__upcast";
+
+    /// <summary>
+    /// R9.15. The upcast as a value: the same ghost step, followed by the reference the
+    /// base-typed name is bound to. It exists because Pulse matches resources by name — a
+    /// `let` that rebinds a reference after the ghost step leaves the invariant attached
+    /// to the wrong term — so the C# conversion becomes one call rather than two steps.
+    /// </summary>
+    public static string UpcastTo(string name, string baseName) =>
+        "class_" + name + "__to_" + baseName;
+
+    /// <summary>
+    /// A member's own name, undoing the type qualifier <c>Naming.Of</c> prefixes. The
+    /// qualifier is what keeps two classes' <c>Area</c> methods in distinct modules; the
+    /// bare name is what a vtable slot and a dispatching wrapper are named after.
+    /// </summary>
+    public static string Member(string qualified, string className) =>
+        qualified.StartsWith(className + "_", StringComparison.Ordinal)
+            ? qualified[(className.Length + 1)..]
+            : qualified;
+
     /// <summary>A <c>[Spec]</c> member of a class: a pure function of the model (R3.9c).</summary>
     public static string Observation(string className, string member) =>
         "spec_" + className + "_" + member;

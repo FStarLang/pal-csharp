@@ -2189,3 +2189,288 @@ R3.10b is untested); and a cast that may fail.
 * `out` parameters are modelled exactly like `ref` — `pts_to` in both pre- and
   post-condition — rather than `pts_to_uninit` in the precondition. This is sound but
   demands more of the caller than C# does.
+
+---
+
+## 9. Inheritance (M3)
+
+§8 records two design studies — `test/pulse_facts/ShapeHierarchy.fst` (depth two) and
+`test/pulse_facts/DeepHierarchy.fst` (depth three) — in which the encoding below was
+probed before any of it was written down. This section turns those studies into rules.
+Every construct named here appears in one of the two studies; nothing is invented.
+
+### 9.1 What is in scope, and why the boundary is where it is
+
+M2's class encoding (§3.4) is a `Box.box` of a record. That encoding admits no
+subclassing at all: the representation type is fixed by the reference type, so a
+`Shape`-typed variable would have to have *one* field layout. Dispatch needs the
+representation to be existential, and that is the whole reason M3 looks different.
+
+**R9.1 — A class is in a hierarchy iff it is `abstract`, or its base list names a
+translated class.** A `sealed class` with no base list is M2 and its emission does not
+change by one character. This is a genuine fork, and it is drawn by the C# declaration
+rather than inferred, so a user always knows which encoding they are getting.
+
+Three restrictions, each traceable to something the studies did *not* probe. Each is a
+refusal to *translate*, not a prediction that a proof will fail (§0 rule 3):
+
+* **R9.2 — An abstract class has no fields.** The studies give `Shape` and
+  `Quadrilateral` no representation of their own; the representation is entirely the
+  leaf's. A base field would make the leaf's representation an extension of the base's
+  and force a constructor chain, which is on §8's not-probed list.
+* **R9.3 — Every virtual method is `abstract`.** In both studies each leaf supplies a
+  *full* vtable. A `virtual` method with a body would have to be inherited by a subclass
+  that does not override it, and a base method body can only run against a
+  representation the base does not have. `base.M()` is refused for the same reason.
+* **R9.4 — A leaf is `sealed`.** A non-sealed concrete class is both a vtable *value* and
+  a vtable *type*, which the studies never build.
+
+A non-`abstract` method on an abstract class is *not* refused: it is an ordinary method
+over the class's invariant, dispatching through its own receiver like any other client
+(`quad_semi_perimeter` in the study). This is the C# `sealed`-by-default reading and it
+costs nothing.
+
+### 9.2 Models and the forgetting function
+
+**R9.5 — An abstract class's `[Model]` member is `abstract`, and declares only the model
+*type*.** It has no body because there is no representation to abstract from. Its
+`[Refine]` clauses behave exactly as in R3.9d.
+
+**R9.6 — A derived class supplies its parent's model by `override`ing the parent's
+`[Model]` member with an expression over its *own* model.** That override *is* the
+forgetting function, and it is written in idiomatic C# with no new attribute:
+
+```csharp
+public abstract class Shape          { [Model] protected abstract SpecInt Area { get; } }
+public sealed class Square : Shape
+{
+    private int side;
+    [Model] private SpecInt Side => side;              // abstraction from the fields
+    protected override SpecInt Area => Side * Side;    // Shape's model from Square's
+}
+```
+
+Emitted as `class_Square__forget (m: class_Square__model) : class_Shape__model`. It is a
+total function of the derived model, which is what makes a subclass a *refinement* of its
+parent: the parent's model is recoverable from the child's, and never the reverse.
+
+**R9.7 — A virtual method's contract is written once, on the `abstract` declaration, at
+the declaring class's model.** An `override` carries no contract of its own; restating it
+would be either a repetition or a Liskov violation, and C# gives it nowhere to go. So the
+*implementation* in a leaf is checked against the parent's contract, over the parent's
+model — which is exactly how the studies type a leaf's vtable slots.
+
+This has a consequence worth stating because it is the most common way a hierarchy fails
+to verify: **a base method's precondition must be strong enough for every subclass.**
+`Shape.Double()`'s `4 * Area <= int.MaxValue` bounds a square's side only because a
+square's area is `side * side`; for a shape whose model does not bound its representation
+the base precondition says nothing and the leaf will not verify. §8 works this out for a
+quadrilateral's perimeter. The fix is the user's — strengthen the base contract, or add a
+`[Refine]` to the leaf's model — and never the emitter's.
+
+### 9.3 What a reference is
+
+**R9.8 — A reference into a hierarchy is a `dyn`, and the dyn is always made at the
+*root's* object record.** `class_Shape = Dn.dyn`, and so is `class_Quadrilateral`: an
+intermediate class is a *view* of the same value, differing only in its invariant. This
+is exactly C#'s reference-conversion semantics, and it is forced — a dyn is made at one
+witness type, so a value made at `class_Quadrilateral__obj` could never be read back as a
+`class_Shape__obj` without injectivity of `mkdyn`, which `ShapeHierarchy.fst` §3 pins as
+unavailable.
+
+**R9.9 — Each abstract class emits a vtable type, an object record, an ownership
+predicate, and an invariant**, in that order:
+
+| Construct | Meaning |
+|---|---|
+| `class_C__vtbl` | one field per virtual method visible at `C`, at `C`'s model, plus `impl: Type`, `inv`, `share`, `gather` |
+| `class_C__obj` | `{ pkg: class_C__vtbl; rep: pkg.impl }`, plus `sub: Dn.dyn` **at the root only** |
+| `class_C` | `Dn.dyn` |
+| `class_C__at o p m` | `o.pkg.inv o.rep p m` — ownership of a *known* object record |
+| `class_C__inv s #p m` | `exists* o. pure (s == mkdyn (view o)) ** class_C__at o p m` |
+| `class_C__inv_at s o p m` | the same with the object record **named** |
+
+`class_C__inv` has the same signature as an M2 class invariant (§3.4), which is why a
+*client* of a hierarchy needs no new rules at all: R4.5's model binders, R4.10's
+fold/unfold bracket, R3.10b's nested objects and R5.12's loops all apply unchanged.
+
+A slot's type is the virtual method's contract with the receiver read as the vtable's own
+`inv x p m`. Three things about it are load-bearing, and all three were found by building
+it rather than by reading the studies:
+
+* **R4.8 applies to a slot exactly as it applies to a method.** A slot's `ensures` is
+  `pure (REQ ==> ENS)`, because that is what the `Func_` module implementing it produces
+  and one C# contract must not be stated two ways. Emitting the bare `ENS` in the slot
+  makes the vtable literal fail with an unprovable subtyping check, which is the right
+  failure: the two are not definitionally equal even though they are equivalent.
+* **A slot is generated apart from `MethodPlan`.** Its `inv` takes the permission
+  *positionally* where R4.10's takes it as F21's meta-argument-defaulted implicit, so the
+  application shapes differ and there is nothing to share.
+* **The binder orders differ, and the eta-expansion is where they meet.** A slot binds
+  `#p` before `#m`; R4.10 threads the model binder before R4.11b's permission. F33 already
+  forces the pack site to eta-expand every slot, so the reconciliation costs nothing and
+  neither side bends towards the other.
+
+**R9.9a — A virtual method takes and returns plain values.** A slot's type is fixed by the
+base class, so every subclass would have to own the same resource in the same way; only a
+value parameter has a reading that does not depend on the implementation. An `abstract`
+method with an array, object or `ref` parameter is refused (PALCS0545) rather than given a
+guessed ownership.
+
+**R9.9b — Inside `Class_C`, an observation of `C` is written unqualified.** This is R3.7's
+rule about field qualifiers, and it holds for the same reason: a self-qualified name makes
+F*'s dependency scan read the module as depending on itself. It first bites here because
+§3.4's class module has no reason to mention its own observations, and a vtable slot's
+contract has every reason to.
+
+**R9.10 — The indexed invariant is the primitive; the plain one is derived.** Both
+studies force this. `gather` needs to know *which* implementation the two halves came
+from, and so does a downcast (§9.7); `class_C__forget_impl` throws the index away, and is
+one ghost step. Every dispatching wrapper is emitted at the index, with the plain form
+derived — one dispatching body per method, not two. Forgetting is *irreversible* even
+given the equation (`quad_remember_impl` is pinned `expect_failure`), so an upcast is a
+real one-way commitment, which is the honest reading of C#.
+
+**R9.11 — `share` and `gather` are vtable slots, not emitted lemmas.** R3.10d emits them
+per class because their proofs recurse into the class's own structure. Behind a dyn there
+is no structure to recurse into, so they become dispatched operations like any other, and
+the leaf supplies them from the R3.10d bodies it already has. Read-only aliasing of a
+`Shape` therefore costs nothing at runtime.
+
+### 9.4 Dispatch
+
+**R9.12a — A call is virtual iff it resolves to an `abstract` declaration**, however the
+receiver is written. It is emitted as the dispatching wrapper in `Class_C`, and its
+arguments, implicit model binder and permission are found by exactly the rules a direct
+call uses, because R9.9 gives the wrapper the same contract shape a direct method has.
+
+**R9.12 — A call on a hierarchy-typed receiver dispatches through the vtable, and costs
+one `recover` per level.** For a root-typed receiver:
+
+```
+fn class_C_M_at (s: class_C) (#o: erased class_C__obj) …
+  preserves class_C__inv_at s o p m
+{ unfold …; let ob = recover #class_C__obj #o s; let f = ob.pkg.fld_M; let v = f ob.rep …; fold …; v }
+```
+
+Three facts from §1 are load-bearing here and the emitter obeys all three without knowing
+why: F31 (a stored Pulse computation must be let-bound before it is applied — `ob.pkg.f x`
+does not run), F33 (a pack site must eta-expand every slot, because F21's
+meta-argument-defaulted permission binder does not match a vtable field type), and F34
+(name the body of an invariant so that the closing `fold` has a head symbol whose argument
+*is* the witness).
+
+At depth *k* the wrapper recovers the root object and then follows `sub` once per level.
+The CLR does the whole thing with one header check; the gap is the price of erasing the
+dynamic type into `dyn`, and it is paid in casts, not in memory.
+
+**R9.13 — `recover` is the one assumption.** `Pulse.Lib.CSharp.Assumptions.recover` says
+the CLR object header faithfully records the dynamic type. It is unprovable because
+`FStar.Dyn.undyn` returns in `Dv`, and it is stated in `stt` rather than `stt_div` because
+`stt_div a emp post` is inhabited for every `post` and so would assume nothing. It does
+**not** imply injectivity of `mkdyn`.
+
+### 9.5 The leaf
+
+**R9.14 — A `sealed class C : P` emits its M2 representation *unchanged*, plus five
+things**: the forgetting function (R9.6); `class_C__as_P`, which is `class_C__inv` seen at
+`P`'s model; one `fn` per `override`, specified over `class_C__as_P` and `P`'s model
+(R9.7); the vtable literal `class_C__vtbl : class_P__vtbl`; and
+`class_C__obj (c: class_C) : class_P__obj`.
+
+That the leaf's own invariant is untouched is the point: an M2 class and an M3 leaf differ
+by a wrapper, so `[Invariant]`, `[Refine]`, arrays, nested objects and R3.10d's share and
+gather all keep working inside a hierarchy with no new rules.
+
+The vtable literal must be emitted *after* the method modules and *before* the
+constructor's, so it gets a module of its own, `Vtbl_C.fst` (§2). F* computes the order.
+
+### 9.6 Upcast
+
+**R9.15 — An upcast is a ghost fold, and is inserted where C# inserts a reference
+conversion**: assignment to a base-typed variable or field, an argument to a base-typed
+parameter, a `return` at a base type, and an element store into a base-typed array.
+
+```
+ghost fn class_C__upcast_at (c: class_C) … requires class_C__as_P c #p m
+                                           ensures class_C__inv_at (mkdyn (view (class_C__obj c))) …
+```
+
+The value changes — `c` is a box, and the upcast produces `mkdyn (…)` — where a C#
+reference conversion does not. That is a property of the encoding, not of the source
+program, and it is invisible to the C# semantics because the box is unreachable
+afterwards: the only way back is R9.16, which requires the index.
+
+**R9.15a — The conversion also has a value form, and that is what a statement uses.**
+Pulse matches resources by name, so a ghost upcast followed by `let x = mkdyn (…)` leaves
+the invariant attached to the term and not to `x` (Error 228, the same fact R3.8's object
+locals are already shaped by). `class_C__to_P` is the ghost step followed by the reference,
+returning it, so the conversion is one operation:
+
+```
+let t0 = func_Square__ctor 5l;
+with vs_0. assert (class_Square__inv t0 vs_0);
+fold (class_Square__as_Shape t0 (class_Square__forget vs_0));
+let var_s = Vtbl_Square.class_Square__to_Shape t0;
+```
+
+The `with` is not a proof step but the naming R9.6 needs: the view is folded at the
+forgetting of *whatever model the constructor established*, and only the prover can name
+that. Currently inserted at a local declaration whose declared type is the immediate base;
+the other three positions and longer chains are refused with a diagnostic rather than
+emitted untested.
+
+A base-typed array is therefore heterogeneous with no extra machinery (`shape_slot` in
+both studies), and `total_area` traverses one at a fraction.
+
+### 9.7 Downcast
+
+**R9.16 — A cast to a derived type requires the ghost index naming the object.** It is
+emitted as the chain walker plus one `recover`, and it needs no assumption beyond R9.13.
+The precondition *is* the knowledge, and it is the same index `gather` already forced.
+
+Be precise about what this proves. `recover` has no failure mode: it is not "test the
+header and maybe fail" but "given a proof the header matches, hand back the value". So the
+cast cannot fail — not because anything proves a runtime test succeeds, but because the
+encoding only lets a user *write* the casts whose test is redundant. A cast that might
+fail is not one this scheme proves safe, it is one this scheme cannot express, and `as`,
+`is` returning `false`, and a throwing cast are all refused. That is consistent with M1's
+exception-freedom (§5.2): a verified cast is one that cannot throw.
+
+### 9.8 Refusals
+
+Each of these is a construct with no image under the scheme, diagnosed at the C#
+declaration that asks for it, never a prediction about a proof:
+
+| Construct | Rule |
+|---|---|
+| a field on an `abstract` class | R9.2 |
+| `virtual` with a body; `base.M()` | R9.3 |
+| a non-`sealed` concrete class | R9.4 |
+| a derived class that does not override its parent's `[Model]` | R9.6 |
+| a contract on an `override` | R9.7 |
+| a virtual method taking or returning a non-value | R9.9a |
+| an upcast anywhere but a base-typed local, or across more than one level | R9.15a |
+| `interface`, multiple bases, generics | not probed |
+| `as`, `is`, a cast that may fail | R9.16 |
+
+### 9.9 Status
+
+**Implemented and verified**, by `test/shape_hierarchy`: an `abstract Shape` with two
+virtual methods and an observed model, `sealed Square` and `sealed Circle` with unrelated
+representations, and a client that reads through dispatch, mutates through dispatch,
+dispatches inside a loop, and upcasts a fresh leaf to the base. `ShapesVariant.cs` is
+§7.2's detector and passes with no emitter change.
+
+Two failures during the build were fixed where §0 rule 3 says they belong. `RepeatArea`'s
+loop re-quantifies the shape's model, so a bound its precondition established has to be
+restated as a `Pal.Invariant` — an annotation in the `.cs` file. And an earlier client
+whose growth was exponential was dropped, because no invariant its bound could support
+existed; that is a true statement about the program, not a gap in the scheme.
+
+`Circle` is the evidence that the translation is not fitted to `Square`: it was added after
+the emitter was complete, with a different representation, a different forgetting function
+and a nonlinear observation, and needed no emitter change at all.
+
+Not yet implemented: depth ≥ 3 (the `sub: Dn.dyn` field of R9.9, designed in
+`DeepHierarchy.fst`), the checked downcast R9.16, and heterogeneous arrays.

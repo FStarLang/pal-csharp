@@ -63,8 +63,17 @@ public sealed class ConsumesAttribute : Attribute;
 [AttributeUsage(AttributeTargets.Parameter)]
 public sealed class PlainAttribute : Attribute;
 
-/// <summary>Hold this parameter at an explicit fractional permission.</summary>
-[AttributeUsage(AttributeTargets.Parameter)]
+/// <summary>
+/// Hold this parameter at an explicit fractional permission.
+/// <para>
+/// On a <em>method</em> it says the same thing about the receiver, which is the one
+/// parameter C# gives no syntax for: the method observes <c>@this</c> rather than owning
+/// it, so callers holding any fraction may call it and two aliases may call it at once.
+/// R4.11b derives this from the write set for a method that has a body; an
+/// <c>abstract</c> method has none, so it says so here (R9.7).
+/// </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Method)]
 public sealed class FracAttribute(string permission) : Attribute
 {
     public string Permission { get; } = permission;

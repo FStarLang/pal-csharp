@@ -34,6 +34,9 @@ public static class Check
         var specOnlyStructs = program.Declarations
             .OfType<IrStruct>().Where(t => t.IsSpecOnly).Select(t => t.Name).ToImmutableHashSet();
 
+        var methods = program.Declarations.OfType<IrMethod>()
+            .GroupBy(m => m.Name).ToImmutableDictionary(g => g.Key, g => g.First());
+
         foreach (var decl in program.Declarations)
         {
             switch (decl)
@@ -42,6 +45,9 @@ public static class Check
                 case IrMethod m: CheckMethod(m, specOnlyStructs, diagnostics); break;
                 case IrSpecFunction s: CheckSpecFunction(s, program, diagnostics); break;
             }
+
+            if (decl is IrMethod { Body: not null } withBody)
+                CheckConversions(withBody, methods, diagnostics);
         }
 
         return program;
@@ -97,7 +103,9 @@ public static class Check
 
         CheckGhostOrder(m, diagnostics);
 
-        if (m.Body is null && m.PulseBody is null && !m.Admit)
+        // R9.9. An `abstract` method is a vtable slot: its contract is a *demand* on every
+        // subclass rather than a claim about a body, so having no body is what it is for.
+        if (m.Body is null && m.PulseBody is null && !m.Admit && !m.IsAbstract)
             diagnostics.Error("PALCS0502", m.Loc,
                 $"`{m.Name}` has no body. Give it a C# body, supply Pulse with " +
                 "`[PulseBody(\"...\")]`, or mark it `[Admit]`.");
@@ -218,6 +226,56 @@ public static class Check
                         "This loop reached Check with no termination measure.");
                     break;
             }
+        }
+    }
+
+    /// <summary>
+    /// R9.15a. C# inserts a reference conversion silently wherever a derived reference
+    /// meets a base-typed context; the scheme's image of one is a ghost fold, and it is
+    /// implemented only at a local declaration. Everywhere else the conversion would be
+    /// dropped, and the resource the generated Pulse holds would not be the one it asks
+    /// for — an error reported against generated code, in terms of a fold the user never
+    /// wrote. This reports it against the C# instead, per the sentinel property.
+    /// </summary>
+    private static void CheckConversions(
+        IrMethod m, ImmutableDictionary<string, IrMethod> methods, DiagnosticBag diagnostics)
+    {
+        foreach (var stmt in Statements(m.Body!))
+        {
+            switch (stmt)
+            {
+                case IrReturn { Value: { } v }:
+                    Report(v, m.ReturnType, "returned");
+                    break;
+                case IrAssign a:
+                    Report(a.Value, a.Target.Type, "assigned");
+                    break;
+            }
+
+            foreach (var call in Expressions(stmt).SelectMany(Subexpressions).OfType<IrCall>())
+            {
+                if (call.Kind != CalleeKind.Method) continue;
+                if (!methods.TryGetValue(call.Callee, out var callee)) continue;
+
+                // An instance call's receiver is Args[0] and is not among the declared
+                // parameters; it is never a conversion site, because C# resolved the
+                // callee *from* the receiver's static type.
+                var offset = call.HasReceiver ? 1 : 0;
+                if (call.Args.Length - offset != callee.Parameters.Length) continue;
+                for (var i = 0; i < callee.Parameters.Length; i++)
+                    Report(call.Args[i + offset], callee.Parameters[i].Type,
+                        $"passed to `{callee.Parameters[i].Name}`");
+            }
+        }
+
+        void Report(IrExpr value, IrType? target, string position)
+        {
+            if (value.Type is not IrClassType from || target is not IrClassType to) return;
+            if (from.Name == to.Name) return;
+            diagnostics.Error("PALCS0546", value.Loc,
+                $"A `{from.Name}` cannot be {position} at type `{to.Name}` here. " +
+                "R9.15 inserts the upcast only at a local declaration whose declared type " +
+                $"is the base: bind `{to.Name} x = …;` first and pass `x`.");
         }
     }
 

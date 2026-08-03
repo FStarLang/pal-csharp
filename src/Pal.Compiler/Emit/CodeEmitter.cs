@@ -128,7 +128,7 @@ public sealed class CodeEmitter(
 
         // The invariant is abstract to the caller, so the body cannot touch a field until
         // it is unfolded, and the matching `fold` on each exit path re-establishes it.
-        foreach (var obj in _objects) Line(Unfold(obj) + ";");
+        foreach (var obj in _objects) OpenReceiver(obj);
 
         // R4.2: rebind assigned by-value parameters as cells.
         foreach (var (cell, source) in plan.Prologue) Line($"let mut {cell} = {source};");
@@ -471,8 +471,71 @@ public sealed class CodeEmitter(
     }
 
 
+    /// <summary>
+    /// R9.15. The class an initialiser actually produces, when the frontend recorded one.
+    /// A reference conversion is invisible in C# and has to be read off the two types.
+    /// </summary>
+    private static string? Source(IrExpr? init) => init switch
+    {
+        IrCall { ResultType: IrClassType c } => c.Name,
+        _ => null,
+    };
+
+    /// <summary>
+    /// R9.15. <c>B x = new D(...);</c>. The object is allocated at its own class, its
+    /// invariant is read at the base's model through R9.14's view, and the upcast returns
+    /// the reference the base-typed name is bound to.
+    /// </summary>
+    private void Upcast(IrLocalDecl d, IrExpr init, string derived, IrClassType target, string binder)
+    {
+        if (classes is null || !classes.TryGetValue(derived, out var sub) ||
+            sub.BaseClass != target.Name)
+        {
+            diagnostics.Unsupported(d.Loc,
+                $"Converting a `{derived}` to a `{target.Name}`",
+                "R9.15 inserts an upcast only from a class to its immediate base; " +
+                "a longer chain would need one upcast per level, which \u00a79 has not probed.");
+            return;
+        }
+
+        var impl = Fresh();
+        if (init is IrCall { Kind: CalleeKind.Method } call) Call(call, impl);
+        else Line($"let {impl} = {Expr(init)};");
+
+        // The view is folded at the forgetting of whatever model the constructor
+        // established, which is the same expression R9.6 read off the `[Model]` override.
+        var own = FreshValue(d.Name);
+        var mod = Names.ClassModule(derived);
+        Line($"with {own}. assert ({mod}.{Names.ClassInv(derived)} {impl} {own});");
+        Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} " +
+             $"({mod}.{Names.ClassForget(derived)} {own}));");
+        Line($"let {binder} = {Names.VtblModule(derived)}." +
+             $"{Names.UpcastTo(derived, target.Name)} {impl};");
+
+        var local = new Slot(d.Name, target, SlotKind.Object, binder);
+        _slots[d.Name] = local;
+        _objectLocals.Add(local);
+    }
+
     private static string Unfold(Slot obj) =>
         $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel}";
+
+    /// <summary>
+    /// R4.10's fold/unfold bracket, opened. R9.14: an <c>override</c> is handed its
+    /// receiver at the base's model, so there is one bracket more to open — the view
+    /// first, then the class's own invariant inside it. The <c>with</c> is how the body
+    /// gets a name for its own model, which the view existentially quantifies.
+    /// </summary>
+    private void OpenReceiver(Slot obj)
+    {
+        var klass = (IrClassType)obj.Type;
+        if (obj.ViewBase is not { } b) { Line(Unfold(obj) + ";"); return; }
+
+        Line($"unfold {Names.ClassModule(klass.Name)}." +
+             $"{Names.ClassAsBase(klass.Name, b)} {obj.Binder} {obj.PermArg}{obj.PreModel};");
+        Line($"with {obj.OwnModel}. assert ({Inv(klass)} {obj.Binder} {obj.PermArg}{obj.OwnModel});");
+        Line($"unfold {Inv(klass)} {obj.Binder} {obj.PermArg}{obj.OwnModel};");
+    }
 
     /// <summary>
     /// R4.11a — the fold witness. A read-only method re-folds at the binder it was handed:
@@ -528,9 +591,14 @@ public sealed class CodeEmitter(
         foreach (var obj in _objects)
         {
             var klass = (IrClassType)obj.Type;
+            // R4.11a. A read-only method re-folds at the binder it was handed; under a
+            // view (R9.14) that binder names the class's *own* model, which the opening
+            // `with` introduced, and the view closes at the base model it was given.
             if (obj.PostModel == obj.PreModel)
             {
-                Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{obj.PreModel};");
+                var own = obj.ViewBase is null ? obj.PreModel : obj.OwnModel;
+                Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{own};");
+                CloseView(obj, obj.PreModel!);
                 continue;
             }
 
@@ -541,8 +609,31 @@ public sealed class CodeEmitter(
                 continue;
             }
 
-            Line($"fold {Inv(klass)} {obj.Binder} {ModelWitness(decl, obj)};");
+            var witness = ModelWitness(decl, obj);
+            if (obj.ViewBase is null)
+            {
+                Line($"fold {Inv(klass)} {obj.Binder} {witness};");
+                continue;
+            }
+
+            // A mutator under a view re-folds twice, and the outer index is the inner one
+            // pushed through R9.6's forgetting function. That is what makes an override
+            // satisfy the base's postcondition: the base's model of the post-state *is*
+            // the forgetting of this class's model of it.
+            var post = Fresh();
+            Line($"let {post} = {witness};");
+            Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{post};");
+            CloseView(obj, $"({Names.ClassModule(klass.Name)}.{Names.ClassForget(klass.Name)} {post})");
         }
+    }
+
+    /// <summary>R9.14. Closes the base-model view an <c>override</c>'s receiver is held at.</summary>
+    private void CloseView(Slot obj, string model)
+    {
+        if (obj.ViewBase is not { } b) return;
+        var klass = (IrClassType)obj.Type;
+        Line($"fold {Names.ClassModule(klass.Name)}." +
+             $"{Names.ClassAsBase(klass.Name, b)} {obj.Binder} {obj.PermArg}{model};");
     }
 
     /// <summary>
@@ -586,9 +677,13 @@ public sealed class CodeEmitter(
                 projection, MethodPlan.KindOf(field.Type), field.Type));
         }
 
+        // R9.2: only a class with a representation has an abstraction function, and only
+        // such a class reaches here — an abstract class's model is supplied by its leaves.
+        var body = decl.ModelBody ?? throw new InvalidOperationException(
+            $"{decl.Name} has no abstraction function");
         return MethodPlan.KindOf(decl.ModelType) == TermKind.Math
-            ? spec.Math(decl.ModelBody, scope)
-            : $"({spec.Emit(decl.ModelBody, scope).Text})";
+            ? spec.Math(body, scope)
+            : $"({spec.Emit(body, scope).Text})";
     }
 
     // =======================================================================
@@ -649,6 +744,16 @@ public sealed class CodeEmitter(
                 }
 
                 var binder = Names.Local(d.Name);
+
+                // R9.15. A C# reference conversion: the initialiser produces a subclass and
+                // the name is declared at a base class. The conversion is what makes the
+                // object's own invariant readable as the base's, so it is emitted here,
+                // where C# performs it, and nowhere else.
+                if (Source(d.Init) is { } derived && derived != oc.Name)
+                {
+                    Upcast(d, d.Init, derived, oc, binder);
+                    return;
+                }
 
                 // The initialiser is emitted *into* the local's binder rather than into a
                 // temporary the local then aliases. Pulse matches resources syntactically:
@@ -1318,7 +1423,15 @@ public sealed class CodeEmitter(
     private string Call(IrCall call, string binder)
     {
         var args = call.Args.Select(Expr).ToImmutableArray();
-        Line($"let {binder} = {Names.Function(call.Callee)} " +
+        // R9.12. A call resolved to an `abstract` declaration is a virtual call: it goes
+        // to the dispatching wrapper, which recovers the object and runs its vtable slot.
+        // Nothing else about the call changes — the arguments, the implicit model binder
+        // and the permission are found by the same rules as for a direct call, because
+        // R9.9 gives the wrapper the same contract shape a direct method has.
+        var callee = PulseEmitter.DispatchOwner(classes, call.Callee) is { } owner
+            ? Names.Dispatch(owner, Names.Member(call.Callee, owner))
+            : Names.Function(call.Callee);
+        Line($"let {binder} = {callee} " +
              (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
         return binder;
     }

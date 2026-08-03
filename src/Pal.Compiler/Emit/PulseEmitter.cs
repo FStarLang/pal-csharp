@@ -73,6 +73,17 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public string? PostModel { get; init; }
 
+    /// <summary>
+    /// R9.14. For an <c>override</c>'s receiver: the base class whose model its inherited
+    /// contract is written at. The slot is then owned through <c>class_C__as_B</c>, and its
+    /// <see cref="PreModel"/> holds a model of <em>B</em>; the method's own fields are
+    /// reached by opening that view, which is what <see cref="OwnModel"/> names.
+    /// </summary>
+    public string? ViewBase { get; init; }
+
+    /// <summary>R9.14. The binder for this class's own model inside an <c>override</c>.</summary>
+    public string OwnModel => "own_" + Name;
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
@@ -114,19 +125,31 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 {
     private readonly SpecEmitter _spec = new(diagnostics);
     private Dictionary<string, IrClass> _classes = [];
+    private readonly HierarchyEmitter _hierarchy = new(new SpecEmitter(diagnostics), diagnostics);
+
+    /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
+    private ILookup<string, IrMethod> _virtuals =
+        Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
 
     public ImmutableArray<EmittedModule> Emit(IrProgram program)
     {
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
         _classes = program.Declarations.OfType<IrClass>().ToDictionary(c => c.Name);
+        _virtuals = program.Declarations.OfType<IrMethod>()
+            .Where(m => m is { IsAbstract: true, DeclaringClass: not null })
+            .ToLookup(m => m.DeclaringClass!);
         foreach (var decl in program.Declarations)
         {
             var module = decl switch
             {
                 IrSpecFunction s => EmitSpecFunction(s),
+                // R9.9. An abstract method is a vtable slot, and the slot is emitted with
+                // the vtable. There is no module of its own to emit, and no body to check.
+                IrMethod { IsAbstract: true } => null,
                 IrMethod { IsLemma: true } m => EmitLemma(m),
                 IrMethod m => EmitMethod(m),
                 IrStruct s => EmitStruct(s),
+                IrClass { IsAbstract: true } c => EmitAbstractClass(c),
                 IrClass c => EmitClass(c),
                 IrIncludePulse i => new EmittedModule(i.Module, i.Text),
                 _ => null,
@@ -157,6 +180,32 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 // §3.4 emits five constructs plus one per [Spec] member for a single C#
                 // class declaration, so each is recorded against the span it came from
                 // rather than leaving five of them unaccounted for.
+                // §9. An abstract class has no representation: it emits a vtable, the dyn
+                // its references are, and the two invariants. R9.11's share and gather are
+                // dispatched rather than proved, and each virtual method contributes the
+                // slot and its two dispatching wrappers.
+                IrClass { IsAbstract: true } ab =>
+                [
+                    new Provenance(Names.ClassModelPred(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassModel(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassVtbl(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassObj(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassType(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassAt(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassInv(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassInvAt(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassForgetImpl(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassInvShare(ab.Name) + "_at", decl.Loc),
+                    new Provenance(Names.ClassInvShare(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassInvGather(ab.Name) + "_at", decl.Loc),
+                    .. _virtuals[ab.Name].SelectMany(v => new[]
+                    {
+                        new Provenance(Names.DispatchAt(ab.Name, Names.Member(v.Name, ab.Name)), v.Loc),
+                        new Provenance(Names.Dispatch(ab.Name, Names.Member(v.Name, ab.Name)), v.Loc),
+                    }),
+                    .. ab.Observations.Select(o =>
+                        new Provenance(Names.Observation(ab.Name, o.Name), o.Loc)),
+                ],
                 IrClass cl =>
                 [
                     new Provenance(Names.ClassRaw(cl.Name), decl.Loc),
@@ -172,14 +221,54 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvGather(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
+                    // R9.14. A leaf adds the forgetting function R9.6 read off its
+                    // `[Model]` override, its own invariant at the base's model, and the
+                    // two lemmas that lift R3.10d's sharing to that model.
+                    .. cl.BaseClass is null ? ImmutableArray<Provenance>.Empty :
+                    [
+                        new Provenance(Names.ClassForget(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassAsBase(cl.Name, cl.BaseClass), decl.Loc),
+                        new Provenance(Names.ClassAsBase(cl.Name, cl.BaseClass) + "_share", decl.Loc),
+                        new Provenance(Names.ClassAsBase(cl.Name, cl.BaseClass) + "_gather", decl.Loc),
+                    ],
                 ],
                 _ => [new Provenance(construct, decl.Loc)],
             };
 
             modules.Add(module with { Origin = origin });
+
+            // R9.14. The vtable *value* is a module of its own: it mentions every method
+            // module of the leaf, and the leaf's constructor mentions it, so it has to sit
+            // between them. F* computes the order from the dependencies, so nothing else
+            // has to know that.
+            if (decl is IrClass { IsAbstract: false, BaseClass: { } baseName } leaf &&
+                _classes.TryGetValue(baseName, out var super))
+            {
+                var overrides = program.Declarations.OfType<IrMethod>()
+                    .Where(m => m.DeclaringClass == leaf.Name && m.Overrides is not null)
+                    .ToImmutableArray();
+                modules.Add(new EmittedModule(
+                    Names.VtblModule(leaf.Name),
+                    _hierarchy.EmitVtbl(leaf, super, [.. _virtuals[baseName]], overrides))
+                {
+                    Origin =
+                    [
+                        new Provenance(Names.ClassVtblValue(leaf.Name), decl.Loc),
+                        new Provenance(Names.ClassObjOf(leaf.Name), decl.Loc),
+                        new Provenance(Names.UpcastAt(leaf.Name), decl.Loc),
+                        new Provenance(Names.Upcast(leaf.Name), decl.Loc),
+                        new Provenance(Names.UpcastTo(leaf.Name, baseName), decl.Loc),
+                    ],
+                });
+            }
         }
         return modules.ToImmutable();
     }
+
+    /// <summary>§9. An abstract class: a vtable, a dyn, and dispatch.</summary>
+    private EmittedModule EmitAbstractClass(IrClass c) => new(
+        Names.ClassModule(c.Name),
+        _hierarchy.EmitAbstract(c, [.. _virtuals[c.Name]]));
 
     // =======================================================================
     // [Spec] functions (R4.6)
@@ -413,12 +502,6 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.9d: the model refinement is stated over the model value, which a [Refine]
         // on the [Model] member names `Result`, as an [Ensures] does.
         var modelKind = MethodPlan.KindOf(c.ModelType);
-        var modelScope = new SpecScope { ResultTerm = "m", ResultKind = modelKind };
-        var modelPred = c.ModelRefinements.Length == 0
-            ? "True"
-            : SpecEmitter.Conjunction(
-                c.ModelRefinements.Select(r => _spec.AsProp(_spec.Emit(r, modelScope))));
-
         // R3.9b: the [Invariant] clauses and the abstraction relation are conjuncts of one
         // `pure`, and the order is load-bearing. `p1 /\ p2` types `p2` with `p1` in scope,
         // so the [Invariant] clauses come *first*: they are the bounds that make a partial
@@ -426,9 +509,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // The equation is stated at the model's kind: a `SpecInt` model of an `int` field
         // is that field's mathematical value, so the abstraction carries the `Int32.v` that
         // §6 puts on every integer in spec position.
+        var modelBody = c.ModelBody ?? throw new InvalidOperationException(
+            $"{c.Name} has no abstraction function");
         var abstraction = modelKind == TermKind.Math
-            ? _spec.Math(c.ModelBody, repScope)
-            : _spec.Emit(c.ModelBody, repScope).Text;
+            ? _spec.Math(modelBody, repScope)
+            : _spec.Emit(modelBody, repScope).Text;
         var conjuncts = new List<string>();
         // R3.10a. A C# array's length is an `int`, so this bound is a fact about the
         // source type and not an assumption: it enters at `new T[n]`, whose length
@@ -469,13 +554,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.9d. Emitted even when the predicate is `True`, for the same reason
         // `struct_S__pred` is (§0 rule 2): uniform output beats output whose shape
         // depends on whether the user happened to write [Refine].
-        var modelType = Types.Render(c.ModelType);
-        sb.AppendLine($"let {Names.ClassModelPred(c.Name)} (m: {modelType}) : prop =");
-        sb.AppendLine($"  {modelPred}");
-        sb.AppendLine();
-        sb.AppendLine($"type {Names.ClassModel(c.Name)} = " +
-                      $"m: {modelType} {{ {Names.ClassModelPred(c.Name)} m }}");
-        sb.AppendLine();
+        _hierarchy.EmitModelType(sb, c);
 
         // R3.10: the invariant is indexed by the model. An un-indexed `inv (x: C)` puts
         // the object's whole state under an existential, so no postcondition could relate
@@ -510,20 +589,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.9c: each [Spec] member is a pure function of the model, never of the
         // representation — a caller holds only the model, so an observation it cannot
         // compute from the model is one it cannot use.
-        foreach (var o in c.Observations)
+        sb.AppendLine();
+        _hierarchy.EmitObservations(sb, c);
+
+        // R9.14. A leaf of a hierarchy is an M2 class *and* an implementation of its
+        // parent: everything above is emitted unchanged, and what follows is what makes it
+        // usable as the parent — the forgetting function, its invariant read at the
+        // parent's model, and R3.10d's sharing lifted to that model.
+        if (c.BaseClass is { } baseName && _classes.TryGetValue(baseName, out var parent))
         {
-            var obsScope = new SpecScope();
-            obsScope.Bind(c.ModelMember, new Term("m", modelKind, c.ModelType));
-            var (ret, text) = o.ReturnType switch
-            {
-                IrPrim { Kind: PrimKind.Bool } => ("prop", _spec.AsProp(_spec.Emit(o.Body, obsScope))),
-                IrPrim { IsMachineInt: true } => ("int", _spec.Math(o.Body, obsScope)),
-                _ => (Types.Render(o.ReturnType), _spec.Emit(o.Body, obsScope).Text),
-            };
-            sb.AppendLine();
-            sb.AppendLine($"let {Names.Observation(c.Name, o.Name)} " +
-                          $"(m: {Names.ClassModel(c.Name)}) : {ret} =");
-            sb.AppendLine($"  {text}");
+            sb.Append(_hierarchy.EmitLeafView(c, parent));
+            sb.Append(_hierarchy.EmitLeafShareGather(c, parent));
         }
 
         return new EmittedModule(Names.ClassModule(c.Name), sb.ToString());
@@ -776,7 +852,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// loop invariant, which is easy to forget and produces an "identifier not found"
     /// only once F* runs.
     /// </summary>
-    private static ImmutableArray<string> Dependencies(
+    /// <summary>
+    /// R9.12. The abstract class a call dispatches through, if any. A call whose resolved
+    /// target is <c>Shape.GetArea</c> is a virtual call however the receiver was written,
+    /// and goes to the wrapper in <c>Class_Shape</c> rather than to a <c>Func_</c> module
+    /// that does not exist — an abstract method has no body to put in one.
+    /// </summary>
+    public static string? DispatchOwner(IReadOnlyDictionary<string, IrClass>? classes, string callee) =>
+        classes?.Values
+            .FirstOrDefault(c => c.IsAbstract &&
+                                 callee.StartsWith(c.Name + "_", StringComparison.Ordinal))
+            ?.Name;
+
+    private ImmutableArray<string> Dependencies(
         string self, IrStmt? body, params IEnumerable<IrExpr>[] specifications)
     {
         var names = new HashSet<string>();
@@ -813,7 +901,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrCall c:
                     names.Add(c.Kind is CalleeKind.Spec or CalleeKind.Lemma
                         ? Names.SpecModule(c.Callee)
-                        : Names.FunctionModule(c.Callee));
+                        : DispatchOwner(_classes, c.Callee) is { } owner
+                            ? Names.ClassModule(owner)
+                            : Names.FunctionModule(c.Callee));
                     foreach (var a in c.Args) CollectExpr(a);
                     return;
                 case IrBinary b: CollectExpr(b.Left); CollectExpr(b.Right); return;

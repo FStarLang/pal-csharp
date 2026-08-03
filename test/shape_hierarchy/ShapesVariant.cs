@@ -1,0 +1,50 @@
+using PalLang;
+
+namespace PalCSharp.Tests;
+
+/// <summary>
+/// §7.2's variant: the same client written differently — a <c>for</c> loop instead of a
+/// <c>while</c>, the accumulation reassociated, the temporaries removed, the shape created
+/// through a differently spelled conversion. It must verify with no emitter change.
+/// </summary>
+public static class ShapesVariant
+{
+    [Requires("first.TheArea + second.TheArea <= 2147483647")]
+    [Ensures("Result == first.TheArea + second.TheArea")]
+    public static int SumAreas(Shape first, Shape second)
+    {
+        return first.GetArea() + second.GetArea();
+    }
+
+    [Requires("4 * shape.TheArea <= 2147483647")]
+    [Ensures("shape.TheArea == 4 * Old(shape.TheArea)")]
+    public static void Grow(Shape shape)
+    {
+        shape.Double();
+    }
+
+    [Requires("count >= 0 && count <= 1000")]
+    [Requires("shape.TheArea <= 100")]
+    [Ensures("Result == count * shape.TheArea")]
+    public static int RepeatArea(Shape shape, int count)
+    {
+        int acc = 0;
+        for (int k = 0; k < count; k++)
+        {
+            Pal.Invariant(0 <= k && k <= count);
+            Pal.Invariant(shape.TheArea <= 100);
+            Pal.Invariant(acc == k * shape.TheArea);
+            Pal.Decreases(count - k);
+            acc = acc + shape.GetArea();
+        }
+        return acc;
+    }
+
+    [Ensures("Result == 27")]
+    public static int MakeAndMeasure()
+    {
+        Shape s = new Circle(3);
+        int a = s.GetArea();
+        return a;
+    }
+}
