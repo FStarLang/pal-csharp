@@ -199,8 +199,8 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrListOp l:
                 return ListOp(l, scope);
 
-            case IrTreeOp t:
-                return TreeOp(t, scope);
+            case IrSpecOp o:
+                return SpecOp(o, scope);
 
             // R10.2. `null` is `None`. The type annotation is what lets F* infer the
             // option's parameter in `pure (x == None)` positions where nothing else
@@ -435,23 +435,35 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         _ => new Term("True", TermKind.Prop),
     };
 
-    /// <summary>R10.5. The ghost tree, <c>Pulse.Lib.CSharp.Tree</c>.</summary>
-    private Term TreeOp(IrTreeOp t, SpecScope scope) => t.Op switch
+    /// <summary>
+    /// R11.2. A user-declared specification operation: the F* term it named, applied to
+    /// its arguments. There is nothing to decide — the name came from the user's
+    /// <c>[SpecOp]</c> or <c>[SpecCtor]</c> and is emitted verbatim.
+    ///
+    /// <para>Every argument goes through <see cref="AsMath"/>, which is a no-op except on
+    /// a machine integer: a specification type's arguments are mathematical, so an
+    /// <c>Int32.t</c> in argument position needs <c>.v</c>. This is the same coercion the
+    /// built-in operations applied, stated once.</para>
+    ///
+    /// <para>The result's <see cref="TermKind"/> is read off the member's C# return type
+    /// rather than declared, because C# already says whether it is a number, a
+    /// proposition or a structure.</para>
+    /// </summary>
+    private Term SpecOp(IrSpecOp op, SpecScope scope)
     {
-        TreeOpKind.Leaf => new Term("CTree.Leaf", TermKind.Other),
-        TreeOpKind.Branch => new Term(
-            $"(CTree.Branch {Emit(t.Args[0], scope).Text} {AsMath(Emit(t.Args[1], scope))} " +
-            $"{Emit(t.Args[2], scope).Text})",
-            TermKind.Other),
-        TreeOpKind.Size => new Term($"(CTree.size {Emit(t.Args[0], scope).Text})", TermKind.Math),
-        TreeOpKind.Insert => new Term(
-            $"(CTree.insert_int {Emit(t.Args[0], scope).Text} {AsMath(Emit(t.Args[1], scope))})",
-            TermKind.Other),
-        TreeOpKind.Elements => new Term(
-            $"(CTree.elements {Emit(t.Args[0], scope).Text})", TermKind.Other),
-        TreeOpKind.IsLeaf => new Term(
-            $"(CTree.Leaf? {Emit(t.Args[0], scope).Text})", TermKind.Prop),
-        _ => new Term("True", TermKind.Prop),
+        var text = op.Args.IsEmpty
+            ? op.Function
+            : $"({op.Function} {string.Join(" ", op.Args.Select(a => AsMath(Emit(a, scope))))})";
+        return new Term(text, Kind(op.Type));
+    }
+
+    /// <summary>R11.2. What a specification type's member returns, as a term kind.</summary>
+    private static TermKind Kind(IrType? type) => type switch
+    {
+        IrPrim { Kind: PrimKind.SpecInt or PrimKind.SpecNat } => TermKind.Math,
+        IrPrim { Kind: PrimKind.Bool } => TermKind.Prop,
+        IrSeqType => TermKind.Seq,
+        _ => TermKind.Other,
     };
 
     private static IrType? ElementType(IrExpr sequence) => sequence.Type switch

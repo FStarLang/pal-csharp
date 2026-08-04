@@ -219,6 +219,59 @@ public sealed class GhostArgAttribute(string declaration) : Attribute
 }
 
 // ---------------------------------------------------------------------------
+// User-defined specification types (doc/translation.md §11).
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// R11.1. Declares this type to be a specification-only type denoting the F* type
+/// <paramref name="type"/>. Its C# type parameters become the F* type's arguments, in
+/// order, so <c>SpecAssoc&lt;K, V&gt;</c> with <c>[SpecType("M.assoc")]</c> denotes
+/// <c>M.assoc ⟦K⟧ ⟦V⟧</c>.
+///
+/// <para>The F* type is the user's: it reaches the generated modules through
+/// <see cref="IncludePulseAttribute"/> or by already being on the include path. The
+/// translator emits the name it was given and does not check that it exists — that is
+/// F*'s job, and a misspelling surfaces as a type error carrying this string.</para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
+public sealed class SpecTypeAttribute(string type) : Attribute
+{
+    public string Type { get; } = type;
+}
+
+/// <summary>
+/// R11.2. Declares this member to denote the F* term <paramref name="function"/>, applied
+/// to the receiver if it has one and then to its arguments, left to right. One rule for a
+/// property, an instance method, a static method and a discriminator, because all four are
+/// applications.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
+public sealed class SpecOpAttribute(string function) : Attribute
+{
+    public string Function { get; } = function;
+}
+
+/// <summary>
+/// R11.3. Declares this static method to denote a <em>constructor</em> of the
+/// <c>[SpecType]</c> it returns. A constructor is a <see cref="SpecOpAttribute"/> that is
+/// also a declaration: it is what §10 inverts to obtain a recursive class's ownership
+/// predicate, so it is marked separately and carries the bit that says which one is empty.
+///
+/// <para>Set <see cref="Empty"/> on exactly one constructor per type. That is the one a
+/// null reference denotes, and so the base case of every induction over the type. All the
+/// constructors of one specification type must be declared together, as static methods of
+/// a single class, which is how the empty one is found from a use of another.</para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class SpecCtorAttribute(string constructor) : Attribute
+{
+    public string Constructor { get; } = constructor;
+
+    /// <summary>True of the nullary constructor a null reference denotes (R11.3).</summary>
+    public bool Empty { get; init; }
+}
+
+// ---------------------------------------------------------------------------
 // Raw Pulse interop.
 // ---------------------------------------------------------------------------
 

@@ -26,6 +26,14 @@ public static class Declarations
         data.ConstructorArguments.Length > index &&
         data.ConstructorArguments[index].Value is string s ? s : null;
 
+    /// <summary>The first string argument of a named attribute on a symbol, if present.</summary>
+    public static string? StringArgument(ISymbol symbol, INamedTypeSymbol attribute) =>
+        Find(symbol, attribute) is { } data ? StringArgument(data) : null;
+
+    /// <summary>A named boolean property set on an attribute application.</summary>
+    public static bool NamedFlag(AttributeData data, string name) =>
+        data.NamedArguments.Any(a => a.Key == name && a.Value.Value is true);
+
     /// <summary>
     /// Which of the three kinds of translatable declaration a method is, or
     /// <c>null</c> if it is not translatable at all.

@@ -17,6 +17,7 @@ public static class FrontendPass
     public static IrProgram Run(CSharpCompilation compilation, DiagnosticBag diagnostics)
     {
         var known = WellKnown.For(compilation);
+        ValidateSpecTypes(compilation, known, diagnostics);
         var candidates = Collect(compilation, known);
         var structs = CollectStructs(compilation, known, diagnostics);
         var classes = CollectClasses(compilation, known, diagnostics);
@@ -160,6 +161,9 @@ public static class FrontendPass
             foreach (var method in tree.GetRoot().DescendantNodes().OfType<BaseMethodDeclarationSyntax>())
             {
                 if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
+                // R11.1a. A specification type's members declare F* names; they are not
+                //程 code and have no bodies to translate.
+                if (known.IsSpecTypeDeclaration(symbol.ContainingType)) continue;
                 if (Declarations.KindOf(symbol, known) is not { } kind) continue;
                 result.Add(new Candidate(method, symbol, kind));
             }
@@ -200,6 +204,11 @@ public static class FrontendPass
                     _ => null,
                 };
                 if (symbol is null) continue;
+
+                // R11.1a. A specification-type declaration is not a class and not a class
+                // member; its members declare F* names.
+                if (known.IsSpecTypeDeclaration(symbol as INamedTypeSymbol ?? symbol.ContainingType))
+                    continue;
 
                 // A class whose own declaration carries [Invariant] or [Model], or an
                 // annotated instance member of one: all of these are §3.4, not yet built.
@@ -262,6 +271,75 @@ public static class FrontendPass
         ImmutableArray<string> Usings,
         bool IsSpecOnly);
 
+    /// <summary>
+    /// R11.1b. Checks that the three specification-type attributes are where they claim to
+    /// be, <em>before</em> R11.1a makes their declarations invisible to every other pass.
+    ///
+    /// <para>This has to be its own pass. A specification-type declaration is skipped
+    /// wholesale, so nothing downstream ever sees it; without this, an attribute in the
+    /// wrong place would be silently ignored, and the first sign of it would be a use of
+    /// the member failing with PALCS0573 — a message about the use, pointing away from the
+    /// mistake.</para>
+    /// </summary>
+    private static void ValidateSpecTypes(
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.GetSemanticModel(tree);
+            foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(syntax) is not { } type) continue;
+
+                // R11.5. A `[SpecType]` denotes an F* type and has no representation: no
+                // fields to own, no model to abstract it by, nothing to construct. Saying
+                // it is also a translated class asks for both at once.
+                if (known.SpecTypeName(type) is not null)
+                {
+                    var offender =
+                        type.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute))
+                        ?? type.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.InvariantAttribute));
+                    if (offender is not null)
+                        diagnostics.Error("PALCS0570", Locations.From(syntax.Identifier),
+                            $"The type `{type.Name}` is a `[SpecType]`, so it denotes the F* type " +
+                            $"`{known.SpecTypeName(type)}` and has no representation of its own. " +
+                            $"Remove `[{(Declarations.Has(offender, known.ModelAttribute) ? "Model" : "Invariant")}]` " +
+                            $"from `{offender.Name}`, or remove `[SpecType]`.");
+                }
+
+                foreach (var member in type.GetMembers())
+                {
+                    // R11.2. `[SpecOp]` says "this member reads as this F* term applied to
+                    // the receiver". Off a specification type there is no such receiver.
+                    if (known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
+                        !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
+                        diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
+                            $"`[SpecOp]` on `{type.Name}.{member.Name}`, but `{type.Name}` is not a " +
+                            $"`[SpecType]`. An operation belongs either to the specification type it " +
+                            $"reads, or to the class that declares that type's `[SpecCtor]`s.");
+
+                    // R11.3. A constructor's whole job is to produce a value of the
+                    // specification type; if it does not, the emitted application is
+                    // ill-typed in F* and the C# says something the F* does not.
+                    if (known.SpecCtorName(member) is not null)
+                    {
+                        var returns = member is IMethodSymbol m ? m.ReturnType : null;
+                        if (!member.IsStatic || known.SpecTypeName(returns) is null)
+                            diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
+                                $"`[SpecCtor]` on `{type.Name}.{member.Name}`, which is not a static " +
+                                $"method returning a `[SpecType]`. A specification constructor builds a " +
+                                $"value of the type it constructs.");
+                    }
+                }
+            }
+        }
+    }
+
+    private static IrLoc MemberLocation(ISymbol member, TypeDeclarationSyntax fallback) =>
+        member.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is MemberDeclarationSyntax d
+            ? Locations.From(d)
+            : Locations.From(fallback.Identifier);
+
     private static ImmutableArray<StructCandidate> CollectStructs(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
@@ -273,6 +351,7 @@ public static class FrontendPass
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
+                if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
 
                 // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
                 // it never appears in executable code, and so — unlike R3.4's ordinary
@@ -885,7 +964,7 @@ public static class FrontendPass
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;
                 case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
                 case IrListOp lo: foreach (var a in lo.Args) Walk(a); return;
-                case IrTreeOp to: foreach (var a in to.Args) Walk(a); return;
+                case IrSpecOp so: foreach (var a in so.Args) Walk(a); return;
                 case IrNew n: foreach (var f2 in n.Fields) Walk(f2.Value); return;
                 // Raw Pulse is opaque, so it is taken at its word rather than refused.
                 case IrInlinePulse: found = true; return;
@@ -1057,41 +1136,65 @@ public static class FrontendPass
             return null;
         }
 
-        var shape = c.ModelType switch
+        // R11.5. The model's two constructors, as F* names. There is no enum of built-in
+        // shapes any more: a model type is a type with an empty constructor and a
+        // non-empty one, and where those names come from — the compiler, for `SpecList`,
+        // or the user's `[SpecCtor]`, for anything else — changes nothing downstream.
+        //
+        // R10.5. The body must be a *single* application of the non-empty constructor.
+        // That is not a syntactic convenience: the emitter inverts it to get the
+        // invariant, and an equation it cannot invert is one whose induction does not
+        // exist, so guessing one would be inventing a proof step (§0 rule 3).
+        //
+        // F44 is why the built-in arm can say `Nil` and `Cons` rather than `[]` and `::`:
+        // they are the same constructors, and the prefix form works in every position,
+        // which is what lets one template serve a built-in model type and a user's alike.
+        var (shape, args) = (c.ModelType, modelBody) switch
         {
-            IrSpecListType => RecursiveShape.List,
-            IrSpecTreeType => RecursiveShape.Tree,
-            _ => (RecursiveShape?)null,
+            (IrSpecListType, IrListOp { Op: ListOpKind.Cons } l) =>
+                (new IrModelShape("Nil", "Cons"), l.Args),
+            (IrUserSpecType, IrSpecOp { SiblingEmpty: { } empty } o) =>
+                (new IrModelShape(empty, o.Function), o.Args),
+            _ => (null, default(ImmutableArray<IrExpr>)),
         };
+
         if (shape is null)
         {
-            diagnostics.Error("PALCS0560",
-                Locations.From(c.ModelSymbol.Locations.FirstOrDefault() ?? Location.None),
-                $"`{self}` is recursive, so its model must be an inductive type whose empty " +
-                $"constructor is what a null reference denotes. `{c.ModelType}` is not one: use " +
-                "`SpecList<T>` or `SpecTree<T>` (doc/translation.md R10.5).");
-            return null;
-        }
+            // Which of the two things went wrong: the model's *type* cannot be inducted
+            // over at all, or it can but the body is not one application of its
+            // constructor. Separating them is what makes each message actionable.
+            if (c.ModelType is not (IrSpecListType or IrUserSpecType))
+            {
+                diagnostics.Error("PALCS0560",
+                    Locations.From(c.ModelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{self}` is recursive, so its model must be an inductive type whose empty " +
+                    $"constructor is what a null reference denotes. `{c.ModelType}` is not one: use " +
+                    "`SpecList<T>`, `SpecTree<T>`, or a type of your own declared with " +
+                    "`[SpecType]` and `[SpecCtor]` (doc/translation.md R11.1).");
+                return null;
+            }
 
-        // R10.5. The body must be a *single* application of the model's non-empty
-        // constructor. That is not a syntactic convenience: the emitter inverts it to get
-        // the invariant, and an equation it cannot invert is one whose induction does not
-        // exist, so guessing one would be inventing a proof step (§0 rule 3).
-        var args = modelBody switch
-        {
-            IrListOp { Op: ListOpKind.Cons } l when shape is RecursiveShape.List => l.Args,
-            IrTreeOp { Op: TreeOpKind.Branch } t when shape is RecursiveShape.Tree => t.Args,
-            _ => default,
-        };
-        if (args.IsDefault)
-        {
-            var ctor = shape is RecursiveShape.List ? "SpecList.Cons" : "SpecTree.Branch";
+            // R11.3. A user's type whose constructors do not say which one is empty. A
+            // null reference has to denote exactly one thing, and nothing else in the
+            // program says which.
+            if (c.ModelType is IrUserSpecType u && modelBody is IrSpecOp { SiblingEmpty: null })
+            {
+                diagnostics.Error("PALCS0572",
+                    Locations.From(c.ModelBody?.GetLocation() ?? Location.None),
+                    $"`{u.Name}` is used as the model of the recursive class `{self}`, but none of " +
+                    "its constructors is marked `[SpecCtor(..., Empty = true)]`. That is the " +
+                    "constructor a null reference denotes, and so the base case of the induction " +
+                    "(doc/translation.md R11.3).");
+                return null;
+            }
+
             diagnostics.Error("PALCS0561",
                 Locations.From(c.ModelBody?.GetLocation() ?? Location.None),
                 $"The `[Model]` of the recursive class `{self}` must be exactly one application of " +
-                $"`{ctor}`, whose recursive arguments are the sub-models `f.{c.ModelSymbol.Name}` of " +
-                "its own fields. The translator inverts that equation to obtain the class's inductive " +
-                "ownership predicate (doc/translation.md R10.5), and cannot invert anything else.");
+                $"a constructor of `{c.ModelType}`, whose recursive arguments are the sub-models " +
+                $"`f.{c.ModelSymbol.Name}` of its own fields. The translator inverts that equation " +
+                "to obtain the class's inductive ownership predicate (doc/translation.md R10.5), " +
+                "and cannot invert anything else.");
             return null;
         }
 
@@ -1130,7 +1233,7 @@ public static class FrontendPass
             return null;
         }
 
-        return new IrRecursion(shape.Value, lowered.ToImmutable(), null);
+        return new IrRecursion(shape, lowered.ToImmutable(), null);
     }
 
     private static ImmutableArray<string> BuildClassUsings(

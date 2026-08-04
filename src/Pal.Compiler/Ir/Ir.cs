@@ -99,12 +99,18 @@ public sealed record IrSpecListType(IrType Element) : IrType
 }
 
 /// <summary>
-/// The spec-only inductive tree <c>SpecTree&lt;T&gt;</c> (R10.5),
-/// <c>Pulse.Lib.CSharp.Tree.tree</c>.
+/// R11.1. A specification-only type the <em>user</em> declared, with <c>[SpecType]</c>.
+/// <see cref="FStar"/> is the F* type it denotes and <see cref="Args"/> its type
+/// arguments, in declaration order.
+///
+/// <para>This is the node that replaces a family of primitives. The translator knows
+/// nothing about such a type beyond the two strings the user wrote, which is the point:
+/// there is no C# specification type it can express that another cannot.</para>
 /// </summary>
-public sealed record IrSpecTreeType(IrType Element) : IrType
+public sealed record IrUserSpecType(string Name, string FStar, ImmutableArray<IrType> Args) : IrType
 {
-    protected override string Describe() => $"SpecTree<{Element}>";
+    protected override string Describe() =>
+        Args.IsEmpty ? Name : $"{Name}<{string.Join(", ", Args)}>";
 }
 
 public sealed record IrNamedType(string Name) : IrType
@@ -157,10 +163,22 @@ public enum ListOpKind { Empty, Cons, Append, Length, Head, Tail, Index, IsEmpty
 
 public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
 
-/// <summary>An operation on the ghost inductive tree <c>SpecTree&lt;T&gt;</c> (R10.5).</summary>
-public enum TreeOpKind { Leaf, Branch, Size, Elements, IsLeaf, Insert }
-
-public sealed record IrTreeOp(IrLoc Loc, TreeOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+/// <summary>
+/// R11.2. An application of a user-declared specification operation: the F* term
+/// <see cref="Function"/> applied to <see cref="Args"/>, left to right, with the receiver
+/// first when there is one. A property, an instance method, a static method and a
+/// discriminator all lower to this, because all four are applications.
+/// </summary>
+public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
+{
+    /// <summary>
+    /// R11.3. When this is a <c>[SpecCtor]</c>, the F* name of its type's <em>empty</em>
+    /// constructor — the sibling marked <c>Empty = true</c>. Null when this is an ordinary
+    /// operation. It is carried here because §10 needs both constructors of a model, and a
+    /// use of one is where the other becomes findable.
+    /// </summary>
+    public string? SiblingEmpty { get; init; }
+}
 
 /// <summary>A read of a local, parameter, or ghost binder.</summary>
 public sealed record IrVar(IrLoc Loc, string Name) : IrExpr(Loc);
@@ -463,7 +481,23 @@ public sealed record IrRecPure(IrExpr Value) : IrRecArg;
 public sealed record IrRecField(string Field) : IrRecArg;
 
 /// <summary>Which inductive spec type a recursive class is modelled by (R10.5).</summary>
-public enum RecursiveShape { List, Tree }
+/// <summary>
+/// R11.5. The two constructors of a recursive class's model type, as F* names. This is
+/// everything §10's emitter ever needed about a model type, and replaces the enum of
+/// built-in shapes it used to branch on.
+///
+/// <para>Both names are written in <em>prefix</em> form, including F*'s own <c>Nil</c> and
+/// <c>Cons</c> (F44), so that one template serves a built-in model type and a user's
+/// alike.</para>
+/// </summary>
+public sealed record IrModelShape(string Empty, string Cons)
+{
+    /// <summary>
+    /// The discriminator of the non-empty constructor. Derived rather than declared: the
+    /// trailing <c>?</c> is F*'s rule for every inductive, not ours.
+    /// </summary>
+    public string ConsTest => $"{Cons}?";
+}
 
 /// <summary>
 /// R10.5. The induction the emitter reads off a recursive class's <c>[Model]</c> member:
@@ -472,7 +506,7 @@ public enum RecursiveShape { List, Tree }
 /// lemmas and the recursive share/gather are all functions of it.
 /// </summary>
 public sealed record IrRecursion(
-    RecursiveShape Shape,
+    IrModelShape Shape,
     ImmutableArray<IrRecArg> Args,
     string? BackwardField)
 {

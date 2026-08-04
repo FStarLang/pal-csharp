@@ -273,6 +273,51 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         return new IrLiteral(loc, null);
     }
 
+    /// <summary>
+    /// R11.2/R11.3. Lowers a member of a user-declared specification type to the F* term
+    /// it declares. There are exactly two ways for a member to have a meaning — it carries
+    /// <c>[SpecOp]</c>, or it carries <c>[SpecCtor]</c> — and a third case would be the
+    /// translator guessing an F* name from a C# one, which §0 rule 3 forbids. So the
+    /// remaining case is a refusal, and that is what makes the mechanism total.
+    /// </summary>
+    private IrExpr SpecMember(ISymbol? symbol, ImmutableArray<IrExpr> args,
+                              ExpressionSyntax node, IrLoc loc)
+    {
+        if (known.SpecOpName(symbol) is { } op)
+            return new IrSpecOp(loc, op, args);
+
+        if (symbol is not null &&
+            Declarations.Find(symbol, known.SpecCtorAttribute) is { } data &&
+            Declarations.StringArgument(data) is { } ctor)
+            return new IrSpecOp(loc, ctor, args) { SiblingEmpty = EmptyCtor(symbol, data) };
+
+        diagnostics.Error("PALCS0573", loc,
+            $"`{Trim(node)}` names a member of a specification type that does not say what " +
+            "it means in F*. Mark it `[SpecOp(\"...\")]`, or `[SpecCtor(\"...\")]` if it is a " +
+            "constructor (doc/translation.md R11.2). The translator will not guess an F* name " +
+            "from a C# one.");
+        return new IrLiteral(loc, null);
+    }
+
+    /// <summary>
+    /// R11.3. The empty constructor of this constructor's type — the sibling declared
+    /// alongside it with <c>Empty = true</c>. A use of one constructor is where the other
+    /// becomes findable, which is why §10 can invert a `[Model]` without a registry of
+    /// specification types.
+    /// </summary>
+    private string? EmptyCtor(ISymbol ctor, AttributeData self)
+    {
+        if (Declarations.NamedFlag(self, "Empty")) return Declarations.StringArgument(self);
+        if (ctor.ContainingType is not { } owner) return null;
+        foreach (var sibling in owner.GetMembers())
+        {
+            if (Declarations.Find(sibling, known.SpecCtorAttribute) is { } data &&
+                Declarations.NamedFlag(data, "Empty"))
+                return Declarations.StringArgument(data);
+        }
+        return null;
+    }
+
     private static string Trim(SyntaxNode node)
     {
         var text = node.ToString();
@@ -339,17 +384,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrListOp(loc, op.Value, [Lower(node.Expression)]);
         }
 
-        if (known.IsSpecTree(receiverType))
-        {
-            var op = node.Name.Identifier.ValueText switch
-            {
-                "Size" => TreeOpKind.Size,
-                "IsLeaf" => TreeOpKind.IsLeaf,
-                _ => (TreeOpKind?)null,
-            };
-            if (op is null) return Unsupported(node, loc);
-            return new IrTreeOp(loc, op.Value, [Lower(node.Expression)]);
-        }
+        // R11.2. A member of a user-declared specification type. The receiver becomes the
+        // first argument, which is the same rule for a property and for an instance
+        // method, and the same rule a discriminator needs (F44).
+        if (known.SpecTypeName(receiverType) is not null)
+            return SpecMember(symbol, [Lower(node.Expression)], node, loc);
 
         // `a.Length` on a real array is a pure function of the array (doc §3, R3.3).
         if (node.Name.Identifier.ValueText == "Length" && receiverType is IArrayTypeSymbol)
@@ -526,18 +565,18 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrListOp(loc, op.Value, [.. args.Select(a => Lower(a.Expression))]);
         }
 
-        if (SymbolEqualityComparer.Default.Equals(method.ContainingType, known.SpecTreeOps))
+        // R11.2/R11.3. A user-declared operation or constructor, recognised by attribute
+        // rather than by containing type, so that where the user chose to put it makes no
+        // difference. An *instance* operation puts the receiver first, which is the same
+        // rule a property already followed — `m.Map.Get(k, 0)` and `m.Map.Count` are the
+        // same application with a different number of arguments.
+        if (known.SpecOpName(method) is not null || known.SpecCtorName(method) is not null)
         {
-            var op = method.Name switch
-            {
-                "Leaf" => TreeOpKind.Leaf,
-                "Branch" => TreeOpKind.Branch,
-                "Elements" => TreeOpKind.Elements,
-                "Insert" => TreeOpKind.Insert,
-                _ => (TreeOpKind?)null,
-            };
-            if (op is null) return Unsupported(node, loc);
-            return new IrTreeOp(loc, op.Value, [.. args.Select(a => Lower(a.Expression))]);
+            var ops = ImmutableArray.CreateBuilder<IrExpr>();
+            if (!method.IsStatic && node.Expression is MemberAccessExpressionSyntax recv)
+                ops.Add(Lower(recv.Expression));
+            foreach (var a in args) ops.Add(Lower(a.Expression));
+            return SpecMember(method, ops.ToImmutable(), node, loc);
         }
 
         var kind = Declarations.KindOf(method, known);

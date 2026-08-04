@@ -662,10 +662,87 @@ not do is migrate into the translator (`translation.md` §0, rule 3).
 | `Ghost<T>` | `erased ⟦T⟧` |
 | `SlProp` | `slprop` |
 | `SpecList<T>` | `list ⟦T⟧` |
-| `SpecTree<T>` | `Pulse.Lib.CSharp.Tree.tree ⟦T⟧` |
+| `SpecTree<T>` | `Pulse.Lib.CSharp.Tree.tree ⟦T⟧` (declared, not built in — see below) |
 
 These exist only in specifications. A program method that mentions one in its signature is
 an error (`PALCS0500`) — mark it `[Spec]`, or wrap the parameter in `Ghost<>`.
+
+### Bringing your own
+
+The table above is a *starting library*, not the language. `SpecList<T>` is built in
+because F\*'s `list` and its theory are worth having by default; everything else on it —
+including `SpecTree<T>` — is declared in ordinary C# through three attributes that any
+program may use. If the structure you are specifying is an association list, a trie, a
+priority queue or a protocol state machine, you declare it the same way the standard
+library does, and the translator learns nothing new.
+
+Write the type in F\* and bring it in with `[assembly: IncludePulse]` (§7):
+
+```csharp
+[assembly: IncludePulse("MyAssoc", @"
+type assoc (k:eqtype) (v:Type) =
+  | Empty : assoc k v
+  | Entry : k -> v -> assoc k v -> assoc k v
+
+let rec count #k #v (a: assoc k v) : nat =
+  match a with Empty -> 0 | Entry _ _ rest -> 1 + count rest
+")]
+```
+
+Then give it a C# face. `[SpecType]` names the F\* type; `[SpecCtor]` names a constructor,
+with `Empty = true` on the one a `null` reference denotes; `[SpecOp]` names any other term,
+applied to the receiver and then the arguments:
+
+```csharp
+[SpecType("MyAssoc.assoc")]
+public sealed class SpecAssoc<K, V>
+{
+    [SpecOp("MyAssoc.count")]
+    public SpecInt Count => throw new InvalidOperationException();
+
+    [SpecOp("MyAssoc.Entry?")]          // a discriminator is an ordinary operation
+    public bool IsEntry => throw new InvalidOperationException();
+}
+
+public static class SpecAssoc
+{
+    [SpecCtor("MyAssoc.Empty", Empty = true)]
+    public static SpecAssoc<K, V> Nil<K, V>() => throw new InvalidOperationException();
+
+    [SpecCtor("MyAssoc.Entry")]
+    public static SpecAssoc<K, V> Entry<K, V>(K key, V value, SpecAssoc<K, V> rest) => throw new InvalidOperationException();
+}
+```
+
+The bodies are unreachable — these are specifications, and nothing calls them at run time —
+so any `throw` will do. Declare all of one type's constructors together in one class; that
+is how a use of `Entry` finds out which sibling is the empty one.
+
+The type is now usable everywhere a built-in one is, including as a recursive class's
+`[Model]`, where `Empty = true` is what lets `null` mean something:
+
+```csharp
+public sealed class Pair
+{
+    internal int key, val;
+    internal Pair? next;
+
+    [Model]
+    private SpecAssoc<SpecInt, SpecInt> Map => SpecAssoc.Entry<SpecInt, SpecInt>(key, val, next!.Map);
+}
+
+[Ensures("Result == c.Map.Count")]
+[Decreases("c.Map")]
+public static int Count([Frac("q")] Pair? c) => c == null ? 0 : Count(c.next) + 1;
+```
+
+Two things the translator deliberately does not do. It does not check that the F\* names
+exist — a misspelling surfaces as a type error in the generated module, carrying the text
+you wrote in the attribute, which is where it can be read. And it does not guess an F\*
+name from a C# one: a member of a specification type used without `[SpecOp]` or
+`[SpecCtor]` is `PALCS0573`, not a silently mistranslated specification.
+
+See `test/user_spec_type` for the whole of the above as a working test.
 
 ---
 

@@ -269,7 +269,7 @@ public static class Normalize
             case IrContents ct: Free(ct.Array, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
             case IrListOp lo: foreach (var a in lo.Args) Free(a, into); return;
-            case IrTreeOp to: foreach (var a in to.Args) Free(a, into); return;
+            case IrSpecOp so: foreach (var a in so.Args) Free(a, into); return;
             case IrQuantifier q:
             {
                 var inner = new HashSet<string>();

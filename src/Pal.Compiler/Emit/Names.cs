@@ -361,7 +361,9 @@ public static class Types
         IrClassType { Nullable: true } c => $"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}",
         IrClassType c => $"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}",
         IrSpecListType l => $"list {Render(l.Element)}",
-        IrSpecTreeType t => $"CTree.tree {Render(t.Element)}",
+        IrUserSpecType u => u.Args.IsEmpty
+            ? u.FStar
+            : $"{u.FStar} {string.Join(" ", u.Args.Select(Render))}",
         IrPulseType p => p.PulseText,
         _ => "unit",
     };

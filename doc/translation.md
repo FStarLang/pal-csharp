@@ -101,6 +101,9 @@ The rules below depend on the following, each **verified against the pinned tool
 | F42 | Two recursive occurrences are no harder than one: the two sub-invariants sit side by side under `**`, which is what makes the two subtrees separately owned and hence what makes an in-place tree insert verifiable. | `test/pulse_facts/RecursiveFacts.fst:class_TreeNode__inv_opt`, `func_Trees_Insert`, verified. Relied on by R10.9. |
 | F43 | A **back pointer** is expressible with no new device: the predecessor becomes an extra *index* of the predicate, the back pointer is constrained (`pure (r.fld_prev == left)`) rather than owned, and the recursive call passes the current reference as the new index. Reading the index *off the field* in `intro_cons` is what makes a write to `prev` a legal proof step. | `test/pulse_facts/RecursiveFacts.fst:class_DNode__inv_opt`, `func_DLists_Length`, `func_DLists_PushFront`, verified. Relied on by R10.10. |
 
+| F44 | `[]` and `::` are *notation* for the ordinary prefix constructors `Nil` and `Cons`, which work in every position the notation does — as a term, as a **pattern**, and under the discriminator `Cons?`. So a scheme phrased over "the empty constructor" and "the non-empty constructor" covers `list` with no special case, and the emitter needs only a constructor *name* and an arity. | `test/pulse_facts/UserSpecFacts.fst:nil_is_prefix`, `cons_is_prefix`, `length_prefix`, `cons_test`, verified. Relied on by R11.5. |
+| F45 | §10's whole encoding — the inductive invariant, all eight lemmas, the window, a recursive traversal and a destructive one — works verbatim over an inductive the **compiler has never heard of**, at a constructor arity that is neither a list's nor a tree's (two pure arguments and one recursive). Nothing in the template depends on which model type it is instantiated at. | `test/pulse_facts/UserSpecFacts.fst:class_Pair__inv_opt`, `class_Pair__elim_cons`, `func_Pairs_Count`, `func_Pairs_Set`, verified. Relied on by R11.6. |
+
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
 (§5.3). F6 and F7 are constraints on the *library*, not on the emitter, and are the reason
@@ -1776,7 +1779,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — thirty-two cases, each
+  `test/diagnostics` is its counterpart to the verification tests — thirty-six cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -3240,3 +3243,172 @@ Not covered, and refused rather than approximated: back pointers (PALCS0566), re
 crossing a hierarchy (PALCS0565), a recursive class that also owns an array (PALCS0563),
 *iterative* traversal — which needs a magic wand to give the tail back, and has not been
 probed — and mutual recursion between two classes.
+
+---
+
+## 11. User-defined specification types
+
+### 11.1 The problem
+
+§10 reads a recursive class's ownership predicate off its `[Model]` member. To do that it
+has to know two things about the model's type: what its **empty** constructor is, and what
+its **non-empty** one is. Up to here it knew them by *name*: an enum with two cases, `List`
+and `Tree`, chosen by matching the C# type against `SpecList<T>` or `SpecTree<T>`, both of
+which the compiler recognises as primitives.
+
+That is a bound on the language that has nothing to do with the language. A user whose
+model is an association list, a rose tree, a finite map, or anything else has no way to say
+so except by patching the compiler — and §0 rule 3 says a proof that needs help gets it
+from the user's annotations or from the reusable library, never from a special case in the
+translator. A *model type* the translator has to be taught about is exactly such a special
+case, and it is one the user cannot reach.
+
+The fix is not to add more primitives. It is to notice, per F44 and F45, that the emitter
+never needed a model type at all — only a constructor name and an arity, which the user can
+declare.
+
+### 11.2 What a user declares
+
+**R11.1.** A **user-defined specification type** is a C# type carrying `[SpecType(t)]`,
+where `t` is the F\* type it denotes. Its type parameters become the F\* type's arguments,
+in order. It is a specification-only type in the sense of §8: naming one in a program
+method's signature is PALCS0500, exactly as for `Seq<T>`.
+
+```csharp
+[SpecType("MyPulse.assoc")]
+public readonly struct SpecAssoc<K, V> { … }
+```
+
+**R11.2.** A member carrying `[SpecOp(f)]` denotes the F\* term `f`, applied to the
+receiver — if it has one — followed by its arguments, left to right. That is one rule for
+four C# shapes, because all four are applications:
+
+| C# | Emits |
+|---|---|
+| `[SpecOp("m.f")] public SpecInt P => …` (property) | `(m.f recv)` |
+| `[SpecOp("m.f")] public SpecInt M(A a) => …` (instance method) | `(m.f recv a)` |
+| `[SpecOp("m.f")] public static X F(A a, B b) => …` | `(m.f a b)` |
+| `[SpecOp("m.C?")] public bool IsC => …` | `(m.C? recv)` |
+
+A discriminator needs no rule of its own: `Cons?` is a prefix function of one argument
+(F44), so it is a `[SpecOp]` like any other.
+
+**R11.3.** A static method carrying `[SpecCtor(c)]` denotes the **constructor** `c` of the
+type it returns. Constructors are `[SpecOp]`s that are also *declarations*: they are what
+§10 inverts, so they are marked separately and carry the extra bit that says which one is
+empty.
+
+```csharp
+[SpecCtor("MyPulse.Empty", Empty = true)]
+public static SpecAssoc<K, V> Nil<K, V>() => throw …;
+
+[SpecCtor("MyPulse.Entry")]
+public static SpecAssoc<K, V> Entry<K, V>(K key, V value, SpecAssoc<K, V> rest) => throw …;
+```
+
+**R11.1a.** A *specification-type declaration* — a type carrying `[SpecType]`, **or** a
+type declaring any `[SpecOp]` or `[SpecCtor]` member — is skipped wholesale by the
+frontend, along with every member of it.
+
+This is not an optimisation, it is what lets a user write a specification type in an
+ordinary source file beside the code that uses it. Such a declaration is not a program and
+cannot survive being read as one: its members have no bodies (each says what it means in
+F\* and throws), their signatures mention specification-only types in executable position,
+and they carry open type parameters that no translated method may have. Without R11.1a the
+first thing a user sees on declaring a spec type is a storm of PALCS0001 and PALCS0500
+about code they never asked to have translated.
+
+**R11.1b.** The placement of the three attributes is checked in its own pass, *before*
+R11.1a makes the declaration invisible. The pass has to be separate for exactly that
+reason: nothing downstream ever sees a spec-type declaration, so an attribute in the wrong
+place would otherwise be silently ignored, and the first symptom would be PALCS0573 at some
+distant *use* — a message pointing away from the mistake. It reports:
+
+* PALCS0570 — `[SpecType]` on a type that also carries `[Model]` or `[Invariant]`;
+* PALCS0571 — `[SpecCtor]` that is not a static method returning a `[SpecType]`, or
+  `[SpecOp]` on a member of a type that is neither a `[SpecType]` nor the class declaring
+  that type's constructors.
+
+**R11.4.** The F\* side is the user's. It reaches the generated modules by
+`[assembly: IncludePulse]` (§7), or by already being on the include path — the translator
+emits the name it was given and does not check that it exists, because that is F\*'s job
+and F\* does it better. A misspelling is a type error in the generated module with the C#
+attribute's text in it, which is where it can be read.
+
+### 11.3 What the compiler stops knowing
+
+**R11.5.** `RecursiveShape` is deleted. In its place a recursive class carries a
+**model shape** — three strings and an arity, all of them read off `[SpecCtor]`:
+
+| Field | Meaning | For `SpecList<T>` | For `SpecAssoc<K,V>` |
+|---|---|---|---|
+| `Empty` | the empty constructor, as a term and as a pattern | `Nil` | `MyPulse.Empty` |
+| `Cons` | the non-empty constructor | `Cons` | `MyPulse.Entry` |
+| `ConsTest` | its discriminator | `Cons?` | `MyPulse.Entry?` |
+
+`ConsTest` is derived, not declared: it is `Cons` with `?` appended, which is F\*'s rule and
+not ours. Everything §10 emits — `NilPattern`, `NilTerm`, `ConsPattern`, `ConsTerm`,
+`ConsTest` — becomes a function of this record, and the emitter's two-way branch on an enum
+disappears.
+
+F44 is what makes the `SpecList` column say `Nil` and `Cons` rather than `[]` and `::`.
+Writing the *prefix* form everywhere is what lets one template serve both, and it costs
+nothing: F\* prints either.
+
+**R11.6.** A model shape's `Cons` may have **any** arity ≥ 1, with any mixture of pure and
+recursive arguments, subject to R10.5's existing rule that each recursive field appears
+exactly once. F45 pins the case that neither built-in shape can express — two pure
+arguments and one recursive one — and it needs no new proof step: the non-empty case of the
+invariant gets one `pure` equation per pure argument and one recursive conjunct per
+recursive argument, which is what the template already said.
+
+**R11.7.** `SpecTree<T>` stops being a primitive and is **re-declared in the annotation
+library** using R11.1–R11.3, pointing at `Pulse.Lib.CSharp.Tree`. It keeps its name, its
+members and its behaviour; what changes is that nothing in the compiler mentions it. This
+is the test of the mechanism: if a type the compiler used to special-case can be expressed
+without the special case, and `test/binary_tree` verifies unchanged, then the mechanism is
+at least as expressive as what it replaces.
+
+`SpecList<T>` **stays built-in**, and deliberately. It is F\*'s `list`, whose theory is in
+`FStar.List.Tot` and whose operations the translator already maps; a user's first model
+type should not require them to write an F\* module. The point of R11.5 is that this is now
+a *convenience* rather than a *limit* — the built-in path and the attribute path produce the
+same `IrModelShape`, and there is exactly one downstream mechanism.
+
+### 11.4 Rejections
+
+| Id | Refused |
+|---|---|
+| PALCS0570 | `[SpecType]` on a type that also has a `[Model]`, or is otherwise a translated class. A specification type has no representation. |
+| PALCS0571 | A `[SpecCtor]` on a method whose return type is not a `[SpecType]`, or a `[SpecOp]` on a member of a type that is not one. |
+| PALCS0572 | A `[SpecType]` used as a recursive class's model with no `[SpecCtor(Empty = true)]`, or with more than one. A null reference has to denote exactly one thing. |
+| PALCS0573 | A member of a `[SpecType]` used in a specification without `[SpecOp]` or `[SpecCtor]`. The translator will not guess an F\* name from a C# one — that is the mistake §0 rule 3 is about, and a silently wrong name is worse than a refusal. |
+
+PALCS0573 is the load-bearing one. It is what makes the mechanism *total*: every member of
+a user's specification type either declares what it means in F\*, or is refused. There is no
+path by which a member is translated to something the user did not write down.
+
+### 11.5 Status
+
+Pinned by `test/pulse_facts/UserSpecFacts.fst` before any of the above was written: the
+prefix-constructor facts, a user-declared inductive with a two-pure/one-recursive
+constructor, its inductive invariant, its eight lemmas, a recursive traversal and a
+destructive traversal that writes a field inside the window.
+
+Delivered end to end from C#: `test/user_spec_type`, whose model type is declared entirely
+in the user's own file — an F\* inductive supplied through `[assembly: IncludePulse]` and a
+C# surface over it carrying `[SpecType]`, `[SpecCtor]` and `[SpecOp]` — and consumed by a
+recursive class the compiler translates with no knowledge of either. `SpecTree<T>` is
+re-declared through the same mechanism, and `test/binary_tree` verifies unchanged.
+
+The §7.2 detectors both apply. `test/user_spec_type/AssocsVariant.cs` is an equivalent
+program written with every null test at the opposite polarity, the empty case in the
+`else`, the model operations reached as instance members where the original reached them
+as statics and the reverse, results bound to locals before being returned, and the key
+comparison written the other way round; it verifies with no emitter change. Four
+diagnostics cases cover PALCS0570–0573.
+
+What is *not* delivered: a user cannot yet declare a spec type whose recursive constructor
+has more than one recursive argument in a *class* (§10's window opens one sub-object), and
+the iterative traversal of §10.7 is still refused. Neither is a limit of §11 — both are
+§10's, and §11 does not make them worse.

@@ -175,18 +175,33 @@ public static class SpecList
 }
 
 /// <summary>
-/// A ghost binary tree, translated to <c>Pulse.Lib.CSharp.Tree.tree</c> (R10.5).
-/// The model of a class with two recursive fields.
+/// A ghost binary tree, the model of a class with two recursive fields (R10.5).
+///
+/// <para>R11.7. This type is <em>not</em> a compiler primitive. Nothing in the translator
+/// mentions it: it is an ordinary user-defined specification type declared through
+/// <c>[SpecType]</c>, <c>[SpecCtor]</c> and <c>[SpecOp]</c> (doc/translation.md §11), and
+/// it ships here only because a binary tree is common enough to be worth writing once.
+/// A user wanting a different model type writes exactly what is below, over an F* module
+/// of their own.</para>
+///
+/// <para>That it can be written this way is the test of the mechanism: it used to be a
+/// primitive, with a case in <c>WellKnown.MapType</c>, an <c>IrType</c>, an
+/// <c>IrTreeOp</c> node, a <c>TreeOpKind</c> enum, a branch in <c>SpecEmitter</c> and a
+/// case of <c>RecursiveShape</c>. All of those are gone and <c>test/binary_tree</c>
+/// verifies unchanged.</para>
 /// </summary>
+[SpecType("Pulse.Lib.CSharp.Tree.tree")]
 public readonly struct SpecTree<T>
 {
     private static Exception Ghost() => new InvalidOperationException(
         "SpecTree<T> is a specification-only construct and has no runtime meaning.");
 
     /// <summary>The number of interior nodes.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.size")]
     public SpecInt Size => throw Ghost();
 
-    /// <summary>True of the empty tree.</summary>
+    /// <summary>True of the empty tree. A discriminator is an ordinary prefix function.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.Leaf?")]
     public bool IsLeaf => throw Ghost();
 
     public static bool operator ==(SpecTree<T> a, SpecTree<T> b) => throw Ghost();
@@ -196,18 +211,24 @@ public readonly struct SpecTree<T>
     public override int GetHashCode() => throw Ghost();
 }
 
-/// <summary>The constructors of <see cref="SpecTree{T}"/>.</summary>
+/// <summary>The constructors and operations of <see cref="SpecTree{T}"/>.</summary>
 public static class SpecTree
 {
     private static Exception Ghost() => new InvalidOperationException(
         "SpecTree is a specification-only construct and has no runtime meaning.");
 
-    /// <summary>The empty tree. What a null reference denotes (R10.5).</summary>
+    /// <summary>The empty tree. What a null reference denotes (R11.3).</summary>
+    [SpecCtor("Pulse.Lib.CSharp.Tree.Leaf", Empty = true)]
     public static SpecTree<T> Leaf<T>() => throw Ghost();
 
     /// <summary>An interior node.</summary>
+    [SpecCtor("Pulse.Lib.CSharp.Tree.Branch")]
     public static SpecTree<T> Branch<T>(SpecTree<T> left, T value, SpecTree<T> right) =>
         throw Ghost();
+
+    /// <summary>The in-order traversal, which relates a tree model to a list model.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.elements")]
+    public static SpecList<T> Elements<T>(SpecTree<T> tree) => throw Ghost();
 
     /// <summary>
     /// Binary-search-tree insertion, <c>Pulse.Lib.CSharp.Tree.insert_int</c>. It is the
@@ -215,6 +236,7 @@ public static class SpecTree
     /// written as a user <c>[Spec]</c> function, so that a C# implementation can be proved
     /// equal to it.
     /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.insert_int")]
     public static SpecTree<SpecInt> Insert(SpecTree<SpecInt> tree, SpecInt value) =>
         throw Ghost();
 }

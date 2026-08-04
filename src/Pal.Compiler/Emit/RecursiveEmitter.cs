@@ -119,21 +119,23 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
     // The model's two constructors, as patterns.
     // -----------------------------------------------------------------------
 
-    /// <summary>R10.5. What a <em>null</em> reference denotes: the empty constructor.</summary>
-    private static string NilPattern(IrRecursion rec) =>
-        rec.Shape is RecursiveShape.List ? "[]" : "CTree.Leaf";
+    /// <summary>
+    /// R10.5/R11.5. What a <em>null</em> reference denotes: the model's empty constructor,
+    /// as the user declared it. A nullary constructor reads the same as a term and as a
+    /// pattern, so one function serves both.
+    /// </summary>
+    private static string NilPattern(IrRecursion rec) => rec.Shape.Empty;
 
     /// <summary>The empty constructor as a term (the same thing, outside a pattern).</summary>
     private static string NilTerm(IrRecursion rec) => NilPattern(rec);
 
-    /// <summary>The non-empty constructor with one binder per argument.</summary>
-    private static string ConsPattern(IrRecursion rec)
-    {
-        var binders = rec.Args.Select((_, i) => Sub(i)).ToImmutableArray();
-        return rec.Shape is RecursiveShape.List
-            ? $"{binders[0]} :: {binders[1]}"
-            : $"CTree.Branch {string.Join(" ", binders)}";
-    }
+    /// <summary>
+    /// The non-empty constructor with one binder per argument. R11.6: the arity is the
+    /// number of arguments the user's <c>[Model]</c> applied, not two and not three, and
+    /// the prefix form (F44) is what makes that uniform.
+    /// </summary>
+    private static string ConsPattern(IrRecursion rec) =>
+        $"{rec.Shape.Cons} {string.Join(" ", rec.Args.Select((_, i) => Sub(i)))}";
 
     /// <summary>
     /// The non-empty constructor applied to the values the <em>representation</em> gives:
@@ -143,11 +145,8 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
     /// </summary>
     private string ConsTerm(IrClass c, IrRecursion rec, Func<int, string> subModel)
     {
-        var parts = rec.Args.Select((a, i) => a is IrRecField ? subModel(i) : Pure(c, (IrRecPure)a))
-            .ToImmutableArray();
-        return rec.Shape is RecursiveShape.List
-            ? $"{parts[0]} :: {parts[1]}"
-            : $"CTree.Branch {string.Join(" ", parts)}";
+        var parts = rec.Args.Select((a, i) => a is IrRecField ? subModel(i) : Pure(c, (IrRecPure)a));
+        return $"{rec.Shape.Cons} {string.Join(" ", parts)}";
     }
 
     /// <summary>
@@ -371,9 +370,12 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
     }
 
-    /// <summary>The discriminator of the non-empty constructor.</summary>
-    private static string ConsTest(IrRecursion rec) =>
-        rec.Shape is RecursiveShape.List ? "Cons?" : "CTree.Branch?";
+    /// <summary>
+    /// The discriminator of the non-empty constructor (R11.5). Derived from the
+    /// constructor's name rather than declared: the trailing <c>?</c> is F*'s rule for
+    /// every inductive, not ours.
+    /// </summary>
+    private static string ConsTest(IrRecursion rec) => rec.Shape.ConsTest;
 
     // -----------------------------------------------------------------------
     // R10.8. Sharing.

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Pal.Compiler.Ir;
 
@@ -28,8 +29,6 @@ public sealed class WellKnown
         SlProp = Type("SlProp");
         SpecList = Type("SpecList`1");
         SpecListOps = Type("SpecList");
-        SpecTree = Type("SpecTree`1");
-        SpecTreeOps = Type("SpecTree");
 
         RequiresAttribute = Type("RequiresAttribute");
         EnsuresAttribute = Type("EnsuresAttribute");
@@ -52,6 +51,9 @@ public sealed class WellKnown
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
         BackwardAttribute = Type("BackwardAttribute");
+        SpecTypeAttribute = Type("SpecTypeAttribute");
+        SpecOpAttribute = Type("SpecOpAttribute");
+        SpecCtorAttribute = Type("SpecCtorAttribute");
     }
 
     public static WellKnown For(Compilation compilation) => new(compilation);
@@ -64,8 +66,6 @@ public sealed class WellKnown
     public INamedTypeSymbol SlProp { get; }
     public INamedTypeSymbol SpecList { get; }
     public INamedTypeSymbol SpecListOps { get; }
-    public INamedTypeSymbol SpecTree { get; }
-    public INamedTypeSymbol SpecTreeOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
     public INamedTypeSymbol InvariantAttribute { get; }
@@ -89,6 +89,9 @@ public sealed class WellKnown
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }
     public INamedTypeSymbol BackwardAttribute { get; }
+    public INamedTypeSymbol SpecTypeAttribute { get; }
+    public INamedTypeSymbol SpecOpAttribute { get; }
+    public INamedTypeSymbol SpecCtorAttribute { get; }
 
     /// <summary>True if <paramref name="symbol"/> is a member of the <c>Pal</c> intrinsics class.</summary>
     public bool IsPalIntrinsic(ISymbol? symbol) =>
@@ -98,7 +101,40 @@ public sealed class WellKnown
     public bool IsGhost(ITypeSymbol? t) => IsConstructedFrom(t, Ghost);
     public bool IsSeq(ITypeSymbol? t) => IsConstructedFrom(t, Seq);
     public bool IsSpecList(ITypeSymbol? t) => IsConstructedFrom(t, SpecList);
-    public bool IsSpecTree(ITypeSymbol? t) => IsConstructedFrom(t, SpecTree);
+
+    /// <summary>
+    /// R11.1. The F* type a <c>[SpecType]</c> denotes, or null if this is not one. This is
+    /// the whole of what the translator knows about a user's specification type.
+    /// </summary>
+    public string? SpecTypeName(ITypeSymbol? t) =>
+        t is INamedTypeSymbol n &&
+        Declarations.StringArgument(n.OriginalDefinition, SpecTypeAttribute) is { } name
+            ? name
+            : null;
+
+    /// <summary>R11.2. The F* term a <c>[SpecOp]</c> member denotes.</summary>
+    public string? SpecOpName(ISymbol? m) =>
+        m is not null ? Declarations.StringArgument(m, SpecOpAttribute) : null;
+
+    /// <summary>
+    /// R11.1a. Whether this type is part of a <em>specification-type declaration</em>:
+    /// it carries <c>[SpecType]</c>, or it declares the constructors and operations of one.
+    ///
+    /// <para>Such a type is not translated, and neither is any member of it. Its members
+    /// have no bodies to translate — each says what it means in F* and throws — and its
+    /// signatures mention specification-only types and open type parameters that no
+    /// program method could. Recognising the declaration as a whole is what lets a user
+    /// write one in an ordinary source file beside the code that uses it.</para>
+    /// </summary>
+    public bool IsSpecTypeDeclaration(INamedTypeSymbol? type) =>
+        type is not null &&
+        (SpecTypeName(type) is not null ||
+         type.GetMembers().Any(m =>
+             Declarations.Has(m, SpecOpAttribute) || Declarations.Has(m, SpecCtorAttribute)));
+
+    /// <summary>R11.3. The F* constructor a <c>[SpecCtor]</c> method denotes.</summary>
+    public string? SpecCtorName(ISymbol? m) =>
+        m is not null ? Declarations.StringArgument(m, SpecCtorAttribute) : null;
 
     private static bool IsConstructedFrom(ITypeSymbol? t, INamedTypeSymbol def) =>
         t is INamedTypeSymbol n &&
@@ -135,8 +171,19 @@ public sealed class WellKnown
                 return new IrGhostType(ge);
             case INamedTypeSymbol named when IsSpecList(named) && MapType(named.TypeArguments[0]) is { } le:
                 return new IrSpecListType(le);
-            case INamedTypeSymbol named when IsSpecTree(named) && MapType(named.TypeArguments[0]) is { } te:
-                return new IrSpecTreeType(te);
+            // R11.1. A user-declared specification type. It is tried before the class
+            // rule because a `[SpecType]` may be a class, and before the struct rule
+            // because it is usually a struct — it is not a representation either way.
+            case INamedTypeSymbol named when SpecTypeName(named) is { } fstar:
+            {
+                var args = ImmutableArray.CreateBuilder<IrType>();
+                foreach (var a in named.TypeArguments)
+                {
+                    if (MapType(a) is not { } mapped) return null;
+                    args.Add(mapped);
+                }
+                return new IrUserSpecType(named.Name, fstar, args.ToImmutable());
+            }
             // §3.4. A class is translated exactly when it declares a [Model] member: R3.9
             // makes the model mandatory, so its presence is the same test as "annotated".
             // R10.2. `C?` is `option C`, and the annotation is part of the type: it is what

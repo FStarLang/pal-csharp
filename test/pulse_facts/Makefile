@@ -15,7 +15,7 @@ LIB_OPTIONS := --include ../../pulse --include ../../pulse/_cache
 all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/ObjectFacts.fst.checked $(CACHE_DIR)/InheritanceFacts.fst.checked \
      $(CACHE_DIR)/ShapeHierarchy.fst.checked $(CACHE_DIR)/DeepHierarchy.fst.checked \
-     $(CACHE_DIR)/RecursiveFacts.fst.checked
+     $(CACHE_DIR)/RecursiveFacts.fst.checked $(CACHE_DIR)/UserSpecFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
@@ -44,6 +44,10 @@ $(CACHE_DIR)/DeepHierarchy.fst.checked: DeepHierarchy.fst
 $(CACHE_DIR)/RecursiveFacts.fst.checked: RecursiveFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) RecursiveFacts.fst
+
+$(CACHE_DIR)/UserSpecFacts.fst.checked: UserSpecFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) UserSpecFacts.fst
 
 clean:
 	rm -rf $(CACHE_DIR)

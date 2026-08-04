@@ -1156,7 +1156,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrContents ct: CollectExpr(ct.Array); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
                 case IrListOp l2: foreach (var a in l2.Args) CollectExpr(a); return;
-                case IrTreeOp t2: foreach (var a in t2.Args) CollectExpr(a); return;
+                case IrSpecOp so: foreach (var a in so.Args) CollectExpr(a); return;
                 case IrObserve ob: CollectExpr(ob.Receiver); return;
                 case IrQuantifier q: CollectExpr(q.Body); return;
                 case IrConvert cv: CollectExpr(cv.Operand); return;
@@ -1199,6 +1199,5 @@ public static class Preamble
         module Seq = FStar.Seq
         module CS = Pulse.Lib.CSharp.Seq
         module List = FStar.List.Tot
-        module CTree = Pulse.Lib.CSharp.Tree
         """;
 }

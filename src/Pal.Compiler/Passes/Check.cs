@@ -423,7 +423,7 @@ public static class Check
             IrContents c => [c.Array],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
-            IrTreeOp t => t.Args,
+            IrSpecOp o => o.Args,
             _ => [],
         };
         foreach (var kid in kids)
