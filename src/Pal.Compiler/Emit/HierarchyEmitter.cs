@@ -38,53 +38,105 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     // =======================================================================
 
     /// <summary>
+    /// R9.17. What a generated module publishes and what it keeps. A declaration is
+    /// <em>shared</em> (its definition is part of the interface), <em>public</em> (its
+    /// signature is, its proof is not), or <em>private</em> (neither).
+    ///
+    /// <para>The distinction is not cosmetic. R9.8's reference type is
+    /// <c>FStar.Dyn.dyn</c>, and a client that could see that could write things about a
+    /// C# object no C# program can express — and would then depend on a choice §9 makes
+    /// for its own convenience. Hiding it makes the dyn an implementation detail in the
+    /// sense F* enforces: the implementation is checked against the interface, so the
+    /// encapsulation is a proof obligation and not a convention.</para>
+    /// </summary>
+    private sealed class Parts
+    {
+        public readonly StringBuilder Iface = new();
+        public readonly StringBuilder Impl = new();
+
+        /// <summary>A definition the interface carries: the model, the vtable, a spec function.</summary>
+        public void Shared(string text) => Iface.Append(text).AppendLine();
+
+        /// <summary>A definition only the implementation sees.</summary>
+        public void Private(string text) => Impl.Append(text).AppendLine();
+
+        /// <summary>A signature the interface carries, with its definition kept back.</summary>
+        public void Public(string signature, string definition)
+        {
+            Iface.Append("val ").Append(signature).AppendLine();
+            Impl.Append(definition).AppendLine();
+        }
+
+        /// <summary>
+        /// A Pulse <c>fn</c> or <c>ghost fn</c>: the interface takes the signature exactly
+        /// as written and stops where the body would start, which is Pulse's own way of
+        /// declaring a computation in an interface.
+        /// </summary>
+        public void Code(string signature, string body)
+        {
+            Iface.Append(signature).AppendLine();
+            Impl.Append(signature).AppendLine()
+                .Append(body.TrimStart('\n')).AppendLine();
+        }
+    }
+
+    /// <summary>
     /// R9.9. The whole of an abstract class: the model, the observations, the vtable, the
     /// object record, the reference type, the two invariants, and a dispatching wrapper
-    /// per virtual method.
+    /// per virtual method — split (R9.17) into what a subclass and a client may see and
+    /// what only this module may.
     /// </summary>
-    public string EmitAbstract(IrClass c, ImmutableArray<IrMethod> virtuals)
+    public (string Iface, string Impl) EmitAbstract(IrClass c, ImmutableArray<IrMethod> virtuals)
     {
-        var sb = new StringBuilder();
-        Header(sb, Names.ClassModule(c.Name));
+        var parts = new Parts();
+        Header(parts.Iface, Names.ClassModule(c.Name));
+        Header(parts.Impl, Names.ClassModule(c.Name));
 
         // R9.9. A slot's type is fixed by the base class, so a virtual method whose
         // signature has no implementation-independent reading has no slot. Checked once,
         // here, so that a refused method is absent from the vtable and from dispatch alike.
         var slots = virtuals.Where(v => CheckVirtual(c, v)).ToImmutableArray();
         var model = Names.ClassModel(c.Name);
-        EmitModelType(sb, c);
-        EmitObservations(sb, c);
+
+        // The model and its observations are the vocabulary every specification about this
+        // class is written in, so they are the one part of it that is entirely public.
+        var shared = new StringBuilder();
+        EmitModelType(shared, c);
+        EmitObservations(shared, c);
+        parts.Shared(shared.ToString().TrimEnd('\n'));
 
         // R9.9. One field per virtual method, at *this* class's model, plus the two
         // things a vtable must carry that no C# declaration mentions: the representation
-        // type, and how a permission splits over it.
-        sb.AppendLine($"noeq type {Names.ClassVtbl(c.Name)} = {{");
-        sb.AppendLine("  impl : Type0;");
-        sb.AppendLine();
-        sb.AppendLine($"  inv : impl -> perm -> {model} -> slprop;");
+        // type, and how a permission splits over it. A subclass builds one of these, so it
+        // is shared — it is the class's dispatch interface, not its encoding.
+        var vtbl = new StringBuilder();
+        vtbl.AppendLine($"noeq type {Names.ClassVtbl(c.Name)} = {{");
+        vtbl.AppendLine("  impl : Type0;");
+        vtbl.AppendLine();
+        vtbl.AppendLine($"  inv : impl -> perm -> {model} -> slprop;");
         foreach (var v in slots)
         {
-            sb.AppendLine();
-            sb.AppendLine($"  {Names.VtblSlot(Member(c, v))} : ({SlotType(c, v)});");
+            vtbl.AppendLine();
+            vtbl.AppendLine($"  {Names.VtblSlot(Member(c, v))} : ({SlotType(c, v)});");
         }
         // R9.11. R3.10d emits share and gather per class because their proofs recurse into
         // the class's own fields. Behind a dyn there is no structure to recurse into, so
         // they become dispatched operations and the leaf supplies the bodies it already
         // has. They are `stt_ghost`, which is why aliasing a `Shape` stays free at runtime.
-        sb.AppendLine();
-        sb.AppendLine($"  vshare : (x: impl -> #{Perm}: perm -> #{Model}: erased {model} ->");
-        sb.AppendLine("            stt_ghost unit emp_inames");
-        sb.AppendLine($"              (inv x {Perm} {Model})");
-        sb.AppendLine($"              (fun _ -> inv x ({Perm} /. 2.0R) {Model} ** inv x ({Perm} /. 2.0R) {Model}));");
-        sb.AppendLine();
-        sb.AppendLine($"  vgather : (x: impl -> {Perm}: perm -> q: perm ->" +
+        vtbl.AppendLine();
+        vtbl.AppendLine($"  vshare : (x: impl -> #{Perm}: perm -> #{Model}: erased {model} ->");
+        vtbl.AppendLine("            stt_ghost unit emp_inames");
+        vtbl.AppendLine($"              (inv x {Perm} {Model})");
+        vtbl.AppendLine($"              (fun _ -> inv x ({Perm} /. 2.0R) {Model} ** inv x ({Perm} /. 2.0R) {Model}));");
+        vtbl.AppendLine();
+        vtbl.AppendLine($"  vgather : (x: impl -> {Perm}: perm -> q: perm ->" +
                       $" #{Model}: erased {model} -> #{Names.Alt(Model)}: erased {model} ->");
-        sb.AppendLine("             stt_ghost unit emp_inames");
-        sb.AppendLine($"               (inv x {Perm} {Model} ** inv x q {Names.Alt(Model)})");
-        sb.AppendLine($"               (fun _ -> inv x ({Perm} +. q) {Model} **" +
+        vtbl.AppendLine("             stt_ghost unit emp_inames");
+        vtbl.AppendLine($"               (inv x {Perm} {Model} ** inv x q {Names.Alt(Model)})");
+        vtbl.AppendLine($"               (fun _ -> inv x ({Perm} +. q) {Model} **" +
                       $" pure (reveal {Model} == reveal {Names.Alt(Model)})));");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        vtbl.Append("}");
+        parts.Shared(vtbl.ToString());
 
         var obj = Names.ClassObj(c.Name);
         var at = Names.ClassAt(c.Name);
@@ -93,75 +145,107 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var self = Names.ClassType(c.Name);
 
         // F28: a vtable together with a value of *its* implementation type is far too big
-        // to live in a heap cell or an array, so F29 promotes it into `dyn`, which is
-        // `Type0` and therefore boxable, array-able, and admissible as a field. R9.8: the
-        // dyn is what a variable of this static type denotes.
-        sb.AppendLine($"noeq type {obj} = {{ pkg: {Names.ClassVtbl(c.Name)}; rep: pkg.impl }}");
-        sb.AppendLine();
-        sb.AppendLine($"let {self} : Type0 = Dn.dyn");
-        sb.AppendLine();
+        // to live in a heap cell or an array. A subclass names one of these as the index
+        // its casts are stated at, so it too is part of the interface.
+        parts.Shared($"noeq type {obj} = {{ pkg: {Names.ClassVtbl(c.Name)}; rep: pkg.impl }}");
+
+        // R9.8/R9.17. F29 promotes the pair into `dyn`, which is `Type0` and therefore
+        // boxable, array-able, and admissible as a field — and *that* is the choice a
+        // client must not see, because nothing in C# corresponds to it.
+        parts.Public($"{self} : Type0", $"let {self} : Type0 = Dn.dyn");
 
         // F34: named apart from the invariant so that a `fold` can be handed an explicit
-        // witness for the existential.
-        sb.AppendLine($"let {at} (o: {obj}) ({Perm}: perm) ({Model}: {model}) : slprop =" +
+        // witness for the existential. Private: it mentions nothing but is the shape of
+        // the encoding, and everything a subclass needs from it is `pack` and `unpack`.
+        parts.Private($"let {at} (o: {obj}) ({Perm}: perm) ({Model}: {model}) : slprop =" +
                       $" o.pkg.inv o.rep {Perm} {Model}");
-        sb.AppendLine();
 
         // R9.9. The same signature an M2 class invariant has (§3.4), which is why a client
         // of a hierarchy needs no new rules: R4.5's model binders, R4.10's fold/unfold
-        // bracket, R3.10b's nested objects and R5.12's loops all apply unchanged.
-        sb.AppendLine($"let {inv} (s: {self}) (#[T.exact (`{Full})] {Perm}: perm)" +
-                      $" ({Model}: {model}) : slprop =");
-        sb.AppendLine($"  exists* ({Obj}: {obj}). pure (s == Dn.mkdyn {Obj}) **" +
-                      $" {at} {Obj} {Perm} {Model}");
-        sb.AppendLine();
+        // bracket, R3.10b's nested objects and R5.12's loops all apply unchanged. The
+        // *signature* is all of that; the body is where the dyn is.
+        var invSig = $"{inv} (s: {self}) (#[T.exact (`{Full})] {Perm}: perm)" +
+                     $" ({Model}: {model}) : slprop";
+        parts.Public(invSig,
+            $"let {invSig} =\n" +
+            $"  exists* ({Obj}: {obj}). pure (s == Dn.mkdyn {Obj}) ** {at} {Obj} {Perm} {Model}");
 
         // R9.10. The primitive form, with the object record named. `gather` forces it —
         // two views of one object otherwise unfold to separate witnesses related only by
         // `s == mkdyn o1` and `s == mkdyn o2`, and equating those is injectivity of
         // `mkdyn`, which is Cantor-inconsistent. A checked downcast needs the same index.
-        sb.AppendLine($"let {invAt} (s: {self}) ({Obj}: erased {obj}) ({Perm}: perm)" +
-                      $" ({Model}: {model}) : slprop =");
-        sb.AppendLine($"  pure (s == Dn.mkdyn (reveal {Obj})) ** {at} {Obj} {Perm} {Model}");
-        sb.AppendLine();
+        var invAtSig = $"{invAt} (s: {self}) ({Obj}: erased {obj}) ({Perm}: perm)" +
+                       $" ({Model}: {model}) : slprop";
+        parts.Public(invAtSig,
+            $"let {invAtSig} =\n" +
+            $"  pure (s == Dn.mkdyn (reveal {Obj})) ** {at} {Obj} {Perm} {Model}");
 
         // R9.10. Forgetting is one ghost step, and irreversible: recovering the index from
         // the plain invariant would again be injectivity of `mkdyn`.
-        sb.AppendLine($"ghost fn {Names.ClassForgetImpl(c.Name)} (s: {self}) ({Obj}: erased {obj})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {model})");
-        sb.AppendLine($"  requires {invAt} s {Obj} {Perm} {Model}");
-        sb.AppendLine($"  ensures  {inv} s #{Perm} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
-        sb.AppendLine($"  fold ({inv} s #{Perm} {Model});");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        parts.Code(
+            $"ghost fn {Names.ClassForgetImpl(c.Name)} (s: {self}) ({Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {invAt} s {Obj} {Perm} {Model}\n" +
+            $"  ensures  {inv} s #{Perm} {Model}",
+            "{\n" +
+            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  fold ({inv} s #{Perm} {Model});\n" +
+            "}");
 
-        // R9.16, the class-independent half of a downcast: recover the object record and
-        // hand back its representation, re-erased. Reading `o.rep` out directly would need
-        // a coercion across `o.pkg.impl == class_D`, which is only propositionally true;
-        // going back through `mkdyn` keeps everything a dyn, and congruence on the box
-        // then delivers the equation the leaf's own `recover` asks for.
-        sb.AppendLine($"let {Names.ClassBox(c.Name)} (o: {obj}) : Dn.dyn = Dn.mkdyn o.rep");
-        sb.AppendLine();
+        // R9.17. The two operations that make the dyn private. `pack` is what a reference
+        // conversion is (R9.15): an object record becomes a reference, and the invariant
+        // follows it. Every subclass's upcast is this call, so `Dn.mkdyn` is written once
+        // in the whole translation.
+        parts.Code(
+            $"fn {Names.ClassPack(c.Name)} ({Obj}: {obj}) (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {Obj}.pkg.inv {Obj}.rep {Perm} {Model}\n" +
+            $"  returns  s: {self}\n" +
+            $"  ensures  {invAt} s (hide {Obj}) {Perm} {Model}",
+            "{\n" +
+            $"  rewrite ({Obj}.pkg.inv {Obj}.rep {Perm} {Model}) as ({at} {Obj} {Perm} {Model});\n" +
+            $"  fold ({invAt} (Dn.mkdyn {Obj}) (hide {Obj}) {Perm} {Model});\n" +
+            $"  (Dn.mkdyn {Obj})\n" +
+            "}");
 
-        sb.AppendLine($"fn {Names.ClassRep(c.Name)} (s: {self}) (#{Obj}: erased {obj})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {model})");
-        sb.AppendLine($"  preserves {invAt} s {Obj} {Perm} {Model}");
-        sb.AppendLine("  returns  d: Dn.dyn");
-        sb.AppendLine($"  ensures  pure (d == {Names.ClassBox(c.Name)} {Obj})");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
-        sb.AppendLine($"  let ob = CAs.recover #{obj} #{Obj} s;");
-        sb.AppendLine($"  fold ({invAt} s {Obj} {Perm} {Model});");
-        sb.AppendLine($"  {Names.ClassBox(c.Name)} ob");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        // R9.16/R9.17. And `unpack` is what a checked downcast is: a reference whose index
+        // names the record it was packed from gives that record's representation back.
+        // Reading `o.rep` out directly would need a coercion across `o.pkg.impl == impl`,
+        // which is only propositionally true; going back through `mkdyn` keeps everything
+        // a dyn, and congruence on the box then delivers the equation `recover` asks for.
+        var pkg = "v";
+        var made = $"({{ pkg = {pkg}; rep = reveal x }})";
+        parts.Private($"let {Names.ClassBox(c.Name)} (o: {obj}) : Dn.dyn = Dn.mkdyn o.rep");
+        parts.Private(
+            $"fn {Names.ClassRep(c.Name)} (s: {self}) (#{Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  preserves {invAt} s {Obj} {Perm} {Model}\n" +
+            "  returns  d: Dn.dyn\n" +
+            $"  ensures  pure (d == {Names.ClassBox(c.Name)} {Obj})\n" +
+            "{\n" +
+            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  let ob = CAs.recover #{obj} #{Obj} s;\n" +
+            $"  fold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  {Names.ClassBox(c.Name)} ob\n" +
+            "}");
 
-        EmitShareGather(sb, c);
-        foreach (var v in slots) EmitDispatch(sb, c, v);
+        parts.Code(
+            $"fn {Names.ClassUnpack(c.Name)} ({pkg}: {Names.ClassVtbl(c.Name)}) (x: erased {pkg}.impl)" +
+            $" (s: {self}) (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {invAt} s (hide {made}) {Perm} {Model}\n" +
+            $"  returns  r: {pkg}.impl\n" +
+            $"  ensures  {pkg}.inv r {Perm} {Model} ** pure (r == reveal x)",
+            "{\n" +
+            $"  let d = {Names.ClassRep(c.Name)} s #(hide {made}) #{Perm} #{Model};\n" +
+            $"  let r = CAs.recover #{pkg}.impl #x d;\n" +
+            $"  unfold ({invAt} s (hide {made}) {Perm} {Model});\n" +
+            $"  rewrite ({at} {made} {Perm} {Model}) as ({pkg}.inv r {Perm} {Model});\n" +
+            "  r\n" +
+            "}");
 
-        return sb.ToString();
+        EmitShareGather(parts, c);
+        foreach (var v in slots) EmitDispatch(parts, c, v);
+
+        return (parts.Iface.ToString(), parts.Impl.ToString());
     }
 
     /// <summary>
@@ -193,7 +277,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     }
 
     /// <summary>R9.12. The dispatching wrapper, at the index and then plain (R9.10).</summary>
-    private void EmitDispatch(StringBuilder sb, IrClass c, IrMethod v)
+    private void EmitDispatch(Parts parts, IrClass c, IrMethod v)
     {
         var model = Names.ClassModel(c.Name);
         var self = Names.ClassType(c.Name);
@@ -210,74 +294,80 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             ? "" : $"  returns {Ret}: {Types.Render(v.ReturnType)}\n";
 
         // The indexed form is the one that dispatches (R9.10).
+        var sb = new StringBuilder();
         sb.AppendLine($"fn {Names.DispatchAt(c.Name, Member(c, v))} (s: {self}){binders}" +
                       $" (#{Obj}: erased {obj}){permBinder} (#{Model}: erased {model})");
         sb.AppendLine($"  requires {invAt} s {Obj} {perm} {Model}{Pure(pre)}");
         sb.Append(returns);
-        sb.AppendLine(moves
+        sb.Append(moves
             ? $"  ensures  exists* {PostModel}. {invAt} s {Obj} {perm} {PostModel}{Pure(post)}"
             : $"  ensures  {invAt} s {Obj} {perm} {Model}{Pure(post)}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} {perm} {Model});");
+
+        var body = new StringBuilder();
+        body.AppendLine("{");
+        body.AppendLine($"  unfold ({invAt} s {Obj} {perm} {Model});");
         // R9.13. The one assumption: the object header faithfully records what was stored.
-        sb.AppendLine($"  let ob = CAs.recover #{obj} #{Obj} s;");
-        sb.AppendLine($"  rewrite ({at} {Obj} {perm} {Model}) as ({at} ob {perm} {Model});");
-        sb.AppendLine($"  unfold ({at} ob {perm} {Model});");
+        body.AppendLine($"  let ob = CAs.recover #{obj} #{Obj} s;");
+        body.AppendLine($"  rewrite ({at} {Obj} {perm} {Model}) as ({at} ob {perm} {Model});");
+        body.AppendLine($"  unfold ({at} ob {perm} {Model});");
         // F31: a stored Pulse computation must be let-bound before it is applied.
-        sb.AppendLine($"  let f = ob.pkg.{Names.VtblSlot(Member(c, v))};");
+        body.AppendLine($"  let f = ob.pkg.{Names.VtblSlot(Member(c, v))};");
         var call = $"f ob.rep{args}{(moves ? "" : $" #{Perm}")} #{Model};";
         if (moves)
         {
-            sb.AppendLine($"  {call}");
-            sb.AppendLine($"  with {PostModel}. assert (ob.pkg.inv ob.rep {perm} {PostModel});");
-            sb.AppendLine($"  fold ({at} ob {perm} {PostModel});");
-            sb.AppendLine($"  rewrite ({at} ob {perm} {PostModel}) as ({at} {Obj} {perm} {PostModel});");
-            sb.AppendLine($"  fold ({invAt} s {Obj} {perm} {PostModel});");
+            body.AppendLine($"  {call}");
+            body.AppendLine($"  with {PostModel}. assert (ob.pkg.inv ob.rep {perm} {PostModel});");
+            body.AppendLine($"  fold ({at} ob {perm} {PostModel});");
+            body.AppendLine($"  rewrite ({at} ob {perm} {PostModel}) as ({at} {Obj} {perm} {PostModel});");
+            body.AppendLine($"  fold ({invAt} s {Obj} {perm} {PostModel});");
         }
         else
         {
-            sb.AppendLine($"  let v = {call}");
-            sb.AppendLine($"  fold ({at} ob {perm} {Model});");
-            sb.AppendLine($"  rewrite ({at} ob {perm} {Model}) as ({at} {Obj} {perm} {Model});");
-            sb.AppendLine($"  fold ({invAt} s {Obj} {perm} {Model});");
-            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) sb.AppendLine("  v");
+            body.AppendLine($"  let v = {call}");
+            body.AppendLine($"  fold ({at} ob {perm} {Model});");
+            body.AppendLine($"  rewrite ({at} ob {perm} {Model}) as ({at} {Obj} {perm} {Model});");
+            body.AppendLine($"  fold ({invAt} s {Obj} {perm} {Model});");
+            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) body.AppendLine("  v");
         }
-        sb.AppendLine("}");
-        sb.AppendLine();
+        body.Append("}");
+        parts.Code(sb.ToString(), "\n" + body);
 
         // R9.10. The plain form is the indexed one composed with forgetting, so there is
         // one dispatching body per method and not two.
-        sb.AppendLine($"fn {Names.Dispatch(c.Name, Member(c, v))} (s: {self}){binders}" +
-                      $"{permBinder} (#{Model}: erased {model})");
-        sb.AppendLine($"  requires {inv} s #{perm} {Model}{Pure(pre)}");
-        sb.Append(returns);
-        sb.AppendLine(moves
+        var sb2 = new StringBuilder();
+        sb2.AppendLine($"fn {Names.Dispatch(c.Name, Member(c, v))} (s: {self}){binders}" +
+                       $"{permBinder} (#{Model}: erased {model})");
+        sb2.AppendLine($"  requires {inv} s #{perm} {Model}{Pure(pre)}");
+        sb2.Append(returns);
+        sb2.Append(moves
             ? $"  ensures  exists* {PostModel}. {inv} s #{perm} {PostModel}{Pure(post)}"
             : $"  ensures  {inv} s #{perm} {Model}{Pure(post)}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({inv} s #{perm} {Model});");
-        sb.AppendLine($"  with {Obj}. assert ({at} {Obj} {perm} {Model});");
-        sb.AppendLine($"  fold ({invAt} s (hide {Obj}) {perm} {Model});");
+
+        var body2 = new StringBuilder();
+        body2.AppendLine("{");
+        body2.AppendLine($"  unfold ({inv} s #{perm} {Model});");
+        body2.AppendLine($"  with {Obj}. assert ({at} {Obj} {perm} {Model});");
+        body2.AppendLine($"  fold ({invAt} s (hide {Obj}) {perm} {Model});");
         var inner = $"{Names.DispatchAt(c.Name, Member(c, v))} s{args} #(hide {Obj})" +
                     $"{(moves ? "" : $" #{Perm}")} #{Model};";
         if (moves)
         {
-            sb.AppendLine($"  {inner}");
-            sb.AppendLine($"  with {PostModel}. assert ({invAt} s (hide {Obj}) {perm} {PostModel});");
-            sb.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{PostModel};");
+            body2.AppendLine($"  {inner}");
+            body2.AppendLine($"  with {PostModel}. assert ({invAt} s (hide {Obj}) {perm} {PostModel});");
+            body2.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{PostModel};");
         }
         else
         {
-            sb.AppendLine($"  let v = {inner}");
-            sb.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{Model};");
-            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) sb.AppendLine("  v");
+            body2.AppendLine($"  let v = {inner}");
+            body2.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{Model};");
+            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) body2.AppendLine("  v");
         }
-        sb.AppendLine("}");
-        sb.AppendLine();
+        body2.Append("}");
+        parts.Code(sb2.ToString(), "\n" + body2);
     }
 
     /// <summary>R9.11. Dispatched sharing and gathering, both ghost.</summary>
-    private static void EmitShareGather(StringBuilder sb, IrClass c)
+    private static void EmitShareGather(Parts parts, IrClass c)
     {
         var model = Names.ClassModel(c.Name);
         var self = Names.ClassType(c.Name);
@@ -288,56 +378,56 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var alt = Names.Alt(Model);
         var half = $"({Perm} /. 2.0R)";
 
-        sb.AppendLine($"ghost fn {Names.ClassInvShare(c.Name)}_at (s: {self}) ({Obj}: erased {obj})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {model})");
-        sb.AppendLine($"  requires {invAt} s {Obj} {Perm} {Model}");
-        sb.AppendLine($"  ensures  {invAt} s {Obj} {half} {Model} ** {invAt} s {Obj} {half} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
-        sb.AppendLine($"  unfold ({at} {Obj} {Perm} {Model});");
-        sb.AppendLine($"  let f = {Obj}.pkg.vshare;");
-        sb.AppendLine($"  f {Obj}.rep #{Perm} #{Model};");
-        sb.AppendLine($"  fold ({at} {Obj} {half} {Model});");
-        sb.AppendLine($"  fold ({at} {Obj} {half} {Model});");
-        sb.AppendLine($"  fold ({invAt} s {Obj} {half} {Model});");
-        sb.AppendLine($"  fold ({invAt} s {Obj} {half} {Model});");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        parts.Code(
+            $"ghost fn {Names.ClassInvShare(c.Name)}_at (s: {self}) ({Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {invAt} s {Obj} {Perm} {Model}\n" +
+            $"  ensures  {invAt} s {Obj} {half} {Model} ** {invAt} s {Obj} {half} {Model}",
+            "\n{\n" +
+            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  unfold ({at} {Obj} {Perm} {Model});\n" +
+            $"  let f = {Obj}.pkg.vshare;\n" +
+            $"  f {Obj}.rep #{Perm} #{Model};\n" +
+            $"  fold ({at} {Obj} {half} {Model});\n" +
+            $"  fold ({at} {Obj} {half} {Model});\n" +
+            $"  fold ({invAt} s {Obj} {half} {Model});\n" +
+            $"  fold ({invAt} s {Obj} {half} {Model});\n" +
+            "}");
 
-        sb.AppendLine($"ghost fn {Names.ClassInvShare(c.Name)} (s: {self})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {model})");
-        sb.AppendLine($"  requires {inv} s #{Perm} {Model}");
-        sb.AppendLine($"  ensures  {inv} s #{half} {Model} ** {inv} s #{half} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({inv} s #{Perm} {Model});");
-        sb.AppendLine($"  with {Obj}. assert ({at} {Obj} {Perm} {Model});");
-        sb.AppendLine($"  fold ({invAt} s (hide {Obj}) {Perm} {Model});");
-        sb.AppendLine($"  {Names.ClassInvShare(c.Name)}_at s (hide {Obj}) #{Perm} #{Model};");
-        sb.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{half} #{Model};");
-        sb.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{half} #{Model};");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        parts.Code(
+            $"ghost fn {Names.ClassInvShare(c.Name)} (s: {self})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {inv} s #{Perm} {Model}\n" +
+            $"  ensures  {inv} s #{half} {Model} ** {inv} s #{half} {Model}",
+            "\n{\n" +
+            $"  unfold ({inv} s #{Perm} {Model});\n" +
+            $"  with {Obj}. assert ({at} {Obj} {Perm} {Model});\n" +
+            $"  fold ({invAt} s (hide {Obj}) {Perm} {Model});\n" +
+            $"  {Names.ClassInvShare(c.Name)}_at s (hide {Obj}) #{Perm} #{Model};\n" +
+            $"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{half} #{Model};\n" +
+            $"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{half} #{Model};\n" +
+            "}");
 
         // Only the *indexed* gather exists. The unindexed one is unprovable: two views of
         // one object unfold to separate witnesses related only through `mkdyn`, and
         // equating them is the injectivity `ShapeHierarchy.fst` §3 pins as unavailable.
-        sb.AppendLine("[@@allow_ambiguous]");
-        sb.AppendLine($"ghost fn {Names.ClassInvGather(c.Name)}_at (s: {self}) ({Obj}: erased {obj})" +
-                      $" ({Perm}: perm) (q: perm) (#{Model}: erased {model}) (#{alt}: erased {model})");
-        sb.AppendLine($"  requires {invAt} s {Obj} {Perm} {Model} ** {invAt} s {Obj} q {alt}");
-        sb.AppendLine($"  ensures  {invAt} s {Obj} ({Perm} +. q) {Model} **" +
-                      $" pure (reveal {Model} == reveal {alt})");
-        sb.AppendLine("{");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} {Perm} {Model});");
-        sb.AppendLine($"  unfold ({invAt} s {Obj} q {alt});");
-        sb.AppendLine($"  unfold ({at} {Obj} {Perm} {Model});");
-        sb.AppendLine($"  unfold ({at} {Obj} q {alt});");
-        sb.AppendLine($"  let g = {Obj}.pkg.vgather;");
-        sb.AppendLine($"  g {Obj}.rep {Perm} q #{Model} #{alt};");
-        sb.AppendLine($"  fold ({at} {Obj} ({Perm} +. q) {Model});");
-        sb.AppendLine($"  fold ({invAt} s {Obj} ({Perm} +. q) {Model});");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        parts.Code(
+            "[@@allow_ambiguous]\n" +
+            $"ghost fn {Names.ClassInvGather(c.Name)}_at (s: {self}) ({Obj}: erased {obj})" +
+            $" ({Perm}: perm) (q: perm) (#{Model}: erased {model}) (#{alt}: erased {model})\n" +
+            $"  requires {invAt} s {Obj} {Perm} {Model} ** {invAt} s {Obj} q {alt}\n" +
+            $"  ensures  {invAt} s {Obj} ({Perm} +. q) {Model} **" +
+            $" pure (reveal {Model} == reveal {alt})",
+            "\n{\n" +
+            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  unfold ({invAt} s {Obj} q {alt});\n" +
+            $"  unfold ({at} {Obj} {Perm} {Model});\n" +
+            $"  unfold ({at} {Obj} q {alt});\n" +
+            $"  let g = {Obj}.pkg.vgather;\n" +
+            $"  g {Obj}.rep {Perm} q #{Model} #{alt};\n" +
+            $"  fold ({at} {Obj} ({Perm} +. q) {Model});\n" +
+            $"  fold ({invAt} s {Obj} ({Perm} +. q) {Model});\n" +
+            "}");
     }
 
     // =======================================================================
@@ -382,29 +472,38 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     }
 
     /// <summary>
-    /// R9.14. The vtable <em>value</em>, the object record, and the upcast. It is a module
-    /// of its own because it mentions every method module, and the constructor's module
-    /// mentions it.
+    /// R9.14. The vtable <em>value</em>, the object record, and the two casts. It is a
+    /// module of its own because it mentions every method module, and the constructor's
+    /// module mentions it.
+    ///
+    /// <para>R9.17: what a client of the cast needs is the two casts and the index they
+    /// are stated at; the vtable value that makes them work is this module's own business,
+    /// and neither <c>FStar.Dyn</c> nor the recovery assumption appears here at all —
+    /// <c>pack</c> and <c>unpack</c> are the base class's interface to its own encoding.
+    /// </para>
     /// </summary>
-    public string EmitVtbl(
+    public (string Iface, string Impl) EmitVtbl(
         IrClass c, IrClass parent,
         ImmutableArray<IrMethod> virtuals, ImmutableArray<IrMethod> overrides)
     {
-        var sb = new StringBuilder();
-        Header(sb, Names.VtblModule(c.Name));
+        var parts = new Parts();
+        Header(parts.Iface, Names.VtblModule(c.Name));
+        Header(parts.Impl, Names.VtblModule(c.Name));
 
         var self = Names.ClassType(c.Name);
         var mod = Names.ClassModule(c.Name);
         var pMod = Names.ClassModule(parent.Name);
         var asBase = $"{mod}.{Names.ClassAsBase(c.Name, parent.Name)}";
         var pModel = $"{pMod}.{Names.ClassModel(parent.Name)}";
+        var pObj = $"{pMod}.{Names.ClassObj(parent.Name)}";
 
         // F33: F21's meta-argument-defaulted permission binder does not match a vtable
         // field type, so every slot is eta-expanded at the pack site.
-        sb.AppendLine($"let {Names.ClassVtblValue(c.Name)} : {pMod}.{Names.ClassVtbl(parent.Name)} = {{");
-        sb.AppendLine($"  impl = {mod}.{self};");
-        sb.AppendLine($"  inv = (fun (x: {mod}.{self}) ({Perm}: perm) ({Model}: {pModel}) ->" +
-                      $" {asBase} x #{Perm} {Model});");
+        var vtbl = new StringBuilder();
+        vtbl.AppendLine($"let {Names.ClassVtblValue(c.Name)} : {pMod}.{Names.ClassVtbl(parent.Name)} = {{");
+        vtbl.AppendLine($"  impl = {mod}.{self};");
+        vtbl.AppendLine($"  inv = (fun (x: {mod}.{self}) ({Perm}: perm) ({Model}: {pModel}) ->" +
+                        $" {asBase} x #{Perm} {Model});");
         foreach (var v in virtuals)
         {
             var o = overrides.FirstOrDefault(m => Member(c, m) == Member(parent, v));
@@ -414,84 +513,75 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             var pass = string.Concat(Value(v).Select(p => " " + Names.Local(p.Name)));
             var permB = moves ? "" : $" (#{Perm}: perm)";
             var permA = moves ? "" : $" #{Perm}";
-            sb.AppendLine($"  {Names.VtblSlot(Member(parent, v))} = (fun (x: {mod}.{self}){args}{permB}" +
-                          $" (#{Model}: erased {pModel}) ->");
+            vtbl.AppendLine($"  {Names.VtblSlot(Member(parent, v))} = (fun (x: {mod}.{self}){args}{permB}" +
+                            $" (#{Model}: erased {pModel}) ->");
             // The slot's binder order is fixed by the vtable type; the implementation's is
             // fixed by R4.10, which threads the model binder before R4.11b's permission.
             // The eta-expansion is where the two meet, and it is the only place they have
             // to: neither side bends towards the other.
-            sb.AppendLine($"    {Names.FunctionModule(o.Name)}.{Names.Function(o.Name)}" +
-                          $" x{pass} #{Model}{permA});");
+            vtbl.AppendLine($"    {Names.FunctionModule(o.Name)}.{Names.Function(o.Name)}" +
+                            $" x{pass} #{Model}{permA});");
         }
         // R9.11. The leaf already has R3.10d's bodies; they are lifted to the base model by
         // the same `as_B` view every method goes through.
-        sb.AppendLine($"  vshare = (fun (x: {mod}.{self}) (#{Perm}: perm) (#{Model}: erased {pModel}) ->");
-        sb.AppendLine($"    {mod}.{Names.ClassAsBase(c.Name, parent.Name)}_share x #{Perm} #{Model});");
-        sb.AppendLine($"  vgather = (fun (x: {mod}.{self}) ({Perm}: perm) (q: perm)" +
-                      $" (#{Model}: erased {pModel}) (#{Names.Alt(Model)}: erased {pModel}) ->");
-        sb.AppendLine($"    {mod}.{Names.ClassAsBase(c.Name, parent.Name)}_gather x {Perm} q" +
-                      $" #{Model} #{Names.Alt(Model)});");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        vtbl.AppendLine($"  vshare = (fun (x: {mod}.{self}) (#{Perm}: perm) (#{Model}: erased {pModel}) ->");
+        vtbl.AppendLine($"    {mod}.{Names.ClassAsBase(c.Name, parent.Name)}_share x #{Perm} #{Model});");
+        vtbl.AppendLine($"  vgather = (fun (x: {mod}.{self}) ({Perm}: perm) (q: perm)" +
+                        $" (#{Model}: erased {pModel}) (#{Names.Alt(Model)}: erased {pModel}) ->");
+        vtbl.AppendLine($"    {mod}.{Names.ClassAsBase(c.Name, parent.Name)}_gather x {Perm} q" +
+                        $" #{Model} #{Names.Alt(Model)});");
+        vtbl.Append("}");
+        parts.Private(vtbl.ToString());
 
-        // R9.8. The object record is built at the *base's* type: the dyn is made once, at
-        // the root, and an upcast is a change of invariant and not of value.
-        sb.AppendLine($"let {Names.ClassObjOf(c.Name)} (x: {mod}.{self}) : {pMod}.{Names.ClassObj(parent.Name)} =");
-        sb.AppendLine($"  {{ pkg = {Names.ClassVtblValue(c.Name)}; rep = x }}");
-        sb.AppendLine();
-
-        // R9.15. The upcast: a ghost fold, at the index and then plain.
-        var pAt = $"{pMod}.{Names.ClassAt(parent.Name)}";
-        var pInvAt = $"{pMod}.{Names.ClassInvAt(parent.Name)}";
-        var made = $"(Dn.mkdyn ({Names.ClassObjOf(c.Name)} x))";
-        sb.AppendLine($"ghost fn {Names.UpcastAt(c.Name)} (x: {mod}.{self}) (#{Perm}: perm)" +
-                      $" (#{Model}: erased {pModel})");
-        sb.AppendLine($"  requires {asBase} x #{Perm} {Model}");
-        sb.AppendLine($"  ensures  {pInvAt} {made} (hide ({Names.ClassObjOf(c.Name)} x)) {Perm} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  rewrite ({asBase} x #{Perm} {Model})" +
-                      $" as ({pAt} ({Names.ClassObjOf(c.Name)} x) {Perm} {Model});");
-        sb.AppendLine($"  fold ({pInvAt} {made} (hide ({Names.ClassObjOf(c.Name)} x)) {Perm} {Model});");
-        sb.AppendLine("}");
-        sb.AppendLine();
-        // R9.15a. The value form. A C# reference conversion produces a reference, and the
-        // name it is bound to is the one every later resource must be attached to, so the
-        // ghost step and the rebinding are one operation and not two. It keeps the index:
-        // dropping it is one `forget_impl` wherever the plain form is wanted, and nothing
-        // recovers it once dropped, so the informative resource is the one to hand back.
+        // R9.8. The object record is built at the *base's* type: the reference is made once,
+        // at the root, and an upcast is a change of invariant and not of value. A client
+        // names this to say *which* object it is holding, and needs nothing of what is in it.
         var objOf = $"({Names.ClassObjOf(c.Name)} x)";
-        sb.AppendLine($"fn {Names.UpcastToAt(c.Name, parent.Name)} (x: {mod}.{self})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {pModel})");
-        sb.AppendLine($"  requires {asBase} x #{Perm} {Model}");
-        sb.AppendLine($"  returns  s: {pMod}.{Names.ClassType(parent.Name)}");
-        sb.AppendLine($"  ensures  {pInvAt} s (hide {objOf}) {Perm} {Model}");
-        sb.AppendLine("{");
-        sb.AppendLine($"  {Names.UpcastAt(c.Name)} x #{Perm} #{Model};");
-        sb.AppendLine($"  {made}");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        parts.Public($"{Names.ClassObjOf(c.Name)} (x: {mod}.{self}) : {pObj}",
+            $"let {Names.ClassObjOf(c.Name)} (x: {mod}.{self}) : {pObj} =\n" +
+            $"  {{ pkg = {Names.ClassVtblValue(c.Name)}; rep = x }}");
+
+        var pInvAt = $"{pMod}.{Names.ClassInvAt(parent.Name)}";
+
+        // R9.15a. The upcast, as a value. A C# reference conversion produces a reference,
+        // and the name it is bound to is the one every later resource must be attached to,
+        // so the ghost step and the rebinding are one operation and not two. It keeps the
+        // index: dropping it is one `forget_impl` wherever the plain form is wanted, and
+        // nothing recovers it once dropped, so the informative resource is what to hand back.
+        parts.Code(
+            $"fn {Names.UpcastToAt(c.Name, parent.Name)} (x: {mod}.{self})" +
+            $" (#{Perm}: perm) (#{Model}: erased {pModel})\n" +
+            $"  requires {asBase} x #{Perm} {Model}\n" +
+            $"  returns  s: {pMod}.{Names.ClassType(parent.Name)}\n" +
+            $"  ensures  {pInvAt} s (hide {objOf}) {Perm} {Model}",
+            "\n{\n" +
+            $"  rewrite ({asBase} x #{Perm} {Model})" +
+            $" as ({objOf}.pkg.inv {objOf}.rep {Perm} {Model});\n" +
+            $"  {pMod}.{Names.ClassPack(parent.Name)} {objOf} #{Perm} #{Model}\n" +
+            "}");
 
         // R9.16. The checked downcast. Its precondition *is* the knowledge C# would test
-        // for at runtime: the index names the object record, so `recover` — which has no
-        // failure mode — is given the equation it asks for at each hop. The cast therefore
-        // cannot fail, not because a runtime test is proved to succeed, but because only
-        // the casts whose test is redundant can be written at all.
+        // for at runtime: the index names the object record, so the recovery `unpack`
+        // performs is given the equation it asks for. The cast therefore cannot fail, not
+        // because a runtime test is proved to succeed, but because only the casts whose
+        // test is redundant can be written at all.
         var cRep = $"({Names.ClassObjOf(c.Name)} (reveal {Witness}))";
-        sb.AppendLine($"fn {Names.DowncastFrom(c.Name, parent.Name)}" +
-                      $" (s: {pMod}.{Names.ClassType(parent.Name)}) (#{Witness}: erased {mod}.{self})" +
-                      $" (#{Perm}: perm) (#{Model}: erased {pModel})");
-        sb.AppendLine($"  requires {pInvAt} s (hide {cRep}) {Perm} {Model}");
-        sb.AppendLine($"  returns  r: {mod}.{self}");
-        sb.AppendLine($"  ensures  {asBase} r #{Perm} {Model} ** pure (r == reveal {Witness})");
-        sb.AppendLine("{");
-        sb.AppendLine($"  let d = {pMod}.{Names.ClassRep(parent.Name)} s" +
-                      $" #(hide {cRep}) #{Perm} #{Model};");
-        sb.AppendLine($"  let r = CAs.recover #{mod}.{self} #{Witness} d;");
-        sb.AppendLine($"  unfold ({pInvAt} s (hide {cRep}) {Perm} {Model});");
-        sb.AppendLine($"  rewrite ({pAt} {cRep} {Perm} {Model}) as ({asBase} r #{Perm} {Model});");
-        sb.AppendLine("  r");
-        sb.AppendLine("}");
-        return sb.ToString();
+        parts.Code(
+            $"fn {Names.DowncastFrom(c.Name, parent.Name)}" +
+            $" (s: {pMod}.{Names.ClassType(parent.Name)}) (#{Witness}: erased {mod}.{self})" +
+            $" (#{Perm}: perm) (#{Model}: erased {pModel})\n" +
+            $"  requires {pInvAt} s (hide {cRep}) {Perm} {Model}\n" +
+            $"  returns  r: {mod}.{self}\n" +
+            $"  ensures  {asBase} r #{Perm} {Model} ** pure (r == reveal {Witness})",
+            "\n{\n" +
+            $"  let r = {pMod}.{Names.ClassUnpack(parent.Name)} {Names.ClassVtblValue(c.Name)}" +
+            $" {Witness} s #{Perm} #{Model};\n" +
+            $"  rewrite ({Names.ClassVtblValue(c.Name)}.inv r {Perm} {Model})" +
+            $" as ({asBase} r #{Perm} {Model});\n" +
+            "  r\n" +
+            "}");
+
+        return (parts.Iface.ToString(), parts.Impl.ToString());
     }
 
     /// <summary>

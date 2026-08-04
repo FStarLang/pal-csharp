@@ -132,27 +132,25 @@ public static class Names
     public static string ClassVtblValue(string name) => "class_" + name + "__vtbl_value";
     public static string ClassObjOf(string name) => "class_" + name + "__obj_of";
 
-    /// <summary>R9.15. The upcast, at the index and plain.</summary>
-    public static string UpcastAt(string name) => "class_" + name + "__upcast_at";
-    public static string Upcast(string name) => "class_" + name + "__upcast";
-
     /// <summary>
-    /// R9.15. The upcast as a value: the same ghost step, followed by the reference the
-    /// base-typed name is bound to. It exists because Pulse matches resources by name — a
-    /// `let` that rebinds a reference after the ghost step leaves the invariant attached
-    /// to the wrong term — so the C# conversion becomes one call rather than two steps.
-    /// </summary>
-    public static string UpcastTo(string name, string baseName) =>
-        "class_" + name + "__to_" + baseName;
-
-    /// <summary>
-    /// R9.15a. The upcast as a value, <em>keeping</em> the index. This is the one the
-    /// emitter uses: the plain form is one <c>forget_impl</c> away and the index is not
-    /// recoverable once dropped, so the conversion hands back the more informative
-    /// resource and R9.16's downcast is what makes use of it.
+    /// R9.15a. The upcast as a value, <em>keeping</em> the index. It is one operation and
+    /// not two because Pulse matches resources by name: a <c>let</c> that rebinds the
+    /// reference after a separate ghost step would leave the invariant attached to the old
+    /// term. The plain form is one <c>forget_impl</c> away and the index is not recoverable
+    /// once dropped, so the conversion hands back the more informative resource and
+    /// R9.16's downcast is what makes use of it.
     /// </summary>
     public static string UpcastToAt(string name, string baseName) =>
-        UpcastTo(name, baseName) + "_at";
+        "class_" + name + "__to_" + baseName + "_at";
+
+    /// <summary>
+    /// R9.17. The two primitives that make the dyn an implementation detail: <c>pack</c>
+    /// turns an object record into a reference, <c>unpack</c> turns a reference whose
+    /// index is known back into the representation it was built from. Every subclass goes
+    /// through them, so <c>FStar.Dyn</c> appears in exactly one emitted module.
+    /// </summary>
+    public static string ClassPack(string name) => "class_" + name + "__pack";
+    public static string ClassUnpack(string name) => "class_" + name + "__unpack";
 
     /// <summary>R9.16. The leaf representation, re-erased so the next <c>recover</c> has its equation.</summary>
     public static string ClassBox(string name) => "class_" + name + "__box";

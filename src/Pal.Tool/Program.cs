@@ -87,7 +87,11 @@ public static class Program
         Directory.CreateDirectory(output);
         var written = 0;
         foreach (var module in modules)
+        {
+            if (module.Interface is { } iface &&
+                WriteIfChanged(Path.Combine(output, module.InterfaceFileName), iface)) written++;
             if (WriteIfChanged(Path.Combine(output, module.FileName), module.Text)) written++;
+        }
 
         // PAL's sentinel: a module that fails to verify whenever translation was
         // incomplete, so a broken translation can never look like a passing proof.

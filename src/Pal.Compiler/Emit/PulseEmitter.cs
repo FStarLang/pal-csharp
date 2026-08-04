@@ -27,6 +27,16 @@ public sealed record EmittedModule(string Name, string Text)
     public string FileName => Name + ".fst";
 
     /// <summary>
+    /// R9.17. The module's interface, when it has one. A class whose encoding a client has
+    /// no business seeing publishes what a client may use and keeps the rest to itself;
+    /// F* then checks the implementation against it, so the separation is enforced rather
+    /// than merely intended.
+    /// </summary>
+    public string? Interface { get; init; }
+
+    public string InterfaceFileName => Name + ".fsti";
+
+    /// <summary>
     /// R2.2. What this module declares and where each declaration came from. A construct
     /// absent from here was invented by the emitter, which the provenance lint reports:
     /// anything the translator produces that no C# asked for has to be justified as a
@@ -215,6 +225,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassForgetImpl(ab.Name), decl.Loc),
                     new Provenance(Names.ClassBox(ab.Name), decl.Loc),
                     new Provenance(Names.ClassRep(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassPack(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassUnpack(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name) + "_at", decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvGather(ab.Name) + "_at", decl.Loc),
@@ -267,15 +279,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 var overrides = program.Declarations.OfType<IrMethod>()
                     .Where(m => m.DeclaringClass == leaf.Name && m.Overrides is not null)
                     .ToImmutableArray();
-                modules.Add(new EmittedModule(
-                    Names.VtblModule(leaf.Name),
-                    _hierarchy.EmitVtbl(leaf, super, [.. _virtuals[baseName]], overrides))
+                var vtbl = _hierarchy.EmitVtbl(leaf, super, [.. _virtuals[baseName]], overrides);
+                modules.Add(new EmittedModule(Names.VtblModule(leaf.Name), vtbl.Impl)
                 {
+                    Interface = vtbl.Iface,
                     Origin =
                     [
                         new Provenance(Names.ClassVtblValue(leaf.Name), decl.Loc),
                         new Provenance(Names.ClassObjOf(leaf.Name), decl.Loc),
-                        new Provenance(Names.UpcastAt(leaf.Name), decl.Loc),
                         new Provenance(Names.UpcastToAt(leaf.Name, baseName), decl.Loc),
                         new Provenance(Names.DowncastFrom(leaf.Name, baseName), decl.Loc),
                     ],
@@ -285,10 +296,16 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         return modules.ToImmutable();
     }
 
-    /// <summary>§9. An abstract class: a vtable, a dyn, and dispatch.</summary>
-    private EmittedModule EmitAbstractClass(IrClass c) => new(
-        Names.ClassModule(c.Name),
-        _hierarchy.EmitAbstract(c, [.. _virtuals[c.Name]]));
+    /// <summary>
+    /// §9. An abstract class: a vtable, a dyn, and dispatch — published as an interface
+    /// (R9.17) that says everything a subclass or a client may use and nothing about how a
+    /// reference is represented.
+    /// </summary>
+    private EmittedModule EmitAbstractClass(IrClass c)
+    {
+        var (iface, impl) = _hierarchy.EmitAbstract(c, [.. _virtuals[c.Name]]);
+        return new EmittedModule(Names.ClassModule(c.Name), impl) { Interface = iface };
+    }
 
     // =======================================================================
     // [Spec] functions (R4.6)

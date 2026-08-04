@@ -7,9 +7,10 @@
 # the translator invents has to be justified as a numbered rule in doc/translation.md
 # rather than as a response to some particular example.
 #
-# The check is deliberately blunt: it reads the generated .fst files, not the compiler's
-# own account of what it did, so an emitter that forgot to record a construct fails just
-# as loudly as one that invented it.
+# The check is deliberately blunt: it reads the generated .fst and .fsti files, not the
+# compiler's own account of what it did, so an emitter that forgot to record a construct
+# fails just as loudly as one that invented it. Interfaces (R9.17) are scanned too, or a
+# construct could escape the lint simply by being declared rather than defined.
 set -u
 
 cd "$(dirname "$0")"
@@ -58,13 +59,15 @@ PY
         fail=1
     fi
 
-    for fst in "$dir"/out/*.fst; do
+    for fst in "$dir"/out/*.fst "$dir"/out/*.fsti; do
+        [ -e "$fst" ] || continue                                  # no interface in this test
         base=$(basename "$fst")
         [ "$base" = "TranslationErrors.fst" ] && continue          # the sentinel, by design
-        grep -qxF "$base" <<<"$verbatim" && continue               # the user's own Pulse
+        grep -qxF "${base%i}" <<<"$verbatim" && continue           # the user's own Pulse
 
         # Top-level F*/Pulse definitions: `fn f`, `let f`, `let rec f`, `ghost fn f`,
-        # and the type declarations a struct produces (R3.4).
+        # a `val` an interface declares (R9.17), and the type declarations a struct
+        # produces (R3.4).
         while read -r name; do
             [ -z "$name" ] && continue
             checked=$((checked + 1))
@@ -73,7 +76,7 @@ PY
                 fail=1
             fi
         done < <(sed -nE \
-            -e 's/^(ghost )?(fn|let)( rec)? ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\4/p' \
+            -e 's/^(ghost )?(fn|let|val)( rec)? ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\4/p' \
             -e 's/^(noeq |unopteq )?type ([A-Za-z_][A-Za-z0-9_'"'"']*).*/\2/p' "$fst")
     done
 done

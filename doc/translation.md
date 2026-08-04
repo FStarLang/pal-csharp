@@ -117,6 +117,8 @@ Following PAL's conventions.
 |---|---|
 | method `C.M` | `Func_C_M.fsti` (signature + contract) and `Func_C_M.fst` (body) |
 | `struct S` | `Struct_S.fst` |
+| `abstract class C` | `Class_C.fsti` (what a subclass and a client may use) and `Class_C.fst` (the encoding — R9.17) |
+| `sealed class C : P` | `Class_C.fst`, plus `Vtbl_C.fsti` / `Vtbl_C.fst` for its vtable and casts |
 | `[Spec]` method `C.P` | `Let_C_P.fst` |
 | `[Lemma]` method `C.L` | `Let_C_L.fst` |
 | `[PulseType]` type `T` | `Type_T.fst` |
@@ -140,8 +142,9 @@ written to `source_range_info.json` as
 `{module, file, construct, source: {file, range}}`. A module whose whole text is the
 user's own Pulse (`[assembly: IncludePulse]`) records the single construct `"*"`.
 
-`test/provenance-lint.sh` reads the generated `.fst` files — not the compiler's account of
-what it did — extracts every top-level `fn`, `let` and `let rec`, and requires each to
+`test/provenance-lint.sh` reads the generated `.fst` and `.fsti` files — not the compiler's
+account of what it did — extracts every top-level `fn`, `let`, `let rec`, `val` and `type`,
+and requires each to
 appear in `source_range_info.json` with a span in a C# file that exists. A construct with
 no provenance was invented by the translator, and anything the translator invents must be
 justified as a numbered rule in this document rather than as a response to one example.
@@ -2544,7 +2547,78 @@ fail is not one this scheme proves safe, it is one this scheme cannot express, a
 `is` returning `false`, and a throwing cast are all refused. That is consistent with M1's
 exception-freedom (§5.2): a verified cast is one that cannot throw.
 
-### 9.8 Refusals
+**R9.17 — The encoding is an implementation detail, and F* is what enforces that.**
+Everything above is a *scheme*, and a scheme's choices are its own business. R9.3 makes a
+reference `FStar.Dyn.dyn` and R9.16 recovers from it through an assumption; both are
+decisions made for §9's convenience, and neither is anything a C# program can talk about.
+So each generated class module is emitted as an interface and an implementation, and the
+split is by *who is entitled to know*:
+
+| | Class_C.fsti | Class_C.fst |
+|---|---|---|
+| the model type and its `spec_C_*` observations | definition | — |
+| `class_C__vtbl`, `class_C__obj` | definition | — |
+| `class_C : Type0` | `val` only | `= Dn.dyn` |
+| `inv`, `inv_at`, `forget_impl`, share/gather, the dispatchers | signature | body |
+| `class_C__at`, `class_C__box`, `class_C__rep` | — | all of it |
+| `class_C__pack`, `class_C__unpack` | signature | body |
+
+The vocabulary a specification is written in — the model and its observations — is wholly
+public, because every contract about the class is stated in it. The vtable and the object
+record stay transparent too, but for a different reason: they are the class's *dispatch
+interface*, the thing a subclass builds, not its encoding. What becomes private is the
+representation of a reference and everything that reads it.
+
+Two new primitives are what make that possible, and they are the interface's whole content
+on the subject:
+
+```
+fn class_C__pack (o: class_C__obj) (#p: perm) (#m: erased class_C__model)
+  requires o.pkg.inv o.rep p m
+  returns  s: class_C
+  ensures  class_C__inv_at s (hide o) p m
+
+fn class_C__unpack (v: class_C__vtbl) (x: erased v.impl) (s: class_C)
+                   (#p: perm) (#m: erased class_C__model)
+  requires class_C__inv_at s (hide ({ pkg = v; rep = reveal x })) p m
+  returns  r: v.impl
+  ensures  v.inv r p m ** pure (r == reveal x)
+```
+
+`pack` is R9.15a's ghost step with the dyn taken out of it; `unpack` is R9.16's recovery
+with the dyn *and* the assumption taken out of it — its precondition says only "the index
+is this vtable applied to this value", which is exactly the knowledge R9.16 already
+required. `Vtbl_C` then reads:
+
+```
+fn class_Square__to_Shape_at (x: class_Square) (#p: perm) (#m: erased class_Shape__model)
+  requires class_Square__as_Shape x #p m
+  returns  s: class_Shape
+  ensures  class_Shape__inv_at s (hide (class_Square__obj_of x)) p m
+{
+  rewrite (class_Square__as_Shape x #p m)
+       as ((class_Square__obj_of x).pkg.inv (class_Square__obj_of x).rep p m);
+  class_Shape__pack (class_Square__obj_of x) #p #m
+}
+```
+
+with no `Dn.mkdyn` and no `CAs.recover` anywhere in it. The measurable consequence, and the
+one worth checking for: in `test/shape_hierarchy`, `FStar.Dyn` occurs in **exactly one**
+generated module out of twenty-eight. The subclass modules get interfaces on the same
+principle — `obj_of` and the two casts are published, the vtable *value* that implements
+them is not.
+
+`class_C__upcast_at`, which R9.15a used to go through, is gone: its `ensures` named
+`Dn.mkdyn` and so could not be stated in an interface at all. That it had to disappear is
+the encapsulation working — a signature that cannot be written without the encoding is a
+signature that was leaking it.
+
+**What is *not* interfaced, and why.** A `sealed` class keeps a single `.fst`. R4.10 has
+its methods `unfold` and `fold` `class_C__inv` — and those methods are *separate F\*
+modules* (`Func_Square_GetArea`), so an abstract leaf invariant would need its opening and
+closing published as ghost functions. That is a real rule, not a difficulty, but it is a
+rule about §4 and not about §9, so it is left until there is a client that wants it.
+
 
 Each of these is a construct with no image under the scheme, diagnosed at the C#
 declaration that asks for it, never a prediction about a proof:
@@ -2608,3 +2682,9 @@ Not yet implemented: depth ≥ 3 (the `sub: Dn.dyn` field of R9.9, designed in
 `DeepHierarchy.fst`), heterogeneous arrays — an array of a base type needs R6's array rules
 to carry an object invariant per element, which §6 has not probed — and the *cross-method*
 downcast, where the index travels in a contract (`Pal.Is<T>`) rather than within one body.
+
+R9.17's interfaces were then applied to the whole of the above and changed no client and no
+proof: the same fourteen client methods verify against `val class_Shape : Type0` as
+verified against `Dn.dyn`, which is the evidence that nothing outside `Class_Shape` was
+depending on the encoding. The provenance lint now reads `.fsti` as well as `.fst`, so a
+construct cannot escape §7.2's detector by being declared rather than defined.
