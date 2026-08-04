@@ -268,11 +268,6 @@ job.
 
 ### Classes
 
-**Not yet implemented.** This is the planned surface; the translation scheme behind it is
-`doc/translation.md` §3.4 and §4.5, and every Pulse shape it relies on is already verified
-in `test/pulse_facts/ObjectFacts.fst`. It is written down here so that the design can be
-argued with before the code exists.
-
 A class is what lets state and the storage it describes finally live together. Compare the
 struct version above:
 
@@ -379,8 +374,9 @@ otherwise. `Merge(Stack a, Stack b)` may not be called as `Merge(s, s)`. That is
 compiler error — it translates perfectly well — it is an unprovable one, and Pulse reports
 it as `Cannot prove: class_Stack__inv var_s _` on the calling line. pal-csharp refuses what
 it cannot translate; what cannot be *proved* is the prover's to say, and keeping that
-boundary sharp is why the frontend is small. Ownership also means a live object is never
-`null`, so no method needs a null check to satisfy the translator.
+boundary sharp is why the frontend is small. Ownership also means a `C`-typed reference is never
+`null`, so no method needs a null check to satisfy the translator. A `C?` is a different
+type and is the subject of *Recursive classes* below.
 
 To allow the aliasing, mark the parameters `[Frac]` and split at the call site with
 `Pal.Share` (§3). `SameSize([Frac("pa")] Stack a, [Frac("pb")] Stack b)` may be called on
@@ -399,15 +395,134 @@ disagree with itself.
 allocates nothing, owns nothing, and emits nothing. Both names denote the same object
 throughout, which is what makes `Pal.Share(t)` and `Pal.Share(s)` the same statement.
 
-**M2 is `sealed` classes only.** `virtual`, `abstract`, `override` and interface
-implementations are rejected (`PALCS0521`), because a per-class invariant cannot express
-behavioural subtyping. A static mutable field is rejected too (`PALCS0522`): it is global
-state that no per-object invariant covers.
+**Hierarchies work, to any depth.** `abstract`, `virtual` and `override` are supported: an
+abstract class declares a `[Model]` and abstract methods, each subclass supplies its own
+model and overrides, and a client holding a base-typed reference calls through it without
+knowing the leaf. A subclass's model must *forget* to the base's, which is the one thing you
+write; `doc/translation.md` §9 is the scheme and `test/deep_hierarchy` is a three-level
+example. Checked downcasts (`is`/`as`) are supported and are *free* — with a precondition
+strong enough to prove the cast succeeds, `x as Square` cannot fail, so it costs nothing to
+prove and nothing to run.
+
+Every class must be **`sealed` or `abstract`** (`PALCS0521`). A leaf owns a representation
+and an abstract base owns a vtable; a class that were both would have to be its own
+subclass's vtable type and one of that type's values at once. C# `interface`
+implementations and generics are still rejected. A static mutable field is rejected too
+(`PALCS0522`): it is global state that no per-object invariant covers.
 
 Two things a class gets for free, and neither costs an annotation. A freshly constructed
 object is automatically distinct from every object that already existed. And nothing is
 ever freed — the CLR's garbage collector means pal-csharp inherits none of PAL's
 deallocation obligations.
+
+### Recursive classes
+
+A class holding a field of its **own nullable type** is recursive, and it owns not one
+record but the whole chain hanging off it. That needs an inductive ownership predicate — and
+you do not write one. You write the `[Model]` member you already owe, and pal-csharp reads
+the induction out of it backwards.
+
+```csharp
+public sealed class Node
+{
+    internal int value;
+    internal Node? next;
+
+    [Model] private SpecList<SpecInt> Items => SpecList.Cons(value, next!.Items);
+
+    [Spec] public SpecList<SpecInt> Elements => Items;
+
+    [Ensures("@this.Elements == SpecList.Cons(v, n.Elements)")]
+    public Node(int v, Node? n) { value = v; next = n; }
+}
+```
+
+Read left to right, `[Model]` defines `Items`. Read right to left it is the ownership
+predicate: a node whose model is `hd :: tl` owns a cell whose value is `hd` and whose `next`
+owns `tl`, and a null reference owns nothing and denotes `[]`. You write no `slprop`, no
+`fold`, and none of the case lemmas.
+
+**The `!` is required, and it is also the right reading.** Without it the stock C# compiler
+rejects the member under `<Nullable>enable</Nullable>`, and the core guarantee is that your
+file still compiles unmodified. It is not a claim that `next` is non-null: it says the
+member is **total** — a null reference denotes the empty structure, so `next!.Items` is `[]`
+when `next` is null and the equation holds either way. That totality is exactly what gives
+the induction its base case. Nothing in a `[Model]` member is ever executed.
+
+**The `if (x == null)` you already write is the case analysis.** There is no ghost statement
+to invoke and no window to open by hand: inside the `else` branch the reference's fields are
+readable and writable, by ordinary C#, and the branch is where the proof steps go.
+
+```csharp
+[Requires("n.Elements.Length < 2147483647")]
+[Ensures("Result == n.Elements.Length")]
+[Decreases("n.Elements")]
+public static int Length([Frac("p")] Node? n)
+{
+    if (n == null) { return 0; }
+    return 1 + Length(n.next);
+}
+```
+
+Four things follow, and each is an ordinary rule rather than a rule about recursion:
+
+* **A self-recursive method needs `[Decreases]`,** and its argument is a *model*. The
+  sub-model being smaller is handed to you by the case analysis, so there is no measure
+  arithmetic to write. Without one the method is refused, exactly as a `while` without a
+  measure is.
+* **The null test must be the whole condition of an `if`.** Inside a `&&`, or assigned to a
+  `bool`, there is no branch for the case analysis to be the extent of, and it is refused.
+* **A field is reachable only inside such a branch** — which is why `Length` may name
+  `n.next` at all despite being a static method of another class. Outside one it is refused.
+* **`[Frac]` works over a recursion.** `Length` above only reads, so it is written
+  fractional and can be called by an owner that itself holds only a share.
+
+**Destructive traversal is the point.** `x.next = Append(x.next, y)` is an ordinary field
+write inside such a branch — this is the case a flat, non-inductive invariant cannot express
+at all:
+
+```csharp
+[Ensures("Result.Elements == SpecList.Append(x.Elements, y.Elements)")]
+[Decreases("x.Elements")]
+public static Node? Append([Consumes] Node? x, [Consumes] Node? y)
+{
+    if (x == null) { return y; }
+    x.next = Append(x.next, y);
+    return x;
+}
+```
+
+`[Consumes]` is what says the result owns the arguments, so neither invariant is handed
+back. A **constructor** consumes its object parameters with no annotation at all: its body
+may only initialise fields, so an object it is given has nowhere to go except into the
+object being built. Using such a name afterwards is refused, because there is nothing left
+to read out of it.
+
+**Branch-local mutation must be written in tail position.** Two arms that leave the object
+in different states cannot be joined afterwards, so each arm ends in its own `return`:
+
+```csharp
+if (t == null)          { return new TreeNode(v, null, null); }
+else if (v < t.value)   { t.left  = Insert(t.left,  v); return t; }
+else if (v > t.value)   { t.right = Insert(t.right, v); return t; }
+else                    { return t; }
+```
+
+Two model types ship, and the rule is stated over a constructor's arity rather than over the
+type: `SpecList<T>` (`SpecList.Empty<T>()`, `SpecList.Cons(head, tail)`, `.Length`, `.Head`,
+`.Tail`, `SpecList.Append`) and `SpecTree<T>` (`SpecTree.Leaf<T>()`,
+`SpecTree.Branch(left, value, right)`, `.Size`, `SpecTree.Insert`). `test/linked_list` and
+`test/binary_tree` are the worked examples; the tree one proves an in-place BST insert equal
+to the mathematical insertion, which is full functional correctness rather than "the result
+is still a tree".
+
+**What is refused, rather than approximated.** A recursive class that also takes part in a
+hierarchy, or that owns an array; a `[Model]` that is not a single constructor application,
+or that does not use each recursive field exactly once; *iterative* traversal of a recursive
+structure; mutual recursion between two classes; and `[Backward]` — a `prev` pointer. That
+last one is not owned but *constrained*, and while the Pulse shape for it is verified in
+`test/pulse_facts/RecursiveFacts.fst`, the surface rule that would supply a new node's
+predecessor is not, and pal-csharp does not guess.
 
 ---
 
@@ -546,6 +661,8 @@ not do is migrate into the translator (`translation.md` §0, rule 3).
 | `Seq<T>` | `Seq.seq ⟦T⟧` |
 | `Ghost<T>` | `erased ⟦T⟧` |
 | `SlProp` | `slprop` |
+| `SpecList<T>` | `list ⟦T⟧` |
+| `SpecTree<T>` | `Pulse.Lib.CSharp.Tree.tree ⟦T⟧` |
 
 These exist only in specifications. A program method that mentions one in its signature is
 an error (`PALCS0500`) — mark it `[Spec]`, or wrap the parameter in `Ghost<>`.
@@ -560,10 +677,17 @@ writes `assert False` into `TranslationErrors.fst`, so a failed translation can 
 mistaken for a passing proof.
 
 Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
-`try`/`catch`/`throw`, `class` instances (**specified but not implemented** — see
-§3 Classes), generics, interfaces, delegates, `async`, `string`, floating point, numeric
-conversions between machine-integer widths, struct fields that are not values,
-user-written struct constructors, and a `return` that is not in tail position.
+`try`/`catch`/`throw`, generics, interfaces, delegates, `async`, `string`, floating point,
+numeric conversions between machine-integer widths, struct fields that are not values,
+user-written struct constructors, static mutable fields, a class that is neither `sealed`
+nor `abstract`, and a `return` that is not in tail position.
+
+For a recursive class (§3): a hierarchy it also takes part in, an array it also owns, a
+`[Model]` that is not one constructor application over each recursive field exactly once,
+mutual recursion between two classes, an iterative rather than recursive traversal, a null
+test that is not the whole condition of an `if`, a field named outside such a test, a
+self-recursive method with no `[Decreases]`, a use of a name whose ownership has moved, and
+`[Backward]`.
 
 Within the subset, the proof obligations are: no arithmetic overflow, no out-of-bounds
 index, no null dereference, no division by zero. C# defines the first as wrapping and turns
