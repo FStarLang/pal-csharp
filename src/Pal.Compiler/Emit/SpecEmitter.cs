@@ -65,6 +65,41 @@ public sealed class SpecScope
 /// </summary>
 public sealed class SpecEmitter(DiagnosticBag diagnostics)
 {
+    /// <summary>
+    /// R9.19. Each class's immediate base, which is what <see cref="Forget"/> walks.
+    /// Set once per program; empty for a program with no hierarchy.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Bases { get; set; } =
+        new Dictionary<string, string>();
+
+    /// <summary>
+    /// R9.19. An observation declared on an ancestor, read off a descendant's model.
+    ///
+    /// <para>The receiver's term denotes a model of *some* class in the hierarchy — which
+    /// one is recorded on the term, and it is not always the class the <c>[Spec]</c> member
+    /// belongs to. A client may write <c>q.TheArea</c> where <c>TheArea</c> is
+    /// <c>Shape</c>'s and <c>q</c> is a <c>Quadrilateral</c>; and R9.7's inherited contract
+    /// is written against the base's model and then re-read at the model of whichever class
+    /// the <c>override</c>'s vtable slot is typed at, which at depth three is neither the
+    /// declaring class nor the implementing one.</para>
+    ///
+    /// <para>Both are the same step, so there is one rule: compose the forgetting functions
+    /// R9.6 already emits, from the class the term denotes up to the class that declares
+    /// the member. The chain is walked and not guessed; a member the receiver's class does
+    /// not inherit is a C# error the frontend has already refused.</para>
+    /// </summary>
+    private string Forget(IrObserve ob, Term receiver, SpecScope scope)
+    {
+        if (receiver.Type is not IrClassType from) return receiver.Text;
+        var text = receiver.Text;
+        for (var at = from.Name; at != ob.Class && Bases.TryGetValue(at, out var up); at = up)
+        {
+            var qualifier = scope.DefiningClass == at ? "" : Names.ClassModule(at) + ".";
+            text = $"({qualifier}{Names.ClassForget(at)} {text})";
+        }
+        return text;
+    }
+
     public Term Emit(IrExpr expr, SpecScope scope)
     {
         switch (expr)
@@ -94,7 +129,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 var qualifier = scope.DefiningClass == ob.Class
                     ? "" : Names.ClassModule(ob.Class) + ".";
                 return new Term(
-                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)} {receiver.Text})",
+                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)} {Forget(ob, receiver, scope)})",
                     MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
             }
 

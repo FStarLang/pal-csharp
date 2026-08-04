@@ -144,6 +144,62 @@ public static class Names
         "class_" + name + "__to_" + baseName + "_at";
 
     /// <summary>
+    /// R9.18. The same conversion with the index dropped, for a reference whose object
+    /// record this method never knew — a base-typed parameter, say. A leaf needs no such
+    /// form because a leaf reference always *is* its record; a class in the middle of a
+    /// hierarchy can be handed one from outside, and must still be convertible.
+    /// </summary>
+    public static string UpcastTo(string name, string baseName) =>
+        "class_" + name + "__to_" + baseName;
+
+    /// <summary>
+    /// R9.18. The four primitives every class in a hierarchy publishes, and the reason a
+    /// class at depth three needs no new dispatch rule.
+    ///
+    /// <para><c>is</c> is the proposition "this reference denotes this object record";
+    /// <c>ref</c> makes the reference from the record; <c>obj_at</c> recovers the record
+    /// from the reference. Stated that way they are the *whole* of what an encoding has to
+    /// supply — everything else in §9, the two invariants, pack and unpack, dispatch,
+    /// share and gather, the upcast and the downcast, is written once against them and is
+    /// the same text at the root and at an intermediate class. What differs between the
+    /// two is three definitions: at the root a reference is a dyn and <c>obj_at</c> is one
+    /// recovery; at an intermediate class a reference is its parent's and <c>obj_at</c>
+    /// follows the parent's <c>sub</c> field, which is one recovery more.</para>
+    /// </summary>
+    public static string ClassIs(string name) => "class_" + name + "__is";
+    public static string ClassRef(string name) => "class_" + name + "__ref";
+    public static string ClassObjAt(string name) => "class_" + name + "__obj_at";
+
+    /// <summary>
+    /// R9.18. Opening and closing the indexed invariant. They are what a *descendant*
+    /// needs — it has to get at the resource its parent's invariant is carrying in order to
+    /// re-read it at its own model — and they are the only way to, since the definition is
+    /// not exported.
+    /// </summary>
+    public static string ClassIntroAt(string name) => "class_" + name + "__intro_at";
+    public static string ClassElimAt(string name) => "class_" + name + "__elim_at";
+
+    /// <summary>
+    /// R9.18. An intermediate class's <em>view</em>: the parent object record a value of
+    /// this class presents itself as. The parent's <c>sub</c> field carries this class's
+    /// record back, so both directions are pure functions and every cast is free.
+    /// </summary>
+    public static string ClassView(string name) => "class_" + name + "__view";
+
+    /// <summary>R9.18. The parent vtable derived from any vtable of this class.</summary>
+    public static string ClassBasePkg(string name, string baseName) =>
+        ClassAsBase(name, baseName) + "_pkg";
+
+    /// <summary>
+    /// R9.18. The derived implementation of an inherited method: this class's vtable
+    /// dispatching one level down, re-read at the parent's model. It is what lets a
+    /// subclass of an intermediate class implement that class's vtable only and get its
+    /// grandparent's for free.
+    /// </summary>
+    public static string ClassPkgSlot(string name, string method) =>
+        "class_" + name + "__pkg_" + method;
+
+    /// <summary>
     /// R9.17. The two primitives that make the dyn an implementation detail: <c>pack</c>
     /// turns an object record into a reference, <c>unpack</c> turns a reference whose
     /// index is known back into the representation it was built from. Every subclass goes

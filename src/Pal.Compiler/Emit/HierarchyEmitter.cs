@@ -22,6 +22,12 @@ namespace Pal.Compiler.Emit;
 /// </summary>
 public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics)
 {
+    /// <summary>R9.19. Forwarded to the spec emitter this class owns.</summary>
+    public IReadOnlyDictionary<string, string> Bases
+    {
+        set => spec.Bases = value;
+    }
+
     private const string Perm = "p";
     private const string Model = "m";
     private const string Obj = "o";
@@ -81,12 +87,30 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     }
 
     /// <summary>
-    /// R9.9. The whole of an abstract class: the model, the observations, the vtable, the
-    /// object record, the reference type, the two invariants, and a dispatching wrapper
-    /// per virtual method — split (R9.17) into what a subclass and a client may see and
-    /// what only this module may.
+    /// R9.9/R9.18. The whole of an abstract class: the model, the observations, the
+    /// vtable, the object record, the reference type, the two invariants, and a
+    /// dispatching wrapper per virtual method — split (R9.17) into what a subclass and a
+    /// client may see and what only this module may.
+    ///
+    /// <para>R9.18. One routine emits both a root and an intermediate class, and that is a
+    /// claim about the encoding rather than a saving in code. Everything below the three
+    /// primitives <c>is</c>, <c>ref</c> and <c>obj_at</c> — the invariants, pack and
+    /// unpack, dispatch, sharing, gathering — is written once and is the same text at
+    /// every depth. A class with a parent then adds, and only adds, the derived vtable
+    /// that presents it as its parent, and the two casts across that one edge. So depth is
+    /// not a case in this emitter: a hierarchy of any depth is the two-level rule applied
+    /// once per edge.</para>
     /// </summary>
-    public (string Iface, string Impl) EmitAbstract(IrClass c, ImmutableArray<IrMethod> virtuals)
+    /// <param name="parent">The base class, or null for the root of a hierarchy.</param>
+    /// <param name="inherited">
+    /// The virtual methods visible at <paramref name="parent"/>, in the order its vtable
+    /// declares them. This class re-declares every one of them, at <em>its</em> model:
+    /// a subclass fills one vtable and one only, and R9.18's derived slots are what turn
+    /// that into the parent's.
+    /// </param>
+    public (string Iface, string Impl) EmitAbstract(
+        IrClass c, IrClass? parent,
+        ImmutableArray<IrMethod> inherited, ImmutableArray<IrMethod> own)
     {
         var parts = new Parts();
         Header(parts.Iface, Names.ClassModule(c.Name));
@@ -95,7 +119,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         // R9.9. A slot's type is fixed by the base class, so a virtual method whose
         // signature has no implementation-independent reading has no slot. Checked once,
         // here, so that a refused method is absent from the vtable and from dispatch alike.
-        var slots = virtuals.Where(v => CheckVirtual(c, v)).ToImmutableArray();
+        var slots = inherited.Concat(own.Where(v => CheckVirtual(c, v))).ToImmutableArray();
         var model = Names.ClassModel(c.Name);
 
         // The model and its observations are the vocabulary every specification about this
@@ -104,6 +128,10 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         EmitModelType(shared, c);
         EmitObservations(shared, c);
         parts.Shared(shared.ToString().TrimEnd('\n'));
+
+        // R9.6. An intermediate class refines its parent exactly as a leaf does, and by the
+        // same declaration: the `override` of the parent's `[Model]` member.
+        if (parent is not null) parts.Shared(Forget(c, parent));
 
         // R9.9. One field per virtual method, at *this* class's model, plus the two
         // things a vtable must carry that no C# declaration mentions: the representation
@@ -117,7 +145,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         foreach (var v in slots)
         {
             vtbl.AppendLine();
-            vtbl.AppendLine($"  {Names.VtblSlot(Member(c, v))} : ({SlotType(c, v)});");
+            vtbl.AppendLine($"  {Names.VtblSlot(Member(v))} : ({SlotType(c, v)});");
         }
         // R9.11. R3.10d emits share and gather per class because their proofs recurse into
         // the class's own fields. Behind a dyn there is no structure to recurse into, so
@@ -143,22 +171,61 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var inv = Names.ClassInv(c.Name);
         var invAt = Names.ClassInvAt(c.Name);
         var self = Names.ClassType(c.Name);
+        var isP = Names.ClassIs(c.Name);
+        var objAt = Names.ClassObjAt(c.Name);
 
         // F28: a vtable together with a value of *its* implementation type is far too big
         // to live in a heap cell or an array. A subclass names one of these as the index
         // its casts are stated at, so it too is part of the interface.
-        parts.Shared($"noeq type {obj} = {{ pkg: {Names.ClassVtbl(c.Name)}; rep: pkg.impl }}");
+        // R9.18. `sub` is the extension point, and the one field the two-level scheme did
+        // not need. A class *between* this one and a leaf adds virtual methods this class
+        // has never heard of, and a reference of this static type must still reach them,
+        // because in this encoding the reference *is* the object. So the class declares one
+        // field of the erased type `Dn.dyn` and says nothing whatever about its contents;
+        // a descendant stores its own object record there, and its own invariant is what
+        // says what is in it. A direct leaf stores `Dn.mkdyn ()`.
+        //
+        // Open-world, which is the point: the class is compiled once and admits subclasses
+        // that do not exist yet. A sum over the known subclasses — the obvious cheaper
+        // encoding — would not. It hangs off the *object* and not the vtable because what a
+        // descendant needs back is a vtable applied to a representation; recovering a bare
+        // vtable would leave its `impl` only propositionally equal to `pkg.impl`. Nothing is
+        // stored twice at runtime: `sub` and the object are the same reference.
+        parts.Shared($"noeq type {obj} = {{ pkg: {Names.ClassVtbl(c.Name)}; rep: pkg.impl;" +
+                     " sub: Dn.dyn }");
+
+        // R9.18. The derived vtable: this class presented as its parent. It is what makes
+        // the parent's `impl` this class's *reference* type rather than a leaf's
+        // representation, and so what lets a leaf implement one vtable and get every
+        // ancestor's for free.
+        if (parent is not null) EmitDerived(parts, c, parent, inherited);
 
         // R9.8/R9.17. F29 promotes the pair into `dyn`, which is `Type0` and therefore
         // boxable, array-able, and admissible as a field — and *that* is the choice a
         // client must not see, because nothing in C# corresponds to it.
-        parts.Public($"{self} : Type0", $"let {self} : Type0 = Dn.dyn");
+        // R9.18. An intermediate class's references *are* its parent's: an upcast changes
+        // the invariant and never the value, so there is one reference type per hierarchy
+        // and the dyn is made once, at the root.
+        parts.Public($"{self} : Type0",
+            $"let {self} : Type0 = " +
+            (parent is null ? "Dn.dyn" : $"{Names.ClassModule(parent.Name)}.{Names.ClassType(parent.Name)}"));
 
         // F34: named apart from the invariant so that a `fold` can be handed an explicit
         // witness for the existential. Private: it mentions nothing but is the shape of
         // the encoding, and everything a subclass needs from it is `pack` and `unpack`.
         parts.Private($"let {at} (o: {obj}) ({Perm}: perm) ({Model}: {model}) : slprop =" +
                       $" o.pkg.inv o.rep {Perm} {Model}");
+
+        // R9.18. "This reference denotes this object record". At the root that is what
+        // `mkdyn` says; at an intermediate class it is the parent's own `is` about the
+        // record this one presents as. Abstract, because it is the encoding: what a client
+        // and a subclass need from it is that it is *some* proposition the three primitives
+        // below agree on.
+        parts.Public($"{isP} (s: {self}) (o: {obj}) : prop",
+            $"let {isP} (s: {self}) (o: {obj}) : prop = " +
+            (parent is null
+                ? $"(s == Dn.mkdyn o)"
+                : $"{Names.ClassModule(parent.Name)}.{Names.ClassIs(parent.Name)} s ({Names.ClassView(c.Name)} o)"));
 
         // R9.9. The same signature an M2 class invariant has (§3.4), which is why a client
         // of a hierarchy needs no new rules: R4.5's model binders, R4.10's fold/unfold
@@ -168,7 +235,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
                      $" ({Model}: {model}) : slprop";
         parts.Public(invSig,
             $"let {invSig} =\n" +
-            $"  exists* ({Obj}: {obj}). pure (s == Dn.mkdyn {Obj}) ** {at} {Obj} {Perm} {Model}");
+            $"  exists* ({Obj}: {obj}). pure ({isP} s {Obj}) ** {at} {Obj} {Perm} {Model}");
 
         // R9.10. The primitive form, with the object record named. `gather` forces it —
         // two views of one object otherwise unfold to separate witnesses related only by
@@ -178,7 +245,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
                        $" ({Model}: {model}) : slprop";
         parts.Public(invAtSig,
             $"let {invAtSig} =\n" +
-            $"  pure (s == Dn.mkdyn (reveal {Obj})) ** {at} {Obj} {Perm} {Model}");
+            $"  pure ({isP} s (reveal {Obj})) ** {at} {Obj} {Perm} {Model}");
 
         // R9.10. Forgetting is one ghost step, and irreversible: recovering the index from
         // the plain invariant would again be injectivity of `mkdyn`.
@@ -192,6 +259,61 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             $"  fold ({inv} s #{Perm} {Model});\n" +
             "}");
 
+        // R9.18. Opening and closing the indexed invariant. A descendant has to reach the
+        // resource its parent's invariant carries, in order to re-read it at its own model;
+        // since the definition is not exported these two are the only way, and they are
+        // what the casts across one inheritance edge are written with.
+        var raw = $"(reveal {Obj}).pkg.inv (reveal {Obj}).rep {Perm} {Model}";
+        parts.Code(
+            $"ghost fn {Names.ClassElimAt(c.Name)} (s: {self}) ({Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {invAt} s {Obj} {Perm} {Model}\n" +
+            $"  ensures  {raw} ** pure ({isP} s (reveal {Obj}))",
+            "{\n" +
+            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
+            $"  rewrite ({at} {Obj} {Perm} {Model}) as ({raw});\n" +
+            "}");
+
+        parts.Code(
+            $"ghost fn {Names.ClassIntroAt(c.Name)} (s: {self}) ({Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {raw} ** pure ({isP} s (reveal {Obj}))\n" +
+            $"  ensures  {invAt} s {Obj} {Perm} {Model}",
+            "{\n" +
+            $"  rewrite ({raw}) as ({at} {Obj} {Perm} {Model});\n" +
+            $"  fold ({invAt} s {Obj} {Perm} {Model});\n" +
+            "}");
+
+        // R9.18. Making a reference from an object record, and recovering the record from
+        // the reference. These two and `is` are the whole of what an encoding supplies; at
+        // the root they are `mkdyn` and R9.13's recovery, and at an intermediate class they
+        // are the parent's, one `sub` field further in.
+        parts.Code(
+            $"fn {Names.ClassRef(c.Name)} (o: {obj})\n" +
+            $"  returns  s: {self}\n" +
+            $"  ensures  pure ({isP} s o)",
+            "{\n" +
+            (parent is null
+                ? "  (Dn.mkdyn o)\n"
+                : $"  ({Names.ClassModule(parent.Name)}.{Names.ClassRef(parent.Name)}" +
+                  $" ({Names.ClassView(c.Name)} o))\n") +
+            "}");
+
+        parts.Code(
+            $"fn {objAt} (s: {self}) ({Obj}: erased {obj})\n" +
+            $"  requires pure ({isP} s (reveal {Obj}))\n" +
+            $"  returns  ob: {obj}\n" +
+            $"  ensures  pure (ob == reveal {Obj})",
+            "{\n" +
+            (parent is null
+                ? $"  CAs.recover #{obj} #{Obj} s\n"
+                // R9.18. One level further: the parent hands back the record this class
+                // presents as, and `sub` is where that record put this one.
+                : $"  let pob = {Names.ClassModule(parent.Name)}.{Names.ClassObjAt(parent.Name)}" +
+                  $" s (hide ({Names.ClassView(c.Name)} (reveal {Obj})));\n" +
+                  $"  CAs.recover #{obj} #{Obj} pob.sub\n") +
+            "}");
+
         // R9.17. The two operations that make the dyn private. `pack` is what a reference
         // conversion is (R9.15): an object record becomes a reference, and the invariant
         // follows it. Every subclass's upcast is this call, so `Dn.mkdyn` is written once
@@ -202,9 +324,10 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             $"  returns  s: {self}\n" +
             $"  ensures  {invAt} s (hide {Obj}) {Perm} {Model}",
             "{\n" +
+            $"  let s = {Names.ClassRef(c.Name)} {Obj};\n" +
             $"  rewrite ({Obj}.pkg.inv {Obj}.rep {Perm} {Model}) as ({at} {Obj} {Perm} {Model});\n" +
-            $"  fold ({invAt} (Dn.mkdyn {Obj}) (hide {Obj}) {Perm} {Model});\n" +
-            $"  (Dn.mkdyn {Obj})\n" +
+            $"  fold ({invAt} s (hide {Obj}) {Perm} {Model});\n" +
+            "  s\n" +
             "}");
 
         // R9.16/R9.17. And `unpack` is what a checked downcast is: a reference whose index
@@ -213,31 +336,19 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         // which is only propositionally true; going back through `mkdyn` keeps everything
         // a dyn, and congruence on the box then delivers the equation `recover` asks for.
         var pkg = "v";
-        var made = $"({{ pkg = {pkg}; rep = reveal x }})";
+        var made = $"({{ pkg = {pkg}; rep = reveal x; sub = reveal sub }})";
         parts.Private($"let {Names.ClassBox(c.Name)} (o: {obj}) : Dn.dyn = Dn.mkdyn o.rep");
-        parts.Private(
-            $"fn {Names.ClassRep(c.Name)} (s: {self}) (#{Obj}: erased {obj})" +
-            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
-            $"  preserves {invAt} s {Obj} {Perm} {Model}\n" +
-            "  returns  d: Dn.dyn\n" +
-            $"  ensures  pure (d == {Names.ClassBox(c.Name)} {Obj})\n" +
-            "{\n" +
-            $"  unfold ({invAt} s {Obj} {Perm} {Model});\n" +
-            $"  let ob = CAs.recover #{obj} #{Obj} s;\n" +
-            $"  fold ({invAt} s {Obj} {Perm} {Model});\n" +
-            $"  {Names.ClassBox(c.Name)} ob\n" +
-            "}");
 
         parts.Code(
             $"fn {Names.ClassUnpack(c.Name)} ({pkg}: {Names.ClassVtbl(c.Name)}) (x: erased {pkg}.impl)" +
-            $" (s: {self}) (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $" (sub: erased Dn.dyn) (s: {self}) (#{Perm}: perm) (#{Model}: erased {model})\n" +
             $"  requires {invAt} s (hide {made}) {Perm} {Model}\n" +
             $"  returns  r: {pkg}.impl\n" +
             $"  ensures  {pkg}.inv r {Perm} {Model} ** pure (r == reveal x)",
             "{\n" +
-            $"  let d = {Names.ClassRep(c.Name)} s #(hide {made}) #{Perm} #{Model};\n" +
-            $"  let r = CAs.recover #{pkg}.impl #x d;\n" +
             $"  unfold ({invAt} s (hide {made}) {Perm} {Model});\n" +
+            $"  let ob = {objAt} s (hide {made});\n" +
+            $"  let r = CAs.recover #{pkg}.impl #x ({Names.ClassBox(c.Name)} ob);\n" +
             $"  rewrite ({at} {made} {Perm} {Model}) as ({pkg}.inv r {Perm} {Model});\n" +
             "  r\n" +
             "}");
@@ -245,7 +356,264 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         EmitShareGather(parts, c);
         foreach (var v in slots) EmitDispatch(parts, c, v);
 
+        // R9.18. The two casts across this one inheritance edge. They are the *whole* of
+        // what depth costs: a client that upcasts a Square to a Shape does it in two steps,
+        // each of which is the two-level rule, and neither step knows about the other.
+        if (parent is not null) EmitInnerCasts(parts, c, parent);
+
         return (parts.Iface.ToString(), parts.Impl.ToString());
+    }
+
+    /// <summary>
+    /// R9.6. The base's model as a function of this class's — the <c>override</c> of the
+    /// base's <c>[Model]</c> member. Identical for an intermediate class and a leaf, which
+    /// is the point: a class is a refinement of its parent for the same reason at every
+    /// depth.
+    /// </summary>
+    private string Forget(IrClass c, IrClass parent)
+    {
+        var pModel = $"{Names.ClassModule(parent.Name)}.{Names.ClassModel(parent.Name)}";
+        var scope = new SpecScope { DefiningClass = c.Name };
+        scope.Bind(c.ModelMember, new Term(Model, MethodPlan.KindOf(c.ModelType), c.ModelType));
+        var forget = c.ForgetBody is null
+            ? Model
+            : MethodPlan.KindOf(parent.ModelType) == TermKind.Math
+                ? spec.Math(c.ForgetBody, scope)
+                : spec.Emit(c.ForgetBody, scope).Text;
+        return $"let {Names.ClassForget(c.Name)} ({Model}: {Names.ClassModel(c.Name)}) : {pModel} =\n" +
+               $"  {forget}";
+    }
+
+    /// <summary>
+    /// R9.18. The derived vtable: an arbitrary vtable of this class, read as one of its
+    /// parent's.
+    ///
+    /// <para>This is the whole content of "an intermediate class is still a subclass". The
+    /// parent's <c>impl</c> is instantiated to *this* class's representation type, its
+    /// <c>inv</c> to this class's invariant existentially quantified over the models that
+    /// forget to the parent's, and each of its slots to a wrapper that opens that
+    /// existential, dispatches one level down and closes it again. A leaf therefore fills
+    /// exactly one vtable — its immediate parent's — and every ancestor's follows.</para>
+    /// </summary>
+    private void EmitDerived(Parts parts, IrClass c, IrClass parent, ImmutableArray<IrMethod> inherited)
+    {
+        var pMod = Names.ClassModule(parent.Name);
+        var pModel = $"{pMod}.{Names.ClassModel(parent.Name)}";
+        var vtbl = Names.ClassVtbl(c.Name);
+        var asBase = Names.ClassAsBase(c.Name, parent.Name);
+        var forget = Names.ClassForget(c.Name);
+        var own = "own";
+
+        // R9.14, at a vtable rather than at a reference: the same view a leaf takes of its
+        // own invariant, taken instead of a vtable applied to a representation, because
+        // that is what an intermediate class has and a leaf's representation is not.
+        parts.Private(
+            $"let {asBase} (qp: {vtbl}) (x: qp.impl) ({Perm}: perm) ({Model}: {pModel}) : slprop =\n" +
+            $"  exists* ({own}: {Names.ClassModel(c.Name)}). qp.inv x {Perm} {own} **" +
+            $" pure ({Model} == {forget} {own})");
+
+        foreach (var v in inherited) EmitDerivedSlot(parts, c, parent, v);
+
+        var half = $"({Perm} /. 2.0R)";
+        var alt = Names.Alt(Model);
+        parts.Private(
+            $"ghost fn {Names.ClassPkgSlot(c.Name, "share")} (qp: {vtbl}) (x: qp.impl)" +
+            $" (#{Perm}: perm) (#{Model}: erased {pModel})\n" +
+            $"  requires {asBase} qp x {Perm} {Model}\n" +
+            $"  ensures  {asBase} qp x {half} {Model} ** {asBase} qp x {half} {Model}\n" +
+            "{\n" +
+            $"  unfold ({asBase} qp x {Perm} {Model});\n" +
+            $"  with {own}. assert (qp.inv x {Perm} {own});\n" +
+            "  let f = qp.vshare;\n" +
+            $"  f x #{Perm} #{own};\n" +
+            $"  fold ({asBase} qp x {half} {Model});\n" +
+            $"  fold ({asBase} qp x {half} {Model});\n" +
+            "}");
+
+        parts.Private(
+            "[@@allow_ambiguous]\n" +
+            $"ghost fn {Names.ClassPkgSlot(c.Name, "gather")} (qp: {vtbl}) (x: qp.impl)" +
+            $" ({Perm}: perm) (q: perm) (#{Model}: erased {pModel}) (#{alt}: erased {pModel})\n" +
+            $"  requires {asBase} qp x {Perm} {Model} ** {asBase} qp x q {alt}\n" +
+            $"  ensures  {asBase} qp x ({Perm} +. q) {Model} **" +
+            $" pure (reveal {Model} == reveal {alt})\n" +
+            "{\n" +
+            $"  unfold ({asBase} qp x {Perm} {Model});\n" +
+            $"  with {own}. assert (qp.inv x {Perm} {own});\n" +
+            $"  unfold ({asBase} qp x q {alt});\n" +
+            $"  with {own}2. assert (qp.inv x q {own}2);\n" +
+            "  let g = qp.vgather;\n" +
+            $"  g x {Perm} q #{own} #{own}2;\n" +
+            $"  fold ({asBase} qp x ({Perm} +. q) {Model});\n" +
+            "}");
+
+        // F33 again: the meta-argument-defaulted permission binder does not match a vtable
+        // field type, so every slot is eta-expanded here exactly as a leaf's is.
+        var pkg = new StringBuilder();
+        pkg.AppendLine($"let {Names.ClassBasePkg(c.Name, parent.Name)} (qp: {vtbl}) :" +
+                       $" {pMod}.{Names.ClassVtbl(parent.Name)} = {{");
+        pkg.AppendLine("  impl = qp.impl;");
+        pkg.AppendLine($"  inv = (fun (x: qp.impl) ({Perm}: perm) ({Model}: {pModel}) ->" +
+                       $" {asBase} qp x {Perm} {Model});");
+        foreach (var v in inherited)
+        {
+            var moves = !v.IsReadOnly;
+            var args = string.Concat(Value(v).Select(p => $" ({Names.Local(p.Name)}: {Types.Render(p.Type)})"));
+            var pass = string.Concat(Value(v).Select(p => " " + Names.Local(p.Name)));
+            var permB = moves ? "" : $" (#{Perm}: perm)";
+            var permA = moves ? "" : $" #{Perm}";
+            pkg.AppendLine($"  {Names.VtblSlot(Member(v))} = (fun (x: qp.impl){args}{permB}" +
+                           $" (#{Model}: erased {pModel}) ->");
+            pkg.AppendLine($"    {Names.ClassPkgSlot(c.Name, Member(v))} qp x{pass}{permA} #{Model});");
+        }
+        pkg.AppendLine($"  vshare = (fun (x: qp.impl) (#{Perm}: perm) (#{Model}: erased {pModel}) ->");
+        pkg.AppendLine($"    {Names.ClassPkgSlot(c.Name, "share")} qp x #{Perm} #{Model});");
+        pkg.AppendLine($"  vgather = (fun (x: qp.impl) ({Perm}: perm) (q: perm)" +
+                       $" (#{Model}: erased {pModel}) (#{alt}: erased {pModel}) ->");
+        pkg.AppendLine($"    {Names.ClassPkgSlot(c.Name, "gather")} qp x {Perm} q #{Model} #{alt});");
+        pkg.Append("}");
+        parts.Private(pkg.ToString());
+
+        // R9.18. The parent object record a value of this class presents as. `sub` carries
+        // this class's own record back, so the view is a pure function and both casts are
+        // free: the reference is the same value, and only the invariant changes.
+        parts.Public(
+            $"{Names.ClassView(c.Name)} (o: {Names.ClassObj(c.Name)}) : {pMod}.{Names.ClassObj(parent.Name)}",
+            $"let {Names.ClassView(c.Name)} (o: {Names.ClassObj(c.Name)}) :" +
+            $" {pMod}.{Names.ClassObj(parent.Name)} =\n" +
+            $"  {{ pkg = {Names.ClassBasePkg(c.Name, parent.Name)} o.pkg; rep = o.rep;" +
+            " sub = Dn.mkdyn o }");
+    }
+
+    /// <summary>
+    /// R9.18. One inherited method's derived implementation: open the existential the
+    /// parent's view hides, dispatch through <em>this</em> class's vtable, close it again.
+    ///
+    /// <para>The proof that the parent's contract holds is the whole of R9.7 restated one
+    /// level up, and is discharged by the model equation alone: the slot's own contract is
+    /// this class's reading of the same C# annotation, which R9.19 composes with
+    /// <c>forget</c>, and the view says the parent's model *is* that composition.</para>
+    /// </summary>
+    private void EmitDerivedSlot(Parts parts, IrClass c, IrClass parent, IrMethod v)
+    {
+        var pMod = Names.ClassModule(parent.Name);
+        var pModel = $"{pMod}.{Names.ClassModel(parent.Name)}";
+        var asBase = Names.ClassAsBase(c.Name, parent.Name);
+        var (pre, post) = Contract(parent, v, Model, out var moves, c);
+        var perm = moves ? Full : Perm;
+        var own = "own";
+        var postOwn = "post_own";
+        var args = string.Concat(Value(v).Select(p => " " + Names.Local(p.Name)));
+        var binders = string.Concat(Value(v).Select(p => $" ({Names.Local(p.Name)}: {Types.Render(p.Type)})"));
+        var permBinder = moves ? "" : $" (#{Perm}: perm)";
+        var isVoid = v.ReturnType is IrPrim { Kind: PrimKind.Void };
+
+        var sig = new StringBuilder();
+        sig.AppendLine($"fn {Names.ClassPkgSlot(c.Name, Member(v))} (qp: {Names.ClassVtbl(c.Name)})" +
+                       $" (x: qp.impl){binders}{permBinder} (#{Model}: erased {pModel})");
+        sig.AppendLine($"  requires {asBase} qp x {perm} {Model}{Pure(pre)}");
+        if (!isVoid) sig.AppendLine($"  returns  {Ret}: {Types.Render(v.ReturnType)}");
+        sig.Append(moves
+            ? $"  ensures  exists* {PostModel}. {asBase} qp x {perm} {PostModel}{Pure(post)}"
+            : $"  ensures  {asBase} qp x {perm} {Model}{Pure(post)}");
+
+        var body = new StringBuilder();
+        body.AppendLine("{");
+        body.AppendLine($"  unfold ({asBase} qp x {perm} {Model});");
+        body.AppendLine($"  with {own}. assert (qp.inv x {perm} {own});");
+        // F31: a stored Pulse computation must be let-bound before it is applied.
+        body.AppendLine($"  let f = qp.{Names.VtblSlot(Member(v))};");
+        var call = $"f x{args}{(moves ? "" : $" #{Perm}")} #{own};";
+        if (moves)
+        {
+            body.AppendLine($"  {call}");
+            body.AppendLine($"  with {postOwn}. assert (qp.inv x {perm} {postOwn});");
+            body.AppendLine($"  fold ({asBase} qp x {perm} ({Names.ClassForget(c.Name)} {postOwn}));");
+        }
+        else
+        {
+            body.AppendLine(isVoid ? $"  {call}" : $"  let {Ret}0 = {call}");
+            body.AppendLine($"  fold ({asBase} qp x {perm} {Model});");
+            if (!isVoid) body.AppendLine($"  {Ret}0");
+        }
+        body.Append("}");
+        parts.Private(sig + "\n" + body);
+    }
+
+    /// <summary>
+    /// R9.18. The two casts across one inheritance edge, for an intermediate class. They
+    /// are R9.15a and R9.16 with the leaf's representation replaced by this class's object
+    /// record, and they are ghost in substance: the reference handed back is the one that
+    /// came in, because in this encoding an upcast changes the invariant and not the value.
+    /// </summary>
+    private static void EmitInnerCasts(Parts parts, IrClass c, IrClass parent)
+    {
+        var pMod = Names.ClassModule(parent.Name);
+        var pModel = $"{pMod}.{Names.ClassModel(parent.Name)}";
+        var model = Names.ClassModel(c.Name);
+        var obj = Names.ClassObj(c.Name);
+        var self = Names.ClassType(c.Name);
+        var asBase = Names.ClassAsBase(c.Name, parent.Name);
+        var view = $"({Names.ClassView(c.Name)} (reveal {Obj}))";
+        var pInvAt = $"{pMod}.{Names.ClassInvAt(parent.Name)}";
+        var forget = $"({Names.ClassForget(c.Name)} {Model})";
+        var raw = $"{view}.pkg.inv {view}.rep {Perm}";
+
+        parts.Code(
+            $"fn {Names.UpcastToAt(c.Name, parent.Name)} (s: {self}) ({Obj}: erased {obj})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {Names.ClassInvAt(c.Name)} s {Obj} {Perm} {Model}\n" +
+            $"  returns  r: {pMod}.{Names.ClassType(parent.Name)}\n" +
+            $"  ensures  {pInvAt} r (hide {view}) {Perm} {forget}",
+            "{\n" +
+            $"  {Names.ClassElimAt(c.Name)} s {Obj} #{Perm} #{Model};\n" +
+            $"  fold ({asBase} (reveal {Obj}).pkg (reveal {Obj}).rep {Perm} {forget});\n" +
+            $"  rewrite ({asBase} (reveal {Obj}).pkg (reveal {Obj}).rep {Perm} {forget})" +
+            $" as ({raw} {forget});\n" +
+            $"  {pMod}.{Names.ClassIntroAt(parent.Name)} s (hide {view}) #{Perm} #{forget};\n" +
+            "  s\n" +
+            "}");
+
+        // R9.18. And with the index dropped. A `Quadrilateral` this method was handed
+        // rather than made has no known object record, and C# converts it to a `Shape`
+        // just the same; the index is what a later downcast needs, so a conversion that
+        // starts without one ends without one.
+        parts.Code(
+            $"fn {Names.UpcastTo(c.Name, parent.Name)} (s: {self})" +
+            $" (#{Perm}: perm) (#{Model}: erased {model})\n" +
+            $"  requires {Names.ClassInv(c.Name)} s #{Perm} {Model}\n" +
+            $"  returns  r: {pMod}.{Names.ClassType(parent.Name)}\n" +
+            $"  ensures  {pMod}.{Names.ClassInv(parent.Name)} r #{Perm} {forget}",
+            "{\n" +
+            $"  unfold ({Names.ClassInv(c.Name)} s #{Perm} {Model});\n" +
+            $"  with {Obj}. assert ({Names.ClassAt(c.Name)} {Obj} {Perm} {Model});\n" +
+            $"  fold ({Names.ClassInvAt(c.Name)} s (hide {Obj}) {Perm} {Model});\n" +
+            $"  let r = {Names.UpcastToAt(c.Name, parent.Name)} s (hide {Obj}) #{Perm} #{Model};\n" +
+            $"  {pMod}.{Names.ClassForgetImpl(parent.Name)} r" +
+            $" (hide ({Names.ClassView(c.Name)} {Obj})) #{Perm} #{forget};\n" +
+            "  r\n" +
+            "}");
+
+        // R9.16. The checked downcast across the inner edge. What the caller must know is
+        // *which* object record the reference denotes, and that is exactly what C# would
+        // test for; the model it gets back is existential because forgetting is not
+        // injective — a Shape model does not determine the Quadrilateral it came from.
+        parts.Code(
+            $"fn {Names.DowncastFrom(c.Name, parent.Name)} (s: {pMod}.{Names.ClassType(parent.Name)})" +
+            $" (#{Obj}: erased {obj}) (#{Perm}: perm) (#{Model}: erased {pModel})\n" +
+            $"  requires {pInvAt} s (hide {view}) {Perm} {Model}\n" +
+            $"  returns  r: {self}\n" +
+            $"  ensures  exists* own. {Names.ClassInvAt(c.Name)} r {Obj} {Perm} own **" +
+            $" pure (reveal {Model} == {Names.ClassForget(c.Name)} own)",
+            "{\n" +
+            $"  {pMod}.{Names.ClassElimAt(parent.Name)} s (hide {view}) #{Perm} #{Model};\n" +
+            $"  rewrite ({raw} {Model})" +
+            $" as ({asBase} (reveal {Obj}).pkg (reveal {Obj}).rep {Perm} {Model});\n" +
+            $"  unfold ({asBase} (reveal {Obj}).pkg (reveal {Obj}).rep {Perm} {Model});\n" +
+            $"  with own. assert ((reveal {Obj}).pkg.inv (reveal {Obj}).rep {Perm} own);\n" +
+            $"  {Names.ClassIntroAt(c.Name)} s {Obj} #{Perm} #own;\n" +
+            "  s\n" +
+            "}");
     }
 
     /// <summary>
@@ -295,7 +663,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
 
         // The indexed form is the one that dispatches (R9.10).
         var sb = new StringBuilder();
-        sb.AppendLine($"fn {Names.DispatchAt(c.Name, Member(c, v))} (s: {self}){binders}" +
+        sb.AppendLine($"fn {Names.DispatchAt(c.Name, Member(v))} (s: {self}){binders}" +
                       $" (#{Obj}: erased {obj}){permBinder} (#{Model}: erased {model})");
         sb.AppendLine($"  requires {invAt} s {Obj} {perm} {Model}{Pure(pre)}");
         sb.Append(returns);
@@ -306,12 +674,14 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var body = new StringBuilder();
         body.AppendLine("{");
         body.AppendLine($"  unfold ({invAt} s {Obj} {perm} {Model});");
-        // R9.13. The one assumption: the object header faithfully records what was stored.
-        body.AppendLine($"  let ob = CAs.recover #{obj} #{Obj} s;");
+        // R9.18. The record the reference denotes. At the root R9.13's recovery is the one
+        // assumption behind it; at an intermediate class it is one `sub` field further in.
+        // Dispatch does not know which, and that is why depth costs it nothing.
+        body.AppendLine($"  let ob = {Names.ClassObjAt(c.Name)} s {Obj};");
         body.AppendLine($"  rewrite ({at} {Obj} {perm} {Model}) as ({at} ob {perm} {Model});");
         body.AppendLine($"  unfold ({at} ob {perm} {Model});");
         // F31: a stored Pulse computation must be let-bound before it is applied.
-        body.AppendLine($"  let f = ob.pkg.{Names.VtblSlot(Member(c, v))};");
+        body.AppendLine($"  let f = ob.pkg.{Names.VtblSlot(Member(v))};");
         var call = $"f ob.rep{args}{(moves ? "" : $" #{Perm}")} #{Model};";
         if (moves)
         {
@@ -335,7 +705,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         // R9.10. The plain form is the indexed one composed with forgetting, so there is
         // one dispatching body per method and not two.
         var sb2 = new StringBuilder();
-        sb2.AppendLine($"fn {Names.Dispatch(c.Name, Member(c, v))} (s: {self}){binders}" +
+        sb2.AppendLine($"fn {Names.Dispatch(c.Name, Member(v))} (s: {self}){binders}" +
                        $"{permBinder} (#{Model}: erased {model})");
         sb2.AppendLine($"  requires {inv} s #{perm} {Model}{Pure(pre)}");
         sb2.Append(returns);
@@ -348,7 +718,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         body2.AppendLine($"  unfold ({inv} s #{perm} {Model});");
         body2.AppendLine($"  with {Obj}. assert ({at} {Obj} {perm} {Model});");
         body2.AppendLine($"  fold ({invAt} s (hide {Obj}) {perm} {Model});");
-        var inner = $"{Names.DispatchAt(c.Name, Member(c, v))} s{args} #(hide {Obj})" +
+        var inner = $"{Names.DispatchAt(c.Name, Member(v))} s{args} #(hide {Obj})" +
                     $"{(moves ? "" : $" #{Perm}")} #{Model};";
         if (moves)
         {
@@ -446,19 +816,10 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var pModel = $"{pModule}.{Names.ClassModel(parent.Name)}";
         var own = Names.ClassModel(c.Name);
 
-        // R9.6. The base's model as a function of this class's — the `override` of the
-        // base's [Model] member, and nothing else in C# has to be written to get it.
-        var scope = new SpecScope { DefiningClass = c.Name };
-        scope.Bind(c.ModelMember, new Term(Model, MethodPlan.KindOf(c.ModelType), c.ModelType));
-        var forget = c.ForgetBody is null
-            ? Model
-            : MethodPlan.KindOf(parent.ModelType) == TermKind.Math
-                ? spec.Math(c.ForgetBody, scope)
-                : spec.Emit(c.ForgetBody, scope).Text;
-
+        // R9.6, shared verbatim with an intermediate class: a leaf is a refinement of its
+        // parent for exactly the same reason, and by exactly the same declaration.
         sb.AppendLine();
-        sb.AppendLine($"let {Names.ClassForget(c.Name)} ({Model}: {own}) : {pModel} =");
-        sb.AppendLine($"  {forget}");
+        sb.AppendLine(Forget(c, parent));
         sb.AppendLine();
 
         // R9.14. The leaf's own invariant read at the base's model: this is what a vtable
@@ -506,14 +867,14 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
                         $" {asBase} x #{Perm} {Model});");
         foreach (var v in virtuals)
         {
-            var o = overrides.FirstOrDefault(m => Member(c, m) == Member(parent, v));
+            var o = overrides.FirstOrDefault(m => Member(m) == Member(v));
             if (o is null) continue;
             var moves = !v.IsReadOnly;
             var args = string.Concat(Value(v).Select(p => $" ({Names.Local(p.Name)}: {Types.Render(p.Type)})"));
             var pass = string.Concat(Value(v).Select(p => " " + Names.Local(p.Name)));
             var permB = moves ? "" : $" (#{Perm}: perm)";
             var permA = moves ? "" : $" #{Perm}";
-            vtbl.AppendLine($"  {Names.VtblSlot(Member(parent, v))} = (fun (x: {mod}.{self}){args}{permB}" +
+            vtbl.AppendLine($"  {Names.VtblSlot(Member(v))} = (fun (x: {mod}.{self}){args}{permB}" +
                             $" (#{Model}: erased {pModel}) ->");
             // The slot's binder order is fixed by the vtable type; the implementation's is
             // fixed by R4.10, which threads the model binder before R4.11b's permission.
@@ -539,7 +900,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var objOf = $"({Names.ClassObjOf(c.Name)} x)";
         parts.Public($"{Names.ClassObjOf(c.Name)} (x: {mod}.{self}) : {pObj}",
             $"let {Names.ClassObjOf(c.Name)} (x: {mod}.{self}) : {pObj} =\n" +
-            $"  {{ pkg = {Names.ClassVtblValue(c.Name)}; rep = x }}");
+            $"  {{ pkg = {Names.ClassVtblValue(c.Name)}; rep = x; sub = Dn.mkdyn () }}");
 
         var pInvAt = $"{pMod}.{Names.ClassInvAt(parent.Name)}";
 
@@ -575,7 +936,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             $"  ensures  {asBase} r #{Perm} {Model} ** pure (r == reveal {Witness})",
             "\n{\n" +
             $"  let r = {pMod}.{Names.ClassUnpack(parent.Name)} {Names.ClassVtblValue(c.Name)}" +
-            $" {Witness} s #{Perm} #{Model};\n" +
+            $" {Witness} (hide (Dn.mkdyn ())) s #{Perm} #{Model};\n" +
             $"  rewrite ({Names.ClassVtblValue(c.Name)}.inv r {Perm} {Model})" +
             $" as ({asBase} r #{Perm} {Model});\n" +
             "  r\n" +
@@ -634,6 +995,16 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
 
     private const string PostModel = "post_this";
 
+    /// <summary>
+    /// R9.3-adjacent, without the diagnostic: whether a virtual method has a slot. A
+    /// subclass asks this about its ancestors' methods, which have already been checked and
+    /// reported on where they were declared.
+    /// </summary>
+    public static bool Admissible(IrMethod v) =>
+        Value(v).All(p => p.Mode == ParamMode.Value &&
+                          p.Type is IrPrim { IsMachineInt: true } or IrPrim { Kind: PrimKind.Bool })
+        && v.ReturnType is IrPrim;
+
     /// <summary>R9.3-adjacent: a virtual method takes and returns values only.</summary>
     public bool CheckVirtual(IrClass c, IrMethod v)
     {
@@ -642,7 +1013,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             if (p.Type is IrPrim { IsMachineInt: true } or IrPrim { Kind: PrimKind.Bool }
                 && p.Mode == ParamMode.Value) continue;
             diagnostics.Error("PALCS0545", p.Loc,
-                $"`{c.Name}.{Member(c, v)}` is `abstract` and takes `{p.Name}`, which is not a plain value. " +
+                $"`{c.Name}.{Member(v)}` is `abstract` and takes `{p.Name}`, which is not a plain value. " +
                 "A vtable slot's type is fixed by the base class, so every subclass would have to own " +
                 "the same resource in the same way (doc/translation.md R9.9); only value parameters " +
                 "have a reading that does not depend on the implementation.");
@@ -650,13 +1021,17 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         }
         if (v.ReturnType is IrPrim) return true;
         diagnostics.Error("PALCS0545", v.Loc,
-            $"`{c.Name}.{Member(c, v)}` is `abstract` and returns `{v.ReturnType}`. A vtable slot returns a " +
+            $"`{c.Name}.{Member(v)}` is `abstract` and returns `{v.ReturnType}`. A vtable slot returns a " +
             "value; returning a resource would make the slot's type depend on the implementation.");
         return false;
     }
 
-    /// <summary>The member's own name within its class.</summary>
-    private static string Member(IrClass c, IrMethod m) => Names.Member(m.Name, c.Name);
+    /// <summary>
+    /// The member's own name within the class that <em>declared</em> it. R9.18: an
+    /// inherited virtual keeps the name it was declared with all the way down, so that a
+    /// subclass three levels away fills the slot the root named.
+    /// </summary>
+    private static string Member(IrMethod m) => Names.Member(m.Name, m.DeclaringClass!);
 
     /// <summary>The method's parameters other than the receiver.</summary>
     private static IEnumerable<IrParam> Value(IrMethod v) =>
@@ -667,17 +1042,26 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
     /// receiver denotes the model binder, exactly as R4.10 makes it denote the model in an
     /// ordinary instance method's contract.
     /// </summary>
-    private (string Pre, string Post) Contract(IrClass c, IrMethod v, string model, out bool moves)
+    /// <param name="c">The class whose model the contract is read at.</param>
+    /// <param name="module">
+    /// The class whose module the contract is being written into, when that is not
+    /// <paramref name="c"/>. R9.18's derived slots state a *parent's* contract inside a
+    /// *subclass's* module, and a name is qualified or not according to where it is
+    /// written, not according to whose model it is about.
+    /// </param>
+    private (string Pre, string Post) Contract(
+        IrClass c, IrMethod v, string model, out bool moves, IrClass? module = null)
     {
         moves = !v.IsReadOnly;
         var type = new IrClassType(c.Name);
-        var pre = new SpecScope { DefiningClass = c.Name };
+        var here = (module ?? c).Name;
+        var pre = new SpecScope { DefiningClass = here };
         pre.Bind(Names.This, new Term($"(reveal {model})", TermKind.Math, type));
 
         var post = new SpecScope
         {
             Pre = pre,
-            DefiningClass = c.Name,
+            DefiningClass = here,
             ResultTerm = Ret,
             ResultKind = MethodPlan.KindOf(v.ReturnType),
         };

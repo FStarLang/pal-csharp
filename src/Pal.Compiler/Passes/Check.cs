@@ -277,18 +277,17 @@ public static class Check
 
         void Report(IrExpr value, IrType? target, string position)
         {
-            // The frontend records the conversion (R9.15) and the emitter has one rule for
-            // it, so what is left to refuse is the conversion the *hierarchy* puts out of
-            // reach: a jump of more than one level, which would need one upcast per level
-            // and has not been probed.
+            // The frontend records the conversion (R9.15) and the emitter has one rule per
+            // edge, applied once per level (R9.18c), so what is left to refuse is a
+            // conversion between classes the hierarchy does not relate at all.
             var from = (value.Type as IrClassType)?.Name;
             if (from is null || target is not IrClassType to || from == to.Name) return;
-            if (bases.TryGetValue(from, out var immediate) && immediate == to.Name) return;
+            for (var at = from; bases.TryGetValue(at, out var up); at = up)
+                if (up == to.Name) return;
 
             diagnostics.Error("PALCS0546", value.Loc,
                 $"A `{from}` cannot be {position} at type `{to.Name}`: R9.15 converts a " +
-                "class to its immediate base and nothing else, so a longer chain has to be " +
-                "written one step at a time.");
+                $"reference to a base class, and `{to.Name}` is not one of `{from}`'s.");
         }
     }
 

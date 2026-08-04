@@ -64,12 +64,28 @@ public static class FrontendPass
         var byName = declarations.OfType<IrMethod>()
             .Where(m => m.IsAbstract && m.DeclaringClass is not null)
             .ToDictionary(m => m.Name);
+        // R9.18. `Overrides` names the *immediate* base, because that is the class whose
+        // model the override's vtable slot is typed at. It is not necessarily the class
+        // that *declared* the method: at depth three `Square.GetArea` overrides through
+        // `Quadrilateral`, which declares no `GetArea` of its own. So the contract is
+        // looked up by walking, and the two questions — whose model, and whose contract —
+        // are answered separately, which is what they always were.
+        var bases = declarations.OfType<IrClass>()
+            .Where(c => c.BaseClass is not null)
+            .ToDictionary(c => c.Name, c => c.BaseClass!);
 
         for (var i = 0; i < declarations.Count; i++)
         {
             if (declarations[i] is not IrMethod
                 { Overrides: { } baseName, DeclaringClass: not null } o) continue;
-            if (!byName.TryGetValue($"{baseName}_{Member(o)}", out var v)) continue;
+            IrMethod? found = null;
+            for (var at = baseName; at is not null; at = bases.TryGetValue(at, out var up) ? up : null)
+                if (byName.TryGetValue($"{at}_{Member(o)}", out var candidate))
+                {
+                    found = candidate;
+                    break;
+                }
+            if (found is not { } v) continue;
 
             if (o.Requires.Length + o.Ensures.Length + o.Preserves.Length > 0)
             {

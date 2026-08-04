@@ -2311,8 +2311,8 @@ predicate, and an invariant**, in that order:
 | Construct | Meaning |
 |---|---|
 | `class_C__vtbl` | one field per virtual method visible at `C`, at `C`'s model, plus `impl: Type`, `inv`, `share`, `gather` |
-| `class_C__obj` | `{ pkg: class_C__vtbl; rep: pkg.impl }`, plus `sub: Dn.dyn` **at the root only** |
-| `class_C` | `Dn.dyn` |
+| `class_C__obj` | `{ pkg: class_C__vtbl; rep: pkg.impl; sub: Dn.dyn }` — `sub` is R9.18's extension point |
+| `class_C` | `Dn.dyn` at the root; the parent's reference type at an intermediate class (R9.18) |
 | `class_C__at o p m` | `o.pkg.inv o.rep p m` — ownership of a *known* object record |
 | `class_C__inv s #p m` | `exists* o. pure (s == mkdyn (view o)) ** class_C__at o p m` |
 | `class_C__inv_at s o p m` | the same with the object record **named** |
@@ -2476,8 +2476,8 @@ the encoding cannot, because the derived object's invariant *becomes* the base's
 name is marked cast and its next use is **PALCS0548**. Converting a name the method does
 not own outright — its own receiver, or an object parameter — would give away the invariant
 R4.10 promises to return, and is **PALCS0549** at the conversion. What is left is
-**PALCS0546**, the conversion the hierarchy puts out of reach: more than one level at once,
-which would need one upcast per level and has not been probed. A cast *down* in expression
+**PALCS0546**, a conversion between two classes the hierarchy does not relate at all
+(R9.18c makes several levels at once ordinary). A cast *down* in expression
 position stays **PALCS0547**, because unlike the upcast it also binds the model equation
 the caller reasons with, and an equation needs a name.
 
@@ -2631,13 +2631,112 @@ declaration that asks for it, never a prediction about a proof:
 | a derived class that does not override its parent's `[Model]` | R9.6 |
 | a contract on an `override` | R9.7 |
 | a virtual method taking or returning a non-value | R9.9a |
-| an upcast anywhere but a base-typed local, or across more than one level | R9.15a |
+| an upcast anywhere but a base-typed local | R9.15a |
 | `interface`, multiple bases, generics | not probed |
-| a reference conversion across more than one level | PALCS0546, R9.15c |
 | a cast *down* in expression position | PALCS0547, R9.15c |
 | a use of a reference after it has been converted | PALCS0548, R9.15c |
-| converting this method's own receiver or object parameter | PALCS0549, R9.15c |
+| converting one of this method's own object parameters, the receiver included | PALCS0549, R9.15c |
 | `as`, `is`, a cast that may fail; `Pal.Is<T>` in a contract | R9.16 |
+
+### 9.10 Depth
+
+Everything above is stated for a hierarchy of two levels: an `abstract` root and its
+`sealed` leaves. C# hierarchies are deeper, and the class in the middle — `abstract class
+Quadrilateral : Shape`, with a model of its own, a virtual method of its own and leaves of
+its own — is not a staging post but a real abstraction that clients program against.
+
+**R9.18 — An intermediate class is emitted by the *same* rules as a root, over three
+primitives.** The whole of §9.3–§9.7 is written in terms of "the reference `s` denotes the
+object record `o`". Name that relation and give it a maker and a reader, and every other
+construct is byte-identical text at every depth:
+
+| Primitive | Root | Intermediate `Q : P` |
+|---|---|---|
+| `class_C__is s o : prop` | `s == Dn.mkdyn o` | `class_P__is s (class_Q__view o)` |
+| `class_C__ref o` → `s` | `Dn.mkdyn o` | `class_P__ref (class_Q__view o)` |
+| `class_C__obj_at s #o` → `o` | `CAs.recover s` | `class_P__obj_at s`, then `CAs.recover pob.sub` |
+
+`class_C__inv`, `class_C__inv_at`, `class_C__at`, `class_C__forget_impl`,
+`class_C__intro_at`, `class_C__elim_at`, `class_C__pack`, `class_C__unpack`, both
+dispatcher forms and share/gather are then *one* definition each, emitted unchanged for a
+root and for an intermediate class. Depth is therefore not a case in the emitter: there is
+one `EmitAbstract`, taking an optional parent.
+
+Three consequences are worth stating, because each was a design decision that could have
+gone the other way:
+
+* **The dyn is made once, at the root** (R9.8). `class_Q = class_P`, so a `Quadrilateral`
+  reference *is* a `Shape` reference — which is what makes the upcast a ghost step and
+  matches C#, where the conversion changes no bits.
+* **`sub` hangs off the object record, not off the vtable.** It holds
+  `Dn.mkdyn qo` — the record one level down, vtable *applied to* its representation — so
+  what a descendant recovers is a working object, not a package it would have to re-apply.
+  A direct leaf of the class stores `Dn.mkdyn ()`.
+* **`class_C` stays abstract in the `.fsti` at every depth** (R9.17). Transparency would
+  be needed only if a client crossed between two classes' reference types, and the only
+  crossings are R9.18's own casts, which live inside `Class_Q`.
+
+**R9.18a — Each edge emits a derived vtable, and its proof obligation is discharged by
+SMT.** `Q` gives `P` a package built from `Q`'s: `class_Q__as_P_pkg` keeps `impl`
+definitionally equal and replaces each inherited slot by a wrapper whose contract is stated
+at `P`'s model. The wrapper's obligation is exactly R9.19's re-reading — the inner slot's
+contract at `Q`'s model *is* the outer one composed with `class_Q__forget` — so the view's
+`pure (m == class_Q__forget own)` is all the prover needs, and no lemma is emitted.
+
+The ownership the wrapper is written over is `class_Q__as_P qp x p m`, a predicate over a
+*vtable and representation* rather than over `class_Q__inv`. That is not a stylistic
+choice: `class_Q__inv` is defined through `class_Q__is`, which is defined through `P`, so
+using it here would close a cycle.
+
+**R9.18b — Each edge emits two casts, and the upcast returns the reference it was
+given.** `class_Q__to_P_at`, `class_Q__to_P` and `class_Q__from_P` sit beside `Q` (there is
+no vtable module for an abstract class). The upcast is `elim_at`, fold `as_P`, rewrite,
+`class_P__intro_at` — it must *return `s`*, because building the result with
+`class_P__pack (class_Q__view qo)` would take `Dn.mkdyn` of an erased value, which does not
+extract. The downcast's postcondition is existential, `exists* own. inv_at r o p own **
+pure (m == class_Q__forget own)`, because forgetting is not injective: a `Shape` model does
+not determine the `Quadrilateral` it came from.
+
+**R9.18c — A conversion across several levels is the composition of the one-edge rules.**
+C# writes one conversion where the hierarchy has several edges; the emitter walks the
+chain and applies R9.15 (or R9.16) once per edge, in order. `Shape s = new Square(5);` and
+`Square sq = (Square) s;` are therefore ordinary, and the intermediate references are the
+same ones the reader would get by writing the steps out. No rule is added for depth.
+
+**R9.18d — A virtual call goes to the dispatcher of the receiver's *static* class; the
+member keeps the name its declaring class gave it.** `q.GetArea()` on a `Quadrilateral`
+must reach `Quadrilateral`'s wrapper, because a wrapper's contract and invariant are
+written at its own class's model and `Shape`'s would demand an invariant the caller does
+not hold. The *slot* reached is the same either way, which is why the slot's name comes
+from `DeclaringClass` and is stable all the way down. Concrete methods of an abstract class
+(R9.13) have bodies and no slot, so they are called directly even though the receiver is
+abstractly typed — "virtual" is decided by the `abstract` declaration (R9.12a) and never by
+the receiver's type.
+
+**R9.18e — Calling an `override` at the leaf's own static type opens R9.14's view.**
+R9.7 writes an override's contract at the base's model, so its receiver is owned through
+`class_L__as_B` and not `class_L__inv`. A caller naming the override directly — which is
+what `sq.Perimeter()` on a `Square` is — hands the receiver over the same way: `fold` the
+view at `class_L__forget own` before the call, `unfold` it after. It is the same two ghost
+steps R9.15 emits, for the same reason, and it is the rendering of "this reference is being
+used as a `B`", not a proof step.
+
+**R9.19 — An inherited observation is re-read by composing the forgetting functions along
+the chain.** `[Ensures("Result == @this.TheArea")]` is written once, on `Shape.GetArea`. At
+`Quadrilateral` it means `spec_Shape_TheArea (class_Quadrilateral__forget m)`; at `Square`,
+one more `class_Square__forget`. The spec emitter walks the base chain from the class the
+model belongs to up to the class the observation was declared on, and composes. This is
+R9.6 iterated, and it is what makes a base's contract mean something at every model below
+it.
+
+**R9.19a — A base's model must be strong enough to bound every subclass's
+representation.** `Quadrilateral`'s model is a bounding box, not `{Area, Perimeter}`, and
+`Shape.Double`'s precondition — `4 * Area` representable — bounds a square's side and a
+box's sides but says *nothing* about a perimeter. So `Rectangle` cannot carry a class
+invariant `2*(w+h) <= int.MaxValue`: no override of `Double` could re-establish it. The
+perimeter bound belongs where the C# already puts it, as a precondition of `Perimeter()`.
+That is a true statement about the program, and §0 rule 3 says the fix goes in the
+annotations, never in the emitter.
 
 ### 9.9 Status
 
@@ -2678,8 +2777,7 @@ and needed no emitter change — which is the §7.2 detector doing its job, and 
 of recording the conversion in the frontend rather than recognising it at one privileged
 site.
 
-Not yet implemented: depth ≥ 3 (the `sub: Dn.dyn` field of R9.9, designed in
-`DeepHierarchy.fst`), heterogeneous arrays — an array of a base type needs R6's array rules
+Not yet implemented: heterogeneous arrays — an array of a base type needs R6's array rules
 to carry an object invariant per element, which §6 has not probed — and the *cross-method*
 downcast, where the index travels in a contract (`Pal.Is<T>`) rather than within one body.
 
@@ -2688,3 +2786,28 @@ proof: the same fourteen client methods verify against `val class_Shape : Type0`
 verified against `Dn.dyn`, which is the evidence that nothing outside `Class_Shape` was
 depending on the encoding. The provenance lint now reads `.fsti` as well as `.fst`, so a
 construct cannot escape §7.2's detector by being declared rather than defined.
+
+**Depth three (R9.18/R9.19) is implemented and verified**, by `test/deep_hierarchy`:
+`Shape > Circle` and `Shape > Quadrilateral > {Square, Rectangle}`, where `Quadrilateral`
+is abstract, has a two-number model of its own, declares a virtual `Perimeter()` and a
+concrete `SemiPerimeter()` that calls it, and inherits `GetArea`/`Double`. The client
+programs at all three static types, dispatches an inherited virtual at the intermediate
+class, loops, converts at both edges and in one step across both, and casts back down one
+and two levels. `ShapesVariant.cs` is §7.2's detector and passes with no emitter change.
+
+`Rectangle` is depth three's `Circle`: a second leaf of the middle class with an unrelated
+representation, added after the emitter was complete, and it needed no emitter change —
+only the removal of a class invariant its base's contract could not support (R9.19a).
+
+Three defects the two-level suite could not see were fixed while building it, each in the
+scheme rather than in an example: a virtual call was going to the *declaring* class's
+wrapper rather than the receiver's (R9.18d); a call to an `override` at the leaf's own
+static type was not opening R9.14's view (R9.18e); and a concrete method of an abstract
+class was being taken for a vtable slot because the test was the name and not the
+`abstract` declaration (R9.12a). A fourth was a refusal that had been stated only for the
+receiver: converting *any* object parameter gives away an invariant the method's own
+postcondition owes back, so PALCS0549 now covers all of them, with
+`test/diagnostics/cases/UpcastParameter.cs` as the case.
+
+Depth four and beyond is supported by construction — every abstract class emits `sub`, the
+three primitives and, if it has a parent, a derived vtable and two casts — but is untested.

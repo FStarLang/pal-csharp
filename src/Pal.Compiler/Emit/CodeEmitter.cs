@@ -20,7 +20,9 @@ namespace Pal.Compiler.Emit;
 public sealed class CodeEmitter(
     SpecEmitter spec,
     DiagnosticBag diagnostics,
-    IReadOnlyDictionary<string, IrClass>? classes = null)
+    IReadOnlyDictionary<string, IrClass>? classes = null,
+    IReadOnlyDictionary<string, string>? overrides = null,
+    HashSet<string>? slots = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -57,6 +59,10 @@ public sealed class CodeEmitter(
     /// representation and may read and write fields.
     /// </summary>
     private ImmutableArray<Slot> _objects = ImmutableArray<Slot>.Empty;
+
+    // The slots that came from the signature. Their invariants appear in this method's
+    // own postcondition, so they are the ones a conversion may not give away (R9.15).
+    private ImmutableDictionary<string, Slot> _params = ImmutableDictionary<string, Slot>.Empty;
 
     /// <summary>
     /// R4.14. Objects allocated by this method. Their invariants are owned here and, unless
@@ -120,6 +126,7 @@ public sealed class CodeEmitter(
         // its invariant, not its representation. The receiver is the one object whose
         // fields this body may name at all (PALCS0523 refuses the rest), so the bracket
         // goes exactly where the field accesses are.
+        _params = plan.Slots;
         _objects = method.DeclaringClass is not null &&
                    plan.Slots.TryGetValue(Names.This, out var self) &&
                    self.Kind == SlotKind.Object
@@ -478,10 +485,24 @@ public sealed class CodeEmitter(
     }
 
 
-    /// <summary>R9.15. Whether <paramref name="derived"/>'s immediate base is <paramref name="baseName"/>.</summary>
-    private bool Extends(string? derived, string? baseName) =>
-        derived is not null && baseName is not null && classes is not null &&
-        classes.TryGetValue(derived, out var c) && c.BaseClass == baseName;
+    /// <summary>
+    /// R9.18. The base classes between <paramref name="derived"/> and
+    /// <paramref name="ancestor"/>, nearest first and <paramref name="ancestor"/> last, or
+    /// <c>null</c> if it is not one. The chain is what makes a conversion across several
+    /// levels the composition of the one-edge rule rather than a rule of its own.
+    /// </summary>
+    private ImmutableArray<string>? Ancestors(string? derived, string? ancestor)
+    {
+        if (derived is null || ancestor is null || classes is null) return null;
+        var chain = ImmutableArray.CreateBuilder<string>();
+        for (var at = derived; classes.TryGetValue(at, out var c) && c.BaseClass is { } up;)
+        {
+            chain.Add(up);
+            if (up == ancestor) return chain.ToImmutable();
+            at = up;
+        }
+        return null;
+    }
 
     /// <summary>
     /// R9.15. The upcast, wherever C# inserts a reference conversion: the object is held
@@ -500,52 +521,104 @@ public sealed class CodeEmitter(
     private Slot? Upcast(IrLoc loc, IrExpr operand, IrClassType target, string name, string binder)
     {
         var derived = (operand.Type as IrClassType)?.Name;
-        if (!Extends(derived, target.Name))
+
+        // R9.18. C# writes one conversion where the hierarchy has several edges, and the
+        // translation writes one per edge: a conversion to a base is the composition of the
+        // conversions along the chain, in order. That is the one-edge rule applied
+        // repeatedly and nothing else — the intermediate references are the same ones the
+        // reader would get by writing the conversions out.
+        if (Ancestors(derived, target.Name) is not { } chain)
         {
             diagnostics.Unsupported(loc,
                 $"Converting a `{derived}` to a `{target.Name}`",
-                "R9.15 inserts an upcast only from a class to its immediate base; " +
-                "a longer chain would need one upcast per level, which \u00a79 has not probed.");
+                "R9.15 converts a reference to a base class, and `" + target.Name +
+                "` is not one of `" + derived + "`'s.");
             return null;
         }
 
         string impl;
+        string? from = null;
         if (operand is IrVar v && Lookup(v.Name) is { Kind: SlotKind.Object } src)
         {
-            if (_objects.Any(o => o.Binder == src.Binder))
+            // R9.15. The conversion *moves* the invariant onto the base reference, and a
+            // parameter's invariant — the receiver's included — is owed back to the caller
+            // by this method's own postcondition. So converting one is not a proof this
+            // emitter is failing to find; it is a program whose specification cannot hold,
+            // and it is refused where it is written rather than left for Pulse to fail on
+            // an epilogue the reader never wrote.
+            if (_params.TryGetValue(v.Name, out var param) && param.Binder == src.Binder)
             {
                 diagnostics.Error("PALCS0549", loc,
-                    $"`{v.Name}` is this method's own object, and converting it to " +
+                    $"`{v.Name}` is a parameter of this method, and converting it to " +
                     $"`{target.Name}` would give away the invariant its specification " +
-                    "promises to return (R4.10). Allocate the base-typed reference from a " +
-                    "value this method owns outright.");
+                    "promises to return (R4.10). Take a `" + target.Name + "` parameter, " +
+                    "or convert a reference this method owns outright.");
                 return null;
             }
 
             impl = src.Binder;
+            from = src.Index;
             _slots[v.Name] = src with { Kind = SlotKind.Value, Index = null, Cast = target.Name };
             _objectLocals.RemoveAll(l => l.Binder == src.Binder);
         }
         else if (operand is IrCall { Kind: CalleeKind.Method } call) { impl = Fresh(); Call(call, impl); }
         else { impl = Fresh(); Line($"let {impl} = {Expr(operand)};"); }
 
+        Slot? slot = null;
+        var current = derived!;
+        for (var i = 0; i < chain.Length; i++)
+        {
+            var last = i == chain.Length - 1;
+            var step = last ? binder : Fresh();
+            slot = UpcastStep(current, impl, from, new IrClassType(chain[i]), last ? name : step, step);
+            impl = step;
+            from = slot.Index;
+            current = chain[i];
+        }
+        return slot;
+    }
+
+    /// <summary>R9.15, one edge: from <paramref name="derived"/> to its immediate base.</summary>
+    private Slot UpcastStep(
+        string derived, string impl, string? from, IrClassType target, string name, string binder)
+    {
+        var mod = Names.ClassModule(derived);
+
+        // R9.18. An *abstract* class's reference already is a reference: there is no
+        // representation to view and no vtable to build, and the conversion changes the
+        // invariant and not the value. So the whole of it is the cast R9.18 emits beside
+        // the class, and the only choice here is whether the object record is known.
+        if (classes is not null && classes[derived].IsAbstract)
+        {
+            if (from is null)
+            {
+                Line($"let {binder} = {mod}.{Names.UpcastTo(derived, target.Name)} {impl};");
+                return new Slot(name, target, SlotKind.Object, binder);
+            }
+            Line($"let {binder} = {mod}.{Names.UpcastToAt(derived, target.Name)} {impl} {from};");
+            return new Slot(name, target, SlotKind.Object, binder)
+            {
+                Index = $"(hide ({mod}.{Names.ClassView(derived)} (reveal {from})))",
+                Sub = from,
+            };
+        }
+
         // The view is folded at the forgetting of whatever model the value is held at,
         // which is the same expression R9.6 read off the `[Model]` override. Only the
         // prover can name that model, which is what the `with` is for: it is the naming
         // R9.6 needs, not a proof step.
         var own = FreshValue(name);
-        var mod = Names.ClassModule(derived!);
-        Line($"with {own}. assert ({mod}.{Names.ClassInv(derived!)} {impl} {own});");
-        Line($"fold ({mod}.{Names.ClassAsBase(derived!, target.Name)} {impl} " +
-             $"({mod}.{Names.ClassForget(derived!)} {own}));");
-        Line($"let {binder} = {Names.VtblModule(derived!)}." +
-             $"{Names.UpcastToAt(derived!, target.Name)} {impl};");
+        Line($"with {own}. assert ({mod}.{Names.ClassInv(derived)} {impl} {own});");
+        Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} " +
+             $"({mod}.{Names.ClassForget(derived)} {own}));");
+        Line($"let {binder} = {Names.VtblModule(derived)}." +
+             $"{Names.UpcastToAt(derived, target.Name)} {impl};");
 
         // R9.16. The conversion keeps the index, so the object record this reference
         // stands for stays known and a later cast back is provable. Where the plain
         // invariant is wanted instead, `Forget` drops it — one ghost step, at the point
         // that wants it, and nothing recovers it afterwards.
-        var index = $"(hide ({Names.VtblModule(derived!)}.{Names.ClassObjOf(derived!)} {impl}))";
+        var index = $"(hide ({Names.VtblModule(derived)}.{Names.ClassObjOf(derived)} {impl}))";
         return new Slot(name, target, SlotKind.Object, binder) { Index = index };
     }
 
@@ -577,44 +650,86 @@ public sealed class CodeEmitter(
     private void Downcast(IrLocalDecl d, IrClassType target, IrVar source, string binder)
     {
         if (Lookup(source.Name) is not { Kind: SlotKind.Object, Type: IrClassType from } obj ||
-            !Extends(target.Name, from.Name))
+            Ancestors(target.Name, from.Name) is not { } up)
         {
             diagnostics.Unsupported(d.Loc, $"Casting a `{Lookup(source.Name)?.Type}` to `{target.Name}`",
-                "R9.16 casts a reference to its immediate subclass and nothing else.");
+                "R9.16 casts a reference to a subclass, and `" + target.Name +
+                "` is not one of `" + Lookup(source.Name)?.Type + "`'s.");
             return;
         }
 
-        if (obj.Index is null)
+        // R9.18, mirroring R9.15's chain: a cast across several levels is the composition
+        // of the one-level casts, applied from the base downwards. Each recovers one
+        // record, and the knowledge each gives back is the knowledge the matching upcast
+        // kept — which is why the last one is the first that can name the leaf's model.
+        for (var i = up.Length - 2; i >= 0; i--)
         {
-            diagnostics.Error("PALCS0547", d.Loc,
+            var step = Fresh();
+            if (DowncastStep(d.Loc, obj, new IrClassType(up[i]), step, step) is not { } mid) return;
+            _slots[step] = mid;
+            _objectLocals.Add(mid);
+            obj = mid;
+        }
+
+        if (DowncastStep(d.Loc, obj, target, d.Name, binder) is not { } local) return;
+        _slots[d.Name] = local;
+        _objectLocals.Add(local);
+    }
+
+    /// <summary>R9.16, one edge: from <paramref name="obj"/>'s class to its immediate subclass.</summary>
+    private Slot? DowncastStep(IrLoc loc, Slot obj, IrClassType target, string name, string binder)
+    {
+        var source = obj;
+        var from = (IrClassType)obj.Type;
+
+        // R9.18. Casting down to an intermediate class needs the record *it* was upcast
+        // from, not the one the base reference is indexed by: they are different records,
+        // related by the view, and only the first says which quadrilateral this is.
+        if (classes is not null && classes[target.Name].IsAbstract ? obj.Sub is null : obj.Index is null)
+        {
+            diagnostics.Error("PALCS0547", loc,
                 $"`{source.Name}` is not known to be a `{target.Name}`, so this cast might " +
                 "throw. R9.16 proves only the casts whose runtime test is redundant: the " +
                 $"reference must have been converted from a `{target.Name}` in this method.");
-            return;
+            return null;
         }
 
         // The model the reference is held at has to be named before the cast: the view the
         // cast hands back is indexed by it, and only the prover knows what it is.
         var pre = FreshValue(source.Name);
         Line($"with {pre}. assert ({obj.Resource(pre)});");
-        Line($"let {binder} = {Names.VtblModule(target.Name)}." +
-             $"{Names.DowncastFrom(target.Name, from.Name)} {obj.Binder};");
 
-        var own = FreshValue(d.Name);
+        var own = FreshValue(name);
         var mod = Names.ClassModule(target.Name);
-        Line($"unfold ({mod}.{Names.ClassAsBase(target.Name, from.Name)} " +
-             $"{binder} {obj.PermArg}{pre});");
-        Line($"with {own}. assert ({mod}.{Names.ClassInv(target.Name)} {binder} {obj.PermArg}{own});");
+        string? sub = null;
+
+        // R9.18. Casting down to an *intermediate* class. The cast lives beside that class
+        // rather than in a vtable module, because there is no vtable: what is recovered is
+        // the object record the reference was upcast from, which the upcast kept, and the
+        // model comes back existentially because forgetting is not injective.
+        if (classes is not null && classes[target.Name].IsAbstract)
+        {
+            sub = obj.Sub;
+            Line($"let {binder} = {mod}.{Names.DowncastFrom(target.Name, from.Name)} {obj.Binder};");
+            Line($"with {own}. assert ({mod}.{Names.ClassInvAt(target.Name)} " +
+                 $"{binder} {sub} {obj.Fraction ?? "1.0R"} {own});");
+        }
+        else
+        {
+            Line($"let {binder} = {Names.VtblModule(target.Name)}." +
+                 $"{Names.DowncastFrom(target.Name, from.Name)} {obj.Binder};");
+            Line($"unfold ({mod}.{Names.ClassAsBase(target.Name, from.Name)} " +
+                 $"{binder} {obj.PermArg}{pre});");
+            Line($"with {own}. assert ({mod}.{Names.ClassInv(target.Name)} {binder} {obj.PermArg}{own});");
+        }
 
         // The base reference owns nothing now: its invariant *became* the derived one.
         // C# would let it be read again, so saying so is the emitter's job (PALCS0548).
         _slots[source.Name] = obj with { Kind = SlotKind.Value, Index = null, Cast = target.Name };
         _objectLocals.RemoveAll(s => s.Binder == obj.Binder);
 
-        var local = new Slot(d.Name, target, SlotKind.Object, binder)
-        { Fraction = obj.Fraction, PreModel = own, PostModel = own };
-        _slots[d.Name] = local;
-        _objectLocals.Add(local);
+        return new Slot(name, target, SlotKind.Object, binder)
+        { Fraction = obj.Fraction, PreModel = own, PostModel = own, Index = sub };
     }
 
     /// <summary>
@@ -872,7 +987,7 @@ public sealed class CodeEmitter(
                 if (d.Init is IrConvert { Target: IrClassType } conv)
                 {
                     var from = (conv.Operand.Type as IrClassType)?.Name;
-                    if (Extends(from, oc.Name))
+                    if (Ancestors(from, oc.Name) is not null)
                     {
                         if (Upcast(d.Loc, conv.Operand, oc, d.Name, binder) is { } up)
                         {
@@ -882,7 +997,7 @@ public sealed class CodeEmitter(
                         return;
                     }
 
-                    if (conv.Operand is IrVar source && Extends(oc.Name, from))
+                    if (conv.Operand is IrVar source && Ancestors(oc.Name, from) is not null)
                     {
                         Downcast(d, oc, source, binder);
                         return;
@@ -890,7 +1005,8 @@ public sealed class CodeEmitter(
 
                     diagnostics.Unsupported(d.Loc,
                         $"Converting a `{from}` to a `{oc.Name}`",
-                        "R9.15 converts between a class and its immediate base only.");
+                        "R9.15 converts a reference between a class and its bases; " +
+                        "these two are not related that way.");
                     return;
                 }
 
@@ -1578,7 +1694,8 @@ public sealed class CodeEmitter(
     /// <summary>Emits a call, binding its result to <paramref name="binder"/>.</summary>
     private string Call(IrCall call, string binder)
     {
-        var owner = PulseEmitter.DispatchOwner(classes, call.Callee);
+        var declared = PulseEmitter.DispatchOwner(classes, slots, call.Callee);
+        var owner = PulseEmitter.DispatchClass(classes, slots, call);
 
         // R9.16. An indexed reference is owned through `class_C__inv_at`, and that is what
         // a dispatching wrapper's `_at` form asks for; anything else — a base-typed
@@ -1600,14 +1717,63 @@ public sealed class CodeEmitter(
         // Nothing else about the call changes — the arguments, the implicit model binder
         // and the permission are found by the same rules as for a direct call, because
         // R9.9 gives the wrapper the same contract shape a direct method has.
+        // R9.18. The wrapper's class is the receiver's static one; the member's name is
+        // the one the class that declared it gave it, all the way down.
+        var member = declared is null ? "" : Names.Member(call.Callee, declared);
         var callee = owner is not null
             ? indexed
-                ? Names.DispatchAt(owner, Names.Member(call.Callee, owner))
-                : Names.Dispatch(owner, Names.Member(call.Callee, owner))
+                ? Names.DispatchAt(owner, member)
+                : Names.Dispatch(owner, member)
             : Names.Function(call.Callee);
+
+        // R9.7, on the calling side. An `override`'s contract is written at the model of
+        // the class that declared the method, so its receiver is owned through
+        // `class_C__as_B` — C's own invariant read at B's model — and not through
+        // `class_C__inv`. A caller naming the override directly, which is what a call at
+        // the leaf's own static type is, therefore has to hand the receiver over the same
+        // way. The bracket is R9.14's view, opened and closed around one call; it is the
+        // same two ghost steps R9.15's conversion emits, for the same reason, and it is
+        // not a proof step but the rendering of "this reference is being used as a B".
+        var view = Bracket(owner is null ? call : null, args);
+
         Line($"let {binder} = {callee} " +
              (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
+        Close(view);
         return binder;
+    }
+
+    /// <summary>
+    /// R9.7. Presents a direct call's receiver at the base model its <c>override</c>'s
+    /// contract is written at, and reports what has to be closed afterwards.
+    /// </summary>
+    private (Slot Slot, string Class, string Base)? Bracket(IrCall? call, ImmutableArray<string> args)
+    {
+        if (call is null || !call.HasReceiver || args.Length == 0) return null;
+        if (overrides is null || !overrides.TryGetValue(call.Callee, out var b)) return null;
+        if (SlotByBinder(args[0]) is not { } recv) return null;
+        // The method's own receiver is already open (R4.10) and already viewed at its base
+        // by the signature, so a call on `this` needs neither half of the bracket.
+        if (_objects.Any(o => o.Binder == recv.Binder)) return null;
+        if (recv.Type is not IrClassType k) return null;
+
+        var mod = Names.ClassModule(k.Name);
+        var own = FreshValue(k.Name);
+        Line($"with {own}. assert ({mod}.{Names.ClassInv(k.Name)} {recv.Binder} {recv.PermArg}{own});");
+        Line($"fold ({mod}.{Names.ClassAsBase(k.Name, b)} {recv.Binder} " +
+             $"{recv.PermArg}({mod}.{Names.ClassForget(k.Name)} {own}));");
+        return (recv, k.Name, b);
+    }
+
+    /// <summary>Closes <see cref="Bracket"/>, at whatever model the call left behind.</summary>
+    private void Close((Slot Slot, string Class, string Base)? view)
+    {
+        if (view is not { } v) return;
+        var mod = Names.ClassModule(v.Class);
+        var model = FreshValue(v.Class);
+        Line($"with {model}. assert ({mod}.{Names.ClassAsBase(v.Class, v.Base)} " +
+             $"{v.Slot.Binder} {v.Slot.PermArg}{model});");
+        Line($"unfold ({mod}.{Names.ClassAsBase(v.Class, v.Base)} " +
+             $"{v.Slot.Binder} {v.Slot.PermArg}{model});");
     }
 
     private string Unary(IrUnary u)
@@ -1684,7 +1850,7 @@ public sealed class CodeEmitter(
             // R9.15's conversion has a value, so it is an expression like any other. R9.16's
             // does too, but it also binds the *model equation* the caller reasons with, and
             // that equation needs a name — so the downcast stays a local declaration.
-            if (Extends((cv.Operand.Type as IrClassType)?.Name, target.Name))
+            if (Ancestors((cv.Operand.Type as IrClassType)?.Name, target.Name) is not null)
                 return UpcastExpr(cv, target);
 
             diagnostics.Error("PALCS0547", cv.Loc,

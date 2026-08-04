@@ -318,9 +318,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         // about the representation, which no caller can see.
         if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } owner && known.HasModel(owner))
         {
+            // R9.19. The *declaring* class, which at depth three need not be the receiver's
+            // static type: `q.TheArea` reads a `Shape` member off a `Quadrilateral`. The
+            // observation belongs to the class that declares it, and getting from the
+            // receiver's model to that class's is R9.6's forgetting, which the spec emitter
+            // composes. Recording the static type here instead would name a spec function
+            // that does not exist.
             if (symbol is not null && Declarations.Has(symbol, known.SpecAttribute))
                 return new IrObserve(
-                    loc, owner.Name, node.Name.Identifier.ValueText, Lower(node.Expression));
+                    loc, symbol.ContainingType?.Name ?? owner.Name,
+                    node.Name.Identifier.ValueText, Lower(node.Expression));
 
             diagnostics.Error("PALCS0523", loc,
                 $"`{node.Name.Identifier.ValueText}` is not a `[Spec]` member of `{owner.Name}`, so a " +

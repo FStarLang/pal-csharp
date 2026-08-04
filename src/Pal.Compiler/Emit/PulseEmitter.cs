@@ -103,6 +103,15 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     public string? Index { get; init; }
 
     /// <summary>
+    /// R9.18. For a reference upcast from an *intermediate* class: the object record one
+    /// level down — the index the source was held at. <see cref="Index"/> is that record
+    /// seen as the base's, and the two are related by the view, so a cast back to the
+    /// intermediate class recovers this one. Null for a reference whose dynamic type is a
+    /// direct subclass of its static one, where the two coincide.
+    /// </summary>
+    public string? Sub { get; init; }
+
+    /// <summary>
     /// R9.16. The class this reference was cast to. C# leaves the base name usable after
     /// a cast; the encoding does not, because the cast <em>moved</em> the invariant onto
     /// the derived reference. A later mention is reported against the C#.
@@ -155,6 +164,23 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private Dictionary<string, IrClass> _classes = [];
     private readonly HierarchyEmitter _hierarchy = new(new SpecEmitter(diagnostics), diagnostics);
 
+    /// <summary>
+    /// R9.7. For each <c>override</c>, the class whose model its contract is written at.
+    /// The body of an override is typed against <c>class_C__as_B</c> rather than
+    /// <c>class_C__inv</c> (see <c>MethodPlan</c>), so a caller naming it directly — which
+    /// is what a call at the leaf's own static type is — has to present the receiver the
+    /// same way.
+    /// </summary>
+    private Dictionary<string, string> _overrides = [];
+
+    /// <summary>
+    /// R9.12. The names of the <c>abstract</c> methods — the vtable slots. A call is
+    /// virtual exactly when it resolves to one of these: a <em>concrete</em> method of an
+    /// abstract class (R9.13) has a body, a <c>Func_</c> module and no slot, so it is
+    /// called directly even though its receiver is abstractly typed.
+    /// </summary>
+    private HashSet<string> _slots = [];
+
     /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
     private ILookup<string, IrMethod> _virtuals =
         Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
@@ -163,9 +189,22 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
         _classes = program.Declarations.OfType<IrClass>().ToDictionary(c => c.Name);
+        // R9.19. Both spec emitters need the base chain, to compose R9.6's forgetting when
+        // an observation is read off a model further down the hierarchy than it was
+        // declared. There is one hierarchy per program, so it is computed once.
+        var bases = _classes.Values
+            .Where(c => c.BaseClass is not null)
+            .ToDictionary(c => c.Name, c => c.BaseClass!);
+        _spec.Bases = bases;
+        _hierarchy.Bases = bases;
         _virtuals = program.Declarations.OfType<IrMethod>()
             .Where(m => m is { IsAbstract: true, DeclaringClass: not null })
             .ToLookup(m => m.DeclaringClass!);
+        _slots = [.. program.Declarations.OfType<IrMethod>()
+            .Where(m => m.IsAbstract).Select(m => m.Name)];
+        _overrides = program.Declarations.OfType<IrMethod>()
+            .Where(m => m.Overrides is not null)
+            .ToDictionary(m => m.Name, m => m.Overrides!);
         foreach (var decl in program.Declarations)
         {
             var module = decl switch
@@ -224,19 +263,40 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvAt(ab.Name), decl.Loc),
                     new Provenance(Names.ClassForgetImpl(ab.Name), decl.Loc),
                     new Provenance(Names.ClassBox(ab.Name), decl.Loc),
-                    new Provenance(Names.ClassRep(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassIs(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassRef(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassObjAt(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassIntroAt(ab.Name), decl.Loc),
+                    new Provenance(Names.ClassElimAt(ab.Name), decl.Loc),
                     new Provenance(Names.ClassPack(ab.Name), decl.Loc),
                     new Provenance(Names.ClassUnpack(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name) + "_at", decl.Loc),
                     new Provenance(Names.ClassInvShare(ab.Name), decl.Loc),
                     new Provenance(Names.ClassInvGather(ab.Name) + "_at", decl.Loc),
-                    .. _virtuals[ab.Name].SelectMany(v => new[]
+                    .. Visible(ab).SelectMany(v => new[]
                     {
-                        new Provenance(Names.DispatchAt(ab.Name, Names.Member(v.Name, ab.Name)), v.Loc),
-                        new Provenance(Names.Dispatch(ab.Name, Names.Member(v.Name, ab.Name)), v.Loc),
+                        new Provenance(Names.DispatchAt(ab.Name, Names.Member(v.Name, v.DeclaringClass!)), v.Loc),
+                        new Provenance(Names.Dispatch(ab.Name, Names.Member(v.Name, v.DeclaringClass!)), v.Loc),
                     }),
                     .. ab.Observations.Select(o =>
                         new Provenance(Names.Observation(ab.Name, o.Name), o.Loc)),
+                    // R9.18. An intermediate class adds the derived vtable that presents it
+                    // as its parent, and the two casts across that one edge.
+                    .. ab.BaseClass is not { } sup ? ImmutableArray<Provenance>.Empty :
+                    [
+                        new Provenance(Names.ClassForget(ab.Name), decl.Loc),
+                        new Provenance(Names.ClassAsBase(ab.Name, sup), decl.Loc),
+                        new Provenance(Names.ClassBasePkg(ab.Name, sup), decl.Loc),
+                        new Provenance(Names.ClassView(ab.Name), decl.Loc),
+                        new Provenance(Names.ClassPkgSlot(ab.Name, "share"), decl.Loc),
+                        new Provenance(Names.ClassPkgSlot(ab.Name, "gather"), decl.Loc),
+                        new Provenance(Names.UpcastToAt(ab.Name, sup), decl.Loc),
+                        new Provenance(Names.UpcastTo(ab.Name, sup), decl.Loc),
+                        new Provenance(Names.DowncastFrom(ab.Name, sup), decl.Loc),
+                        .. Visible(_classes[sup]).Select(v =>
+                            new Provenance(
+                                Names.ClassPkgSlot(ab.Name, Names.Member(v.Name, v.DeclaringClass!)), v.Loc)),
+                    ],
                 ],
                 IrClass cl =>
                 [
@@ -279,7 +339,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 var overrides = program.Declarations.OfType<IrMethod>()
                     .Where(m => m.DeclaringClass == leaf.Name && m.Overrides is not null)
                     .ToImmutableArray();
-                var vtbl = _hierarchy.EmitVtbl(leaf, super, [.. _virtuals[baseName]], overrides);
+                var vtbl = _hierarchy.EmitVtbl(leaf, super, Visible(super), overrides);
                 modules.Add(new EmittedModule(Names.VtblModule(leaf.Name), vtbl.Impl)
                 {
                     Interface = vtbl.Iface,
@@ -303,8 +363,24 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private EmittedModule EmitAbstractClass(IrClass c)
     {
-        var (iface, impl) = _hierarchy.EmitAbstract(c, [.. _virtuals[c.Name]]);
+        var parent = c.BaseClass is { } b && _classes.TryGetValue(b, out var super) ? super : null;
+        var (iface, impl) = _hierarchy.EmitAbstract(
+            c, parent, parent is null ? [] : Visible(parent), [.. _virtuals[c.Name]]);
         return new EmittedModule(Names.ClassModule(c.Name), impl) { Interface = iface };
+    }
+
+    /// <summary>
+    /// R9.18. The virtual methods a class dispatches: its ancestors' first, in the order
+    /// they were declared, then its own. It is the order the vtable type declares its
+    /// slots in, and every subclass — however deep — fills that one vtable, so the order
+    /// has to be a function of the class alone and not of who is asking.
+    /// </summary>
+    private ImmutableArray<IrMethod> Visible(IrClass c)
+    {
+        var result = ImmutableArray.CreateBuilder<IrMethod>();
+        if (c.BaseClass is { } b && _classes.TryGetValue(b, out var super)) result.AddRange(Visible(super));
+        result.AddRange(_virtuals[c.Name].Where(HierarchyEmitter.Admissible));
+        return result.ToImmutable();
     }
 
     // =======================================================================
@@ -801,7 +877,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     private EmittedModule EmitMethod(IrMethod method)
     {
-        var body = new CodeEmitter(_spec, diagnostics, _classes);
+        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots);
         var plan = new MethodPlan(method, _spec, diagnostics);
 
         var sb = new StringBuilder();
@@ -895,11 +971,37 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// and goes to the wrapper in <c>Class_Shape</c> rather than to a <c>Func_</c> module
     /// that does not exist — an abstract method has no body to put in one.
     /// </summary>
-    public static string? DispatchOwner(IReadOnlyDictionary<string, IrClass>? classes, string callee) =>
-        classes?.Values
-            .FirstOrDefault(c => c.IsAbstract &&
-                                 callee.StartsWith(c.Name + "_", StringComparison.Ordinal))
-            ?.Name;
+    public static string? DispatchOwner(
+        IReadOnlyDictionary<string, IrClass>? classes, HashSet<string>? slots, string callee) =>
+        slots is null || !slots.Contains(callee)
+            ? null
+            : classes?.Values
+                .FirstOrDefault(c => c.IsAbstract &&
+                                     callee.StartsWith(c.Name + "_", StringComparison.Ordinal))
+                ?.Name;
+
+    /// <summary>
+    /// R9.18. Whose dispatching wrapper a virtual call goes to: the class the receiver is
+    /// <em>statically</em> typed at, which at depth three need not be the class that
+    /// declared the method.
+    ///
+    /// <para>The two differ for an inherited virtual called through an intermediate class,
+    /// and the difference is not cosmetic: a wrapper's contract and invariant are written
+    /// at its own class's model, so <c>q.GetArea()</c> on a <c>Quadrilateral</c> must go to
+    /// <c>Quadrilateral</c>'s wrapper — <c>Shape</c>'s would demand a <c>Shape</c>
+    /// invariant the caller does not hold. The <em>slot</em> reached is the same one either
+    /// way, which is why the method still keeps the name it was declared with (R9.18).</para>
+    /// </summary>
+    public static string? DispatchClass(
+        IReadOnlyDictionary<string, IrClass>? classes, HashSet<string>? slots, IrCall call)
+    {
+        if (DispatchOwner(classes, slots, call.Callee) is not { } declared) return null;
+        return call.HasReceiver && call.Args.Length > 0 &&
+               call.Args[0].Type is IrClassType receiver && classes is not null &&
+               classes.TryGetValue(receiver.Name, out var k) && k.IsAbstract
+            ? receiver.Name
+            : declared;
+    }
 
     private ImmutableArray<string> Dependencies(
         string self, IrStmt? body, params IEnumerable<IrExpr>[] specifications)
@@ -938,7 +1040,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrCall c:
                     names.Add(c.Kind is CalleeKind.Spec or CalleeKind.Lemma
                         ? Names.SpecModule(c.Callee)
-                        : DispatchOwner(_classes, c.Callee) is { } owner
+                        : DispatchClass(_classes, _slots, c) is { } owner
                             ? Names.ClassModule(owner)
                             : Names.FunctionModule(c.Callee));
                     foreach (var a in c.Args) CollectExpr(a);
