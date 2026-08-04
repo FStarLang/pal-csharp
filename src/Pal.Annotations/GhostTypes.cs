@@ -121,3 +121,100 @@ public readonly struct SlProp
     /// <summary>Separating conjunction (Pulse <c>**</c>).</summary>
     public static SlProp operator *(SlProp left, SlProp right) => throw Ghost();
 }
+
+/// <summary>
+/// A ghost inductive list, translated to F*'s <c>list</c> (R10.5).
+/// </summary>
+/// <remarks>
+/// Its purpose is to be the <em>model</em> of a recursive class. The <c>[Model]</c> member
+/// of a class with a <c>C? next</c> field is written as a constructor application over the
+/// fields — <c>SpecList.Cons(value, next.Items)</c> — and the translator reads that
+/// equation backwards to obtain the class's inductive ownership predicate. The user never
+/// writes the predicate, and never writes the lemmas that take it apart.
+/// </remarks>
+public readonly struct SpecList<T>
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecList<T> is a specification-only construct and has no runtime meaning.");
+
+    /// <summary>The number of elements, F*'s <c>List.Tot.length</c>.</summary>
+    public SpecInt Length => throw Ghost();
+
+    /// <summary>True of the empty list.</summary>
+    public bool IsEmpty => throw Ghost();
+
+    /// <summary>The first element; specification-only, and meaningful only when non-empty.</summary>
+    public T Head => throw Ghost();
+
+    /// <summary>Everything but the first element.</summary>
+    public SpecList<T> Tail => throw Ghost();
+
+    public T this[SpecInt index] => throw Ghost();
+
+    public static bool operator ==(SpecList<T> a, SpecList<T> b) => throw Ghost();
+    public static bool operator !=(SpecList<T> a, SpecList<T> b) => throw Ghost();
+
+    public override bool Equals(object? obj) => throw Ghost();
+    public override int GetHashCode() => throw Ghost();
+}
+
+/// <summary>The constructors of <see cref="SpecList{T}"/>.</summary>
+public static class SpecList
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecList is a specification-only construct and has no runtime meaning.");
+
+    /// <summary>The empty list, F*'s <c>[]</c>. What a null reference denotes (R10.5).</summary>
+    public static SpecList<T> Empty<T>() => throw Ghost();
+
+    /// <summary>F*'s <c>hd :: tl</c>.</summary>
+    public static SpecList<T> Cons<T>(T head, SpecList<T> tail) => throw Ghost();
+
+    /// <summary>F*'s <c>List.Tot.append</c>.</summary>
+    public static SpecList<T> Append<T>(SpecList<T> left, SpecList<T> right) => throw Ghost();
+}
+
+/// <summary>
+/// A ghost binary tree, translated to <c>Pulse.Lib.CSharp.Tree.tree</c> (R10.5).
+/// The model of a class with two recursive fields.
+/// </summary>
+public readonly struct SpecTree<T>
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecTree<T> is a specification-only construct and has no runtime meaning.");
+
+    /// <summary>The number of interior nodes.</summary>
+    public SpecInt Size => throw Ghost();
+
+    /// <summary>True of the empty tree.</summary>
+    public bool IsLeaf => throw Ghost();
+
+    public static bool operator ==(SpecTree<T> a, SpecTree<T> b) => throw Ghost();
+    public static bool operator !=(SpecTree<T> a, SpecTree<T> b) => throw Ghost();
+
+    public override bool Equals(object? obj) => throw Ghost();
+    public override int GetHashCode() => throw Ghost();
+}
+
+/// <summary>The constructors of <see cref="SpecTree{T}"/>.</summary>
+public static class SpecTree
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecTree is a specification-only construct and has no runtime meaning.");
+
+    /// <summary>The empty tree. What a null reference denotes (R10.5).</summary>
+    public static SpecTree<T> Leaf<T>() => throw Ghost();
+
+    /// <summary>An interior node.</summary>
+    public static SpecTree<T> Branch<T>(SpecTree<T> left, T value, SpecTree<T> right) =>
+        throw Ghost();
+
+    /// <summary>
+    /// Binary-search-tree insertion, <c>Pulse.Lib.CSharp.Tree.insert_int</c>. It is the
+    /// <em>model</em> of the destructive operation, supplied by the library rather than
+    /// written as a user <c>[Spec]</c> function, so that a C# implementation can be proved
+    /// equal to it.
+    /// </summary>
+    public static SpecTree<SpecInt> Insert(SpecTree<SpecInt> tree, SpecInt value) =>
+        throw Ghost();
+}

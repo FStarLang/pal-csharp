@@ -81,9 +81,30 @@ public sealed record IrGhostType(IrType Inner) : IrType
 /// A reference to a translated <c>class</c> (R3.8): a <c>Box.box</c> of the class's
 /// representation, carrying an invariant and a model rather than a value.
 /// </summary>
-public sealed record IrClassType(string Name) : IrType
+public sealed record IrClassType(string Name, bool Nullable = false) : IrType
 {
-    protected override string Describe() => Name;
+    protected override string Describe() => Nullable ? Name + "?" : Name;
+
+    /// <summary>R10.2. The same class, held through an <c>option</c>.</summary>
+    public IrClassType AsNullable => Nullable ? this : this with { Nullable = true };
+
+    /// <summary>The non-null form, which R10.3a derives the nullable one from.</summary>
+    public IrClassType AsNonNull => Nullable ? this with { Nullable = false } : this;
+}
+
+/// <summary>The spec-only inductive list <c>SpecList&lt;T&gt;</c> (R10.5), F*'s <c>list</c>.</summary>
+public sealed record IrSpecListType(IrType Element) : IrType
+{
+    protected override string Describe() => $"SpecList<{Element}>";
+}
+
+/// <summary>
+/// The spec-only inductive tree <c>SpecTree&lt;T&gt;</c> (R10.5),
+/// <c>Pulse.Lib.CSharp.Tree.tree</c>.
+/// </summary>
+public sealed record IrSpecTreeType(IrType Element) : IrType
+{
+    protected override string Describe() => $"SpecTree<{Element}>";
 }
 
 public sealed record IrNamedType(string Name) : IrType
@@ -119,6 +140,27 @@ public abstract record IrExpr(IrLoc Loc)
 }
 
 public sealed record IrLiteral(IrLoc Loc, object? Value) : IrExpr(Loc);
+
+/// <summary>
+/// The <c>null</c> literal (R10.2). A distinct node rather than an <see cref="IrLiteral"/>
+/// with a null value, because that is also what a lowering error produces, and the two must
+/// not be confused.
+/// </summary>
+public sealed record IrNull(IrLoc Loc) : IrExpr(Loc);
+
+/// <summary>
+/// An operation on the ghost inductive list <c>SpecList&lt;T&gt;</c> (R10.5).
+/// <see cref="ListOpKind.Empty"/> and <see cref="ListOpKind.Cons"/> are its constructors,
+/// and it is those two that R10.5 reads a recursive class's invariant off.
+/// </summary>
+public enum ListOpKind { Empty, Cons, Append, Length, Head, Tail, Index, IsEmpty }
+
+public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+
+/// <summary>An operation on the ghost inductive tree <c>SpecTree&lt;T&gt;</c> (R10.5).</summary>
+public enum TreeOpKind { Leaf, Branch, Size, Elements, IsLeaf, Insert }
+
+public sealed record IrTreeOp(IrLoc Loc, TreeOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
 
 /// <summary>A read of a local, parameter, or ghost binder.</summary>
 public sealed record IrVar(IrLoc Loc, string Name) : IrExpr(Loc);
@@ -405,7 +447,39 @@ public sealed record IrSpecFunction(
     public IrExpr? Decreases { get; init; }
 }
 
-public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type);
+public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
+{
+    /// <summary>R10.10. A back pointer: constrained by the invariant, not owned by it.</summary>
+    public bool IsBackward { get; init; }
+}
+
+/// <summary>One argument of a recursive class's model constructor (R10.5).</summary>
+public abstract record IrRecArg;
+
+/// <summary>An argument that is a pure expression over the non-recursive fields.</summary>
+public sealed record IrRecPure(IrExpr Value) : IrRecArg;
+
+/// <summary>An argument that is a recursive field's own model, <c>f.M</c>.</summary>
+public sealed record IrRecField(string Field) : IrRecArg;
+
+/// <summary>Which inductive spec type a recursive class is modelled by (R10.5).</summary>
+public enum RecursiveShape { List, Tree }
+
+/// <summary>
+/// R10.5. The induction the emitter reads off a recursive class's <c>[Model]</c> member:
+/// the constructor's arguments, in order, each either pure or a recursive field. This is
+/// the whole of what §10 extracts from the user's notation — the predicate, the six case
+/// lemmas and the recursive share/gather are all functions of it.
+/// </summary>
+public sealed record IrRecursion(
+    RecursiveShape Shape,
+    ImmutableArray<IrRecArg> Args,
+    string? BackwardField)
+{
+    /// <summary>The recursive fields, in constructor-argument order.</summary>
+    public ImmutableArray<string> RecursiveFields =>
+        [.. Args.OfType<IrRecField>().Select(a => a.Field)];
+}
 
 /// <summary>A struct: emitted as <c>Struct_&lt;Name&gt;.fst</c> (R3.4).</summary>
 public sealed record IrStruct(
@@ -484,6 +558,13 @@ public sealed record IrClass(
 
     /// <summary>True when this class participates in the M3 encoding rather than M2's.</summary>
     public bool InHierarchy => IsAbstract || BaseClass is not null;
+
+    /// <summary>
+    /// R10.5. Non-null when the class has a field of its own nullable type, in which case
+    /// the invariant is an induction (R10.3) rather than a flat <c>exists*</c>, and
+    /// <see cref="ModelBody"/> is not used: the induction replaces it.
+    /// </summary>
+    public IrRecursion? Recursion { get; init; }
 }
 
 /// <summary>Raw Pulse pulled in via <c>[assembly: IncludePulse]</c>.</summary>

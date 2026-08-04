@@ -44,15 +44,47 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// </summary>
     public ImmutableHashSet<string> ObjectFields { get; init; } = [];
 
+    /// <summary>
+    /// R10.2. The type a name was *declared* at, which for a nullable reference is not the
+    /// type the expression has: C#'s flow analysis narrows `t` to non-null inside the
+    /// `else` of a null test, and rightly so. The encoding cannot follow it there — the
+    /// reference is an `option` for its whole life, and what the test bought is the
+    /// contents of R10.7's window, not a different type. So a name is typed by its
+    /// declaration and nothing else.
+    /// </summary>
+    private IrType? Declared(ExpressionSyntax node)
+    {
+        if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
+        var symbol = model.GetSymbolInfo(node).Symbol;
+        var declared = symbol switch
+        {
+            ILocalSymbol l => l.Type,
+            IParameterSymbol p => p.Type,
+            IFieldSymbol f => f.Type,
+            _ => null,
+        };
+        return declared is null ? null : known.MapType(declared);
+    }
+
     public IrExpr Lower(ExpressionSyntax node)
     {
         var loc = Locations.From(node);
         var info = model.GetTypeInfo(node);
-        var type = known.MapType(info.Type);
+        // R10.2. `null` has no type of its own; what it denotes is fixed by the context,
+        // and that is the only thing that says *which* class's `None` this is.
+        var type = Declared(node) ?? known.MapType(info.Type)
+            ?? (node.IsKind(SyntaxKind.NullLiteralExpression) ? known.MapType(info.ConvertedType) : null);
 
         IrExpr result = node switch
         {
             ParenthesizedExpressionSyntax p => Lower(p.Expression),
+            // R10.5. `e!` is C#'s null-forgiving operator: it changes what the *C#*
+            // compiler's flow analysis believes and nothing else. It is how a model
+            // expression says that reading through a nullable reference is deliberate —
+            // a null one denotes the empty structure — so it is transparent here, exactly
+            // as parentheses are.
+            PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn
+                => Lower(sn.Operand),
             // `default` and `default(T)` are the same expression; both must be matched
             // before the general literal case, which would otherwise see a token with
             // no value and produce a nonsense constant.
@@ -248,7 +280,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     }
 
     private static IrExpr LowerLiteral(LiteralExpressionSyntax node, IrLoc loc) =>
-        new IrLiteral(loc, node.Token.Value);
+        // R10.2. `null` is `None`, and it is a node of its own: an `IrLiteral` at a null
+        // value is what a failed lowering produces, and the two must never be confused.
+        node.IsKind(SyntaxKind.NullLiteralExpression)
+            ? new IrNull(loc)
+            : new IrLiteral(loc, node.Token.Value);
 
     /// <summary>R3.5. <c>default</c> at any translatable type.</summary>
     private IrExpr Default(ExpressionSyntax node, IrLoc loc)
@@ -285,6 +321,35 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+
+        // R10.5. The ghost inductive types' observations. They are recognised by symbol,
+        // before any class rule, because `SpecList<T>` is a struct and would otherwise
+        // fall through to the struct-field rule.
+        if (known.IsSpecList(receiverType))
+        {
+            var op = node.Name.Identifier.ValueText switch
+            {
+                "Length" => ListOpKind.Length,
+                "IsEmpty" => ListOpKind.IsEmpty,
+                "Head" => ListOpKind.Head,
+                "Tail" => ListOpKind.Tail,
+                _ => (ListOpKind?)null,
+            };
+            if (op is null) return Unsupported(node, loc);
+            return new IrListOp(loc, op.Value, [Lower(node.Expression)]);
+        }
+
+        if (known.IsSpecTree(receiverType))
+        {
+            var op = node.Name.Identifier.ValueText switch
+            {
+                "Size" => TreeOpKind.Size,
+                "IsLeaf" => TreeOpKind.IsLeaf,
+                _ => (TreeOpKind?)null,
+            };
+            if (op is null) return Unsupported(node, loc);
+            return new IrTreeOp(loc, op.Value, [Lower(node.Expression)]);
+        }
 
         // `a.Length` on a real array is a pure function of the array (doc §3, R3.3).
         if (node.Name.Identifier.ValueText == "Length" && receiverType is IArrayTypeSymbol)
@@ -324,10 +389,29 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             // receiver's model to that class's is R9.6's forgetting, which the spec emitter
             // composes. Recording the static type here instead would name a spec function
             // that does not exist.
+            // R10.5. Reading the `[Model]` member off a reference *is* the model — that
+            // is what the model member means. It is how a recursive class's abstraction
+            // names its sub-model (`next.Items`), and it is sound anywhere: the model is
+            // exactly what a caller holds.
+            if (symbol is not null && Declarations.Has(symbol, known.ModelAttribute))
+                return Lower(node.Expression);
+
             if (symbol is not null && Declarations.Has(symbol, known.SpecAttribute))
                 return new IrObserve(
                     loc, symbol.ContainingType?.Name ?? owner.Name,
                     node.Name.Identifier.ValueText, Lower(node.Expression));
+
+            // R10.8. A recursive class's fields *are* reachable from outside it, because
+            // the window R10.7 opens is one the client's own null test opened: `elim_cons`
+            // hands back the head cell, so between the test and the end of the branch the
+            // representation is as available to a client as it is to a method of the class.
+            // This is the C# a linked list is actually written in — the traversal is not a
+            // method of the node, and the node's fields are `internal` for exactly this
+            // reason. Outside a window the emitter refuses (PALCS0567); it does not have to
+            // be refused here, because the reference is still an `option` there and there
+            // is nothing to project.
+            if (symbol is IFieldSymbol { IsStatic: false } && WellKnown.IsRecursive(owner))
+                return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
 
             diagnostics.Error("PALCS0523", loc,
                 $"`{node.Name.Identifier.ValueText}` is not a `[Spec]` member of `{owner.Name}`, so a " +
@@ -350,6 +434,9 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var receiver = Lower(node.Expression);
         var index = Lower(node.ArgumentList.Arguments[0].Expression);
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+
+        if (known.IsSpecList(receiverType))
+            return new IrListOp(loc, ListOpKind.Index, [receiver, index]);
 
         return known.IsSeq(receiverType)
             ? new IrSeqOp(loc, SeqOpKind.Index, [receiver, index])
@@ -422,6 +509,36 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+
+        // R10.5. The constructors and operations of the ghost inductive types. They are
+        // static methods on `SpecList`/`SpecTree`, recognised by containing type so that
+        // `using static` and qualification make no difference.
+        if (SymbolEqualityComparer.Default.Equals(method.ContainingType, known.SpecListOps))
+        {
+            var op = method.Name switch
+            {
+                "Empty" => ListOpKind.Empty,
+                "Cons" => ListOpKind.Cons,
+                "Append" => ListOpKind.Append,
+                _ => (ListOpKind?)null,
+            };
+            if (op is null) return Unsupported(node, loc);
+            return new IrListOp(loc, op.Value, [.. args.Select(a => Lower(a.Expression))]);
+        }
+
+        if (SymbolEqualityComparer.Default.Equals(method.ContainingType, known.SpecTreeOps))
+        {
+            var op = method.Name switch
+            {
+                "Leaf" => TreeOpKind.Leaf,
+                "Branch" => TreeOpKind.Branch,
+                "Elements" => TreeOpKind.Elements,
+                "Insert" => TreeOpKind.Insert,
+                _ => (TreeOpKind?)null,
+            };
+            if (op is null) return Unsupported(node, loc);
+            return new IrTreeOp(loc, op.Value, [.. args.Select(a => Lower(a.Expression))]);
+        }
 
         var kind = Declarations.KindOf(method, known);
         if (kind is null)

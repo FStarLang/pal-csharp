@@ -91,6 +91,15 @@ The rules below depend on the following, each **verified against the pinned tool
 | F26 | Generalising a **read-only** method over the permission is a *pure* generalisation: a caller holding full ownership calls it unchanged, because Pulse instantiates the binder at `1.0R`. It is also **necessary for composition** — R3.10c propagates the outer fraction into a sub-object's invariant, so an owner's reader can only call its parts' readers if those are generalised too. | `test/pulse_facts/ObjectFacts.fst:frac_peek`, `frac_full_owner_reads`, `frac_outer_peek`, verified. Relied on by R4.11b. |
 | F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
 | F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
+| F35 | A `type … and …` group may **mix a record definition with a type abbreviation**, so a recursive class's representation, its reference type and its nullable form come out as one mutually recursive group and nothing new is needed to tie the knot. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.LinkedList.fst:14-16`; `test/pulse_facts/RecursiveFacts.fst:class_Node__raw`, verified. Relied on by R10.1. |
+| F36 | An inductive ownership predicate must recurse on the **model**, not on the reference. By cases on the reference there is no measure F\* can see, because the sub-model is related to the model by a `pure` equation rather than by a pattern; by cases on the model the sub-model *is* a sub-term and `decreases m` is discharged with nothing written by the user. | `test/pulse_facts/RecursiveFacts.fst:class_Node__inv_opt`, verified. This is the fact that fixes §10's whole shape, and the reason R10.5 asks for the model as a function of the fields. |
+| F37 | The five case lemmas of R10.4 are provable from the definition alone, and are placed by the **null test the C# already writes**. R4.10 opens a window around a field access; R10.6 opens the same window around the `else` branch of a null test. | `test/pulse_facts/RecursiveFacts.fst:class_Node__nil_case`, `elim_nil`, `intro_nil`, `elim_cons`, `intro_cons`, `cases`, all verified. Relied on by R10.4 and R10.6. |
+| F38 | `decreases` on an **erased** model binder is accepted for a `fn rec`, and the recursive call's obligation is discharged by SMT from the `pure (m == hd :: tl)` that `elim_cons` hands back. So a recursive method needs no measure beyond naming its model. | `test/pulse_facts/RecursiveFacts.fst:func_Lists_Length`, `func_Trees_Size`, verified. Relied on by R10.6. |
+| F39 | The ordinary field-write idiom (R3.12's `B.op_Colon_Equals var ({ t with … })`) composes with R10.4 unchanged: the window opened by a null test is exactly the window a field write needs. This is what makes a **destructive** traversal — `Append`, an in-place BST insert — verifiable. | `test/pulse_facts/RecursiveFacts.fst:func_Lists_Append`, `func_Trees_Insert`, verified. Relied on by R10.6b. |
+| F40 | R3.10d's `share`/`gather` survive the induction: a `ghost fn rec` recursing on the model proves both, using the class's own case lemmas rather than `unfold`. | `test/pulse_facts/RecursiveFacts.fst:class_Node__inv_opt_share`, `class_Node__inv_opt_gather`, verified. Relied on by R10.7. |
+| F41 | R3.10b — "a field of class type contributes that class's invariant at an existentially bound model" — applies **verbatim** when the field's type is nullable and recursive; only the predicate's name changes. So an ordinary M2 handle class over a recursive one needs no new rule. | `test/pulse_facts/RecursiveFacts.fst:class_LinkedList__inv`, `func_LinkedList_Push`, `func_LinkedList_Count`, verified. Relied on by R10.8. |
+| F42 | Two recursive occurrences are no harder than one: the two sub-invariants sit side by side under `**`, which is what makes the two subtrees separately owned and hence what makes an in-place tree insert verifiable. | `test/pulse_facts/RecursiveFacts.fst:class_TreeNode__inv_opt`, `func_Trees_Insert`, verified. Relied on by R10.9. |
+| F43 | A **back pointer** is expressible with no new device: the predecessor becomes an extra *index* of the predicate, the back pointer is constrained (`pure (r.fld_prev == left)`) rather than owned, and the recursive call passes the current reference as the new index. Reading the index *off the field* in `intro_cons` is what makes a write to `prev` a legal proof step. | `test/pulse_facts/RecursiveFacts.fst:class_DNode__inv_opt`, `func_DLists_Length`, `func_DLists_PushFront`, verified. Relied on by R10.10. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1104,6 +1113,20 @@ Freshness is free and needs no emitter work: the frame rule gives every caller
 `frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
 everything that already existed.
 
+**R4.12b (a constructor consumes its object parameters).** A constructor body may only
+initialise fields (R4.12), so an object it is *given* has nowhere to go except into the
+representation it is building. Ownership therefore moves, whether or not the author wrote
+`[Consumes]`, and the rule is read off the shape of a constructor rather than off an
+annotation. Keeping the argument's invariant in the postcondition would ask the caller to
+own the same object twice.
+
+**R4.9c/R4.12b on the calling side.** The two ends have to agree, or the resource is owned
+twice or not at all, so consumption is one predicate over `(method, parameter)` consulted by
+both. At a call site, an argument at a consumed position stops being owned: it is not folded
+back by R4.14, and it may not be handed to anything else. C# would leave the name usable —
+the reference is still there — so a later use is **PALCS0550**, reported against the second
+use rather than left to surface as an unprovable resource in generated Pulse.
+
 **R4.14 (the garbage collector).** An object whose reference does not leave the method is
 **dropped at every exit**:
 
@@ -1753,7 +1776,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — twenty-two cases, each
+  `test/diagnostics` is its counterpart to the verification tests — thirty-two cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1790,8 +1813,11 @@ Rules are recorded here as they are validated.
   additionally forbids any acceptance-test directory or method name from appearing anywhere
   in `Pal.Compiler`, and `test/provenance-lint.sh` (R2.2) requires every top-level
   construct in every generated module to trace to a C# span. `break_continue` and
-  `compare_elements` ship variants too: six variant directories in all, none of which
-  required a translator change.
+  `compare_elements` ship variants too, and §10's `linked_list` and `binary_tree` each ship
+  one written at the *opposite null-test polarity* — the detector that matters most there,
+  since a rule recognising only `== null` would be a rule about how the acceptance test
+  happens to be phrased. Eight variant directories in all, none of which required a
+  translator change.
 * Every fix demanded by these tests landed where §0 rule 3 requires. `binary_search` needed
   three `Pal.Assert` steps and a measure that decreases on the iteration that finds the key
   — all in the `.cs` file. `sum_array` needed the `SumsFit` precondition and the
@@ -2811,3 +2837,406 @@ postcondition owes back, so PALCS0549 now covers all of them, with
 
 Depth four and beyond is supported by construction — every abstract class emits `sub`, the
 three primitives and, if it has a parent, a derived vtable and two casts — but is untested.
+
+---
+
+## 10. Recursive data structures (M4)
+
+A `Counter` owns a number. A `Stack` owns an array. A `Range` owns two `Counter`s. In every
+one of those, R3.10's invariant is a *flat* `exists*` over one record, and it is flat
+because the class's field graph is finite and acyclic and known at emission time.
+
+A `Node` with a `Node? next` is not. Its invariant has to be an **induction**, and §10 is
+about what that induction is, where it comes from, and who writes it.
+
+### 10.1 What PAL does, and what is wrong with it
+
+PAL's answer for C (`../pal/test/recursive_struct/recursive_struct.c`) is to give up and
+hand the user Pulse. The user writes
+
+```c
+_include_pulse(ListPredicates,
+  "let rec is_list (head:list_node_ptr) (p:perm) (l:list int)
+     : Tot slprop (decreases l) = match l with … ")
+```
+
+then hand-writes three ghost lemmas — `is_list_nil_case`, `elim_is_list_nonnull`,
+`intro_is_list_cons` — and then invokes them by hand, with `_ghost_stmt(…)`, at every null
+test and around every field read. The predicate, the lemmas and their placement are all the
+user's problem, and all three are written in a language that is not C.
+
+That is a reasonable escape hatch and pal-csharp keeps the equivalent one (`[PulseBody]`,
+`IncludePulse`). But it is not an *annotation language* for this feature: nothing about the
+predicate is specific to the proof, and nothing about the placement is specific to the
+program. Both are functions of the class declaration and of the C# control flow. §10's
+claim is that the user should write **no Pulse at all** — only the `[Model]` member they
+already have to write for every class (R3.9), and the `if (n == null)` they already have to
+write for the program to run.
+
+### 10.2 The representation
+
+**R10.1.** A class is **recursive** when at least one of its fields has the class's own
+nullable type. Its representation, its reference type and its nullable form are emitted as
+one mutually recursive group (F35):
+
+```fstar
+noeq type class_Node__raw = {
+  fld_value: I32.t;
+  fld_next: class_Node__opt;
+}
+and class_Node = B.box class_Node__raw
+and class_Node__opt = option class_Node
+```
+
+**R10.2.** `C?` is `option C`. Nullability is not a refinement of the reference type and
+not a separate pointer kind. That choice is what makes the null test a *pattern match* and
+therefore what makes the base case of the induction reachable by the prover: `x == None` on
+one side, `[]` on the other, and `class_C__cases` (R10.4) bridging them.
+
+`Box.null` and `Box.is_null` exist (F14) and would have been the other candidate. They are
+rejected: `is_null` is a pure function on a `box`, so the *type* would not record that a
+non-null reference had been established, and every field access would carry a `pure` side
+condition rather than being ruled out by typing. pal-csharp does no C extraction (the
+executable artifact is the original C#), so `option` costs nothing.
+
+**R10.2a.** A nullable reference is *owned through the option*: the resource for a slot of
+type `C?` is `class_C__inv_opt x #p m`, not `class_C__inv`. R10.3a defines the non-null
+invariant in terms of the nullable one, so every §3, §4 and §5 rule that mentions
+`class_C__inv` keeps working with no case for recursion.
+
+**R10.2b.** A non-null `C` used where a `C?` is expected — an argument, a `return`, the
+right-hand side of a field write — is an *injection*, not a no-op. C# calls it an identity
+conversion because nullability is an annotation rather than a type; the encoding disagrees,
+because `C` is a box and `C?` is an `option` of one. So the value becomes `Some e` and the
+invariant is moved to the injected form by one derived lemma:
+
+```fstar
+ghost fn class_Node__as_opt (x: class_Node) (#p: perm) (#m: class_Node__model)
+  requires class_Node__inv x #p m
+  ensures  class_Node__inv_opt (Some x) p m
+```
+
+The rule fires at the point the *expected type* is known — the emitter's three positions
+above — and never off Roslyn's flow analysis, which narrows a nullable local to non-null
+inside a branch and would make the same expression an injection in one place and not in
+another. Whether a name is nullable is read off its **declaration**.
+
+### 10.3 The invariant
+
+**R10.3.** The invariant of a recursive class is a `let rec` over the *nullable* reference,
+by cases on the **model**, with `decreases` on the model (F36):
+
+```fstar
+let rec class_Node__inv_opt ([@@@mkey] x: class_Node__opt) (p: perm) (m: class_Node__model)
+  : Tot slprop (decreases m)
+  = match m with
+    | [] -> pure (x == None)
+    | hd :: tl ->
+      exists* (v: class_Node) (r: class_Node__raw).
+        pure (x == Some v) **
+        B.pts_to v #p r **
+        pure (hd == I32.v r.fld_value) **
+        class_Node__inv_opt r.fld_next p tl
+```
+
+Three things are load-bearing and none is a choice.
+
+* **The recursion is on the model.** By cases on `x` there is no measure (F36).
+* **`[@@@mkey]` is on the reference.** It is the key Pulse matches resources on; without it
+  a goal at one model is not found in a context holding the predicate at another.
+* **The permission is an explicit parameter, not meta-defaulted.** F21's `#[T.exact …]`
+  default cannot be written on a `let rec` binder that the recursive call must instantiate.
+  R10.3a restores the defaulted form at the top.
+
+**R10.3a.** The non-null invariant every other rule already talks about is *derived*:
+
+```fstar
+let class_Node__inv (this: class_Node) (#[T.exact (`1.0R)] p: perm) (m: class_Node__model)
+  : slprop
+  = class_Node__inv_opt (Some this) p m
+```
+
+so a recursive class is an ordinary class whose invariant happens to be defined by
+recursion, and R4.5's contracts, R4.10's fold/unfold window and R3.10b's nesting need no new
+case.
+
+### 10.4 Where the induction comes from — the notation
+
+**R10.5.** The user writes no predicate. They write the `[Model]` member R3.9 already
+requires, as a **structural function of the fields**:
+
+```csharp
+public sealed class Node
+{
+    private int value;
+    private Node? next;
+
+    [Model] private SpecList<SpecInt> Items => SpecList.Cons(value, next!.Items);
+}
+```
+
+and the emitter reads it as an induction, by inverting the equation.
+
+The `!` is required — the core invariant says annotated C# compiles unmodified, and a stock
+compiler with `<Nullable>enable</Nullable>` will not accept `next.Items` — and it is also
+the right reading. It is not a claim that `next` is non-null; it says the member is
+**total**: a null reference denotes the empty structure, so `next!.Items` is `[]` when
+`next` is null and the equation holds in both cases. That totality is exactly what lets the
+equation be read backwards as an induction *with a base case*, and nothing here is ever
+executed. The rule is exactly
+this and nothing wider:
+
+> The `[Model]` body of a recursive class must be a single application of a **model
+> constructor** to arguments, each of which is either
+>   (a) a pure expression over the class's non-recursive fields, or
+>   (b) `f.M`, where `f` is a field of the class's own nullable type and `M` is the same
+>       `[Model]` member.
+>
+> The constructor's inductive type must have exactly one other constructor, taking no
+> recursive argument. That one is what a **null** reference denotes.
+
+Two model types ship with the language, and a third is not needed to make the rule general —
+the rule is stated over the constructor's arity, not over the type:
+
+| C# spec type | Pulse | "nil" constructor | recursive constructor |
+|---|---|---|---|
+| `SpecList<T>` | `list ⟦T⟧` | `SpecList.Empty` | `SpecList.Cons(head, tail)` |
+| `SpecTree<T>` | `Pulse.Lib.CSharp.Tree.tree ⟦T⟧` | `SpecTree.Leaf` | `SpecTree.Branch(left, value, right)` |
+
+The derivation is then mechanical. For a model constructor `K a₁ … aₙ` where the recursive
+arguments are `aᵢ = fᵢ.M` and the pure ones are `aⱼ = eⱼ`:
+
+```
+⟦class C⟧ᵢₙᵥ =
+  let rec class_C__inv_opt ([@@@mkey] x) (p: perm) (m) : Tot slprop (decreases m) =
+    match m with
+    | <Nil>          -> pure (x == None)
+    | K b₁ … bₙ      -> exists* (v: class_C) (r: class_C__raw).
+                          pure (x == Some v) **
+                          B.pts_to v #p r **
+                          pure (⋀ⱼ bⱼ == ⟦eⱼ⟧[fields := r.fld_…]) **
+                          (**ᵢ class_C__inv_opt r.fld_fᵢ p bᵢ)
+```
+
+`SpecTree.Branch(left.Contents, value, right.Contents)` gives the binary-tree predicate of
+R10.9 by the same rule, with two recursive conjuncts instead of one (F42).
+
+**R10.5a (refusals).** Anything the derivation does not cover is refused with a diagnostic,
+never approximated:
+
+| Diagnostic | Refused |
+|---|---|
+| PALCS0560 | A recursive class whose `[Model]` type is not one of the inductive spec types. |
+| PALCS0561 | A `[Model]` body that is not a single constructor application (R10.5). |
+| PALCS0562 | A recursive field that the `[Model]` body does not mention, or mentions other than as `f.M`. |
+| PALCS0563 | A recursive class that also has an array field or a non-recursive object field — the induction and R3.10a/R3.10b's flat conjuncts have not been probed together. |
+| PALCS0565 | A recursive class in a hierarchy (§9). The two encodings have not been probed together. |
+| PALCS0566 | A `[Backward]` field (R10.10): the Pulse shape is pinned, the surface rule is not. |
+| PALCS0567 | A field of a recursive class reached outside a null-test window (R10.7c). |
+| PALCS0568 | A self-recursive method with no `[Decreases]` (R10.6). |
+| PALCS0569 | A null test that is not the whole condition of an `if` (R10.7). |
+
+This is a narrow language. It is narrow *honestly*: every shape inside it is pinned by
+`test/pulse_facts/RecursiveFacts.fst`, and §0 rule 3 forbids widening it by guessing.
+
+### 10.5 The derived lemmas
+
+**R10.4.** Six ghost lemmas are emitted beside the predicate, and they are what a client
+uses; no client ever unfolds the predicate. This is what makes R9.17's `.fsti` treatment
+apply here unchanged, and it is the whole of the improvement over PAL's `_include_pulse`.
+
+| Lemma | Meaning |
+|---|---|
+| `class_C__cases x` | preserves the invariant; `Some? x <==> <the model is a K>`. The bridge between the C# null test and the induction. |
+| `class_C__nil_case x` | preserves; `x == None` implies the model is `<Nil>`. |
+| `class_C__elim_nil x` | **consumes**; `x == None` implies the model is `<Nil>`. |
+| `class_C__intro_nil x p` | `x == None` gives the invariant at `<Nil>`. |
+| `class_C__elim_cons x` | on `x: C?{Some? x}`, gives up the head cell and each sub-invariant, with the model equation. |
+| `class_C__intro_cons x` | its inverse. |
+
+Two more are derived from `intro_cons` and are what makes R10.6a's constructor and R10.2b's
+injection one line each:
+
+| Lemma | Meaning |
+|---|---|
+| `class_C__intro x` | R10.4c. `intro_cons` at the **non-null** form: a constructor's result is a `C`, and its postcondition owes `class_C__inv`, not the invariant of an option that happens to be `Some`. |
+| `class_C__as_opt x` | R10.2b's injection. |
+
+`nil_case` and `elim_nil` differ only in whether the invariant survives. Which one the
+emitter uses at a null test is read off the *contract* — whether the postcondition still
+owes that reference's invariant — exactly as R4.10 already reads it. A method that consumes
+its argument (R10.6b's `Append` moves `x` into its result) needs the consuming form; one
+that preserves it needs the other.
+
+**R10.4d.** R3.10d's `share` and `gather` become `ghost fn rec`, recursing on the model and
+proved from the class's own case lemmas rather than by `unfold` (F40). Nothing else about
+R3.10c/d changes, so `[Frac]` and read-only aliasing work over a recursive structure.
+
+### 10.6 Methods
+
+**R10.6.** A method over a recursive class is an ordinary method (§4) with two additions.
+
+*Recursion.* A C# method that calls itself is emitted `fn rec` and **must** carry
+`[Decreases]`, whose argument is a model. `decreases` on an erased model binder is accepted,
+and the obligation at the recursive call is discharged from the equation `elim_cons` hands
+back (F38). A recursive method with no `[Decreases]` is PALCS0568 — inferring one would be
+the emitter inventing a proof step (§0 rule 3), and is the same refusal R5.9 already makes
+for a `while`. There is not even a counted-`for` case to fall back on: a recursion's measure
+is a term over the model, so the only two answers are the user's and a refusal.
+
+**R10.7 (the window).** `if (n == null) … else …` **is** the case analysis, so it is where
+the lemmas go — the user invokes nothing:
+
+```
+⟦if (n == null) S₁ else S₂⟧ =
+  class_C__cases n;
+  if (None? var_n) {
+    class_C__nil_case var_n;      // or elim_nil, per the contract
+    ⟦S₁⟧
+  } else {
+    class_C__elim_cons var_n;
+    ⟦S₂⟧
+    class_C__intro_cons var_n;    // at the end of the branch, as R4.10 closes its window
+  }
+```
+
+`class_C__cases` comes first and unconditionally: it is what tells the prover that the two
+case analyses — on the reference, which the program does, and on the model, which the
+predicate does — agree. Inside the `else` branch every field of `n` is accessible by R3.11's
+ordinary rules, reached through `Some?.v var_n`, and every field *write* by R3.12's (F39).
+
+The tests `n == null`, `n != null`, `null == n` and `null != n` all lower to the same
+`None? var_n`, with the branches exchanged where C# exchanges them. A null test that is not
+the condition of an `if` — inside a `&&`, or assigned to a `bool` — is PALCS0569: the window
+it would open has no branch to be the extent of.
+
+**R10.7a.** Inside the window the slot's *type* stays nullable and its binder stays
+`var_n`; what `elim_cons` adds is a non-null projection `Some?.v var_n` for field access.
+That is why `return n` and `Append(n.next, y)` inside the branch still produce the option
+unchanged, with no re-binding and no injection.
+
+**R10.7b.** Branch-local mutation has to be written in **tail position**. Two arms that
+leave the object in *different* states — one subtree replaced, the other not — cannot be
+joined by a statement-position `if`, which has to leave a single state; and each arm has its
+own window to close at the state it actually reached. `else if (…) { …; return t; }` is the
+ordinary C# for that, and it is a fact about Pulse's `if`, not a restriction §10 adds.
+
+**R10.6a (allocation).** `new Node(v, n)` is R4.12's constructor, unchanged: the argument's
+invariant transfers into the field by R3.10b, and R10.4's `intro_cons` is R3.10b's closing
+`fold`.
+
+**R10.6b (destructive traversal).** `x.next = Append(x.next, y)` is an ordinary R3.12 field
+write inside R10.6's window. This is the case a flat invariant cannot express and the reason
+§10 exists.
+
+**R10.7c.** A recursive class's fields are reachable **from outside the class**, which
+R3.11 does not otherwise allow (PALCS0523). The licence is exactly R10.7's window: the
+client's own null test is what runs `elim_cons`, and `elim_cons` hands back the head cell,
+so inside the branch the field is as available to a static method as it is to a method of
+the class. Outside any window it is not, and that is PALCS0567. This is why a traversal like
+`Lists.Length(Node? n)` can be written as a free function over `n.next` at all, and it is
+what keeps the recursive class free of a method per traversal.
+
+### 10.7 Handle classes
+
+**R10.8.** A class holding a recursive class as a field is an *ordinary* M2 class. R3.10b
+applies verbatim; only the name of the contributed predicate changes, from `class_C__inv`
+to `class_C__inv_opt` (F41). So
+
+```csharp
+public sealed class LinkedList
+{
+    private Node? head;
+    [Model] private SpecList<SpecInt> Items => head!.Elements;
+
+    [Ensures("@this.Elements == SpecList.Cons(v, Old(@this.Elements))")]
+    public void Push(int v) { head = new Node(v, head); }
+}
+```
+
+needs no rule of its own, and §10 stays confined to the recursive class itself. `Push` is
+three rules already written: the field read hands the sub-invariant to the constructor,
+R4.12b transfers it, and R10.2b injects the result back into the nullable field.
+
+**R10.8a.** A `preserves` method of a handle class holds only a *share* of its receiver
+(R4.11 makes the receiver's permission a parameter), so the sub-invariant it can hand to a
+traversal is at that permission too. A traversal such a method calls must therefore be
+`[Frac]` — R4.9's ordinary annotation, discharged over a recursive invariant by R10.7's
+recursive `share`/`gather`. Nothing is special-cased: a full-permission traversal is simply
+a function the owner cannot call, and the message says which permission was wanted.
+
+### 10.8 Back pointers
+
+**R10.10.** A `prev` field breaks the rule §10 rests on. `next` is *owned* — the cell it
+points at belongs to this list and to nothing else — but `prev` points at a cell that
+already belongs to the list, so owning it would be owning it twice. The predicate cannot be
+a function of the fields alone.
+
+The surface answer is one attribute:
+
+```csharp
+public sealed class DNode
+{
+    private int value;
+    [Backward] private DNode? prev;
+    private DNode? next;
+
+    [Model] private SpecList<SpecInt> Items => SpecList.Cons(value, next.Items);
+}
+```
+
+`[Backward]` means: **this field is not owned.** It contributes one *index* to the class's
+invariant and one pure equation to each node (F43):
+
+```fstar
+let rec class_DNode__inv_opt (left: class_DNode__opt) ([@@@mkey] x: class_DNode__opt)
+    (p: perm) (m: class_DNode__model)
+  : Tot slprop (decreases m)
+  = match m with
+    | [] -> pure (x == None)
+    | hd :: tl ->
+      exists* (v: class_DNode) (r: class_DNode__raw).
+        pure (x == Some v) **
+        B.pts_to v #p r **
+        pure (hd == I32.v r.fld_value /\ r.fld_prev == left) **
+        class_DNode__inv_opt x r.fld_next p tl
+```
+
+Note the recursive call: the current reference becomes the successor's index. Three
+consequences, all mechanical:
+
+* Every method over the class gains one **erased implicit** for the index. It is solved by
+  unification at every call site including the recursive one, so the user writes nothing.
+* `intro_cons` reads the index **off the field** rather than taking it as an argument. That
+  is what makes `head.prev = n` a legal proof step: after the write, re-introducing the node
+  yields the invariant at the new predecessor with no extra obligation.
+* The `[Model]` member does not mention the `[Backward]` field, and R10.5's derivation does
+  not look for it. `[Backward]` is what excuses it from PALCS0562.
+
+**`[Backward]` is refused (PALCS0566).** The Pulse shape above is pinned — `RecursiveFacts.fst`
+§8 verifies a doubly linked list with `Length` and a `PushFront` that writes the old head's
+back pointer — but the *surface* rule is not. A freshly allocated node's predecessor index
+has to come from somewhere, and no rule over C# yet says where; §0 rule 3 forbids the
+emitter from inventing one, and it forbids inventing a refusal just as firmly, so the
+refusal is written down as a rule with its reason rather than left as an approximation. The
+doubly linked list ships as a Pulse-level probe until the missing rule is probed.
+
+### 10.9 Status
+
+Pinned end to end by `test/pulse_facts/RecursiveFacts.fst`, in the emitter's own idiom and
+before any rule above was written: the singly linked list with `Length`, `Cons` and a
+destructive `Append`; recursive `share`/`gather`; the `LinkedList` handle class; the binary
+tree with `Size` and an in-place BST `Insert`; and the doubly linked list with `Length` and
+a `PushFront` that writes the old head's back pointer.
+
+Delivered end to end from C#: `test/linked_list` (`Node`, `Lists.Length`/`Cons`/`Append`,
+the `LinkedList` handle class, and §7.2's `ListsVariant` written at the opposite null-test
+polarity) and `test/binary_tree` (`TreeNode`, `Trees.Size`, a functionally correct in-place
+BST `Insert`, and §7.2's `TreesVariant`). Both variants verify with no emitter change, which
+is what says R10.7's window is a rule about a null test rather than about how the acceptance
+test happens to be phrased.
+
+Not covered, and refused rather than approximated: back pointers (PALCS0566), recursion
+crossing a hierarchy (PALCS0565), a recursive class that also owns an array (PALCS0563),
+*iterative* traversal — which needs a magic wand to give the tail back, and has not been
+probed — and mutual recursion between two classes.

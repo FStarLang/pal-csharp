@@ -79,6 +79,22 @@ public sealed class FracAttribute(string permission) : Attribute
     public string Permission { get; } = permission;
 }
 
+/// <summary>
+/// A back pointer: this field is <em>not</em> owned (R10.10).
+/// <para>
+/// A recursive class owns what its ordinary recursive fields point at. A back pointer
+/// points at a cell that already belongs to the structure, so owning it would be owning it
+/// twice. Marked this way, the field contributes an <em>index</em> to the class's
+/// invariant and a pure equation to each node — "my predecessor is who you say it is" —
+/// rather than a resource, and the <c>[Model]</c> member is excused from mentioning it.
+/// </para>
+/// <para>
+/// At most one per class, and its type must be the class's own nullable type.
+/// </para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class BackwardAttribute : Attribute;
+
 /// <summary>This reference is known non-null; no null obligation is generated.</summary>
 [AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Field)]
 public sealed class NonNullAttribute : Attribute;

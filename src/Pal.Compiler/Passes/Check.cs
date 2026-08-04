@@ -125,6 +125,22 @@ public static class Check
             diagnostics.Warning("PALCS0900", m.Loc,
                 $"`{m.Name}` is `[Admit]`ed: its contract is assumed, not proved.");
 
+        // R10.7's counterpart to R5.9. A self-recursive method becomes `fn rec`, and F2
+        // applies to it just as it applies to a loop: without a `decreases` the definition
+        // is divergent and cannot compose with its callers. There is no counted-`for`
+        // analogue to fall back on here — the measure is a term over the model — so the
+        // only two answers are the one the user wrote and a refusal.
+        if (m.Body is not null && m.Decreases is null &&
+            Statements(m.Body).SelectMany(Expressions).SelectMany(Subexpressions)
+                .OfType<IrCall>()
+                .Any(c => c.Kind == CalleeKind.Method && c.Callee == m.Name))
+            diagnostics.Error("PALCS0568", m.Loc,
+                $"`{m.Name}` calls itself, so it needs a termination measure: add " +
+                "`[Decreases(\"…\")]` naming a term that gets smaller at every recursive " +
+                "call — for a traversal of a recursive class, its model " +
+                "(doc/translation.md R10.7). Without one the translation is divergent and " +
+                "no caller can use it.");
+
         if (m.Body is not null) CheckBody(m.Body, diagnostics);
     }
 
@@ -221,6 +237,19 @@ public static class Check
                 case IrGhostStmt { Kind: GhostKind.Assume } a:
                     diagnostics.Warning("PALCS0902", a.Loc,
                         "`Pal.Assume` is unsound: this proposition is taken on trust.");
+                    break;
+
+                // R10.7. A null test opens a window whose extent is a *branch*, so the
+                // test has to be the condition of an `if`. Inside a `&&`, or assigned to a
+                // `bool`, there is no branch for the window to be the extent of — and the
+                // reference would then be tested in one place and used in another, with
+                // nothing to carry the case analysis between them.
+                case var s2 when NullTestOutOfPosition(s2) is { } bad:
+                    diagnostics.Error("PALCS0569", bad.Loc,
+                        "A null test of a recursive class's reference has to be the whole " +
+                        "condition of an `if`: it is what opens the window in which the " +
+                        "reference's fields are reachable (doc/translation.md R10.7), and a " +
+                        "window's extent is a branch. Write `if (x == null) { … } else { … }`.");
                     break;
 
                 case IrWhile { Decreases: null, Counted: null } w:
@@ -336,6 +365,28 @@ public static class Check
         }
     }
 
+    /// <summary>
+    /// R10.7. A comparison against <c>null</c> that is not the whole condition of an
+    /// <c>if</c>, if this statement holds one. A <c>null</c> in a *value* position — an
+    /// argument, an initialiser, the right-hand side of an assignment — is an ordinary
+    /// empty reference and is not a test, so it is not looked at here.
+    /// </summary>
+    private static IrExpr? NullTestOutOfPosition(IrStmt stmt)
+    {
+        var allowed = stmt is IrIf i && IsNullTest(i.Cond) ? i.Cond : null;
+        foreach (var held in Expressions(stmt))
+        {
+            if (ReferenceEquals(held, allowed)) continue;
+            foreach (var sub in Subexpressions(held))
+                if (IsNullTest(sub)) return sub;
+        }
+        return null;
+    }
+
+    private static bool IsNullTest(IrExpr e) =>
+        e is IrBinary { Op: BinOp.Eq or BinOp.Ne } b &&
+        (b.Left is IrNull || b.Right is IrNull);
+
     /// <summary>The expressions a statement holds directly, not counting its substatements.</summary>
     internal static IEnumerable<IrExpr> Expressions(IrStmt stmt) => stmt switch
     {
@@ -371,6 +422,8 @@ public static class Check
             IrNewArray n => [n.Length],
             IrContents c => [c.Array],
             IrSeqOp s => s.Args,
+            IrListOp l => l.Args,
+            IrTreeOp t => t.Args,
             _ => [],
         };
         foreach (var kid in kids)

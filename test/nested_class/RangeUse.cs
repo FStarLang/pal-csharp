@@ -9,6 +9,20 @@ namespace PalCSharp.Tests;
 /// </summary>
 public static class RangeUse
 {
+    /// <summary>
+    /// R4.12b from the outside. The caller builds a `Counter`, gives it away, and does not
+    /// mention it again — which is the only thing it could do, because the constructor took
+    /// its invariant with it.
+    /// </summary>
+    [Ensures("Result == 6")]
+    public static int HandOver()
+    {
+        Counter c = new Counter(5);
+        Held h = new Held(c);
+        h.Bump();
+        return h.Inspect();
+    }
+
     /// <summary>The composite's model is what a client reasons about.</summary>
     [Ensures("Result == 3")]
     public static int BuildAndMeasure()

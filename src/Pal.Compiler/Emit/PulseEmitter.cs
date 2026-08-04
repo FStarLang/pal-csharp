@@ -91,6 +91,24 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public string? ViewBase { get; init; }
 
+    /// <summary>
+    /// R4.9c. True when the caller gave this object away: the method's postcondition owns
+    /// nothing of it, and R10.7's null case must therefore consume rather than preserve.
+    /// </summary>
+    public bool Consumed { get; init; }
+
+    /// <summary>
+    /// R10.7. True inside the <c>else</c> branch of a null test on this reference, where
+    /// the head cell has been given up by <c>elim_cons</c>. The slot's type stays nullable
+    /// — the reference is still an <c>option</c>, and passing it on or returning it is
+    /// unchanged — but the representation behind it is now reachable, which is the only
+    /// thing the window adds.
+    /// </summary>
+    public bool Window { get; init; }
+
+    /// <summary>R10.7. The reference, as a non-null one. Legal only in a window.</summary>
+    public string NonNull => Type is IrClassType { Nullable: true } ? $"(Some?.v {Binder})" : Binder;
+
     /// <summary>R9.14. The binder for this class's own model inside an <c>override</c>.</summary>
     public string OwnModel => "own_" + Name;
 
@@ -117,6 +135,9 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// the derived reference. A later mention is reported against the C#.
     /// </summary>
     public string? Cast { get; init; }
+
+    /// <summary>R4.9c, R4.12b. The callee this reference's invariant was handed to.</summary>
+    public string? Given { get; init; }
 
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
@@ -163,6 +184,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private readonly SpecEmitter _spec = new(diagnostics);
     private Dictionary<string, IrClass> _classes = [];
     private readonly HierarchyEmitter _hierarchy = new(new SpecEmitter(diagnostics), diagnostics);
+    private readonly RecursiveEmitter _recursive =
+        new(new SpecEmitter(diagnostics), new HierarchyEmitter(new SpecEmitter(diagnostics), diagnostics));
 
     /// <summary>
     /// R9.7. For each <c>override</c>, the class whose model its contract is written at.
@@ -173,6 +196,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private Dictionary<string, string> _overrides = [];
 
+    /// <summary>R10.6. Whether the method being emitted calls itself; see Dependencies.</summary>
+    private bool _recursiveMethod;
+
     /// <summary>
     /// R9.12. The names of the <c>abstract</c> methods — the vtable slots. A call is
     /// virtual exactly when it resolves to one of these: a <em>concrete</em> method of an
@@ -180,6 +206,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// called directly even though its receiver is abstractly typed.
     /// </summary>
     private HashSet<string> _slots = [];
+
+    /// <summary>R4.9c, R4.12b. The argument positions each method takes ownership at.</summary>
+    private Dictionary<string, ImmutableHashSet<int>> _consumed = [];
 
     /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
     private ILookup<string, IrMethod> _virtuals =
@@ -205,6 +234,15 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         _overrides = program.Declarations.OfType<IrMethod>()
             .Where(m => m.Overrides is not null)
             .ToDictionary(m => m.Name, m => m.Overrides!);
+        // R4.9c, R4.12b, on the calling side. Which of a callee's parameters take their
+        // argument's invariant with them, by position, so that a call site can stop owning
+        // what it handed over. Computed from the same predicate the callee's own contract
+        // is built from, once, because it is a property of the program and not of a call.
+        _consumed = program.Declarations.OfType<IrMethod>().ToDictionary(
+            m => m.Name,
+            m => Enumerable.Range(0, m.Parameters.Length)
+                .Where(i => MethodPlan.Consumed(m, m.Parameters[i]))
+                .ToImmutableHashSet());
         foreach (var decl in program.Declarations)
         {
             var module = decl switch
@@ -313,6 +351,24 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvGather(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
+                    // §10. A recursive class states its invariant at the option (R10.3) and
+                    // supplies the lemmas that take it apart (R10.4). Each exists because
+                    // the class is recursive and points at the class declaration, which is
+                    // the only C# there is for them to point at.
+                    .. cl.Recursion is null ? ImmutableArray<Provenance>.Empty :
+                    [
+                        new Provenance(Names.ClassInvOpt(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassCases(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassNilCase(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassElimNil(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassIntroNil(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassElimCons(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassIntroCons(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassIntro(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassAsOpt(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassInvOptShare(cl.Name), decl.Loc),
+                        new Provenance(Names.ClassInvOptGather(cl.Name), decl.Loc),
+                    ],
                     // R9.14. A leaf adds the forgetting function R9.6 read off its
                     // `[Model]` override, its own invariant at the base's model, and the
                     // two lemmas that lift R3.10d's sharing to that model.
@@ -571,20 +627,56 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     internal static string SubInv(IrType t) =>
         $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInv(((IrClassType)t).Name)}";
 
+    /// <summary>
+    /// R3.10b/R10.3. The sub-object's invariant <em>applied</em>. A nullable field is owned
+    /// through the recursive `__inv_opt`, whose permission is an ordinary positional binder
+    /// (F36c: a `let rec` cannot carry R3.10c's meta-defaulted one, because the recursive
+    /// call instantiates it). Every site that owns a field's invariant goes through here, so
+    /// the difference is stated once and no other rule knows about it.
+    /// </summary>
+    /// <summary>
+    /// The same, taking the permission in the form a <see cref="Slot"/> carries it —
+    /// <c>"#p "</c> for a fraction, empty for full ownership. R3.10c's default makes the
+    /// empty form mean <c>1.0R</c>, which R10.3's positional binder has to be told.
+    /// </summary>
+    internal static string SubInvAt(IrType t, string reference, string permArg, string model) =>
+        ((IrClassType)t).Nullable
+            ? SubInvApp(t, reference, permArg.Length == 0 ? "1.0R" : permArg.Trim().TrimStart('#'), model)
+            : $"{SubInv(t)} {reference} {permArg}{model}";
+
+    internal static string SubInvApp(IrType t, string reference, string perm, string model)
+    {
+        var k = (IrClassType)t;
+        return k.Nullable
+            ? $"{Names.ClassModule(k.Name)}.{Names.ClassInvOpt(k.Name)} {reference} {perm} {model}"
+            : $"{Names.ClassModule(k.Name)}.{Names.ClassInv(k.Name)} {reference} #{perm} {model}";
+    }
+
     /// <summary>R3.10b. The sub-object's model type, qualified by its own module.</summary>
     internal static string SubModelType(IrType t) =>
         $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassModel(((IrClassType)t).Name)}";
 
     /// <summary>R3.10d. A sub-object's own <c>share</c>, qualified by its module.</summary>
     private static string SubShare(IrType t) =>
-        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvShare(((IrClassType)t).Name)}";
+        ((IrClassType)t).Nullable
+            ? $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvOptShare(((IrClassType)t).Name)}"
+            : $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvShare(((IrClassType)t).Name)}";
 
     /// <summary>R3.10d. A sub-object's general <c>gather</c>, qualified by its module.</summary>
     private static string SubGatherGen(IrType t) =>
-        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvGatherGen(((IrClassType)t).Name)}";
+        ((IrClassType)t).Nullable
+            ? $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvOptGather(((IrClassType)t).Name)}"
+            : $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvGatherGen(((IrClassType)t).Name)}";
 
     private EmittedModule EmitClass(IrClass c)
     {
+        // §10. A class that holds its own nullable type cannot have a flat `exists*`
+        // invariant: the predicate would appear inside its own definition. Its whole module
+        // is a different shape, so it is emitted whole rather than patched — every rule
+        // below assumes an invariant with one record and no recursion.
+        if (c.Recursion is not null)
+            return new EmittedModule(Names.ClassModule(c.Name), _recursive.Emit(c));
+
         // R3.7: inside the defining module a field needs no qualifier, and must not have
         // one, or F*'s dependency scan reads the module as depending on itself.
         var repScope = new SpecScope();
@@ -694,7 +786,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.10c hands it the *same* fraction: an object held at `p` is one every part of
         // which is held at `p`, and there is no other coherent reading.
         foreach (var f in objects)
-            sb.AppendLine($"    {SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)} **");
+            sb.AppendLine($"    {SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))} **");
         sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
 
         EmitShareAndGather(sb, c, arrays, objects);
@@ -756,7 +848,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                           $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
-                          $"({SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)});");
+                          $"({SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))});");
         sb.AppendLine("  B.share this;");
         foreach (var f in arrays)
             sb.AppendLine($"  A.share r.{Names.Field(f.Name)};");
@@ -793,7 +885,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                           $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
-                          $"({SubInv(f.Type)} r.{Names.Field(f.Name)} #p {Names.SubModel(f.Name)});");
+                          $"({SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))});");
         sb.AppendLine($"  unfold ({inv} this #q alt_m);");
         sb.AppendLine("  with alt_r. assert (B.pts_to this #q alt_r);");
         foreach (var f in arrays)
@@ -801,8 +893,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                           $"(A.pts_to alt_r.{Names.Field(f.Name)} #q {Names.Alt(Names.Contents(f.Name))});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.Alt(Names.SubModel(f.Name))}. assert " +
-                          $"({SubInv(f.Type)} alt_r.{Names.Field(f.Name)} #q " +
-                          $"{Names.Alt(Names.SubModel(f.Name))});");
+                          $"({SubInvApp(f.Type, $"alt_r.{Names.Field(f.Name)}", "q", Names.Alt(Names.SubModel(f.Name)))});");
         // The two views are of one object, so the second's resources are renamed onto the
         // first's *before* anything is gathered. The equality has to be learned without
         // consuming either view — hence `pts_to_injective_eq` rather than `gather` — for a
@@ -823,8 +914,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         foreach (var f in objects)
         {
             var alt = Names.Alt(Names.SubModel(f.Name));
-            sb.AppendLine($"  rewrite ({SubInv(f.Type)} alt_r.{Names.Field(f.Name)} #q {alt})");
-            sb.AppendLine($"       as ({SubInv(f.Type)} r.{Names.Field(f.Name)} #q {alt});");
+            sb.AppendLine($"  rewrite ({SubInvApp(f.Type, $"alt_r.{Names.Field(f.Name)}", "q", alt)})");
+            sb.AppendLine($"       as ({SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "q", alt)});");
         }
         sb.AppendLine("  B.gather this;");
         foreach (var f in arrays)
@@ -867,7 +958,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         parts.AddRange(arrays.Select(f =>
             $"A.pts_to {record}.{Names.Field(f.Name)} #{perm} {contents(f.Name)}"));
         parts.AddRange(objects.Select(f =>
-            $"{SubInv(f.Type)} {record}.{Names.Field(f.Name)} #{perm} {submodel(f.Name)}"));
+            SubInvApp(f.Type, $"{record}.{Names.Field(f.Name)}", perm, submodel(f.Name))));
         return string.Join(" ** ", parts);
     }
 
@@ -877,7 +968,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     private EmittedModule EmitMethod(IrMethod method)
     {
-        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots);
+        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed);
         var plan = new MethodPlan(method, _spec, diagnostics);
 
         var sb = new StringBuilder();
@@ -896,7 +987,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var origins = ImmutableArray.CreateBuilder<LineOrigin>();
 
         origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
-        sb.Append("fn ").Append(Names.Function(method.Name));
+        sb.Append(_recursiveMethod ? "fn rec " : "fn ").Append(Names.Function(method.Name));
         foreach (var b in plan.Binders) sb.Append(' ').Append(b);
         sb.AppendLine();
 
@@ -910,6 +1001,16 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"  returns  {Names.Result}: {Types.Render(method.ReturnType)}");
         origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Ensures) ?? method.Loc));
         sb.AppendLine($"  ensures  {plan.Ensures}");
+
+        // R10.6/F2. A `fn rec` needs a measure for the same reason a `while` does: without
+        // one it is `stt_div` and will not compose with its `stt` continuation. Guessing
+        // one would be the emitter inventing a proof step, so it is the user's
+        // `[Decreases]` or nothing — and nothing is refused by Check.
+        if (method.Decreases is { } measure)
+        {
+            origins.Add(new LineOrigin(Lines(sb) + 1, measure.Loc));
+            sb.AppendLine($"  decreases {_spec.Emit(measure, plan.PreScope).Text}");
+        }
         origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.AppendLine("{");
 
@@ -1054,13 +1155,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrNewArray na: CollectExpr(na.Length); return;
                 case IrContents ct: CollectExpr(ct.Array); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
+                case IrListOp l2: foreach (var a in l2.Args) CollectExpr(a); return;
+                case IrTreeOp t2: foreach (var a in t2.Args) CollectExpr(a); return;
+                case IrObserve ob: CollectExpr(ob.Receiver); return;
                 case IrQuantifier q: CollectExpr(q.Body); return;
                 case IrConvert cv: CollectExpr(cv.Operand); return;
                 default: return;
             }
         }
 
-        names.Remove(self);
+        // R10.6. A method that names itself is a Pulse `fn rec`. The dependency scan
+        // already had to answer this question, so asking it here costs nothing and keeps
+        // one walker rather than two.
+        _recursiveMethod = names.Remove(self);
         return [.. names.OrderBy(n => n, StringComparer.Ordinal)];
     }
 
@@ -1091,5 +1198,7 @@ public static class Preamble
         module U64 = FStar.UInt64
         module Seq = FStar.Seq
         module CS = Pulse.Lib.CSharp.Seq
+        module List = FStar.List.Tot
+        module CTree = Pulse.Lib.CSharp.Tree
         """;
 }

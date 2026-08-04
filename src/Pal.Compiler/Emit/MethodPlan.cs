@@ -13,6 +13,17 @@ namespace Pal.Compiler.Emit;
 /// </summary>
 public sealed class MethodPlan
 {
+    /// <summary>
+    /// R4.9c and R4.12b. Whether an object parameter's invariant moves into the callee.
+    /// Both halves of the rule are here rather than at the two places that need them,
+    /// because the caller and the callee have to agree: the callee stops owing the
+    /// invariant back, and the caller stops owning it, and a rule read differently at the
+    /// two ends is a resource that is owned twice or not at all.
+    /// </summary>
+    public static bool Consumed(IrMethod method, IrParam p) =>
+        p.Type is IrClassType &&
+        (p.Consumes || (method.IsConstructor && p.Name != Names.This));
+
     private readonly SpecEmitter _spec;
 
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics)
@@ -157,28 +168,53 @@ public sealed class MethodPlan
                     if (fraction is not null) ghostBinders.Add($"(#{fraction}: perm)");
                     var perm = fraction is null ? "" : $"#{fraction} ";
 
+                    // R10.3. A *nullable* reference is owned through the recursive
+                    // `__inv_opt`, whose permission is positional (F36c). One local
+                    // function keeps that difference out of every line below.
+                    string Owned(string model) =>
+                        klass.Nullable
+                            ? $"{Names.ClassModule(klass.Name)}.{Names.ClassInvOpt(klass.Name)} " +
+                              $"{name} {(fraction ?? "1.0R")} {model}"
+                            : $"{inv} {name} {perm}{model}";
+
                     // An observed object contributes no existential: its permission is
                     // precisely the right to read, so the model cannot move and the one
                     // binder stands for the pre- and the post-state.
                     var observed = fraction is not null;
 
-                    preResources.Add($"{inv} {name} {perm}{preModel}");
+                    preResources.Add(Owned(preModel));
 
                     // R4.11. A method that changes no field cannot change the model, so
                     // the *same* binder stands for the pre- and the post-state. That is
                     // literally `preserves`: without it the caller would hold
                     // `exists* m'. inv this m'` and would have to be told, conjunct by
                     // conjunct, that nothing moved.
+                    // R4.9c. `[Consumes]` transfers ownership to the callee, so the
+                    // postcondition owns nothing: the object has moved into whatever the
+                    // method built out of it. Without this a method such as an in-place
+                    // append — which splices its argument into its result — would have to
+                    // hand back an invariant it no longer has, and R10.7 would have to
+                    // preserve a null case it must instead give up.
                     var moves = mutatedObjects.Contains(p.Name) && !observed;
-                    if (moves)
+                    // R4.12b. A constructor stores the objects it is given into the
+                    // representation it is building, so ownership moves whether or not the
+                    // author said `[Consumes]`: a body that may only assign fields (R4.12)
+                    // has nowhere else to put one. Keeping the invariant in the
+                    // postcondition would ask the caller to own the same object twice.
+                    var consumed = Consumed(method, p);
+                    if (consumed)
                     {
-                        postResources.Add($"{inv} {name} {postModel}");
+                        post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));
+                    }
+                    else if (moves)
+                    {
+                        postResources.Add(Owned(postModel));
                         postExistentials.Add(postModel);
                         post.Bind(p.Name, new Term(postModel, TermKind.Math, seen));
                     }
                     else
                     {
-                        postResources.Add($"{inv} {name} {perm}{preModel}");
+                        postResources.Add(Owned(preModel));
                         post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));
                     }
 
@@ -189,6 +225,7 @@ public sealed class MethodPlan
                         PreModel = preModel,
                         PostModel = moves ? postModel : preModel,
                         ViewBase = view == klass.Name ? null : view,
+                        Consumed = consumed,
                     };
                     break;
                 }
@@ -252,8 +289,11 @@ public sealed class MethodPlan
         // too, and the only difference is the name its contract calls it by.
         if (method.ReturnType is IrClassType built)
         {
+            // R10.2. A method may return `C?`, and then what it owns is the nullable
+            // invariant at full permission — the same conjunct R10.3a derives the non-null
+            // one from. Nothing else about returning an object changes.
             postResources.Add(
-                $"{Names.ClassModule(built.Name)}.{Names.ClassInv(built.Name)} {Names.Result} {resultModel}");
+                PulseEmitter.SubInvApp(built, Names.Result, "1.0R", resultModel));
             postExistentials.Add(resultModel);
             if (method.IsConstructor) post.Bind(Names.This, new Term(resultModel, TermKind.Math, built));
         }

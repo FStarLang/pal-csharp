@@ -196,6 +196,22 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrSeqOp s:
                 return SeqOp(s, scope);
 
+            case IrListOp l:
+                return ListOp(l, scope);
+
+            case IrTreeOp t:
+                return TreeOp(t, scope);
+
+            // R10.2. `null` is `None`. The type annotation is what lets F* infer the
+            // option's parameter in `pure (x == None)` positions where nothing else
+            // determines it.
+            case IrNull n:
+                return new Term(
+                    n.Type is IrClassType nullClass
+                        ? $"(None #{Names.ClassModule(nullClass.Name)}.{Names.ClassType(nullClass.Name)})"
+                        : "None",
+                    TermKind.Other);
+
             // R5.12. Inside R4.10's window the receiver is a representation, and a loop
             // invariant naming a field means that representation's field. The binding is
             // put there by the loop emitter, which is the only place that knows the
@@ -394,6 +410,47 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.IsPermutation => new Term(
             $"(CS.is_permutation {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})",
             TermKind.Prop),
+        _ => new Term("True", TermKind.Prop),
+    };
+
+    /// <summary>R10.5. The ghost list, F*'s own <c>list</c> and <c>FStar.List.Tot</c>.</summary>
+    private Term ListOp(IrListOp l, SpecScope scope) => l.Op switch
+    {
+        ListOpKind.Empty => new Term("[]", TermKind.Other),
+        ListOpKind.Cons => new Term(
+            $"({AsMath(Emit(l.Args[0], scope))} :: {Emit(l.Args[1], scope).Text})", TermKind.Other),
+        ListOpKind.Append => new Term(
+            $"(List.Tot.append {Emit(l.Args[0], scope).Text} {Emit(l.Args[1], scope).Text})",
+            TermKind.Other),
+        ListOpKind.Length => new Term(
+            $"(List.Tot.length {Emit(l.Args[0], scope).Text})", TermKind.Math),
+        ListOpKind.IsEmpty => new Term(
+            $"(Nil? {Emit(l.Args[0], scope).Text})", TermKind.Prop),
+        ListOpKind.Head => new Term(
+            $"(List.Tot.hd {Emit(l.Args[0], scope).Text})", TermKind.Math),
+        ListOpKind.Tail => new Term(
+            $"(List.Tot.tl {Emit(l.Args[0], scope).Text})", TermKind.Other),
+        ListOpKind.Index => new Term(
+            $"(List.Tot.index {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Math),
+        _ => new Term("True", TermKind.Prop),
+    };
+
+    /// <summary>R10.5. The ghost tree, <c>Pulse.Lib.CSharp.Tree</c>.</summary>
+    private Term TreeOp(IrTreeOp t, SpecScope scope) => t.Op switch
+    {
+        TreeOpKind.Leaf => new Term("CTree.Leaf", TermKind.Other),
+        TreeOpKind.Branch => new Term(
+            $"(CTree.Branch {Emit(t.Args[0], scope).Text} {AsMath(Emit(t.Args[1], scope))} " +
+            $"{Emit(t.Args[2], scope).Text})",
+            TermKind.Other),
+        TreeOpKind.Size => new Term($"(CTree.size {Emit(t.Args[0], scope).Text})", TermKind.Math),
+        TreeOpKind.Insert => new Term(
+            $"(CTree.insert_int {Emit(t.Args[0], scope).Text} {AsMath(Emit(t.Args[1], scope))})",
+            TermKind.Other),
+        TreeOpKind.Elements => new Term(
+            $"(CTree.elements {Emit(t.Args[0], scope).Text})", TermKind.Other),
+        TreeOpKind.IsLeaf => new Term(
+            $"(CTree.Leaf? {Emit(t.Args[0], scope).Text})", TermKind.Prop),
         _ => new Term("True", TermKind.Prop),
     };
 

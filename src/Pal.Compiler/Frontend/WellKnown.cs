@@ -26,6 +26,10 @@ public sealed class WellKnown
         SpecInt = Type("SpecInt");
         SpecNat = Type("SpecNat");
         SlProp = Type("SlProp");
+        SpecList = Type("SpecList`1");
+        SpecListOps = Type("SpecList");
+        SpecTree = Type("SpecTree`1");
+        SpecTreeOps = Type("SpecTree");
 
         RequiresAttribute = Type("RequiresAttribute");
         EnsuresAttribute = Type("EnsuresAttribute");
@@ -47,6 +51,7 @@ public sealed class WellKnown
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
+        BackwardAttribute = Type("BackwardAttribute");
     }
 
     public static WellKnown For(Compilation compilation) => new(compilation);
@@ -57,6 +62,10 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecInt { get; }
     public INamedTypeSymbol SpecNat { get; }
     public INamedTypeSymbol SlProp { get; }
+    public INamedTypeSymbol SpecList { get; }
+    public INamedTypeSymbol SpecListOps { get; }
+    public INamedTypeSymbol SpecTree { get; }
+    public INamedTypeSymbol SpecTreeOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
     public INamedTypeSymbol InvariantAttribute { get; }
@@ -79,6 +88,7 @@ public sealed class WellKnown
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }
+    public INamedTypeSymbol BackwardAttribute { get; }
 
     /// <summary>True if <paramref name="symbol"/> is a member of the <c>Pal</c> intrinsics class.</summary>
     public bool IsPalIntrinsic(ISymbol? symbol) =>
@@ -87,6 +97,8 @@ public sealed class WellKnown
 
     public bool IsGhost(ITypeSymbol? t) => IsConstructedFrom(t, Ghost);
     public bool IsSeq(ITypeSymbol? t) => IsConstructedFrom(t, Seq);
+    public bool IsSpecList(ITypeSymbol? t) => IsConstructedFrom(t, SpecList);
+    public bool IsSpecTree(ITypeSymbol? t) => IsConstructedFrom(t, SpecTree);
 
     private static bool IsConstructedFrom(ITypeSymbol? t, INamedTypeSymbol def) =>
         t is INamedTypeSymbol n &&
@@ -96,6 +108,18 @@ public sealed class WellKnown
     /// <summary>Whether a class declares the <c>[Model]</c> member R3.9 requires.</summary>
     public bool HasModel(INamedTypeSymbol type) =>
         type.GetMembers().Any(m => Declarations.Has(m, ModelAttribute));
+
+    /// <summary>
+    /// R10.8. A class that holds a nullable reference of its own type. Recognising it here
+    /// is syntactic on purpose: what it licenses — a client reaching a field of a node it
+    /// has just null-tested — is a property of the *representation*, decided before any
+    /// model is inverted.
+    /// </summary>
+    public static bool IsRecursive(INamedTypeSymbol type) =>
+        type.GetMembers().OfType<IFieldSymbol>().Any(f =>
+            !f.IsStatic &&
+            SymbolEqualityComparer.Default.Equals(f.Type, type) &&
+            f.NullableAnnotation == NullableAnnotation.Annotated);
 
     public IrType? MapType(ITypeSymbol? type)
     {
@@ -109,10 +133,17 @@ public sealed class WellKnown
                 return new IrSeqType(se);
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:
                 return new IrGhostType(ge);
+            case INamedTypeSymbol named when IsSpecList(named) && MapType(named.TypeArguments[0]) is { } le:
+                return new IrSpecListType(le);
+            case INamedTypeSymbol named when IsSpecTree(named) && MapType(named.TypeArguments[0]) is { } te:
+                return new IrSpecTreeType(te);
             // §3.4. A class is translated exactly when it declares a [Model] member: R3.9
             // makes the model mandatory, so its presence is the same test as "annotated".
+            // R10.2. `C?` is `option C`, and the annotation is part of the type: it is what
+            // makes the null test a pattern match, and hence what makes the base case of
+            // R10.3's induction reachable by the prover.
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named when HasModel(named):
-                return new IrClassType(named.Name);
+                return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated);
         }
 
         if (SymbolEqualityComparer.Default.Equals(type, SpecInt)) return new IrPrim(PrimKind.SpecInt);

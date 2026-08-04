@@ -884,6 +884,8 @@ public static class FrontendPass
                 case IrQuantifier q: Walk(q.Body); return;
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;
                 case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
+                case IrListOp lo: foreach (var a in lo.Args) Walk(a); return;
+                case IrTreeOp to: foreach (var a in to.Args) Walk(a); return;
                 case IrNew n: foreach (var f2 in n.Fields) Walk(f2.Value); return;
                 // Raw Pulse is opaque, so it is taken at its word rather than refused.
                 case IrInlinePulse: found = true; return;
@@ -909,7 +911,10 @@ public static class FrontendPass
     {
         var fields = c.Fields
             .Select(f => new IrFieldDecl(
-                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped))
+                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped)
+            {
+                IsBackward = Declarations.Has(f.Symbol, known.BackwardAttribute),
+            })
             .ToImmutableArray();
 
         // The abstraction reads the fields; an observation reads the model. Both are
@@ -981,7 +986,151 @@ public static class FrontendPass
             BaseClass = c.BaseSymbol?.Name,
             IsAbstract = c.IsAbstract,
             ForgetBody = forgetBody,
+            Recursion = Recursion(c, fields, modelBody, known, diagnostics),
         };
+    }
+
+    /// <summary>
+    /// R10.5. A class that holds its own nullable type is recursive, and its invariant is
+    /// an induction rather than a flat <c>exists*</c>. The user writes no predicate and no
+    /// lemma: the induction is read off the <c>[Model]</c> member they already owe, by
+    /// inverting the equation <c>M = ctor(… f.M …)</c>. Everything §10 emits is a function
+    /// of what this returns, which is why the notation stays this small.
+    /// </summary>
+    private static IrRecursion? Recursion(
+        ClassCandidate c,
+        ImmutableArray<IrFieldDecl> fields,
+        IrExpr? modelBody,
+        WellKnown known,
+        DiagnosticBag diagnostics)
+    {
+        var self = c.Symbol.Name;
+        var loc = Locations.From(c.Syntax.Identifier);
+
+        // R10.10. A back pointer is *constrained* by the invariant rather than owned by
+        // it. The Pulse shape for that is pinned (test/pulse_facts/RecursiveFacts.fst §8),
+        // but the rule that threads the predecessor index through the surface program is
+        // not: a freshly allocated node's index is the tail it is about to be linked to,
+        // and no general C# rule yet says where that comes from. §0 rule 3 forbids the
+        // emitter from inventing one, so the surface refuses rather than guesses.
+        foreach (var f in fields.Where(f => f.IsBackward))
+        {
+            diagnostics.Error("PALCS0566", f.Loc,
+                $"`[Backward]` on `{self}.{f.Name}` is not yet translated. The doubly linked " +
+                "invariant is pinned in Pulse (doc/translation.md R10.10), but the rule that " +
+                "supplies a new node's predecessor index is not, and the emitter may not invent " +
+                "one. Use a singly linked field, or write the class in Pulse and import it.");
+            return null;
+        }
+        var recursive = fields
+            .Where(f => f.Type is IrClassType { Nullable: true } t && t.Name == self)
+            .Select(f => f.Name)
+            .ToImmutableHashSet();
+        if (recursive.IsEmpty) return null;
+
+        // R10.9. The hierarchy encoding indexes an object by a vtable and reaches it
+        // through a `dyn`; the recursive encoding indexes it by its own model and reaches
+        // it through an `option`. Nothing has probed the two at once.
+        if (c.IsAbstract || c.BaseSymbol is not null)
+        {
+            diagnostics.Error("PALCS0565", loc,
+                $"`{self}` holds a field of its own type *and* takes part in a class hierarchy. " +
+                "The recursive encoding (doc/translation.md R10.3) and the hierarchy encoding (R9.9) " +
+                "index an object in different ways and have not been shown to compose. Make the " +
+                "recursive class `sealed` and free-standing.");
+            return null;
+        }
+
+        // R10.6. A recursive class's invariant recurses into the sub-model, so every other
+        // field must be a value the cons case can state purely. An array or a *different*
+        // object would each contribute their own ownership at every node, which the case
+        // lemmas would then have to thread — not probed.
+        foreach (var f in fields)
+        {
+            if (f.Type is IrClassType { Nullable: true } t && t.Name == self) continue;
+            if (f.Type is IrPrim or IrNamedType) continue;
+            diagnostics.Error("PALCS0563", f.Loc,
+                $"`{self}.{f.Name}` has type `{f.Type}`, but `{self}` is recursive: it holds a field " +
+                "of its own type. A recursive class's invariant is an induction on its model " +
+                "(doc/translation.md R10.3), and every other field must be a value that induction can " +
+                "state purely. Hold the array or object in a non-recursive class instead.");
+            return null;
+        }
+
+        var shape = c.ModelType switch
+        {
+            IrSpecListType => RecursiveShape.List,
+            IrSpecTreeType => RecursiveShape.Tree,
+            _ => (RecursiveShape?)null,
+        };
+        if (shape is null)
+        {
+            diagnostics.Error("PALCS0560",
+                Locations.From(c.ModelSymbol.Locations.FirstOrDefault() ?? Location.None),
+                $"`{self}` is recursive, so its model must be an inductive type whose empty " +
+                $"constructor is what a null reference denotes. `{c.ModelType}` is not one: use " +
+                "`SpecList<T>` or `SpecTree<T>` (doc/translation.md R10.5).");
+            return null;
+        }
+
+        // R10.5. The body must be a *single* application of the model's non-empty
+        // constructor. That is not a syntactic convenience: the emitter inverts it to get
+        // the invariant, and an equation it cannot invert is one whose induction does not
+        // exist, so guessing one would be inventing a proof step (§0 rule 3).
+        var args = modelBody switch
+        {
+            IrListOp { Op: ListOpKind.Cons } l when shape is RecursiveShape.List => l.Args,
+            IrTreeOp { Op: TreeOpKind.Branch } t when shape is RecursiveShape.Tree => t.Args,
+            _ => default,
+        };
+        if (args.IsDefault)
+        {
+            var ctor = shape is RecursiveShape.List ? "SpecList.Cons" : "SpecTree.Branch";
+            diagnostics.Error("PALCS0561",
+                Locations.From(c.ModelBody?.GetLocation() ?? Location.None),
+                $"The `[Model]` of the recursive class `{self}` must be exactly one application of " +
+                $"`{ctor}`, whose recursive arguments are the sub-models `f.{c.ModelSymbol.Name}` of " +
+                "its own fields. The translator inverts that equation to obtain the class's inductive " +
+                "ownership predicate (doc/translation.md R10.5), and cannot invert anything else.");
+            return null;
+        }
+
+        var used = ImmutableHashSet<string>.Empty;
+        var lowered = ImmutableArray.CreateBuilder<IrRecArg>();
+        foreach (var arg in args)
+        {
+            if (arg is IrVar v && recursive.Contains(v.Name))
+            {
+                used = used.Add(v.Name);
+                lowered.Add(new IrRecField(v.Name));
+                continue;
+            }
+            lowered.Add(new IrRecPure(arg));
+        }
+
+        // Every recursive field must appear, exactly once. A field the model never
+        // mentions is memory the invariant would have to own with nothing to own it at,
+        // and a field mentioned twice would be owned twice.
+        foreach (var f in recursive)
+            if (!used.Contains(f))
+            {
+                diagnostics.Error("PALCS0562", loc,
+                    $"`{self}.{f}` is a field of `{self}`'s own type, but the `[Model]` member " +
+                    $"`{c.ModelSymbol.Name}` does not use it as `{f}.{c.ModelSymbol.Name}`. The " +
+                    "recursion of the invariant is read off the recursion of the model " +
+                    "(doc/translation.md R10.5), so a field the model does not reach is memory the " +
+                    "invariant cannot own.");
+                return null;
+            }
+        if (used.Count != lowered.OfType<IrRecField>().Count())
+        {
+            diagnostics.Error("PALCS0562", loc,
+                $"The `[Model]` of `{self}` uses one of its recursive fields more than once. Each " +
+                "occurrence would own that sub-object again (doc/translation.md R10.5).");
+            return null;
+        }
+
+        return new IrRecursion(shape.Value, lowered.ToImmutable(), null);
     }
 
     private static ImmutableArray<string> BuildClassUsings(

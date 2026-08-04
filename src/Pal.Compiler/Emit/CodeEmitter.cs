@@ -22,7 +22,8 @@ public sealed class CodeEmitter(
     DiagnosticBag diagnostics,
     IReadOnlyDictionary<string, IrClass>? classes = null,
     IReadOnlyDictionary<string, string>? overrides = null,
-    HashSet<string>? slots = null)
+    HashSet<string>? slots = null,
+    IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -52,6 +53,15 @@ public sealed class CodeEmitter(
     private sealed record Escape(string? Break, string? Continue);
 
     private Escape? _escape;
+
+    /// <summary>
+    /// R10.7. The <c>intro_cons</c> owed by each null test currently open, innermost last.
+    /// A recursive object is opened by the <em>null test the C# already writes</em>, exactly
+    /// as an ordinary receiver is opened by R4.10's bracket, and like that bracket it has to
+    /// be closed on every path out of the branch — including a <c>return</c> in the middle
+    /// of it, which is why this is a stack rather than a line emitted after the branch.
+    /// </summary>
+    private readonly List<string> _windows = [];
 
     /// <summary>
     /// R4.10. The objects this method holds, in declaration order. Each is unfolded once
@@ -202,7 +212,7 @@ public sealed class CodeEmitter(
                 // may read a field and so needs the representation still open; it is
                 // let-bound so that the `fold` can be interposed between the read and the
                 // block's value.
-                var text = Expr(ret.Value!);
+                var text = Inject(method.ReturnType, ret.Value!, Expr(ret.Value!));
                 if (!NeedsEpilogue) { Line(text); return; }
 
                 // A returned object must keep the binder the callee produced it under:
@@ -231,6 +241,11 @@ public sealed class CodeEmitter(
 
             case IrIf { Else: not null } i:
             {
+                if (NullTest(i.Cond) is { } window)
+                {
+                    NullWindow(window, i, branch => Tail(branch!, method, plan), tail: true);
+                    return;
+                }
                 var cond = Expr(i.Cond);
                 Line($"if ({cond}) {{");
                 _indent++;
@@ -307,6 +322,16 @@ public sealed class CodeEmitter(
 
         Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
 
+        // R10.6a. Allocation is the one place a new cell enters the induction, and R10.4's
+        // `intro_cons` is R3.10b's `fold` — the sub-object's invariant is already in the
+        // context, because R4.12b's caller gave it away when it passed the reference.
+        if (decl.Recursion is not null)
+        {
+            Line($"{Names.ClassModule(decl.Name)}.{Names.ClassIntro(decl.Name)} {Names.Result};");
+            Line(Names.Result);
+            return;
+        }
+
         var slot = new Slot(Names.This, built, SlotKind.Object, Names.Result)
         {
             PreModel = null,
@@ -318,7 +343,14 @@ public sealed class CodeEmitter(
 
 
     private bool IsObjectBinder(string text) =>
-        _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text);
+        // R10.2b. An injected reference is a binder too: `(Some t)` is the name the
+        // context holds its invariant under, and re-binding it would lose it.
+        (text.StartsWith("(Some ", StringComparison.Ordinal) && text.EndsWith(")", StringComparison.Ordinal)) ||
+        _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text) ||
+        // R10.6b. A method may hand back an object it was *given*, which is what a
+        // traversal that returns one of its arguments does. The binder rule is the same:
+        // re-binding it would leave the invariant in the context under the old name.
+        _slots.Values.Any(s => s.Kind is SlotKind.Object && s.Binder == text);
 
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
@@ -385,8 +417,7 @@ public sealed class CodeEmitter(
                 // as an array is carried by its `A.pts_to` at its contents. Inside the
                 // loop it is still *folded*, so the body may call its methods.
                 var sub = FreshValue(Names.SubModel(f.Name));
-                var subResource =
-                    $"{PulseEmitter.SubInv(f.Type)} {projection} {receiver.PermArg}{sub}";
+                var subResource = PulseEmitter.SubInvAt(f.Type, projection, receiver.PermArg, sub);
                 resources.Add(subResource);
                 var settled = !writesRecord && !written.Contains(f.Name);
                 if (settled) fixedNames.Add((sub, subResource));
@@ -781,7 +812,7 @@ public sealed class CodeEmitter(
     /// abstraction function applied to the representation it has just written — the same
     /// expression the class module puts in the invariant, evaluated at the post-state.
     /// </summary>
-    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0;
+    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0 || _windows.Count > 0;
 
     /// <summary>
     /// R4.14. Discards the invariant of every object this method allocated and did not
@@ -822,6 +853,10 @@ public sealed class CodeEmitter(
     private void CloseObjects(IrMethod method, MethodPlan plan, string? returned = null)
     {
         DropLocals(returned);
+
+        // R10.7. The innermost window closes first: it was opened last, and what it
+        // re-establishes is a conjunct of what the one outside it re-establishes.
+        for (var i = _windows.Count - 1; i >= 0; i--) Line(_windows[i]);
 
         foreach (var obj in _objects)
         {
@@ -904,7 +939,7 @@ public sealed class CodeEmitter(
                 // holding for it, not the one the `unfold` produced.
                 var subModel = FreshValue(Names.SubModel(field.Name));
                 Line($"with {subModel}. assert " +
-                     $"({PulseEmitter.SubInv(field.Type)} {projection} {subModel});");
+                     $"({PulseEmitter.SubInvAt(field.Type, projection, obj.PermArg, subModel)});");
                 scope.Bind(field.Name, new Term(subModel, TermKind.Math, field.Type));
                 continue;
             }
@@ -1179,10 +1214,11 @@ public sealed class CodeEmitter(
             case IrField { Receiver: IrVar ov } field when
                 _slots.TryGetValue(ov.Name, out var obj) && obj is { Kind: SlotKind.Object, Type: IrClassType oc }:
             {
-                var value = Expr(a.Value);
+                if (!Reachable(obj, field.Loc, field.Field)) return;
+                var value = Inject(FieldType(oc, field.Field), a.Value, Expr(a.Value));
                 var current = Fresh();
-                Line($"let {current} = B.op_Bang {obj.Binder};");
-                Line($"B.op_Colon_Equals {obj.Binder} " +
+                Line($"let {current} = B.op_Bang {obj.NonNull};");
+                Line($"B.op_Colon_Equals {obj.NonNull} " +
                      $"({{ {current} with {Names.ClassProjection(oc.Name, field.Field)} = {value} }});");
                 return;
             }
@@ -1261,6 +1297,13 @@ public sealed class CodeEmitter(
     /// <summary>R5.4. Both branches are always emitted.</summary>
     private void If(IrIf i, MethodPlan plan)
     {
+        if (NullTest(i.Cond) is { } window)
+        {
+            NullWindow(window, i, branch => { if (branch is not null) Statement(branch, plan); }, tail: false);
+            Line(";");
+            return;
+        }
+
         var cond = Expr(i.Cond);
         Line($"if ({cond}) {{");
         _indent++;
@@ -1273,6 +1316,119 @@ public sealed class CodeEmitter(
         Line("()");
         _indent--;
         Line("};");
+    }
+
+    /// <summary>
+    /// R10.2b. A non-null reference where a nullable one is expected. C# calls this the
+    /// identity, because nullability is an annotation there; the encoding does not, because
+    /// `C` is a box and `C?` is an `option` of one. So the reference is injected and its
+    /// invariant re-read at the injected form, which is the whole of `as_opt`.
+    /// </summary>
+    private string Inject(IrType? expected, IrExpr value, string text)
+    {
+        if (expected is not IrClassType { Nullable: true } k) return text;
+        if (value.Type is not IrClassType { Nullable: false } nn || nn.Name != k.Name) return text;
+        Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
+        return $"(Some {text})";
+    }
+
+    private IrType? FieldType(IrClassType owner, string field) =>
+        classes is not null && classes.TryGetValue(owner.Name, out var decl)
+            ? decl.Fields.FirstOrDefault(f => f.Name == field)?.Type
+            : null;
+
+    /// <summary>
+    /// R10.8. Whether the representation behind a reference is reachable here. For a
+    /// non-null reference it always is; for a nullable one it is exactly inside the window
+    /// R10.7 opens, because that is where the head cell has been given up. Refusing the
+    /// rest is not the emitter inventing a refusal: outside a window the reference is still
+    /// an `option` and there is no record to project.
+    /// </summary>
+    private bool Reachable(Slot obj, IrLoc loc, string field)
+    {
+        if (obj.Type is not IrClassType { Nullable: true } || obj.Window) return true;
+        diagnostics.Error("PALCS0567", loc,
+            $"`{obj.Name}.{field}` reads through a reference that may be null. A field of a " +
+            "recursive class is reachable only inside a null test — write `if (" + obj.Name +
+            " == null) { … } else { … }` and reach the field in the `else` branch " +
+            "(doc/translation.md R10.7).");
+        return false;
+    }
+
+    /// <summary>
+    /// R10.7. A null test on a recursive object, which is where §10 puts the case lemmas.
+    /// Returns the slot tested, its class, and whether the <c>then</c> branch is the null
+    /// one — nothing else in the emitter needs to know what a recursive class is.
+    /// </summary>
+    private (Slot Slot, IrClassType Type, bool ThenIsNull)? NullTest(IrExpr cond)
+    {
+        if (cond is not IrBinary { Op: BinOp.Eq or BinOp.Ne } b) return null;
+        var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
+        if (tested is not IrVar v || !_slots.TryGetValue(v.Name, out var slot)) return null;
+        if (slot.Kind is not SlotKind.Object || slot.Type is not IrClassType { Nullable: true } k) return null;
+        if (classes is null || !classes.TryGetValue(k.Name, out var decl) || decl.Recursion is null)
+            return null;
+        return (slot, k, b.Op is BinOp.Eq);
+    }
+
+    /// <summary>
+    /// R10.7. The whole of §10's proof placement, and the reason the user writes no ghost
+    /// code: the <c>if (n == null)</c> they had to write anyway <em>is</em> the case split
+    /// on the model. <c>cases</c> connects the two before the test; the null branch learns
+    /// the model is empty; the other branch opens the head cell, runs, and closes it again.
+    ///
+    /// <para>It is the same bracket R4.10 puts around a receiver, at a different place —
+    /// around the branch a null test already delimits rather than around a whole body — and
+    /// the field access inside it is the same rule, because the slot is rebound to the
+    /// non-null reference for exactly the extent of the branch.</para>
+    /// </summary>
+    private void NullWindow(
+        (Slot Slot, IrClassType Type, bool ThenIsNull) window, IrIf i,
+        Action<IrStmt?> branch, bool tail)
+    {
+        var (slot, klass, thenIsNull) = window;
+        var mod = Names.ClassModule(klass.Name);
+        var opt = slot.Binder;
+        var nullBranch = thenIsNull ? i.Then : i.Else;
+        var consBranch = thenIsNull ? i.Else : i.Then;
+
+        Line($"{mod}.{Names.ClassCases(klass.Name)} {opt};");
+        Line($"if (None? {opt}) {{");
+        _indent++;
+        // R10.4b. Preserving or consuming, read off the contract: a method that gave the
+        // object away (R4.9c) owes nothing back, and leaving the empty invariant behind
+        // would be a leftover resource.
+        var nil = slot.Consumed ? Names.ClassElimNil(klass.Name) : Names.ClassNilCase(klass.Name);
+        Line($"{mod}.{nil} {opt};");
+        branch(nullBranch);
+        if (!tail) Line("()");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        Line($"{mod}.{Names.ClassElimCons(klass.Name)} {opt};");
+
+        // Inside the window the reference is known non-null, so every rule that reaches a
+        // field through a box applies unchanged — the slot names the box rather than the
+        // option, and R3.8's read and R3.12's write need no case for recursion.
+        var saved = _slots[slot.Name];
+        _slots[slot.Name] = saved with { Window = true };
+        _windows.Add($"{mod}.{Names.ClassIntroCons(klass.Name)} {opt};");
+        try
+        {
+            branch(consBranch);
+            if (!tail)
+            {
+                Line(_windows[^1]);
+                Line("()");
+            }
+        }
+        finally
+        {
+            _windows.RemoveAt(_windows.Count - 1);
+            _slots[slot.Name] = saved;
+        }
+        _indent--;
+        Line(tail ? "}" : "}");
     }
 
     /// <summary>R5.6, R5.8, R5.8b, R5.9.</summary>
@@ -1574,6 +1730,14 @@ public sealed class CodeEmitter(
             case IrLiteral l:
                 return Types.Literal(l.Value, l.Type);
 
+            // R4.9c, R4.12b. The call took this reference's invariant with it.
+            case IrVar v when _slots.TryGetValue(v.Name, out var given) && given.Given is { } to:
+                diagnostics.Error("PALCS0550", v.Loc,
+                    $"`{v.Name}` cannot be used after it is passed to `{to}`, which takes " +
+                    "ownership of it (R4.9c). What `" + v.Name + "` owned is now part of " +
+                    "what that call produced: use the result instead.");
+                return "()";
+
             // R9.16. The cast moved this reference's invariant onto the derived name.
             case IrVar v when _slots.TryGetValue(v.Name, out var cast) && cast.Cast is { } to:
                 diagnostics.Error("PALCS0548", v.Loc,
@@ -1625,6 +1789,13 @@ public sealed class CodeEmitter(
             // R6.9. `new T[n]`. `Pulse.Lib.CSharp.Array.alloc` is where the garbage
             // collector is assumed: it carries no deallocation obligation, unlike
             // `Pulse.Lib.Array.alloc`, which is a stack allocation.
+            // R10.2. `null` is the empty structure, and owning it is free — which is what
+            // `intro_nil` says. Emitting the step here rather than at each position a null
+            // may appear keeps `new Node(v, null)` and `x.next = null` the same rule.
+            case IrNull n when n.Type is IrClassType k:
+                Line($"{Names.ClassModule(k.Name)}.{Names.ClassIntroNil(k.Name)} None 1.0R;");
+                return "None";
+
             case IrNewArray na:
             {
                 var length = Expr(na.Length);
@@ -1640,8 +1811,9 @@ public sealed class CodeEmitter(
             case IrField { Receiver: IrVar ov } f when
                 _slots.TryGetValue(ov.Name, out var obj) && obj is { Kind: SlotKind.Object, Type: IrClassType oc }:
             {
+                if (!Reachable(obj, f.Loc, f.Field)) return "()";
                 var t = Fresh();
-                Line($"let {t} = B.op_Bang {obj.Binder};");
+                Line($"let {t} = B.op_Bang {obj.NonNull};");
                 return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
             }
 
@@ -1712,6 +1884,13 @@ public sealed class CodeEmitter(
             if (i == 0 && call.HasReceiver && owner is not null) { indexed = true; continue; }
             Forget(ix);
         }
+
+        // R4.9c, R4.12b, on the calling side. A parameter the callee consumes takes the
+        // argument's invariant with it, so the caller stops owning it here — it must not be
+        // folded back at the end of the block (R4.14) and must not be handed to anything
+        // else. C# would leave the name usable, so PALCS0550 says so at the next use rather
+        // than leaving Pulse to fail on a resource that moved several statements earlier.
+        Moved(call, args);
         // R9.12. A call resolved to an `abstract` declaration is a virtual call: it goes
         // to the dispatching wrapper, which recovers the object and runs its vtable slot.
         // Nothing else about the call changes — the arguments, the implicit model binder
@@ -1740,6 +1919,21 @@ public sealed class CodeEmitter(
              (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
         Close(view);
         return binder;
+    }
+
+    /// <summary>
+    /// R4.9c, R4.12b. Records that a call took ownership of its consumed arguments.
+    /// </summary>
+    private void Moved(IrCall call, ImmutableArray<string> args)
+    {
+        if (consumed is null || !consumed.TryGetValue(call.Callee, out var positions)) return;
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (!positions.Contains(i)) continue;
+            if (SlotByBinder(args[i]) is not { Kind: SlotKind.Object } obj) continue;
+            _slots[obj.Name] = obj with { Kind = SlotKind.Value, Index = null, Given = call.Callee };
+            _objectLocals.RemoveAll(l => l.Binder == obj.Binder);
+        }
     }
 
     /// <summary>

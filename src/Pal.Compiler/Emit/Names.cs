@@ -71,6 +71,42 @@ public static class Names
     /// </summary>
     public static string Permission(string parameter) => "perm_" + parameter;
 
+    // -----------------------------------------------------------------------
+    // §10. Recursive classes. `C?` is `option class_C`, the invariant is stated at the
+    // *option* so that null is a pattern the prover can case on (R10.3), and six lemmas
+    // take it apart. Nothing here is per-example: every name is a function of the class.
+    // -----------------------------------------------------------------------
+
+    /// <summary>R10.2. The nullable object reference, <c>option class_C</c>.</summary>
+    public static string ClassOpt(string name) => "class_" + name + "__opt";
+
+    /// <summary>R10.3. The primitive, model-recursive invariant, stated at the option.</summary>
+    public static string ClassInvOpt(string name) => "class_" + name + "__inv_opt";
+
+    /// <summary>R10.4. <c>Some? x &lt;==&gt; </c> the model is a non-empty constructor.</summary>
+    public static string ClassCases(string name) => "class_" + name + "__cases";
+
+    /// <summary>R10.4. The null case, preserving the invariant.</summary>
+    public static string ClassNilCase(string name) => "class_" + name + "__nil_case";
+
+    /// <summary>R10.4. The null case, consuming the invariant.</summary>
+    public static string ClassElimNil(string name) => "class_" + name + "__elim_nil";
+
+    /// <summary>R10.4. Re-establishing the invariant of a null reference.</summary>
+    public static string ClassIntroNil(string name) => "class_" + name + "__intro_nil";
+
+    /// <summary>R10.4. Opening a non-null reference into its fields and sub-invariants.</summary>
+    public static string ClassElimCons(string name) => "class_" + name + "__elim_cons";
+
+    /// <summary>R10.4. Closing it again.</summary>
+    public static string ClassIntroCons(string name) => "class_" + name + "__intro_cons";
+    public static string ClassIntro(string name) => "class_" + name + "__intro";
+    public static string ClassAsOpt(string name) => "class_" + name + "__as_opt";
+
+    /// <summary>R10.8. The recursive share/gather of a recursive class, at the option.</summary>
+    public static string ClassInvOptShare(string name) => ClassInvOpt(name) + "_share";
+    public static string ClassInvOptGather(string name) => ClassInvOpt(name) + "_gather";
+
     public static string ClassInvShare(string name) => ClassInv(name) + "_share";
     public static string ClassInvGather(string name) => ClassInv(name) + "_gather";
     public static string ClassInvGatherGen(string name) => ClassInv(name) + "_gather_gen";
@@ -319,7 +355,13 @@ public static class Types
         IrSeqType s => $"Seq.seq {Render(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
+        // R10.2. A nullable reference is `option class_C`, named through the class's own
+        // abbreviation so that every rule below reads the same whether or not the class
+        // is recursive.
+        IrClassType { Nullable: true } c => $"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}",
         IrClassType c => $"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}",
+        IrSpecListType l => $"list {Render(l.Element)}",
+        IrSpecTreeType t => $"CTree.tree {Render(t.Element)}",
         IrPulseType p => p.PulseText,
         _ => "unit",
     };
