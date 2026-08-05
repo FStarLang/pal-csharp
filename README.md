@@ -43,6 +43,9 @@ Pulse out — and the whole M1 acceptance suite passes.
       array, and a class owning other objects three levels deep
 - [x] Twenty-five acceptance directories verify, each with an independently written variant
       that must verify with no translator change
+- [x] **A production checksum verified as it ships** — SharpZipLib's `Adler32`
+      ([`examples/adler32`](examples/adler32)), proved free of overflow *and* equal to
+      RFC 1950 §8.2, which turned up an arithmetic error in its own safety comment
 - [x] `Pal.Analyzers` — in-IDE squiggles, running the translator's own passes so the
       editor and `palcs` cannot disagree
 - [ ] `Span<T>`, generics, interfaces — see
@@ -53,8 +56,15 @@ Pulse out — and the whole M1 acceptance suite passes.
 ```bash
 make tools        # install the pinned F*/Pulse toolchain into tools/fstar
 make              # build the translator
-make -C test      # translate and verify every test, then run the lints
+make test         # the regression gate: every test and every example, then the lints
 ```
+
+`make test` is the gate. It covers two trees. `test/` holds programs written to exercise a
+numbered rule of [`doc/translation.md`](doc/translation.md). `examples/` holds code that was
+written for some other purpose and then verified — real code, ported with its adaptations
+documented and its upstream licence carried beside it. Both run through the same harness,
+carry the same two obligations, and are held to the same lints; only their provenance
+differs. `make -C examples` runs the examples alone.
 
 To translate and verify one program:
 

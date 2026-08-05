@@ -1,5 +1,6 @@
 <!--
-  What every test project in this tree needs, in one place.
+  What every acceptance project needs, in one place — `test/` and `examples/` alike,
+  since an example is a test in every mechanical respect and differs only in provenance.
 
   A test directory has no `.csproj` of its own for the build: `test/build-cs.sh`
   synthesises a *stock* one into `obj/`, deliberately without this file, because the

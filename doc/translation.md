@@ -110,7 +110,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F50 | `FStar.Int` has **no** `logand_mask`. The route to a masking fact is `Int.logand a b == Int.from_uint (UInt.logand (Int.to_uint a) (Int.to_uint b))`, which holds by `()` because `to_vec`, `from_vec` and `logand` are plain reducible `let`s, followed by `FStar.UInt.logand_mask`. | `pulse/Pulse.Lib.CSharp.Casts.fst:int_logand_as_uint`, verified. Relied on by `byte_mask_ff`. |
 | F51 | `FStar.UIntN.shift_left` takes its shift amount as a **`UInt32.t` whatever the operand's width is**, so a shift whose amount C# writes as an `int` needs a conversion on the amount and only on the amount. | `test/pulse_facts/ConversionFacts.fst:shift_amount_width`, verified. Relied on by R13.5. |
 | F52 | `FStar.UInt.logor_disjoint` needs a **positive** shift amount; at zero the lemma does not apply even though the equation still holds. A general packing lemma must exclude `0`. | `pulse/Pulse.Lib.CSharp.Casts.fst:logor_shift_disjoint`; the `m: pos` requirement was reported by the checker. |
-| F53 | An SMT pattern may be placed on the **idiom** rather than on a named lemma — `[SMTPat (int32_to_uint32 (logand (uint8_to_int32 b) 255l))]` fires on the shape `(uint)(b & 0xff)` compiles to. This is how a language-level idiom is made free of annotation without the emitter knowing anything about it. | `pulse/Pulse.Lib.CSharp.Casts.fsti:byte_mask_ff_bound`, `logor_shift_disjoint`; relied on by `test/adler32`, which needs no annotation for either idiom. |
+| F53 | An SMT pattern may be placed on the **idiom** rather than on a named lemma — `[SMTPat (int32_to_uint32 (logand (uint8_to_int32 b) 255l))]` fires on the shape `(uint)(b & 0xff)` compiles to. This is how a language-level idiom is made free of annotation without the emitter knowing anything about it. | `pulse/Pulse.Lib.CSharp.Casts.fsti:byte_mask_ff_bound`, `logor_shift_disjoint`; relied on by `examples/adler32`, which needs no annotation for either idiom. |
 | F54 | SharpZipLib's Adler-32 comment is **arithmetically wrong in the unsafe direction**: the true supremum of `s2` before the deferred modulo is 2 090 626 020, not the 2 090 079 800 the comment claims — larger by 546 220, because "median(s1)" approximates a triangular sum. The conclusion (`< 2^31`) survives, with 2.65% headroom rather than 2.68%. The claim about `s1` (max 1 034 520) is right. | `test/pulse_facts/ConversionFacts.fst:tri`, `tri_closed`, `adler_s2_bound`, `adler_comment_understates`, verified. |
 | F55 | A `[Spec]` function's parameters are all mathematical (R4.6) whatever their C# types, but a `[Lemma]`'s binders keep the types they were declared with (R4.7). Argument coercion is therefore **not** a property of the argument alone. | The two emitted signatures differ: `Let_RingVariant_Slot` takes `(var_head: int)` from a C# `int`, `Let_Adler32_Step` takes `(var_off: I32.t)` from the same C# type. Relied on by R13.6. |
 | F56 | A slot is a *binding*, and a binding introduced inside a block is out of scope once the block closes — including for R5.13's resource-naming bracket, which would otherwise assert `pts_to` for a cell whose Pulse binder no longer exists ("Identifier not found: var_n"). | Reproduced by a `Pal.Assert` placed after a loop whose body declared a local; fixed in `CodeEmitter.Scoped`. |
@@ -3631,7 +3631,16 @@ can be cheap about; §12 is what you reach for when neither will do.
 ## 13. Conversions, side effects, and a production case study (M7)
 
 §§1–12 were exercised on programs written to be verified. §13 is the first section driven
-by code that was not: SharpZipLib's `Adler32` (MIT), verified in `test/adler32`.
+by code that was not: SharpZipLib's `Adler32` (MIT), verified in `examples/adler32`.
+
+That directory is the reason `examples/` exists. An example and a test run through the
+same harness (`test/verify.mk`), carry the same two obligations, and are gated by the same
+`make test`; what separates them is provenance. A test is written to exercise a numbered
+rule and may be shaped to do so. An example is code that was written for some other
+purpose, ported with its adaptations documented and its upstream licence carried alongside
+it (`examples/adler32/LICENSE`), and it may not be reshaped to suit the tool. Gating them
+identically is the point: an example that is allowed to rot is a claim about pal-csharp
+that stopped being true without anyone noticing.
 
 The target was chosen for one reason. Most C# checksums — MurmurHash3, the two common
 CRC32s, FNV-1a — rely on **intentional wrapping**, so the obligation pal-csharp discharges
@@ -3673,7 +3682,7 @@ case study's headline finding is machine-checked and independent of everything b
 
 R13.6 replaced a blanket rule that coerced every machine argument. That was sound for
 `[Spec]` calls, which are the only kind a specification could make before M7, and silently
-wrong for a `[Lemma]` with a machine parameter — a combination `test/adler32` is the first
+wrong for a `[Lemma]` with a machine parameter — a combination `examples/adler32` is the first
 program to write.
 
 ### 13.3 What Adler-32 needed, and where each piece landed
@@ -3733,7 +3742,7 @@ sides) is only enough for `s1`.
 
 ### 13.5 The §7.2 detector
 
-`test/adler32/Adler32Variant.cs` is the same checksum with the inner loop written as a
+`examples/adler32/Adler32Variant.cs` is the same checksum with the inner loop written as a
 `for`, the chunk size chosen by a conditional expression rather than an `if` statement, the
 accumulators updated by compound assignment, the outer guard written `!= 0`, and every
 local renamed. **It translated with no emitter change** — which is the claim §7.2 exists to
@@ -3750,7 +3759,7 @@ guard to preserve the invariant, and the natural progress invariant is not stabl
 guard's own decrement. Only inequalities in the weakening direction survive it, and the
 body cannot re-establish a tight bound because `n` is stale by one inside the body — the
 decrement happened in the guard, not the body. The textbook resolution is to move the
-decrement out of the guard, and that is what `test/adler32/Adler32.cs` does:
+decrement out of the guard, and that is what `examples/adler32/Adler32.cs` does:
 `while (n > 0) { …; n--; }`.
 
 This is the one adaptation to the loop, and it is a genuine, reportable limitation rather

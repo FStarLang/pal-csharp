@@ -83,17 +83,20 @@ PULSE_CACHED='Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore'
 write_config pulse ../tools/run-fstar.sh "$PULSE_CACHED" . _cache
 
 # ---------------------------------------------------------------------------
-# Test directories. Which include paths a directory needs follows from what it
-# holds, so nothing here is a per-test special case:
+# Acceptance directories, in both trees. Which include paths a directory needs
+# follows from what it holds, so nothing here is a per-test special case:
 #
 #   .        the directory has hand-written .fst/.fsti at its root
 #   out      `palcs` writes generated modules there
 #   _cache   every directory that runs F* has one
 #   ../../pulse{,/_cache}   Pulse.Lib.CSharp.*, as in verify.mk
+#
+# `examples/` sits at the same depth as `test/`, so the relative include paths are the
+# same and an example needs no special case here either.
 # ---------------------------------------------------------------------------
-for dir in "$ROOT"/test/*/; do
+for dir in "$ROOT"/test/*/ "$ROOT"/examples/*/; do
     dir=${dir%/}
-    rel=test/$(basename "$dir")
+    rel=${dir#"$ROOT"/}
     includes=()
 
     # Hand-written F* at the directory root (the probe, the fact pins, the smoke test).

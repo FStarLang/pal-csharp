@@ -12,7 +12,9 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPILER_DIR="$REPO/src/Pal.Compiler"
-TEST_DIR="$REPO/test"
+# Both trees. An example's names are exactly as forbidden inside the compiler as a test's:
+# the rule is that the translator implements a scheme, not that it passes `test/`.
+TEST_DIRS=("$REPO/test" "$REPO/examples")
 
 if [[ ! -d "$COMPILER_DIR" ]]; then
   echo "no-example-names: $COMPILER_DIR does not exist yet; skipping"
@@ -28,7 +30,7 @@ while IFS= read -r name; do
     grep -rni --include='*.cs' -- "$name" "$COMPILER_DIR" >&2
     status=1
   fi
-done < <(grep -rl 'verify\.mk' --include='Makefile' "$TEST_DIR" \
+done < <(grep -rl 'verify\.mk' --include='Makefile' "${TEST_DIRS[@]}" \
            | xargs -r -n1 dirname | xargs -r -n1 basename | sort -u)
 
 # 2. No method name declared in a test .cs file may appear in the compiler.
@@ -39,7 +41,7 @@ while IFS= read -r ident; do
     status=1
   fi
 done < <(grep -rhoP '(?<=\bstatic (?:void|int|bool|uint|long|byte) )\w+' \
-           --include='*.cs' "$TEST_DIR" 2>/dev/null | sort -u)
+           --include='*.cs' "${TEST_DIRS[@]}" 2>/dev/null | sort -u)
 
 if [[ $status -eq 0 ]]; then
   echo "no-example-names: OK"

@@ -58,11 +58,16 @@ write_project() {
 }
 
 # An acceptance directory: a Makefile that includes verify.mk, and C# to translate.
-for dir in "$ROOT"/test/*/; do
+# Both trees are scanned. `test/pal-tests.props` is shared, so how far up it lies depends
+# on which tree the directory is in.
+for dir in "$ROOT"/test/*/ "$ROOT"/examples/*/; do
     dir=${dir%/}
     grep -q 'verify\.mk' "$dir/Makefile" 2>/dev/null || continue
     compgen -G "$dir/*.cs" > /dev/null || continue
-    write_project "$dir" "../pal-tests.props"
+    case ${dir#"$ROOT"/} in
+        test/*)     write_project "$dir" "../pal-tests.props" ;;
+        examples/*) write_project "$dir" "../../test/pal-tests.props" ;;
+    esac
 done
 
 # The negative cases, which are the interesting ones to look at: every file in here is

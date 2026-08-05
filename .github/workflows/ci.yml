@@ -32,8 +32,10 @@ jobs:
       - name: Build Pulse support library
         run: make lib
 
+      # The gate is the root target, not `make -C test`: it builds `examples/` first, so
+      # the lints that follow see what the emitter produced for the production code too.
       - name: Test
-        run: make -C test
+        run: make test
 
       # Anti-contortion checks (doc/translation.md §7.2). `make -C test` runs both, but
       # naming them here keeps a failure legible in the CI summary.

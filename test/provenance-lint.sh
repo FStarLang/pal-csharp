@@ -13,11 +13,15 @@
 # construct could escape the lint simply by being declared rather than defined.
 set -u
 
-cd "$(dirname "$0")"
+# Both trees: an example is held to the same standard as a test, and the emitter has no
+# more licence to invent a construct for production code than for a written-to-be-verified
+# one.
+cd "$(dirname "$0")/.."
 fail=0
 checked=0
 
-for info in */out/source_range_info.json; do
+shopt -s nullglob
+for info in test/*/out/source_range_info.json examples/*/out/source_range_info.json; do
     dir=$(dirname "$(dirname "$info")")
 
     # Constructs the emitter claims to have produced, and the modules it declares are
