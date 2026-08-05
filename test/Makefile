@@ -10,6 +10,12 @@ all: $(TESTS) lint
 # is here for a different reason, which `cs-projects.sh --check` shares: an IDE config
 # that disagrees with the build about what a directory contains is worse than no config at
 # all, so neither is allowed to drift.
+#
+# `ide-build.sh` closes the other half of the C# obligation. Each directory is compiled
+# above with a *stock* project, deliberately without the analyzer, because the invariant
+# there is that annotated C# is ordinary C#. That leaves "the analyzer says nothing about
+# a program pal-csharp accepts" unchecked -- invisible to a proof, and the first thing a
+# contributor sees when they open the file.
 .PHONY: lint
 lint: $(TESTS)
 	@bash no-example-names.sh
@@ -17,6 +23,7 @@ lint: $(TESTS)
 	@bash provenance-lint.sh
 	@bash fst-configs.sh --check
 	@bash cs-projects.sh --check
+	@bash ide-build.sh
 
 # Rewrite the generated editor configuration after adding or removing a test directory:
 # the F* configs that let fstar-mode open the emitted Pulse, and the C# projects that let

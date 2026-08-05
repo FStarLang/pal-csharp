@@ -1,5 +1,7 @@
 # pal-csharp
 
+[![CI](https://github.com/FStarLang/pal-csharp/actions/workflows/ci.yml/badge.svg)](https://github.com/FStarLang/pal-csharp/actions/workflows/ci.yml)
+
 ### Proof Annotation Language for C#
 
 Write ordinary C#, annotate it with separation-logic specifications, and have those
@@ -119,6 +121,23 @@ After adding or removing a test directory:
 ```bash
 make -C test configs
 ```
+
+The gate builds these projects too, via [`test/ide-build.sh`](test/ide-build.sh), and
+requires them to build clean. The acceptance harness compiles each directory with a
+synthesised *stock* project — deliberately without the analyzer, since its obligation is
+that annotated C# is ordinary C# — which leaves the converse unchecked: that the analyzer
+says *nothing* about a program pal-csharp accepts. A spurious diagnostic is invisible to a
+proof and is the first thing a contributor sees, so it is gated. The diagnostics cases are
+excluded, for the reason they are red above.
+
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `make test` — the same gate,
+not a reimplementation of it, so CI and a working copy cannot disagree about what passing
+means. The pinned toolchain is cached on `tools/fstar-version.txt` and CI asserts that the
+F\* it ended up with is the one the pin names, so neither a stale cache nor a silent
+upgrade can go unnoticed. The analyzer check runs again as its own job, where it needs no
+F\* and so reports a regression in minutes rather than after a verification run.
 
 ## Documentation
 

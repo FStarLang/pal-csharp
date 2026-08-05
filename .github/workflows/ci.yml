@@ -1,3 +1,8 @@
+# The regression gate, run on every push and pull request.
+#
+# The job mirrors what a developer runs locally (`make test`) rather than reimplementing
+# it, so that CI and a working copy cannot disagree about what passing means. Everything
+# specific to CI is here: caching, and the checks that the cache did not lie.
 name: CI
 
 on:
@@ -5,9 +10,24 @@ on:
     branches: [main]
   pull_request:
 
+# Verification is the expensive part of this repository, so superseded runs are cancelled
+# rather than left to finish. `main` is excluded: its runs are what the cache is built
+# from, and cancelling them would leave later pull requests to install F* themselves.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
 jobs:
-  build:
+  gate:
     runs-on: ubuntu-latest
+    # A full cold-cache gate is about fifteen minutes locally. The ceiling is here to turn
+    # a proof that diverges -- an ordinary way for an SMT query to fail -- into a failure
+    # in the first hour rather than one that runs for GitHub's six-hour default.
+    timeout-minutes: 90
+
     steps:
       - uses: actions/checkout@v4
 
@@ -15,32 +35,106 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # Cache the pinned F* toolchain. The key is the pin file, so a version
-      # bump invalidates the cache and local/CI toolchains cannot drift.
-      - name: Cache F*
+      - name: Cache NuGet packages
         uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', 'Pal.slnx') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # The toolchain is ~500 MB and changes only when the pin does, so it is cached on
+      # the pin file. Restore and save are separate steps on purpose: `actions/cache`
+      # saves only when the job succeeds, and the expected failure here is a failed
+      # proof -- exactly the case where a contributor pushes again in a minute and should
+      # not wait for another download.
+      - name: Restore F* toolchain
+        id: fstar-cache
+        uses: actions/cache/restore@v4
         with:
           path: tools/fstar
           key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt') }}
 
-      - name: Install F*
+      - name: Install F* toolchain
+        if: steps.fstar-cache.outputs.cache-hit != 'true'
         run: make tools
 
-      - name: Build translator
+      - name: Save F* toolchain
+        if: always() && steps.fstar-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt') }}
+
+      # `make tools` builds tools/fstar/bin/fstar.exe from tools/fstar-version.txt, and a
+      # restored cache defeats that rule: the archive keeps the toolchain's original
+      # timestamps while `actions/checkout` stamps the pin file with the time of the
+      # checkout, so the prerequisite is always newer than the target and every later
+      # `make` re-downloads F* despite the cache hit. Restoring the ordering is all that
+      # is needed, and it is a no-op when F* was just installed.
+      - name: Mark the toolchain newer than its pin
+        run: touch tools/fstar/bin/fstar.exe
+
+      # The pin is the reason this repository can reproduce a proof at all, so CI asserts
+      # it instead of assuming it. This also catches a cache entry that was restored under
+      # the right key but holds the wrong build.
+      - name: Check the toolchain matches the pin
+        run: |
+          pinned="nightly-$(tr -d '[:space:]' < tools/fstar-version.txt)"
+          actual="$(tools/fstar/bin/fstar.exe --version | head -1 | cut -d' ' -f2-)"
+          echo "pinned: $pinned"
+          echo "actual: $actual"
+          if [ "$pinned" != "$actual" ]; then
+            echo "::error::F* is $actual but tools/fstar-version.txt pins $pinned"
+            exit 1
+          fi
+
+      - name: Build the translator
         run: make build
 
-      - name: Build Pulse support library
+      - name: Build the Pulse support library
         run: make lib
 
-      # The gate is the root target, not `make -C test`: it builds `examples/` first, so
-      # the lints that follow see what the emitter produced for the production code too.
+      # The whole gate: both acceptance trees (`test/` and `examples/`), each of which
+      # compiles its C# with the stock compiler and verifies the Pulse that `palcs`
+      # generates from it, followed by the six lints. This is the root target rather
+      # than `make -C test`, so the lints also see what the emitter produced for the
+      # examples.
       - name: Test
         run: make test
 
-      # Anti-contortion checks (doc/translation.md §7.2). `make -C test` runs both, but
-      # naming them here keeps a failure legible in the CI summary.
+      # `make test` has already run these; naming the two anti-contortion detectors
+      # (doc/translation.md §7.2) separately is for the CI summary, where "the compiler
+      # mentions a test by name" and "a proof failed" should not look alike.
       - name: Compiler must not name any example
         run: ./test/no-example-names.sh
 
       - name: Every generated construct must trace to C#
         run: bash test/provenance-lint.sh
+
+  # `make test` already runs this, as the sixth lint. It is repeated here as its own job
+  # because it needs no F* at all: an analyzer regression is reported in about three
+  # minutes instead of waiting out a verification run. The gate remains the authority --
+  # this job only makes it fail sooner.
+  analyzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', 'Pal.slnx') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # Not `dotnet build Pal.Tests.sln`: one project in that solution, the diagnostics
+      # cases, is a collection of programs pal-csharp is supposed to *reject*, so it
+      # cannot build and the script excludes it. See test/ide-build.sh.
+      - name: Analyzer must be silent on accepted programs
+        run: bash test/ide-build.sh

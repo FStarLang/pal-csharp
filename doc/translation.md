@@ -2099,6 +2099,16 @@ Rules are recorded here as they are validated.
   build about what a directory contains is worse than an editor that knows nothing about
   it.
 
+  The lint goes one step further and *builds* those projects (`test/ide-build.sh`),
+  requiring a clean compile. Two obligations look alike here but are converse to each
+  other: the stock build asserts that annotated C# needs nothing of ours to compile, and
+  this one asserts that the analyzer, given the same code, has nothing to say about it. A
+  spurious diagnostic passes the first and every proof in the suite, and is still the
+  first thing a contributor sees. `test/diagnostics/cases` is excluded by name — it is the
+  one project whose purpose is to not compile — and that exclusion is the script's only
+  piece of knowledge about the tree; everything else it builds comes from `Pal.Tests.sln`,
+  which `cs-projects.sh` generates and the lint above keeps honest.
+
 * **A refusal that was in the wrong place is gone** (`test/pulse_refusals`). `PALCS0520`
   detected an aliased call and refused it, so that F* would not have to explain itself in
   Pulse names. R3.13 records why that was a mistake in full; the short version is that a
