@@ -116,6 +116,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F56 | A slot is a *binding*, and a binding introduced inside a block is out of scope once the block closes — including for R5.13's resource-naming bracket, which would otherwise assert `pts_to` for a cell whose Pulse binder no longer exists ("Identifier not found: var_n"). | Reproduced by a `Pal.Assert` placed after a loop whose body declared a local; fixed in `CodeEmitter.Scoped`. |
 | F57 | A pass that analyses a body and a pass that rewrites it are **ordered**, and the analysis must see the rewritten form. R5.7 asks whether a loop body escapes, in order to decide whether the `for` step goes in the body or in its own slot; asked of the body *before* R5.14 has run, the question is answered "no" for a `continue` still sitting inside a `switch`, the step is appended to the body, and the step is then skipped on the very iterations that continue — so the measure stalls and termination fails. | Reproduced by `test/switch_stmt:Count`, whose `case 7: continue;` failed with `pow2 31 - (match … with \| true -> i+1 \| false -> i) << meas`. Fixed by asking `Escapes` of the normalized body. |
 | F58 | A desugaring that introduces a binding must **splice** into its enclosing block, not nest inside a fresh one. R5.14's scrutinee binding wrapped the if/else chain in a block, and R5.5b absorbs a tail only into a chain that is a statement of the same block — so `switch (t) { case k: return e; } return d;` was rejected even though every piece of the rule was right. | Reproduced by `test/switch_stmt/SwitchVariant.cs:WeightOf` (three `PALCS0001`s). Fixed by carrying the binding in `IrSwitch` and splicing the expansion in `Normalize`. |
+| F59 | Pulse's `match` **can** scrutinise a machine integer, since FStarLang/FStar#4374 (merged 2026-08-02); before it, `0l` in pattern position was read as a `Prims.int` and rejected against an `Int32.t` scrutinee. But an arm's hypothesis is just the equality `I32.v k == 0` — a machine integer is not an inductive type, so there is no case split to be had that an `if` does not already give. | `test/pulse_facts/MatchFacts.fst:match_i32`, `match_u8`, and `match_gives_equality` beside `chain_gives_equality`, which discharge the same assertion. Requires the toolchain pinned at 2026-08-05 or later. |
+| F60 | **Pulse has no or-patterns**, though F\* does. `match k { 0l \| 1l -> … }` is a syntax error, while `let f n = match n with \| 0 \| 1 -> 10 \| _ -> 1` verifies. A C# section carries a *set* of labels, so `match` can express `case 0: case 1: S; break;` only by duplicating `S` once per label, without bound. | `test/pulse_facts/MatchFacts.fst` §4 records the error (`Error 168: Syntax error`) and the disjunction that replaces it. This is what decides R5.14 against `match`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1559,6 +1561,51 @@ there.
 Neither fix is a special case for `switch`: one is an ordering constraint between two
 existing passes, the other a rule that was too narrow. That is §0 rule 3 working as
 intended — the cost of a new construct is paid in the general rules or not at all.
+
+### Why not a Pulse `match`?
+
+Because a C# `switch` looks like one, and structure-preserving is what §0 asks for, this
+is the first question to ask about R5.14 — so it is worth saying what the answer rests on,
+which has changed once already.
+
+When R5.14 was written the answer was that Pulse could not do it: `0l` in pattern position
+was read as a `Prims.int` and rejected against an `Int32.t` scrutinee. A chain was not
+chosen over `match`, it was the only target there was. FStarLang/FStar#4374 (merged
+2026-08-02) fixed that, and `test/pulse_facts/MatchFacts.fst` now verifies a Pulse `match`
+on `Int32.t` and `UInt8.t` literals. So the question is live, and the chain has to be
+argued for rather than assumed.
+
+**It loses on one point, and that point is decisive: Pulse has no or-patterns (F60).**
+A C# section carries a *set* of labels —
+
+```csharp
+case 0:
+case 1:
+    S;
+    break;
+```
+
+is one section with two labels, not two sections. `match` can only express it by
+duplicating `S` once per label, and nothing bounds the number of labels. `S` is the user's
+code: their `Pal.Assert`s, their lemma calls, their loops. Duplicating it duplicates proof
+obligations they wrote once, and reports each failure twice against the same C# span.
+`t == k1 || t == k2` is one branch, of any width, at no cost. (F\* itself has or-patterns,
+so this is a property of Pulse's `match` and may not be permanent.)
+
+**And it wins nothing to set against that.** The intuition that a `match` gives the solver
+a case analysis a chain does not is wrong here: a machine integer is not an inductive type,
+so an arm's hypothesis is exactly the equality `I32.v k == 0` that the `if` branch already
+supplies (F59). `MatchFacts.fst` discharges the same assertion both ways to make the point
+checkable rather than plausible. The other candidate advantages are smaller than they
+look. `match` would evaluate the scrutinee once natively, saving the binding — but the
+binding is one immutable `let`, and it is what makes the *rewrite* obviously correct.
+Pulse would check exhaustiveness — but C# has already done that, and a `switch` with no
+`default` is not an error in C# and must not become one here. `default` would still need
+hoisting, because match arms are ordered too.
+
+So: the chain, until Pulse has or-patterns. That is the condition to re-open this on, and
+it is a fact about Pulse rather than a preference — which is the point of writing it down
+here instead of leaving it as a decision nobody recorded.
 
 ---
 
