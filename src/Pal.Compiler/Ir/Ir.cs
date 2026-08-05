@@ -414,6 +414,31 @@ public sealed record IrFor(
     IrExpr? Decreases,
     IrStmt Body) : IrStmt(Loc);
 
+/// <summary>
+/// One section of a <c>switch</c>: the labels that select it and the statements it runs.
+/// An empty <see cref="Labels"/> is the <c>default</c> section.
+/// </summary>
+public sealed record IrSwitchSection(
+    IrLoc Loc,
+    ImmutableArray<IrExpr> Labels,
+    ImmutableArray<IrStmt> Statements);
+
+/// <summary>
+/// A <c>switch</c> statement, kept intact by lowering and desugared to a chain of
+/// <see cref="IrIf"/> by the Normalize pass (R5.14).
+/// </summary>
+/// <param name="Scrutinee">
+/// The immutable binding of the governing expression, which C# evaluates exactly once
+/// however many arms the chain has. It is carried here rather than emitted beside the
+/// <c>switch</c> so that the expansion can be spliced into its enclosing block: a
+/// <c>switch</c> whose sections <c>return</c> becomes a chain of guards, and R5.5b can
+/// only absorb what follows a chain if the chain is the block's own statement.
+/// </param>
+public sealed record IrSwitch(
+    IrLoc Loc,
+    IrLocalDecl Scrutinee,
+    ImmutableArray<IrSwitchSection> Sections) : IrStmt(Loc);
+
 public sealed record IrReturn(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
 
 public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);

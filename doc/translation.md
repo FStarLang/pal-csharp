@@ -114,6 +114,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F54 | SharpZipLib's Adler-32 comment is **arithmetically wrong in the unsafe direction**: the true supremum of `s2` before the deferred modulo is 2 090 626 020, not the 2 090 079 800 the comment claims — larger by 546 220, because "median(s1)" approximates a triangular sum. The conclusion (`< 2^31`) survives, with 2.65% headroom rather than 2.68%. The claim about `s1` (max 1 034 520) is right. | `test/pulse_facts/ConversionFacts.fst:tri`, `tri_closed`, `adler_s2_bound`, `adler_comment_understates`, verified. |
 | F55 | A `[Spec]` function's parameters are all mathematical (R4.6) whatever their C# types, but a `[Lemma]`'s binders keep the types they were declared with (R4.7). Argument coercion is therefore **not** a property of the argument alone. | The two emitted signatures differ: `Let_RingVariant_Slot` takes `(var_head: int)` from a C# `int`, `Let_Adler32_Step` takes `(var_off: I32.t)` from the same C# type. Relied on by R13.6. |
 | F56 | A slot is a *binding*, and a binding introduced inside a block is out of scope once the block closes — including for R5.13's resource-naming bracket, which would otherwise assert `pts_to` for a cell whose Pulse binder no longer exists ("Identifier not found: var_n"). | Reproduced by a `Pal.Assert` placed after a loop whose body declared a local; fixed in `CodeEmitter.Scoped`. |
+| F57 | A pass that analyses a body and a pass that rewrites it are **ordered**, and the analysis must see the rewritten form. R5.7 asks whether a loop body escapes, in order to decide whether the `for` step goes in the body or in its own slot; asked of the body *before* R5.14 has run, the question is answered "no" for a `continue` still sitting inside a `switch`, the step is appended to the body, and the step is then skipped on the very iterations that continue — so the measure stalls and termination fails. | Reproduced by `test/switch_stmt:Count`, whose `case 7: continue;` failed with `pow2 31 - (match … with \| true -> i+1 \| false -> i) << meas`. Fixed by asking `Escapes` of the normalized body. |
+| F58 | A desugaring that introduces a binding must **splice** into its enclosing block, not nest inside a fresh one. R5.14's scrutinee binding wrapped the if/else chain in a block, and R5.5b absorbs a tail only into a chain that is a statement of the same block — so `switch (t) { case k: return e; } return d;` was rejected even though every piece of the rule was right. | Reproduced by `test/switch_stmt/SwitchVariant.cs:WeightOf` (three `PALCS0001`s). Fixed by carrying the binding in `IrSwitch` and splicing the expansion in `Normalize`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1479,6 +1481,85 @@ Four consequences.
   receiver's invariant is unfolded there, so the lemma's precondition is precisely what the
   context does not hold. The frontend says nothing about it — §0 rule 3, other direction.
 
+**R5.14 (`switch` becomes an if/else chain).** Like R5.7's `for`, a `switch` is lowered
+intact and desugared by Normalize, so the rewrite is one rule applied uniformly rather
+than a shape the frontend recognises:
+
+```csharp
+switch (e) {                       {
+  case k1:                             var t = e;             // once
+  case k2: S1; break;          ==>     if (t == k1 || t == k2) { S1 }
+  case k3: S2; break;                  else if (t == k3)      { S2 }
+  default: S3; break;                  else                   { S3 }
+}                                  }
+```
+
+Three things in that picture are load-bearing.
+
+*The scrutinee is bound, always.* C# evaluates the governing expression exactly once, and
+an if/else chain tests it up to *n* times. For `switch (a[i++])` the difference is
+observable, so the binding is not an optimisation to be applied when it happens to matter
+— it is what makes the rewrite correct. It is an immutable binding (the `Immutable` flag
+R13.3 introduced), because it is written once and read many times, and because a cell
+declared here would become a resource in every enclosing block.
+
+*The `default` section moves to the end.* C# lets it be written anywhere among the
+sections, and it always means "none of the others". Reordering is sound precisely because
+C# requires the case labels to be *distinct constants*: no two arms of the chain can both
+be taken, so the order among them carries no information. A `switch` with no `default` has
+no final `else`, which is the same fallthrough-to-nothing C# gives it.
+
+*A section's trailing `break` is dropped, and any other `break` is refused.* This is the
+one place a naive desugaring is quietly wrong. Inside a `switch`, `break` means "leave the
+switch"; inside a loop it means "leave the loop"; and a `switch` inside a loop has both
+meanings in scope, distinguished only by which construct encloses the statement. The final
+`break` of a section is the section terminator and vanishes with the section. But
+
+```csharp
+while (…) { switch (k) { case 1: if (c) break; S; break; …
+```
+
+has a `break` whose meaning *changes* under the rewrite: it left the `switch` before and
+would leave the `while` after. There is no if/else chain that expresses it — the chain has
+no construct to break out of — so it is rejected (PALCS0577) rather than mistranslated.
+`continue` needs no such care: it targets the enclosing loop both before and after.
+
+The rest is refusal, and each refusal is a construct with no meaning in the chain rather
+than one that is merely unimplemented. Pattern labels and `when` guards (`case int x:`,
+`case > 0:`) are rejected: they bind and test rather than compare, and R5.14 is a rule
+about equality against constants. `goto case` and `goto default` are rejected as the
+arbitrary control flow they are. A section that does not end in `break`, `return` or
+`continue` cannot occur — C# itself forbids the fallthrough — and stacked labels
+(`case k1: case k2:`) are one section with two labels in Roslyn's tree already, which is
+why they need no rule of their own beyond the disjunction above.
+
+What this rule does *not* do is give the solver a case analysis it did not have.
+`if (t == k1) … else if (t == k2) …` is exactly the term structure a hand-written chain
+would produce, so a proof about a `switch` costs what the same proof about the chain
+costs. That is the intended outcome: `switch` is a notation, and R5.14 says it is only a
+notation.
+
+The variant test (§7.2) earned its keep twice here, and neither finding was about
+`switch`. Both were about *where* the rewrite sits among the rules that were already
+there.
+
+* **A rewrite must run before anything that analyses what it produces (F57).** R5.7 asks
+  whether a loop body escapes, to decide whether the `for` step belongs in the body or in
+  its own slot. Asked before R5.14 has run, it does not see a `continue` still inside a
+  `switch`, appends the step to the body, and the step is then skipped on exactly the
+  iterations that continue — so the counter stalls and *termination* fails. The symptom is
+  a failed measure, four rules away from the cause.
+* **A rewrite that introduces a binding must splice, not nest (F58).** The scrutinee
+  binding wrapped the chain in a block, and R5.5b absorbs a tail only into a chain that is
+  a statement of the *same* block. So a `switch` whose sections `return` was rejected with
+  every piece of R5.14 correct. Fixing it generalised R5.5b, which previously absorbed
+  only into an `if` with no `else` and now absorbs into a chain of guards — a shape a
+  hand-written program can have too, and which it had been silently refusing.
+
+Neither fix is a special case for `switch`: one is an ordering constraint between two
+existing passes, the other a rule that was too narrow. That is §0 rule 3 working as
+intended — the cost of a new construct is paid in the general rules or not at all.
+
 ---
 
 ## 6. Expressions
@@ -1737,6 +1818,14 @@ Rules are recorded here as they are validated.
   `new Counter(from)` does. And R4.11's read-only test counted *any* instance call as a
   write, which would have made every composite reader a mutator and its result unusable to
   a caller; it now follows the call, treating a cycle as a write.
+* **`switch` is supported** (R5.14, `test/switch_stmt`). It is a notation for an if/else
+  chain and nothing more, so it costs nothing to prove: the two tiers hold for a `switch`
+  exactly as they do for the chain a user would otherwise write. The rule's own content is
+  three details — the scrutinee is bound so it is evaluated once, `default` moves to the
+  end, and a `break` that is not a section's last statement is refused (PALCS0577) because
+  after the rewrite there is no switch left for it to leave. The two bugs the variant found
+  (F57, F58) were both in rules that already existed, which is the outcome the discipline
+  is meant to produce.
 * **A loop inside an instance method works** (R5.12, `test/bag_class`). This was refused
   until the sub-scheme was written, and writing it turned out to need one idea: inside
   R4.10's window a loop carries the *representation*, and which half of it is
@@ -1790,7 +1879,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — thirty-nine cases, each
+  `test/diagnostics` is its counterpart to the verification tests — forty cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1859,7 +1948,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the thirty-nine
+  right, since an editor has no business writing files, but eight of the forty
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every

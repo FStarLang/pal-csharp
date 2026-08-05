@@ -870,11 +870,16 @@ writes `assert False` into `TranslationErrors.fst`, so a failed translation can 
 mistaken for a passing proof.
 
 Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
-`switch`, `try`/`catch`/`throw`, generics, C# `interface` declarations, delegates, `async`,
+`try`/`catch`/`throw`, generics, C# `interface` declarations, delegates, `async`,
 `string`, floating point, struct fields that are not values, user-written struct
 constructors, static mutable fields, a class that is neither `sealed` nor `abstract`, a
-`return` that is not in tail position **inside a loop**, and an increment or decrement
-written in a specification.
+`return` that is not in tail position **inside a loop**, an increment or decrement
+written in a specification, a `switch` label that is a pattern or carries a `when` guard,
+and a `break` that leaves a `switch` before the end of its section.
+
+`switch` itself is supported: R5.14 desugars it to an if/else chain, evaluating the
+governing expression once and moving `default` to the end. What it does not cover is
+everything about `switch` that is not a comparison against a constant.
 
 Two entries left this list in M7. Conversions between machine-integer widths — explicit
 casts and C#'s implicit promotions alike — are translated by §13's R13.1 and R13.4. A

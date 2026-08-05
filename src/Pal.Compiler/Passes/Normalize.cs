@@ -14,6 +14,7 @@ namespace Pal.Compiler.Passes;
 /// <item>R5.8 — ownership (<c>live</c>) inference for each loop.</item>
 /// <item>R5.8b — locals a loop never assigns get their value fixed, not existentialised.</item>
 /// <item>R5.9 — the <c>decreases</c> measure every Pulse loop requires (F2).</item>
+/// <item>R5.14 — <c>switch</c> becomes an if/else chain.</item>
 /// </list>
 /// </summary>
 public static class Normalize
@@ -51,23 +52,41 @@ public static class Normalize
     /// statements move into the branch they were already the alternative to. Applied
     /// repeatedly it handles a chain of guard clauses. A <c>return</c> that survives in
     /// a non-final position — from inside a loop, say — is still rejected.
+    ///
+    /// A chain of guards is absorbed at its far end: <c>if (c) … else if (d) …</c>, where
+    /// both branches return and the chain has no final <c>else</c>, takes what follows as
+    /// that <c>else</c>. R5.14's <c>switch</c> is the reason this generality is needed —
+    /// a section that ends in <c>return</c> becomes exactly such a chain — but the shape
+    /// is one a hand-written program can have too.
     /// </summary>
     private static ImmutableArray<IrStmt> Returns(ImmutableArray<IrStmt> statements)
     {
         for (var i = 0; i < statements.Length - 1; i++)
         {
-            if (statements[i] is not IrIf { Else: null } branch) continue;
-            if (!EndsInReturn(branch.Then)) continue;
+            if (statements[i] is not IrIf branch || !GuardChain(branch)) continue;
 
             var rest = Returns([.. statements.Skip(i + 1)]);
             return
             [
                 .. statements.Take(i),
-                branch with { Else = new IrBlock(rest[0].Loc, rest) },
+                Attach(branch, new IrBlock(rest[0].Loc, rest)),
             ];
         }
         return statements;
     }
+
+    /// <summary>
+    /// A chain <c>if (c1) T1 else if (c2) T2 …</c> that ends without an <c>else</c> and
+    /// whose every branch returns. Such a chain has one exit that is not a return — the
+    /// one the missing <c>else</c> stands for — and that is where the tail belongs.
+    /// </summary>
+    private static bool GuardChain(IrIf i) =>
+        EndsInReturn(i.Then) && (i.Else is null || (i.Else is IrIf next && GuardChain(next)));
+
+    private static IrIf Attach(IrIf chain, IrStmt tail) =>
+        chain.Else is IrIf next
+            ? chain with { Else = Attach(next, tail) }
+            : chain with { Else = tail };
 
     private static bool EndsInReturn(IrStmt stmt) => stmt switch
     {
@@ -88,10 +107,20 @@ public static class Normalize
                 var result = ImmutableArray.CreateBuilder<IrStmt>();
                 foreach (var s in Returns(block.Statements))
                 {
-                    result.Add(Statement(s, scope, diagnostics));
+                    var normalized = Statement(s, scope, diagnostics);
+                    // R5.14's expansion is spliced, not nested: its chain has to be a
+                    // statement of *this* block for R5.5b below to absorb what follows it.
+                    if (s is IrSwitch sw)
+                    {
+                        result.AddRange(Flatten(normalized));
+                        scope = scope.Add(sw.Scrutinee.Name);
+                    }
+                    else result.Add(normalized);
                     if (s is IrLocalDecl d) scope = scope.Add(d.Name);
                 }
-                return block with { Statements = result.ToImmutable() };
+                // Again, because R5.14 turns a `switch` into an `if` chain and a section
+                // that ended in `return` is a guard clause that was not one before.
+                return block with { Statements = Returns(result.ToImmutable()) };
             }
 
             case IrIf i:
@@ -106,6 +135,9 @@ public static class Normalize
 
             case IrFor f:
                 return ForToWhile(f, outer, diagnostics);
+
+            case IrSwitch s:
+                return SwitchToIf(s, outer, diagnostics);
 
             default:
                 return stmt;
@@ -128,8 +160,10 @@ public static class Normalize
 
         // A `continue` must still run the step, so a body that contains one keeps the
         // step in its own slot; otherwise the two are indistinguishable and appending is
-        // both simpler and identical in meaning.
-        var loop = Escapes(f.Body)
+        // both simpler and identical in meaning. The question is asked of the *normalized*
+        // body: R5.14's `continue` is inside an `IrSwitch` until the rewrite has run, and
+        // a traversal that stopped there would report a body that never escapes.
+        var loop = Escapes(body)
             ? new IrWhile(
                 f.Loc,
                 f.Cond ?? new IrLiteral(f.Loc, true) { Type = IrPrim.Bool },
@@ -151,6 +185,42 @@ public static class Normalize
 
     private static IEnumerable<IrStmt> Flatten(IrStmt s) =>
         s is IrBlock b ? b.Statements : [s];
+
+    /// <summary>
+    /// R5.14. <c>switch (t) { case k1: case k2: S1 break; … default: Sd break; }</c>
+    /// becomes <c>if (t == k1 || t == k2) { S1 } else if … else { Sd }</c>.
+    ///
+    /// The scrutinee is already an immutable local (the frontend bound it), so testing it
+    /// once per arm evaluates the governing expression exactly as often as C# does: once.
+    /// The <c>default</c> section moves to the end whatever its written position, which is
+    /// sound because C# requires the case labels to be distinct constants — no two arms
+    /// can both be taken, so their order carries nothing. A <c>switch</c> with no
+    /// <c>default</c> gets no final <c>else</c>, which is C#'s fallthrough to nothing.
+    /// </summary>
+    private static IrStmt SwitchToIf(IrSwitch s, ImmutableHashSet<string> outer, DiagnosticBag diagnostics)
+    {
+        var arms = s.Sections.Where(sec => !sec.Labels.IsEmpty).ToList();
+        var fallback = s.Sections.FirstOrDefault(sec => sec.Labels.IsEmpty);
+
+        var scrutinee = new IrVar(s.Scrutinee.Loc, s.Scrutinee.Name) { Type = s.Scrutinee.Type };
+
+        IrStmt? chain = fallback is null ? null : Body(fallback);
+        for (var i = arms.Count - 1; i >= 0; i--)
+            chain = new IrIf(arms[i].Loc, Test(scrutinee, arms[i]), Body(arms[i]), chain);
+
+        var expansion = chain is null
+            ? ImmutableArray.Create<IrStmt>(s.Scrutinee)
+            : [s.Scrutinee, Statement(chain, outer.Add(s.Scrutinee.Name), diagnostics)];
+        return new IrBlock(s.Loc, expansion);
+
+        static IrStmt Body(IrSwitchSection section) => new IrBlock(section.Loc, section.Statements);
+    }
+
+    /// <summary>The disjunction of a section's labels: stacked labels are alternatives.</summary>
+    private static IrExpr Test(IrExpr scrutinee, IrSwitchSection section) =>
+        section.Labels
+            .Select(k => (IrExpr)new IrBinary(k.Loc, BinOp.Eq, scrutinee, k) { Type = IrPrim.Bool })
+            .Aggregate((a, b) => new IrBinary(b.Loc, BinOp.Or, a, b) { Type = IrPrim.Bool });
 
     /// <summary>
     /// Recognises the shape <c>for (T i = e; i &lt; h; i++)</c> — a counter that a single

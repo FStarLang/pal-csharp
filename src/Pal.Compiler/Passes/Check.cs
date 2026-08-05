@@ -234,6 +234,12 @@ public static class Check
                         "Internal error: a `for` loop reached Check un-normalized.");
                     break;
 
+                case IrSwitch sw:
+                    // The same, for R5.14's `switch`.
+                    diagnostics.Error("PALCS0509", sw.Loc,
+                        "Internal error: a `switch` reached Check un-normalized.");
+                    break;
+
                 case IrGhostStmt { Kind: GhostKind.Assume } a:
                     diagnostics.Warning("PALCS0902", a.Loc,
                         "`Pal.Assume` is unsound: this proposition is taken on trust.");
@@ -361,6 +367,11 @@ public static class Check
                 foreach (var s in f.Init.Concat(f.Step))
                     foreach (var r in Statements(s)) yield return r;
                 foreach (var r in Statements(f.Body)) yield return r;
+                break;
+            case IrSwitch sw:
+                foreach (var r in Statements(sw.Scrutinee)) yield return r;
+                foreach (var s in sw.Sections.SelectMany(sec => sec.Statements))
+                    foreach (var r in Statements(s)) yield return r;
                 break;
         }
     }

@@ -39,6 +39,7 @@ public sealed class StmtLowerer(
                 r.Expression is null ? null : _code.Lower(r.Expression)),
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
+            SwitchStatementSyntax s => LowerSwitch(s, loc),
             EmptyStatementSyntax => new IrBlock(loc, []),
             _ => UnsupportedStatement(node, loc),
         };
@@ -52,6 +53,98 @@ public sealed class StmtLowerer(
 
     private IrBlock LowerBlock(BlockSyntax block) =>
         new(Locations.From(block), [.. block.Statements.Select(Lower)]);
+
+    // -----------------------------------------------------------------------
+    // R5.14. `switch`
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// R5.14. Lowers a <c>switch</c> to <see cref="IrSwitch"/>, which Normalize turns
+    /// into an if/else chain. Two things are settled here rather than there, because
+    /// both need the syntax: the scrutinee is bound to an immutable local, so that the
+    /// chain tests a value C# evaluated exactly once; and the constructs the chain cannot
+    /// express are refused.
+    /// </summary>
+    private IrStmt LowerSwitch(SwitchStatementSyntax node, IrLoc loc)
+    {
+        var type = known.MapType(model.GetTypeInfo(node.Expression).Type);
+        if (type is null)
+        {
+            diagnostics.Unsupported(Locations.From(node.Expression),
+                $"The type of the `switch` expression `{node.Expression}`");
+            return new IrBlock(loc, []);
+        }
+
+        var scrutinee = new IrLocalDecl(loc, Fresh("switch"), type, _code.Lower(node.Expression))
+            { Immutable = true };
+
+        var sections = ImmutableArray.CreateBuilder<IrSwitchSection>();
+        foreach (var section in node.Sections)
+            if (LowerSwitchSection(section) is { } lowered) sections.Add(lowered);
+
+        return new IrSwitch(loc, scrutinee, sections.ToImmutable());
+    }
+
+    private IrSwitchSection? LowerSwitchSection(SwitchSectionSyntax section)
+    {
+        var loc = Locations.From(section);
+        var labels = ImmutableArray.CreateBuilder<IrExpr>();
+
+        foreach (var label in section.Labels)
+        {
+            switch (label)
+            {
+                case DefaultSwitchLabelSyntax:
+                    break;  // no test; an empty label list is the `default` section
+                case CaseSwitchLabelSyntax { Value: { } value }:
+                    labels.Add(_code.Lower(value));
+                    break;
+                default:
+                    // A pattern label binds and tests; R5.14 compares against constants.
+                    diagnostics.Unsupported(Locations.From(label),
+                        $"The `switch` label `{label.ToString().Trim()}`");
+                    return null;
+            }
+        }
+
+        var statements = section.Statements.Select(Lower).ToImmutableArray();
+
+        // The section's trailing `break` is the section terminator: it goes with the
+        // section. Any other `break` meant "leave the switch", and after the rewrite
+        // there is no switch to leave — inside a loop it would silently become the
+        // loop's `break` instead.
+        if (statements is [.., IrBreak]) statements = statements.RemoveAt(statements.Length - 1);
+        if (LooseBreak(statements) is { } stray)
+        {
+            diagnostics.Error("PALCS0577", stray.Loc,
+                "A `break` that leaves a `switch` early has no meaning once the `switch` " +
+                "becomes an if/else chain (R5.14): there is nothing left to break out of, " +
+                "and inside a loop it would become the loop's `break`. Restructure the " +
+                "section so that its `break` is its last statement.");
+            return null;
+        }
+
+        return new IrSwitchSection(loc, labels.ToImmutable(), statements);
+    }
+
+    /// <summary>
+    /// A <c>break</c> that would be captured by the desugaring. Loops and nested
+    /// <c>switch</c>es are opaque: a <c>break</c> inside one binds to it, before the
+    /// rewrite and after.
+    /// </summary>
+    private static IrBreak? LooseBreak(IEnumerable<IrStmt> statements) =>
+        statements.Select(LooseBreak).FirstOrDefault(b => b is not null);
+
+    private static IrBreak? LooseBreak(IrStmt stmt) => stmt switch
+    {
+        IrBreak b => b,
+        IrBlock b => LooseBreak(b.Statements),
+        IrIf i => LooseBreak(i.Then) ?? (i.Else is null ? null : LooseBreak(i.Else)),
+        _ => null,
+    };
+
+    private int _temps;
+    private string Fresh(string hint) => $"__pal_{hint}{_temps++}";
 
     private IrStmt LowerLocalDeclaration(LocalDeclarationStatementSyntax node, IrLoc loc)
     {

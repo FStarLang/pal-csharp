@@ -41,7 +41,7 @@ Pulse out — and the whole M1 acceptance suite passes.
 - [x] **Insertion sort proved sorted *and* a permutation of its input**
 - [x] Classes and objects — abstract invariants over a pure model, a class owning its
       array, and a class owning other objects three levels deep
-- [x] Twenty-five acceptance directories verify, each with an independently written variant
+- [x] Twenty-six acceptance directories verify, each with an independently written variant
       that must verify with no translator change
 - [x] **A production checksum verified as it ships** — SharpZipLib's `Adler32`
       ([`examples/adler32`](examples/adler32)), proved free of overflow *and* equal to
