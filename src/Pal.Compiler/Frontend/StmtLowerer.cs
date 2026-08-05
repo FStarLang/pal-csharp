@@ -40,6 +40,7 @@ public sealed class StmtLowerer(
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
+            GotoStatementSyntax g => LowerGoto(g, loc),
             EmptyStatementSyntax => new IrBlock(loc, []),
             _ => UnsupportedStatement(node, loc),
         };
@@ -48,6 +49,31 @@ public sealed class StmtLowerer(
     private IrStmt UnsupportedStatement(SyntaxNode node, IrLoc loc)
     {
         diagnostics.Unsupported(loc, $"The statement `{node.Kind()}`");
+        return new IrBlock(loc, []);
+    }
+
+    /// <summary>
+    /// R5.14. `goto case` and `goto default` are C#'s way of asking for the fallthrough
+    /// the language otherwise forbids, and they are the reason PAL — translating C, where
+    /// fallthrough is implicit — needs a `hit` flag threaded through its whole desugaring.
+    /// pal-csharp needs no such flag, because C# has already ruled out the case that
+    /// requires one, and these two statements are the exception it left open.
+    /// </summary>
+    private IrStmt LowerGoto(GotoStatementSyntax node, IrLoc loc)
+    {
+        var jump = node.Kind() switch
+        {
+            SyntaxKind.GotoCaseStatement => "`goto case`",
+            SyntaxKind.GotoDefaultStatement => "`goto default`",
+            _ => null,
+        };
+        if (jump is null) return UnsupportedStatement(node, loc);
+
+        diagnostics.Unsupported(loc, $"A {jump} statement",
+            "It re-introduces the fallthrough C# otherwise forbids, and an if/else chain " +
+            "(R5.14) has no way to enter one arm from another. Where the target section " +
+            "is to run *instead*, write its labels on this section as well; where it is " +
+            "to run *as well*, lift the shared work into a method both sections call.");
         return new IrBlock(loc, []);
     }
 

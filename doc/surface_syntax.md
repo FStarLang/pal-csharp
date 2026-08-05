@@ -879,7 +879,12 @@ and a `break` that leaves a `switch` before the end of its section.
 
 `switch` itself is supported: R5.14 desugars it to an if/else chain, evaluating the
 governing expression once and moving `default` to the end. What it does not cover is
-everything about `switch` that is not a comparison against a constant.
+everything about `switch` that is not a comparison against a constant. `goto case` and
+`goto default` are refused specifically: C# forbids implicit fallthrough, which is what
+makes the chain a faithful target, and these two are the exception that asks to enter one
+arm from inside another. The diagnostic names the two rewrites — stack the labels where
+the other section should run *instead*, factor out a method where it should run *as
+well*.
 
 Two entries left this list in M7. Conversions between machine-integer widths — explicit
 casts and C#'s implicit promotions alike — are translated by §13's R13.1 and R13.4. A

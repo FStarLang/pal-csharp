@@ -118,6 +118,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F58 | A desugaring that introduces a binding must **splice** into its enclosing block, not nest inside a fresh one. R5.14's scrutinee binding wrapped the if/else chain in a block, and R5.5b absorbs a tail only into a chain that is a statement of the same block — so `switch (t) { case k: return e; } return d;` was rejected even though every piece of the rule was right. | Reproduced by `test/switch_stmt/SwitchVariant.cs:WeightOf` (three `PALCS0001`s). Fixed by carrying the binding in `IrSwitch` and splicing the expansion in `Normalize`. |
 | F59 | Pulse's `match` **can** scrutinise a machine integer, since FStarLang/FStar#4374 (merged 2026-08-02); before it, `0l` in pattern position was read as a `Prims.int` and rejected against an `Int32.t` scrutinee. But an arm's hypothesis is just the equality `I32.v k == 0` — a machine integer is not an inductive type, so there is no case split to be had that an `if` does not already give. | `test/pulse_facts/MatchFacts.fst:match_i32`, `match_u8`, and `match_gives_equality` beside `chain_gives_equality`, which discharge the same assertion. Requires the toolchain pinned at 2026-08-05 or later. |
 | F60 | **Pulse has no or-patterns**, though F\* does. `match k { 0l \| 1l -> … }` is a syntax error, while `let f n = match n with \| 0 \| 1 -> 10 \| _ -> 1` verifies. A C# section carries a *set* of labels, so `match` can express `case 0: case 1: S; break;` only by duplicating `S` once per label, without bound. | `test/pulse_facts/MatchFacts.fst` §4 records the error (`Error 168: Syntax error`) and the disjunction that replaces it. This is what decides R5.14 against `match`. |
+| F61 | **C's implicit fallthrough is what forces PAL's `hit` flag.** `pal/cpp/impl.cpp` desugars `switch` into a *sequence* of `if (!brk && (hit \|\| scrut == v))` guards with two threaded flags; C# forbids fallthrough (CS0163), so its sections are disjoint and a plain if/else chain suffices with neither flag. | Read from `pal/cpp/impl.cpp:1834`. This is why R5.14 does not import PAL's machinery, and why `goto case`/`goto default` — the one way back into fallthrough — are refused rather than approximated. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1607,6 +1608,47 @@ So: the chain, until Pulse has or-patterns. That is the condition to re-open thi
 it is a fact about Pulse rather than a preference — which is the point of writing it down
 here instead of leaving it as a decision nobody recorded.
 
+### What C# rules out, and what PAL has to do about it
+
+The rewrite above is only as simple as it is because **C# forbids implicit fallthrough**
+(CS0163). Every section is entered exactly one way — by matching one of its own labels —
+so the sections are disjoint and an if/else chain, whose arms are disjoint too, is a
+faithful target.
+
+PAL translates C, which has no such rule, and the difference is visible in the shape of
+its desugaring. `pal/cpp/impl.cpp` reads:
+
+```
+// Desugar: switch (scrutinee) { case v1: s1; case v2: s2; default: sd }
+//      --> let scrut = scrutinee;
+//          bool hit = false; bool brk = false;
+//          if (!brk && (hit || scrut == v1)) { hit = true; s1 }
+//          if (!brk && (hit || scrut == v2)) { hit = true; s2 }
+//          if (!brk) { sd }
+// break inside case bodies sets brk = true.
+```
+
+Three of those pieces exist for fallthrough. `hit` is a flag that makes a section run
+because an *earlier* one did; the arms are a sequence of independent `if`s rather than a
+chain, because more than one may run; and `brk` is a real variable rather than a
+structural exit, because `break` has to stop that sequence part-way. pal-csharp needs none
+of it: the scrutinee binding is shared, and everything else falls away. That is a language
+difference doing real work, not a difference in ambition — and it is worth naming, because
+"how does PAL do it?" would otherwise import machinery for a case that cannot arise.
+
+`goto case` and `goto default` are the exception C# leaves open, and they ask for precisely
+what the chain cannot express: entry into one arm from inside another. They are refused,
+with a message naming the two honest rewrites — stack the labels when the other section
+should run *instead*, factor out a method when it should run *as well*
+(`test/diagnostics/cases/GotoCaseFallthrough.cs`). Approximating them would mean adopting
+PAL's `hit` flag for the one construct C# already discourages.
+
+One further thing PAL needs and pal-csharp does not: a **join contract**. Its
+`switch_stmt.c` carries `switch (x) _ensures(_live(x) && _live(result))` — an annotation
+at the point where the arms rejoin, because the desugaring's arms are a *sequence* and
+the resources have to be re-established between them. A chain has a structural join, which
+Pulse's `if` already types, so there is nothing for the user to write.
+
 ---
 
 ## 6. Expressions
@@ -1926,7 +1968,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — forty cases, each
+  `test/diagnostics` is its counterpart to the verification tests — forty-one cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1995,7 +2037,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the forty
+  right, since an editor has no business writing files, but eight of the forty-one
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every
