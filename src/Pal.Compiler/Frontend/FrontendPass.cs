@@ -311,7 +311,15 @@ public static class FrontendPass
                 {
                     // R11.2. `[SpecOp]` says "this member reads as this F* term applied to
                     // the receiver". Off a specification type there is no such receiver.
+                    // R12.2. An `SlProp`-valued `[SpecOp]` is an *ownership predicate*, not
+                    // an operation on a specification type: it belongs to no type, because
+                    // what it describes is a region of the heap. It is therefore allowed
+                    // wherever a static method is.
+                    var isPredicate = member is IMethodSymbol { IsStatic: true } pm &&
+                        SymbolEqualityComparer.Default.Equals(pm.ReturnType, known.SlProp);
+
                     if (known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
+                        !isPredicate &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
                             $"`[SpecOp]` on `{type.Name}.{member.Name}`, but `{type.Name}` is not a " +
@@ -538,6 +546,9 @@ public static class FrontendPass
         /// <summary>R9.2. An <c>abstract class</c>: a vtable rather than a record.</summary>
         public bool IsAbstract { get; init; }
 
+        /// <summary>R12.1. <c>[Plain]</c>: representation only, no derived ownership.</summary>
+        public bool IsPlain { get; init; }
+
         /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
         public ExpressionSyntax? ForgetBody { get; init; }
 
@@ -564,6 +575,44 @@ public static class FrontendPass
                 var modelMembers = symbol.GetMembers()
                     .Where(m => Declarations.Has(m, known.ModelAttribute))
                     .ToImmutableArray();
+
+                // R12.1. A `[Plain]` class is collected for its *representation* alone. It
+                // has no model, so none of the checks below apply to it: they all ask
+                // whether the abstraction function is well formed, and it has none by
+                // construction. What owns its cells is whatever the user's own predicate
+                // says, which the translator never sees.
+                if (Declarations.Has(symbol, known.PlainAttribute))
+                {
+                    if (modelMembers.Length > 0)
+                    {
+                        diagnostics.Error("PALCS0574", Locations.From(syntax.Identifier),
+                            $"`{symbol.Name}` is `[Plain]` and also declares a `[Model]`. " +
+                            "`[Plain]` means the class has no derived ownership at all, so there is " +
+                            "nothing for an abstraction function to abstract. Drop one of the two: " +
+                            "keep `[Model]` for a class whose predicate the translator derives, and " +
+                            "`[Plain]` for one whose predicate you write yourself " +
+                            "(doc/translation.md R12.1).");
+                        continue;
+                    }
+                    if (symbol.IsAbstract || symbol.BaseType?.SpecialType != SpecialType.System_Object)
+                    {
+                        diagnostics.Error("PALCS0575", Locations.From(syntax.Identifier),
+                            $"`{symbol.Name}` is `[Plain]` and takes part in a class hierarchy. " +
+                            "A `[Plain]` class is a bare representation with no vtable and no " +
+                            "invariant to relate to a base class's, so the two encodings have nothing " +
+                            "to compose. Make it `sealed` and free-standing.");
+                        continue;
+                    }
+                    if (CollectPlainFields(symbol, known, diagnostics) is not { } plainFields)
+                        continue;
+                    result.Add(new ClassCandidate(
+                        syntax, symbol, plainFields, symbol, IrPrim.SpecIntType, null,
+                        [], BuildClassUsings(syntax, symbol))
+                    {
+                        IsPlain = true,
+                    });
+                    continue;
+                }
 
                 // A class with no [Model] and no annotation at all is an ordinary C#
                 // class the translator has no business touching.
@@ -616,6 +665,51 @@ public static class FrontendPass
             }
         }
         return result.ToImmutable();
+    }
+
+    /// <summary>
+    /// R12.1. The fields of a <c>[Plain]</c> class. Only the representation is wanted, so
+    /// this is the struct field rule (R3.4) and nothing else: every instance field and
+    /// auto-property, mapped, with no model, no observations and no invariant to check.
+    /// </summary>
+    private static ImmutableArray<StructField>? CollectPlainFields(
+        INamedTypeSymbol symbol, WellKnown known, DiagnosticBag diagnostics)
+    {
+        var fields = ImmutableArray.CreateBuilder<StructField>();
+        var ok = true;
+        foreach (var member in symbol.GetMembers())
+        {
+            if (member is IFieldSymbol { IsStatic: true, IsConst: false } stat)
+            {
+                diagnostics.Error("PALCS0522",
+                    Locations.From(stat.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{stat.Name}` is a static mutable field. No per-object " +
+                    "invariant covers it, so nothing in the scheme can say what it holds.");
+                ok = false;
+                continue;
+            }
+
+            var (name, type) = member switch
+            {
+                IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } f
+                    => (f.Name, f.Type),
+                IPropertySymbol { IsStatic: false, IsIndexer: false } p
+                    when p.GetMethod is not null && IsAuto(p) => (p.Name, p.Type),
+                _ => (null, null),
+            };
+            if (name is null || type is null) continue;
+
+            if (known.MapType(type) is not { } mapped)
+            {
+                diagnostics.Error("PALCS0500",
+                    Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{name}` has type `{type}`, which has no translation.");
+                ok = false;
+                continue;
+            }
+            fields.Add(new StructField(member, name, type, mapped));
+        }
+        return ok ? fields.ToImmutable() : null;
     }
 
     private static bool TryCollectClass(
@@ -996,6 +1090,18 @@ public static class FrontendPass
             })
             .ToImmutableArray();
 
+        // R12.1. Everything below this point derives something from the model — the
+        // abstraction, the invariant, the observations, the recursion. A `[Plain]` class
+        // has no model, so it stops here with just its fields.
+        if (c.IsPlain)
+            return new IrClass(
+                Locations.From(c.Syntax.Identifier), c.Symbol.Name, fields,
+                ModelMember: "", ModelType: IrPrim.SpecIntType, ModelBody: null,
+                ModelRefinements: [], Invariants: [], Observations: [])
+            {
+                IsPlain = true,
+            };
+
         // The abstraction reads the fields; an observation reads the model. Both are
         // written unqualified inside the class, which is the same convention R3.4 uses
         // for a struct's [Refine].
@@ -1235,6 +1341,11 @@ public static class FrontendPass
 
         return new IrRecursion(shape, lowered.ToImmutable(), null);
     }
+
+    /// <summary>R12.1. Whether a type is a <c>[Plain]</c> class.</summary>
+    private static bool IsPlainClass(ITypeSymbol? t, WellKnown known) =>
+        (t as INamedTypeSymbol)?.OriginalDefinition is { } n &&
+        Declarations.Has(n, known.PlainAttribute);
 
     private static ImmutableArray<string> BuildClassUsings(
         ClassDeclarationSyntax syntax, INamedTypeSymbol symbol)
@@ -1554,7 +1665,12 @@ public static class FrontendPass
             {
                 IsGhost = isGhost,
                 Consumes = Declarations.Has(p, known.ConsumesAttribute),
-                Plain = Declarations.Has(p, known.PlainAttribute),
+                // R12.1. A parameter is plain either because it says so, or because its
+                // *class* does: a `[Plain]` class has no derived invariant to own it
+                // through, so every reference to one carries the resource its contract
+                // names and nothing implicit.
+                Plain = Declarations.Has(p, known.PlainAttribute) ||
+                        IsPlainClass(declared, known),
                 Fraction = Declarations.Find(p, known.FracAttribute) is { } f
                     ? Declarations.StringArgument(f) : null,
             });

@@ -90,6 +90,13 @@ public sealed record IrClassType(string Name, bool Nullable = false) : IrType
 
     /// <summary>The non-null form, which R10.3a derives the nullable one from.</summary>
     public IrClassType AsNonNull => Nullable ? this with { Nullable = false } : this;
+
+    /// <summary>
+    /// R12.1. The class is <c>[Plain]</c>: it has a representation and nothing else, so
+    /// every rule that would attach an invariant, a model or a case lemma to a value of
+    /// this type has nothing to attach.
+    /// </summary>
+    public bool Plain { get; init; }
 }
 
 /// <summary>The spec-only inductive list <c>SpecList&lt;T&gt;</c> (R10.5), F*'s <c>list</c>.</summary>
@@ -224,6 +231,13 @@ public sealed record IrFieldInit(string Field, IrExpr Value)
 /// </summary>
 public sealed record IrNew(
     IrLoc Loc, string Struct, ImmutableArray<IrFieldInit> Fields) : IrExpr(Loc);
+
+/// <summary>
+/// R12.4. <c>new C { … }</c> on a <c>[Plain]</c> class: a box holding the record. There is
+/// no constructor to call, because §12 emitted no constructor — a plain class is its
+/// representation, so allocating one is building the record and boxing it.
+/// </summary>
+public sealed record IrAlloc(IrLoc Loc, string Class, IrNew Record) : IrExpr(Loc);
 
 public enum CalleeKind { Method, Spec, Lemma }
 
@@ -570,6 +584,14 @@ public sealed record IrClass(
     ImmutableArray<IrExpr> Invariants,
     ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name)
 {
+    /// <summary>
+    /// R12.1. <c>[Plain]</c>: the class carries no derived ownership. Only its
+    /// representation is emitted — no model type, no invariant, no case lemmas — and no
+    /// contract mentioning it gains an automatic conjunct. Whatever owns its cells is
+    /// said by the user, in a predicate the user also wrote.
+    /// </summary>
+    public bool IsPlain { get; init; }
+
     /// <summary>
     /// R9.1. The translated class this one derives from, if any. Non-null and
     /// <see cref="IsAbstract"/> false is a leaf; null and abstract is a root.

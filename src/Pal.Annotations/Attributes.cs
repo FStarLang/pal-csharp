@@ -59,8 +59,33 @@ public sealed class DecreasesAttribute(string measure) : Attribute
 [AttributeUsage(AttributeTargets.Parameter)]
 public sealed class ConsumesAttribute : Attribute;
 
-/// <summary>Suppress the resource this parameter's type would otherwise imply.</summary>
-[AttributeUsage(AttributeTargets.Parameter)]
+/// <summary>
+/// Carry <em>no derived ownership</em>.
+///
+/// <para>On a <b>parameter</b>, this suppresses the resource the parameter's type would
+/// otherwise imply: the reference is passed, and what is owned through it is whatever the
+/// contract says explicitly.</para>
+///
+/// <para>R12.1. On a <b>class</b>, it suppresses the whole derived encoding. The translator
+/// emits the representation — the record of fields, the reference, and the nullable
+/// reference — and nothing else: no invariant, no model, no case lemmas, and no automatic
+/// conjunct in any contract mentioning the class.</para>
+///
+/// <para>This is the escape hatch for structures whose ownership predicate cannot be read
+/// off a <c>[Model]</c>. §10 derives the predicate from one downward fold over one
+/// recursive field, which is enough for a list or a tree and not enough in general: a
+/// <em>list segment</em> is bounded at both ends, so it carries boundary parameters no fold
+/// over the fields could produce, and its emptiness is a relation between two of them
+/// rather than a property of one. A doubly linked list needs both.</para>
+///
+/// <para>What a <c>[Plain]</c> class asks of the user in exchange is everything §10 would
+/// have derived: the predicate, its intro and elim lemmas, and any lemma relating two
+/// instances of it — written in Pulse, brought in with <see cref="IncludePulseAttribute"/>,
+/// named in contracts by a <see cref="SpecOpAttribute"/> on an <c>SlProp</c>-valued member,
+/// and applied in bodies with <c>Pal.GhostStmt</c>. The translator places the calls the
+/// user names and derives nothing.</para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.Class)]
 public sealed class PlainAttribute : Attribute;
 
 /// <summary>
@@ -289,3 +314,4 @@ public sealed class IncludePulseAttribute(string module, string body) : Attribut
     public string Module { get; } = module;
     public string Body { get; } = body;
 }
+

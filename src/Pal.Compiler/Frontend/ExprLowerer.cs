@@ -173,6 +173,39 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             };
         }
 
+        // R12.4. `new C { f = e, … }` on a `[Plain]` class. Object-initializer syntax and
+        // not a constructor call: a constructor has a *body*, and reading a body to learn
+        // which parameter lands in which field is exactly the deriving §12 does not do.
+        // The initializer says it outright, so the record is built the way R3.5 builds a
+        // struct's and then boxed.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } plain
+            && Declarations.Has(plain.OriginalDefinition, known.PlainAttribute))
+        {
+            if (node.ArgumentList is { Arguments.Count: > 0 })
+            {
+                diagnostics.Unsupported(loc, $"A constructor call on the `[Plain]` class `{plain.Name}`",
+                    "Use object-initializer syntax: `new " + plain.Name + " { Field = value, … }`. " +
+                    "A `[Plain]` class has no emitted constructor, because pal-csharp derives " +
+                    "nothing about it (doc/translation.md R12.4).");
+                return new IrLiteral(loc, null);
+            }
+
+            var inits = new List<IrFieldInit>();
+            foreach (var expr in node.Initializer?.Expressions ?? default)
+            {
+                if (expr is not AssignmentExpressionSyntax { Left: IdentifierNameSyntax pn } pa)
+                {
+                    diagnostics.Unsupported(Locations.From(expr), $"The initializer `{Trim(expr)}`");
+                    continue;
+                }
+                inits.Add(new IrFieldInit(pn.Identifier.ValueText, Lower(pa.Right)));
+            }
+
+            if (Construct(loc, plain.Name, plain, inits) is not IrNew record)
+                return new IrLiteral(loc, null);
+            return new IrAlloc(loc, plain.Name, record) { Type = new IrClassType(plain.Name) };
+        }
+
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
             return Unsupported(node, loc);
 
@@ -416,6 +449,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             if (symbol is IFieldSymbol { IsStatic: false } && ObjectFields.Contains(member))
                 return new IrField(loc, new IrVar(loc, Names.This), member);
         }
+
+        // R12.3. A field of a `[Plain]` class. There is no model to read instead and no
+        // `[Spec]` member to prefer, because §12 derived nothing: the representation is all
+        // there is, so a field read is the only thing this can mean. Whether the read is
+        // *owned* is settled by the user's predicate when the emitter checks the window,
+        // not here.
+        if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } plain
+            && Declarations.Has(plain.OriginalDefinition, known.PlainAttribute)
+            && symbol is IFieldSymbol { IsStatic: false })
+            return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
 
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
         // a caller holds the model and nothing else; a field read here would be a fact

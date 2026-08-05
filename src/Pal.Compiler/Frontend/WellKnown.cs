@@ -189,8 +189,15 @@ public sealed class WellKnown
             // R10.2. `C?` is `option C`, and the annotation is part of the type: it is what
             // makes the null test a pattern match, and hence what makes the base case of
             // R10.3's induction reachable by the prover.
-            case INamedTypeSymbol { TypeKind: TypeKind.Class } named when HasModel(named):
-                return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated);
+            // R12.1. A `[Plain]` class is translated too, and is translated for the same
+            // reason: it has a representation. What it does not have is a model, so it is
+            // recognised by the attribute rather than by the `[Model]` member.
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } named
+                when HasModel(named) || Declarations.Has(named.OriginalDefinition, PlainAttribute):
+                return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
+                {
+                    Plain = Declarations.Has(named.OriginalDefinition, PlainAttribute),
+                };
         }
 
         if (SymbolEqualityComparer.Default.Equals(type, SpecInt)) return new IrPrim(PrimKind.SpecInt);

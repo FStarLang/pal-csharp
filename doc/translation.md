@@ -1779,7 +1779,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — thirty-six cases, each
+  `test/diagnostics` is its counterpart to the verification tests — thirty-eight cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1848,7 +1848,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the thirty-six
+  right, since an editor has no business writing files, but eight of the thirty-eight
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every
@@ -3221,8 +3221,12 @@ consequences, all mechanical:
 back pointer — but the *surface* rule is not. A freshly allocated node's predecessor index
 has to come from somewhere, and no rule over C# yet says where; §0 rule 3 forbids the
 emitter from inventing one, and it forbids inventing a refusal just as firmly, so the
-refusal is written down as a rule with its reason rather than left as an approximation. The
-doubly linked list ships as a Pulse-level probe until the missing rule is probed.
+refusal is written down as a rule with its reason rather than left as an approximation.
+
+`[Backward]` is also one more knob, and knobs run out: it makes a *whole* doubly linked
+list expressible and a list *segment* no more expressible than before. §12 is the answer to
+the general case, and a doubly linked list is delivered there — with the predicate written
+by the user rather than derived, which is what a back pointer needed all along.
 
 ### 10.9 Status
 
@@ -3412,3 +3416,199 @@ What is *not* delivered: a user cannot yet declare a spec type whose recursive c
 has more than one recursive argument in a *class* (§10's window opens one sub-object), and
 the iterative traversal of §10.7 is still refused. Neither is a limit of §11 — both are
 §10's, and §11 does not make them worse.
+
+---
+
+## 12. User-defined ownership predicates
+
+### 12.1 The problem
+
+§10 derives a class's ownership predicate from its `[Model]`: one downward fold over one
+recursive field. §11 lets the *model type* be the user's. Neither lets the **predicate** be
+the user's, and there are structures for which no derivation can produce it.
+
+The driving example is a **doubly linked list segment**. A segment breaks §10 three ways,
+and the three are independent:
+
+1. It is bounded at **both** ends. It carries boundary parameters — where the segment stops,
+   and which node is its last — that no fold over the class's fields could produce, because
+   they are not properties of the data at all: they are chosen by whoever states the
+   specification.
+2. Its empty case is `from == to`, a **relation between two parameters**, not `x == None`, a
+   property of one. So a C# `if (x == null)` means something strictly weaker than §10
+   assumes as soon as segments are in play — R10.7's case lemma is sound only when the right
+   boundary is `null`, that is only for a whole list.
+3. Its central lemma — that two adjacent segments compose — is a statement about **two
+   instances of the predicate at once**, proved by induction. No amount of reading a
+   `[Model]` backwards produces it.
+
+And the `prev` field breaks the ownership discipline outright, for the reason R10.10 gives:
+`next` is owned, `prev` points at a cell the node before it already owns. The standard
+answer is that a back pointer is **constrained, not owned** — a `pure` equation the
+predicate carries — and a predicate the compiler derives can only own what it folds over.
+
+So §12 is the third and last link in a chain: §7 brings your own *module*, §11 brings your
+own *model type*, §12 brings your own *ownership predicate*. It is the direct analogue of
+PAL's `_plain` + `_include_pulse` + `_refine_value` + `_ghost_stmt`
+(`pal/test/recursive_struct/recursive_struct.c`), and it exists for the same reason: the
+general case has to be reachable without patching the compiler.
+
+### 12.2 `[Plain]`: a class the translator derives nothing about
+
+**R12.1.** A class carrying `[Plain]` is translated to its **representation and nothing
+else**:
+
+```fstar
+noeq type class_DNode__raw = {
+  fld_value: I32.t;
+  fld_prev: class_DNode__opt;
+  fld_next: class_DNode__opt;
+}
+and class_DNode = B.box class_DNode__raw
+and class_DNode__opt = option class_DNode
+```
+
+That is the whole module. No `[Model]`, no `__inv`, no `intro_nil`/`elim_cons`/`cases`, no
+`__as_opt`, no constructor. Everything §10 would have derived becomes the user's
+obligation, which is the trade: the compiler gives up saying anything, and in exchange the
+user may say anything.
+
+Consequently, and mechanically:
+
+* A `[Plain]` parameter contributes a **binder and no resource** to a contract. Nothing is
+  owned by virtue of a reference's type; ownership is only ever what a clause says.
+* `null` on a plain class is `None`, with **no `intro_nil`** — there is no derived predicate
+  for a lemma to be about (R12.2).
+* A non-null reference used where a nullable one is expected is `Some x`, with **no
+  `__as_opt`** — there is no invariant to re-read at the injected form.
+* A method returning a plain class returns a **bare reference**: no existentially quantified
+  result model, no `__inv` conjunct. `Result` denotes the reference itself.
+
+Two refusals, both about combining `[Plain]` with something that presupposes a derivation:
+
+* **PALCS0574** — `[Plain]` together with `[Model]`. They are two answers to one question.
+* **PALCS0575** — a `[Plain]` class in a hierarchy. A bare record behind a box has no vtable
+  and no invariant, so there is nothing for a base class's encoding to compose with.
+
+### 12.3 `SlProp` clauses, plain windows, plain fields
+
+**R12.2.** A `[SpecOp]` whose C# return type is `SlProp` is an **ownership** clause. Where
+it appears in a `[Requires]`, `[Ensures]` or `[Preserves]` it joins the separating
+conjunction rather than the `pure`:
+
+```csharp
+[SpecOp("DllSeg.seg")]
+public static SlProp Seg(DNode? from, DNode? prev, DNode? to, DNode? last,
+                         SpecList<SpecInt> values) => throw new InvalidOperationException();
+```
+
+```csharp
+[Requires("Dll.Seg(from, prev, null, last, xs)")]
+[Ensures("Dll.Seg(from, prev, null, last, xs)")]
+```
+
+becomes `requires (DllSeg.seg var_from var_prev None var_last (reveal var_xs)) ** …`. The
+decision is made purely by the C# return type, and it is the only new thing a contract can
+say. Note the idiom on the Pulse side: the named wrapper is `unfold`, so slprop matching —
+which is syntactic — still sees the underlying `dll_seg` and every lemma written about it
+applies to a contract written in terms of the wrapper.
+
+**R12.3.** Inside a method body, three rules, each the corresponding §10 rule with the
+proof steps deleted:
+
+| C# | Pulse |
+|---|---|
+| `x == null` / `x != null` in value position | `None? x` / `Some? x` |
+| `if (x == null) A else B` | `if (None? x) { A } else { B }` — **no `cases`, no `elim_cons`, no `intro_cons`**; the `else` branch knows only that `x` is `Some`, which is what makes `x.f` mean something there |
+| `x.f`, `x.f = e` | the same box read and box write as R3.8, reached through a value slot |
+
+Whether a field read or write inside the window is *owned* is the user's predicate's
+business, and a missing `pts_to` is a failure in their annotations. That is §0 rule 3 read
+in the intended direction: the emitter neither invents the proof step nor invents the
+refusal.
+
+The `prev` write is where this pays off. Because the user's predicate only ever
+**constrained** `prev` with a `pure` equation, overwriting it costs nothing: re-closing the
+segment simply reports what the field now holds. A derived predicate could not have offered
+this, because it would have had to own the field it folded over.
+
+**R12.4.** `new C { f = e, … }` on a plain class allocates: the record is built exactly as
+R3.5 builds a struct's, then boxed with `B.alloc`. **Object-initializer syntax only** — a
+constructor call is refused with a diagnostic, because a constructor has a *body*, and
+reading a body to learn which parameter lands in which field is precisely the deriving §12
+does not do. The initializer says it outright.
+
+The allocation is emitted **at the local's own binder**, not at a fresh one it is then
+copied from: Pulse matches resources by name, so a copy would leave the context holding
+`pts_to t0 _` while every later mention asked for `pts_to var_node _`. This is the same
+reason R3.8's alias case shares a slot rather than rebinding one.
+
+### 12.4 What the user supplies
+
+Everything §10 would have derived, written in Pulse through `[assembly: IncludePulse]` and
+named from C# through `[SpecOp]`, and applied in bodies through `Pal.GhostStmt`. For the
+doubly linked list that is the predicate
+
+```fstar
+let rec dll_seg (p: perm) ([@@@mkey] from) (prev) (to_) (last) (l: list int)
+  : Tot slprop (decreases l)
+  = match l with
+    | [] -> pure (from == to_ /\ prev == last)
+    | hd :: tl ->
+      exists* v r.
+        pure (from == Some v) ** B.pts_to v #p r **
+        pure (hd == I32.v r.fld_value /\ r.fld_prev == prev) **
+        dll_seg p r.fld_next from to_ last tl
+```
+
+and eight lemmas: `intro_nil`, `elim_nil`, `some`, `elim_cons`, `intro_cons`, `append`,
+`snoc` and `cases`. Three of them are worth naming:
+
+* **`append`** — two adjacent segments make one, by induction on the first. This is the
+  lemma no `[Model]` could produce.
+* **`snoc`** — extending a segment on the right, which is the step an *iterative* traversal
+  takes when it advances its cursor. It is what §10.7's refused iterative traversal was
+  missing, and §12 is where it can be written.
+* **`cases`** — the `if (x == null)` connection, valid *only* when the right boundary is
+  `None`. §12 refuses to derive it and makes the user state and prove it, which is the whole
+  of point 2 above made concrete.
+
+Three shapes recur in the lemma statements and are worth pinning, because getting them
+wrong produces failures that look like unrelated problems:
+
+* An `ensures` cannot mention `L.hd l` — `Cons? l` is not in scope there. Existentially
+  quantify the tail and state `pure (l == I32.v r.fld_value :: tl)`, which is the idiom the
+  emitter already uses.
+* A binder introduced by `with v r.` is **ghost** and cannot feed a stateful call or a box
+  write. The node has to be *read* (`let node = B.op_Bang (Some?.v from)`), which is exactly
+  what the emitter does anyway (R3.8).
+* `elim_cons` should take a **refined** binder `(from: …__opt { Some? from })` and
+  `rewrite each v as (Some?.v from)`, so that it ensures `B.pts_to (Some?.v from) …`
+  directly and the C# body can read a field of a *program* pointer. Getting `Some? from` in
+  the first place is its own preserving lemma, `some`.
+
+### 12.5 Status
+
+Pinned first, and independently of the compiler, by `test/pulse_facts/SegmentFacts.fst`:
+the representation exactly as the emitter produces it, `dll_seg`, the whole-list wrapper,
+all eight lemmas, a forward traversal and a `push_front` that writes the old head's back
+pointer.
+
+Delivered end to end from C#: `test/dll_segment`. `Dll.cs` carries the predicate and its
+lemmas in one `[assembly: IncludePulse]`, declares `[Plain] DNode`, and gives the predicate
+a C# face as two `SlProp`-valued `[SpecOp]`s. `DllOps.cs` has a recursive `Length` over a
+segment and a `PushFront` that allocates a node and **writes the old head's back pointer** —
+the operation a doubly linked list exists for, and the one §10 could not reach at all.
+
+The §7.2 detector applies: `DllOpsVariant.cs` is the same two operations written with the
+null tests inverted and their branches swapped, the cursor read into a local before the
+recursive call, the fields initialized in a different order, the locals renamed and the
+addition written the other way round. It verifies with no emitter change. Two diagnostics
+cases cover PALCS0574 and PALCS0575.
+
+What §12 does *not* do is make the proofs short. A segment operation costs the user five or
+six `Pal.GhostStmt` lines, most of them `rewrite`s that talk the boundary pointers into the
+shape the next lemma wants. That is the honest price of the general case, and it is charged
+where §0 rule 3 says it should be — in the user's annotations, visible and editable, rather
+than in a special case in the emitter. The cheap path remains §10, and §11 widens what §10
+can be cheap about; §12 is what you reach for when neither will do.

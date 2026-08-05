@@ -668,6 +668,49 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             ? $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvOptGather(((IrClassType)t).Name)}"
             : $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassInvGatherGen(((IrClassType)t).Name)}";
 
+    /// <summary>
+    /// R12.1. The whole of a <c>[Plain]</c> class: the record of fields, the reference,
+    /// and the nullable reference — the same three lines §10 emits (F35), and then nothing.
+    ///
+    /// <para>No invariant, because the user writes it. No model type, because there is no
+    /// abstraction function to give one. No case lemmas, because the cases are a property
+    /// of the user's predicate and not of this record. What the module exports is exactly
+    /// what a user's Pulse module needs in order to <em>state</em> ownership: a type to
+    /// hold <c>B.pts_to</c> at, and field names to write equations over.</para>
+    /// </summary>
+    private string EmitPlainClass(IrClass c)
+    {
+        var raw = Names.ClassRaw(c.Name);
+        var self = Names.ClassType(c.Name);
+        var opt = Names.ClassOpt(c.Name);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"module {Names.ClassModule(c.Name)}");
+        sb.AppendLine("#lang-pulse");
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Opens);
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Modules);
+        sb.AppendLine();
+
+        // F35. The three declarations are one mutually recursive group whether or not the
+        // class actually refers to itself, which costs nothing and means a self-reference
+        // needs no separate rule.
+        sb.Append("noeq type ").Append(raw).AppendLine(" = {");
+        foreach (var f in c.Fields)
+            sb.AppendLine($"  {Names.Field(f.Name)}: {PlainFieldType(c, f.Type, opt)};");
+        sb.AppendLine("}");
+        sb.AppendLine($"and {self} = B.box {raw}");
+        sb.AppendLine($"and {opt} = option {self}");
+        return sb.ToString();
+    }
+
+    /// <summary>A field of a <c>[Plain]</c> class; a self-reference is the nullable form.</summary>
+    private static string PlainFieldType(IrClass c, IrType t, string opt) =>
+        t is IrClassType ct && ct.Name == c.Name
+            ? (ct.Nullable ? opt : Names.ClassType(c.Name))
+            : Types.Render(t);
+
     private EmittedModule EmitClass(IrClass c)
     {
         // §10. A class that holds its own nullable type cannot have a flat `exists*`
@@ -676,6 +719,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // below assumes an invariant with one record and no recursion.
         if (c.Recursion is not null)
             return new EmittedModule(Names.ClassModule(c.Name), _recursive.Emit(c));
+
+        // R12.1. A `[Plain]` class is its representation and nothing else. Everything the
+        // rest of this method emits is derived from the model, and there is none.
+        if (c.IsPlain)
+            return new EmittedModule(Names.ClassModule(c.Name), EmitPlainClass(c));
 
         // R3.7: inside the defining module a field needs no qualifier, and must not have
         // one, or F*'s dependency scan reads the module as depending on itself.

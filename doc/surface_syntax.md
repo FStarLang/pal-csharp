@@ -746,7 +746,123 @@ See `test/user_spec_type` for the whole of the above as a working test.
 
 ---
 
-## 9. What is rejected
+## 9. Bringing your own ownership predicate
+
+§8 lets you bring your own *spec type*. This section lets you bring your own **ownership
+predicate** — what it means to own a reference — for the structures no derivation can
+describe.
+
+You need this when the shape of ownership is not a fold over the fields. The example is a
+**doubly linked list segment**: it is bounded at both ends, so it carries boundary pointers
+that are chosen by the specification rather than read off the data; its empty case is
+`from == to`, a relation between two of them, so `x == null` is not the case split; its
+`prev` field points at a cell the previous node already owns, so it can only be
+*constrained* and never owned; and its key lemma — that two adjacent segments compose —
+relates two instances of the predicate at once.
+
+### `[Plain]`: a class pal-csharp derives nothing about
+
+```csharp
+[Plain]
+public sealed class DNode
+{
+    internal int value;
+    internal DNode? prev;
+    internal DNode? next;
+}
+```
+
+`[Plain]` emits the record, the reference and the nullable reference, and stops. There is
+no `[Model]`, no invariant, no case lemmas, no constructor. Nothing is owned by virtue of a
+reference's *type*: a `DNode?` parameter is a bare binder, and ownership is only ever what a
+clause says.
+
+In exchange, you may say anything. Write the predicate and its lemmas in Pulse:
+
+```csharp
+[assembly: IncludePulse("DllSeg", """
+module DllSeg
+#lang-pulse
+open Pulse
+module B = Pulse.Lib.Box
+
+let rec dll_seg (p: perm) ([@@@mkey] from: Class_DNode.class_DNode__opt)
+                (prev to_ last: Class_DNode.class_DNode__opt) (l: list int)
+  : Tot slprop (decreases l)
+  = match l with
+    | [] -> pure (from == to_ /\ prev == last)
+    | hd :: tl -> exists* v r. ...
+
+unfold
+let seg (from prev to_ last: Class_DNode.class_DNode__opt) (l: list int) : slprop =
+  dll_seg 1.0R from prev to_ last l
+""")]
+```
+
+Two conventions matter. The class module is `Class_<Name>`, its record `class_<Name>__raw`,
+its reference `class_<Name>`, its nullable reference `class_<Name>__opt`, and its fields
+`fld_<name>` — that is the whole of what `[Plain]` publishes. And the friendly wrapper you
+name from C# should be `unfold`, so that Pulse's resource matching (which is syntactic)
+still sees `dll_seg` and every lemma you wrote about it applies.
+
+### `SlProp` clauses
+
+A `[SpecOp]` returning `SlProp` is an *ownership* clause: where it appears in a contract it
+joins the separating conjunction rather than the `pure`.
+
+```csharp
+public static class Dll
+{
+    [SpecOp("DllSeg.seg")]
+    public static SlProp Seg(DNode? from, DNode? prev, DNode? to, DNode? last,
+                             SpecList<SpecInt> values) => throw new InvalidOperationException();
+}
+```
+
+```csharp
+[Requires("Dll.Seg(from, prev, null, last, xs)")]
+[Ensures("Dll.Seg(from, prev, null, last, xs)")]
+[Ensures("Result == xs.Length")]
+[Decreases("xs")]
+public static int Length(DNode? from, DNode? prev, DNode? last,
+                         Ghost<SpecList<SpecInt>> xs = default)
+```
+
+### In the body
+
+A `[Plain]` reference behaves the way the encoding does and no more:
+
+* `if (from == null) { … } else { … }` is `if (None? from)`. **No lemma is placed** — there
+  is no derived predicate to case-split, so if your predicate needs a case split, call your
+  own `cases` lemma first. That restriction is the point: for a general segment, emptiness
+  is `from == to`, not `from == null`.
+* Inside the `else` branch the reference is known non-null, so `from.next` and
+  `from.prev = node` are the ordinary box read and box write. Whether they are *owned* is
+  your predicate's business; a missing `pts_to` shows up as a proof failure you fix in your
+  annotations.
+* `new DNode { value = v, prev = null, next = head }` allocates. **Object-initializer syntax
+  only** — a constructor call is refused, because reading a constructor body to learn which
+  argument lands in which field is exactly the deriving `[Plain]` opts out of.
+* Proof steps are `Pal.GhostStmt("DllSeg.dll_seg_elim_cons 1.0R $(from) …")`, with `$(x)`
+  splicing the Pulse name of a C# variable and `with r tl. assert (…)` naming what a lemma
+  existentially quantified.
+
+Writing `head.prev = node` and having it cost nothing is the payoff: because the predicate
+only ever constrained `prev` with an equation, re-closing the segment simply reports what
+the field now holds.
+
+`[Plain]` may not be combined with `[Model]` (`PALCS0574`), and a `[Plain]` class may not
+take part in a hierarchy (`PALCS0575`).
+
+The honest caveat: a segment operation costs five or six ghost lines, most of them
+`rewrite`s that talk the boundary pointers into the shape the next lemma expects. Reach for
+`[Plain]` when §3's recursive classes will not do, and not before.
+
+See `test/dll_segment` for the whole of the above as a working test.
+
+---
+
+## 10. What is rejected
 
 pal-csharp refuses rather than mistranslates. Every rejection is a diagnostic with a source
 span, collected in `diagnostics.json` alongside the generated modules, and every error also
@@ -773,7 +889,7 @@ C#'s guarantee and matches PAL's treatment of the corresponding undefined behavi
 
 ---
 
-## 10. A complete example
+## 11. A complete example
 
 ```csharp
 using PalLang;

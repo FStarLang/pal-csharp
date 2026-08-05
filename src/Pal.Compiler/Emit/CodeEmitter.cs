@@ -246,6 +246,11 @@ public sealed class CodeEmitter(
                     NullWindow(window, i, branch => Tail(branch!, method, plan), tail: true);
                     return;
                 }
+                if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
+                {
+                    PlainNullWindow(ptest, i, branch => Tail(branch!, method, plan), tail: true);
+                    return;
+                }
                 var cond = Expr(i.Cond);
                 Line($"if ({cond}) {{");
                 _indent++;
@@ -978,6 +983,32 @@ public sealed class CodeEmitter(
             // R3.8. An object local binds a reference. C# can rebind it, but nothing in
             // the supported subset does, and binding it immutably is what lets it be
             // handed to a callee that consumes and returns its invariant.
+            // R12.4. A local naming a `[Plain]` object. An immutable binder rather than
+            // R5.2's `let mut` cell: the reference is a value, and the resource behind it
+            // is matched by the binder's name, so putting it in a cell would leave every
+            // later mention asking for a `pts_to` at a name Pulse cannot see through.
+            case IrLocalDecl { Type: IrClassType pc, Init: not null } d
+                when classes is not null && classes.TryGetValue(pc.Name, out var pdecl) && pdecl.IsPlain:
+            {
+                var pbinder = Names.Local(d.Name);
+                if (d.Init is IrAlloc pal)
+                {
+                    // The allocation is emitted *at* the local's binder rather than at a
+                    // fresh one it is then copied from. Pulse matches resources by name, so
+                    // a copy would leave the context holding `pts_to t0 _` while every later
+                    // mention asked for `pts_to var_node _` — the same reason R3.8's alias
+                    // case shares a slot instead of rebinding one.
+                    Line($"let {pbinder} = B.alloc {AllocRecord(pal)};");
+                }
+                else
+                {
+                    _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, Expr(d.Init));
+                    return;
+                }
+                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, pbinder);
+                return;
+            }
+
             case IrLocalDecl { Type: IrClassType, Init: IrVar alias } d
                 when Lookup(alias.Name) is { Kind: SlotKind.Object } aliased:
             {
@@ -1208,6 +1239,26 @@ public sealed class CodeEmitter(
                 return;
             }
 
+            // R12.3. Writing a field of a `[Plain]` reference: the same write as R3.8,
+            // reached by a different slot kind. This is the operation §10 could not offer
+            // at all, because a derived predicate *owns* the field it folds over; here the
+            // user's predicate only constrained `prev`, so overwriting it is a plain write
+            // and re-closing the segment reports what the field now holds.
+            case IrField { Receiver: IrVar wv } wfield when
+                _slots.TryGetValue(wv.Name, out var wobj)
+                && wobj is { Kind: SlotKind.Value, Type: IrClassType wc }
+                && classes is not null && classes.TryGetValue(wc.Name, out var wdecl)
+                && wdecl.IsPlain:
+            {
+                if (!Reachable(wobj, wfield.Loc, wfield.Field)) return;
+                var wvalue = Inject(FieldType(wc, wfield.Field), a.Value, Expr(a.Value));
+                var wcur = Fresh();
+                Line($"let {wcur} = B.op_Bang {wobj.NonNull};");
+                Line($"B.op_Colon_Equals {wobj.NonNull} " +
+                     $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
+                return;
+            }
+
             // R3.8. Writing a field of an object is a write through the box: read the
             // representation, replace one field, write it back. The record update needs a
             // pure source (F11), which is why the dereference is let-bound first.
@@ -1304,6 +1355,13 @@ public sealed class CodeEmitter(
             return;
         }
 
+        if (i.Else is not null && i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
+        {
+            PlainNullWindow(ptest, i, branch => { if (branch is not null) Statement(branch, plan); }, tail: false);
+            Line(";");
+            return;
+        }
+
         var cond = Expr(i.Cond);
         Line($"if ({cond}) {{");
         _indent++;
@@ -1328,8 +1386,21 @@ public sealed class CodeEmitter(
     {
         if (expected is not IrClassType { Nullable: true } k) return text;
         if (value.Type is not IrClassType { Nullable: false } nn || nn.Name != k.Name) return text;
+        // R12.2. A plain reference carries no invariant to re-read, so the injection is
+        // the `Some` and nothing more.
+        if (classes is not null && classes.TryGetValue(k.Name, out var kd) && kd.IsPlain)
+            return $"(Some {text})";
         Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
         return $"(Some {text})";
+    }
+
+    /// <summary>R12.4. The record an allocation boxes.</summary>
+    private string AllocRecord(IrAlloc al)
+    {
+        var flds = al.Record.Fields.Select((f, i) =>
+            (i == 0 ? Names.ClassProjection(al.Class, f.Field) : Names.Field(f.Field))
+            + " = " + Inject(f.FieldType, f.Value, Expr(f.Value)));
+        return "{ " + string.Join("; ", flds) + " }";
     }
 
     private IrType? FieldType(IrClassType owner, string field) =>
@@ -1348,11 +1419,66 @@ public sealed class CodeEmitter(
     {
         if (obj.Type is not IrClassType { Nullable: true } || obj.Window) return true;
         diagnostics.Error("PALCS0567", loc,
-            $"`{obj.Name}.{field}` reads through a reference that may be null. A field of a " +
-            "recursive class is reachable only inside a null test — write `if (" + obj.Name +
+            $"`{obj.Name}.{field}` reads through a reference that may be null. A field behind a " +
+            "nullable class reference is reachable only inside a null test — write `if (" + obj.Name +
             " == null) { … } else { … }` and reach the field in the `else` branch " +
             "(doc/translation.md R10.7).");
         return false;
+    }
+
+    /// <summary>
+    /// R12.3. The operand of an <c>== null</c> / <c>!= null</c> test whose static type is a
+    /// nullable <c>[Plain]</c> class, or <c>null</c> when this is not such a test.
+    /// </summary>
+    private (IrExpr Tested, Slot? Slot, bool ThenIsNull)? PlainNullTest(IrBinary b)
+    {
+        if (b.Op is not (BinOp.Eq or BinOp.Ne)) return null;
+        var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
+        if (tested?.Type is not IrClassType { Nullable: true } k) return null;
+        if (classes is null || !classes.TryGetValue(k.Name, out var decl) || !decl.IsPlain) return null;
+        Slot? slot = null;
+        if (tested is IrVar v && _slots.TryGetValue(v.Name, out var s) && s.Kind is SlotKind.Value)
+            slot = s;
+        return (tested, slot, b.Op is BinOp.Eq);
+    }
+
+    /// <summary>
+    /// R12.3. The bracket R10.7 puts around a null test, with every proof step taken out.
+    /// §12 derived no predicate for a <c>[Plain]</c> class, so there is nothing to case
+    /// split and no lemma the emitter would be entitled to place; what remains is the
+    /// branch itself and the one fact the branch establishes — that in the <c>else</c>
+    /// arm the reference is <c>Some</c>, so the record behind it can be projected. Whether
+    /// that projection is <em>owned</em> is the user's predicate's business, and a missing
+    /// <c>pts_to</c> is a failure in their annotations rather than in the translation.
+    /// </summary>
+    private void PlainNullWindow(
+        (IrExpr Tested, Slot? Slot, bool ThenIsNull) test, IrIf i,
+        Action<IrStmt?> branch, bool tail)
+    {
+        var opt = Expr(test.Tested);
+        var nullBranch = test.ThenIsNull ? i.Then : i.Else;
+        var otherBranch = test.ThenIsNull ? i.Else : i.Then;
+
+        Line($"if (None? {opt}) {{");
+        _indent++;
+        branch(nullBranch);
+        if (!tail) Line("()");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        var saved = test.Slot is null ? null : _slots[test.Slot.Name];
+        if (saved is not null) _slots[saved.Name] = saved with { Window = true };
+        try
+        {
+            branch(otherBranch);
+            if (!tail) Line("()");
+        }
+        finally
+        {
+            if (saved is not null) _slots[saved.Name] = saved;
+        }
+        _indent--;
+        Line("}");
     }
 
     /// <summary>
@@ -1792,6 +1918,14 @@ public sealed class CodeEmitter(
             // R10.2. `null` is the empty structure, and owning it is free — which is what
             // `intro_nil` says. Emitting the step here rather than at each position a null
             // may appear keeps `new Node(v, null)` and `x.next = null` the same rule.
+            // R12.2. `null` on a `[Plain]` class is the empty option and nothing else:
+            // §12 derived no `intro_nil`, because it derived no predicate for the lemma to
+            // be about. Whether `None` may stand where a segment is wanted is the user's
+            // predicate's business.
+            case IrNull pn when pn.Type is IrClassType pk
+                && classes is not null && classes.TryGetValue(pk.Name, out var pnd) && pnd.IsPlain:
+                return "None";
+
             case IrNull n when n.Type is IrClassType k:
                 Line($"{Names.ClassModule(k.Name)}.{Names.ClassIntroNil(k.Name)} None 1.0R;");
                 return "None";
@@ -1802,6 +1936,21 @@ public sealed class CodeEmitter(
                 var t = Fresh();
                 Line($"let {t} = alloc {length} {Default(na.Element)};");
                 return t;
+            }
+
+            // R12.3. A field of a `[Plain]` reference. The same memory operation as R3.8 —
+            // dereference the box, project the record — reached by a different slot kind,
+            // because a plain reference carries no model and so is an ordinary value.
+            case IrField { Receiver: IrVar pv } pf when
+                _slots.TryGetValue(pv.Name, out var pobj)
+                && pobj is { Kind: SlotKind.Value, Type: IrClassType pc }
+                && classes is not null && classes.TryGetValue(pc.Name, out var pdecl)
+                && pdecl.IsPlain:
+            {
+                if (!Reachable(pobj, pf.Loc, pf.Field)) return "()";
+                var pt = Fresh();
+                Line($"let {pt} = B.op_Bang {pobj.NonNull};");
+                return $"{pt}.{Names.ClassProjection(pc.Name, pf.Field)}";
             }
 
             // R3.8. A field of an object lives behind a box, so reading it is a memory
@@ -1830,6 +1979,16 @@ public sealed class CodeEmitter(
                 return $"{receiver}.{Names.Projection(named.Name, f.Field)}";
             }
 
+            // R12.4. Allocating a `[Plain]` object: build the record, box it. `B.alloc`
+            // carries no deallocation obligation, which is the same assumption R6.9 makes
+            // about `new T[n]` and for the same reason — C# has a collector.
+            case IrAlloc al:
+            {
+                var box = Fresh();
+                Line($"let {box} = B.alloc {AllocRecord(al)};");
+                return box;
+            }
+
             case IrNew n:
             {
                 var fields = n.Fields.Select((f, i) =>
@@ -1840,6 +1999,16 @@ public sealed class CodeEmitter(
 
             case IrUnary u:
                 return Unary(u);
+            // R12.3. A null test on a `[Plain]` reference in value position is the
+            // representation's own question and nothing more: is the option `None`?
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } pb when PlainNullTest(pb) is { } pt:
+            {
+                var t = Expr(pt.Tested);
+                var name = Fresh();
+                Line($"let {name} = {(pb.Op is BinOp.Eq ? "None?" : "Some?")} {t};");
+                return name;
+            }
+
             case IrBinary b:
                 return Binary(b);
 

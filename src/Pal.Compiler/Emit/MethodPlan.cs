@@ -61,7 +61,7 @@ public sealed class MethodPlan
         // caller reasons with is the model the postcondition owns it at. So `Result`
         // denotes that model, not the binder — the same substitution R4.10 makes for
         // `this`, and the reason `Result.TheArea` means anything at all.
-        var returnsObject = method.ReturnType is IrClassType;
+        var returnsObject = method.ReturnType is IrClassType { Plain: false };
         var resultModel = "post_" + (method.IsConstructor ? Names.This : Names.Result);
 
         // Otherwise `Result` denotes the value the method returns, so it carries that
@@ -135,6 +135,22 @@ public sealed class MethodPlan
                 // of `R.pts_to`, which is why the two read alike.
                 case IrClassType klass:
                 {
+                    // R12.1. A `[Plain]` reference is passed and nothing is owned through
+                    // it. There is no invariant to name, no model binder to quantify, and
+                    // nothing to say in the postcondition: what this method owns is
+                    // exactly what its `[Requires]` says, in the user's own predicate.
+                    if (p.Plain)
+                    {
+                        binders.Add($"({name}: {Types.Render(p.Type)})");
+                        // An ordinary immutable binder: the reference is a value like any
+                        // other. What is *owned* through it is not the slot's business,
+                        // because with `[Plain]` it never was the compiler's.
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
+                        pre.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
+                        post.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
+                        break;
+                    }
+
                     var preModel = "pre_" + p.Name;
                     var postModel = "post_" + p.Name;
 
@@ -287,7 +303,7 @@ public sealed class MethodPlan
         // R9.15 makes this every method's rule, not the constructor's: once a reference
         // conversion can happen at a `return`, an ordinary method can hand back an object
         // too, and the only difference is the name its contract calls it by.
-        if (method.ReturnType is IrClassType built)
+        if (method.ReturnType is IrClassType { Plain: false } built)
         {
             // R10.2. A method may return `C?`, and then what it owns is the nullable
             // invariant at full permission — the same conjunct R10.3a derives the non-null
@@ -308,9 +324,31 @@ public sealed class MethodPlan
         PostScope = post;
         Slots = slots.ToImmutable();
 
-        var preConjuncts = method.Requires.Select(r => _spec.AsProp(_spec.Emit(r, pre))).ToImmutableArray();
-        var postConjuncts = method.Ensures.Select(e => _spec.AsProp(_spec.Emit(e, post)))
-            .Concat(method.Preserves.Select(e => _spec.AsProp(_spec.Emit(e, post))))
+        // R12.2. A contract clause whose type is `SlProp` is an *ownership* clause, so it
+        // joins the resources rather than the `pure`. This is the whole of what §12 adds to
+        // the contract language: a user's predicate is applied like any other spec function
+        // (R11.2), and where its application lands is decided by its C# type.
+        //
+        // Nothing else changes. A clause is a resource or it is a proposition, the two are
+        // already assembled separately by `Clause`, and `**` between resources is what
+        // `SlProp.operator *` means on the C# side.
+        static bool IsResource(IrExpr e) => e.Type is IrPrim { Kind: PrimKind.SlProp };
+
+        preResources.AddRange(method.Requires.Where(IsResource)
+            .Select(r => _spec.Emit(r, pre).Text));
+        postResources.AddRange(method.Ensures.Where(IsResource)
+            .Select(e => _spec.Emit(e, post).Text));
+        postResources.AddRange(method.Preserves.Where(IsResource)
+            .Select(e => _spec.Emit(e, post).Text));
+        preResources.AddRange(method.Preserves.Where(IsResource)
+            .Select(e => _spec.Emit(e, pre).Text));
+
+        var preConjuncts = method.Requires.Where(r => !IsResource(r))
+            .Select(r => _spec.AsProp(_spec.Emit(r, pre))).ToImmutableArray();
+        var postConjuncts = method.Ensures.Where(e => !IsResource(e))
+            .Select(e => _spec.AsProp(_spec.Emit(e, post)))
+            .Concat(method.Preserves.Where(e => !IsResource(e))
+                .Select(e => _spec.AsProp(_spec.Emit(e, post))))
             .ToImmutableArray();
 
         Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
