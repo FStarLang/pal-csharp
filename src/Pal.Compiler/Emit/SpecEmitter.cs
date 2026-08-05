@@ -260,13 +260,39 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // in arithmetic and as an array index.
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
-                    string.Join(" ", call.Args.Select(a => Argument(a, scope))) + ")",
+                    string.Join(" ", call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
 
             case IrConvert cv:
-                // A widening conversion is the identity on mathematical values.
-                return Emit(cv.Operand, scope) with { Type = cv.Target };
+                // R13.2. A conversion is the identity on mathematical values exactly when
+                // every value of the source type is a value of the target — which is a
+                // narrower condition than "widening", since `uint -> int` and
+                // `byte -> sbyte` both lose values without narrowing the width.
+                //
+                // When it does not fit, the specification has to say what the code does,
+                // and what the code does is truncate (R13.1, F48). Reporting it as the
+                // identity would let a user prove `(byte)300 == 300`.
+                if (cv.Operand.Type is IrPrim { Kind: var src } && cv.Target is IrPrim { Kind: var dst }
+                    && src != dst && !Types.RangeFits(src, dst))
+                {
+                    var v = Math(cv.Operand, scope);
+                    var bits = Types.Width(dst);
+                    // Two's complement: unsigned truncation is `%`, signed truncation is
+                    // F*'s `@%`, which centres the residue on the signed range.
+                    var text = Types.Signed(dst)
+                        ? $"(FStar.Int.op_At_Percent {v} (pow2 {bits}))"
+                        : $"({v} % pow2 {bits})";
+                    return new Term(text, TermKind.Math, cv.Target);
+                }
+                // The value is unchanged, but its *type* is not, and a machine term still
+                // carries the module whose `.v` reads it. Taking the mathematical value
+                // here, at the source type, is what stops the target's module being
+                // applied to the source's representation.
+                var kept = Emit(cv.Operand, scope);
+                return kept.Kind == TermKind.Machine
+                    ? new Term(AsMath(kept), TermKind.Math, cv.Target)
+                    : kept with { Type = cv.Target };
 
             case IrInlinePulse raw:
                 return new Term($"({Antiquotation.Expand(raw.Text, scope)})", TermKind.Other);
@@ -531,11 +557,31 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         _ => Emit(expr, scope).Text,
     };
 
-    private string Argument(IrExpr arg, SpecScope scope)
+    /// <summary>
+    /// R4.13. A machine argument crosses into the mathematical world exactly when the
+    /// parameter it is passed to lives there. A <c>[Spec]</c> function or <c>[Lemma]</c>
+    /// may equally declare an <c>int</c> parameter — C# performs no conversion then, and
+    /// neither does the translation.
+    /// </summary>
+    internal string Argument(IrExpr arg, IrType? paramType, SpecScope scope)
     {
         var term = Emit(arg, scope);
-        return term.Kind == TermKind.Machine ? AsMath(term) : term.Text;
+        return term.Kind == TermKind.Machine && paramType is not IrPrim { IsMachineInt: true }
+            ? AsMath(term)
+            : term.Text;
     }
+
+    /// <summary>
+    /// The type the *emitted* binder for parameter <paramref name="index"/> carries, or
+    /// null when that binder is mathematical. R4.6 makes every parameter of a
+    /// <c>[Spec]</c> function mathematical whatever its C# type; R4.7 leaves a
+    /// <c>[Lemma]</c>'s binders with the types they were declared with, so only there
+    /// does the C# parameter type decide.
+    /// </summary>
+    internal static IrType? ParamType(IrCall call, int index) =>
+        call.Kind is CalleeKind.Spec ? null
+        : index < call.ParamTypes.Length ? call.ParamTypes[index]
+        : null;
 
     private Term TypeBoundMeasure(IrTypeBoundMeasure m, SpecScope scope)
     {

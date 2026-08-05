@@ -1208,6 +1208,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrObserve ob: CollectExpr(ob.Receiver); return;
                 case IrQuantifier q: CollectExpr(q.Body); return;
                 case IrConvert cv: CollectExpr(cv.Operand); return;
+                case IrStmtExpr se: foreach (var s in se.Prelude) Collect(s); CollectExpr(se.Value); return;
                 default: return;
             }
         }
@@ -1247,5 +1248,6 @@ public static class Preamble
         module Seq = FStar.Seq
         module CS = Pulse.Lib.CSharp.Seq
         module List = FStar.List.Tot
+        module Cast = FStar.Int.Cast
         """;
 }

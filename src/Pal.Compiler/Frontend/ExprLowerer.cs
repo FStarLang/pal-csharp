@@ -85,6 +85,13 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             // as parentheses are.
             PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn
                 => Lower(sn.Operand),
+            // R13.3. An increment in expression position both produces a value and
+            // performs a write. Postfix yields the value from *before* the write, prefix
+            // from after; that one-word difference is the whole of the distinction.
+            PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PostIncrementExpression } pi
+                => Step(pi.Operand, BinOp.Add, before: true, loc),
+            PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.PostDecrementExpression } pd
+                => Step(pd.Operand, BinOp.Sub, before: true, loc),
             // `default` and `default(T)` are the same expression; both must be matched
             // before the general literal case, which would otherwise see a token with
             // no value and produce a nonsense constant.
@@ -120,6 +127,24 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             converted.Name != ((IrClassType)type).Name)
         {
             result = new IrConvert(loc, converted, result) { Type = converted };
+        }
+
+        // R13.4. The same is true of C#'s implicit numeric promotions, and for the same
+        // reason. `b & 0xff` on a `byte` is not a `byte` operation: C# promotes both
+        // operands to `int` and applies `int`'s operator. Until R13.1 the promotion could
+        // be ignored because no conversion was translated at all, so the operation was
+        // silently attributed to the operand's own width — which is a different function.
+        //
+        // A constant is re-typed rather than converted. `byte b = 5;` converts the
+        // literal at compile time, and emitting a cast around it would name a runtime
+        // operation the program does not perform.
+        if (type is IrPrim { IsMachineInt: true } from &&
+            known.MapType(info.ConvertedType) is IrPrim { IsMachineInt: true } to &&
+            from.Kind != to.Kind)
+        {
+            result = result is IrLiteral lit
+                ? lit with { Type = to }
+                : new IrConvert(loc, to, result) { Type = to };
         }
 
         return result;
@@ -566,9 +591,50 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         };
 
         if (node.IsKind(SyntaxKind.UnaryPlusExpression)) return Lower(node.Operand);
+        if (node.IsKind(SyntaxKind.PreIncrementExpression))
+            return Step(node.Operand, BinOp.Add, before: false, loc);
+        if (node.IsKind(SyntaxKind.PreDecrementExpression))
+            return Step(node.Operand, BinOp.Sub, before: false, loc);
         if (op is null) return Unsupported(node, loc);
         return new IrUnary(loc, op.Value, Lower(node.Operand));
     }
+
+    /// <summary>
+    /// R13.3. Lowers <c>x++</c>, <c>++x</c>, <c>x--</c> and <c>--x</c> in expression
+    /// position to the write they perform paired with the value they produce.
+    ///
+    /// A specification is a description of a state, not a thing that runs, so an
+    /// increment inside one is meaningless rather than merely unsupported.
+    /// </summary>
+    private IrExpr Step(ExpressionSyntax operand, BinOp op, bool before, IrLoc loc)
+    {
+        if (SpecPosition)
+        {
+            diagnostics.Error("PALCS0576", loc,
+                "An increment or decrement cannot appear in a specification, which " +
+                "describes a state rather than changing one.");
+            return Lower(operand);
+        }
+
+        var target = Lower(operand);
+        var stepped = new IrBinary(loc, op, target, new IrLiteral(loc, 1)) { Type = target.Type };
+        var write = new IrAssign(loc, target, stepped);
+        var name = Fresh("step");
+        var snapshot = new IrLocalDecl(loc, name, target.Type ?? stepped.Type!, target)
+            { Immutable = true };
+        var result = new IrVar(loc, name) { Type = target.Type };
+
+        // Postfix reads before writing; prefix writes before reading. Both take a
+        // snapshot, because the operand is a mutable cell whose contents the write
+        // changes underneath any later mention of it.
+        var prelude = before
+            ? ImmutableArray.Create<IrStmt>(snapshot, write)
+            : ImmutableArray.Create<IrStmt>(write, snapshot);
+        return new IrStmtExpr(loc, prelude, result) { Type = target.Type };
+    }
+
+    private int _steps;
+    private string Fresh(string hint) => $"__pal_{hint}{_steps++}";
 
     /// <summary>
     /// R6.10. A <c>ref</c>/<c>out</c>/<c>in</c> argument passes the variable itself, so
@@ -650,6 +716,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
             HasReceiver = receiver is not null,
+            ParamTypes = Declarations.ParamTypes(method, known, receiver is not null),
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };
     }

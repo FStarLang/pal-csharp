@@ -416,6 +416,7 @@ public static class Check
             IrRefArg r => [r.Operand],
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
+            IrStmtExpr se => [se.Value],
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],

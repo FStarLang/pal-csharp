@@ -25,6 +25,15 @@ let arr_length_v (#t: Type0) (a: array t)
           [SMTPat (I32.v (arr_length a))]
   = ()
 
+(* A C# array's length is an `int`, so it is below 2^31. Without this the obligation
+   that an index one past the last read still fits in an `int` cannot be discharged:
+   the loop knows `i < a.Length` but nothing bounds `a.Length` itself. The fact belongs
+   here rather than in any one program's annotations, because it holds of every array. *)
+let arr_length_bound (#t: Type0) (a: array t)
+  : Lemma (A.length a < pow2 31)
+          [SMTPat (A.length a)]
+  = let _ = clr_array_length_header a in ()
+
 fn length_i32 (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
   preserves A.pts_to a #p s
   returns  n : I32.t

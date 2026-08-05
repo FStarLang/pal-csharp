@@ -263,6 +263,7 @@ public static class Normalize
             case IrRefArg r: Free(r.Operand, into); return;
             case IrCall call: foreach (var a in call.Args) Free(a, into); return;
             case IrConvert cv: Free(cv.Operand, into); return;
+            case IrStmtExpr se: foreach (var s in se.Prelude) Free(s, into); Free(se.Value, into); return;
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
             case IrNewArray na: Free(na.Length, into); return;
@@ -401,6 +402,7 @@ public static class Normalize
                 MutatedIn(c2.Else, into);
                 return;
             case IrConvert cv: MutatedIn(cv.Operand, into); return;
+            case IrStmtExpr se: foreach (var s in se.Prelude) Mutated(s, into); MutatedIn(se.Value, into); return;
             case IrRefArg ra: MutatedIn(ra.Operand, into); return;
             case IrElement el: MutatedIn(el.Array, into); MutatedIn(el.Index, into); return;
             case IrField f: MutatedIn(f.Receiver, into); return;
@@ -429,6 +431,7 @@ public static class Normalize
                 Assigned(i.Else, into);
                 return;
             case IrWhile w:
+                AssignedByCalls(w.Cond, into);
                 Assigned(w.Body, into);
                 foreach (var st in w.Step) Assigned(st, into);
                 return;
@@ -477,6 +480,13 @@ public static class Normalize
             case IrElement el: AssignedByCalls(el.Array, into); AssignedByCalls(el.Index, into); return;
             case IrField f: AssignedByCalls(f.Receiver, into); return;
             case IrConvert cv: AssignedByCalls(cv.Operand, into); return;
+            // R13.3. An expression can now perform a write, so the question "what does
+            // this statement assign" is no longer answered by looking at statements
+            // alone.
+            case IrStmtExpr se:
+                foreach (var s in se.Prelude) Assigned(s, into);
+                AssignedByCalls(se.Value, into);
+                return;
             case IrNew n: foreach (var f in n.Fields) AssignedByCalls(f.Value, into); return;
             default: return;
         }

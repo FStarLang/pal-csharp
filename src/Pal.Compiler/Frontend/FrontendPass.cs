@@ -1050,6 +1050,7 @@ public static class FrontendPass
                 case IrField f: Walk(f.Receiver); return;
                 case IrObserve o: Walk(o.Receiver); return;
                 case IrConvert cv: Walk(cv.Operand); return;
+                case IrStmtExpr se: Walk(se.Value); return;
                 case IrOld o2: Walk(o2.Operand); return;
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); return;

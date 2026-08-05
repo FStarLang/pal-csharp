@@ -263,6 +263,16 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
 
     /// <summary>
+    /// R4.13. The callee's declared parameter types, in <see cref="Args"/> order (a
+    /// receiver, when present, occupies the first slot with no declared type). An
+    /// argument crossing into the mathematical world is C#'s implicit conversion from a
+    /// machine integer to <c>SpecInt</c>, and it is the *parameter* that decides whether
+    /// that crossing happens: a spec function or lemma may just as well take an `int`,
+    /// and then the machine value must be passed as it stands.
+    /// </summary>
+    public ImmutableArray<IrType?> ParamTypes { get; init; } = [];
+
+    /// <summary>
     /// The callee's declared result type, when the frontend could map it. Emit needs it
     /// to know whether a <see cref="CalleeKind.Spec"/> application denotes a proposition
     /// or a mathematical value (R4.6).
@@ -280,6 +290,21 @@ public sealed record IrRefArg(IrLoc Loc, IrExpr Operand) : IrExpr(Loc);
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);
+
+/// <summary>
+/// An expression whose evaluation performs an effect first (R13.3): <c>Prelude</c> runs,
+/// then <c>Value</c> is the result. Produced only by an increment or decrement in
+/// expression position, and never appears in a specification.
+///
+/// The effect is deliberately left <em>here</em>, at the operator's own position in the
+/// tree, rather than hoisted to the front of the enclosing statement. Emit already walks
+/// operands left to right and already captures the right operand of a short-circuit into
+/// a conditional sub-block (R6.3), so leaving the effect in place makes it inherit C#'s
+/// evaluation order and its conditional evaluation for free. Hoisting would have had to
+/// reconstruct both, and would have been wrong for <c>p &amp;&amp; a[i++] &gt; 0</c>.
+/// </summary>
+public sealed record IrStmtExpr(
+    IrLoc Loc, ImmutableArray<IrStmt> Prelude, IrExpr Value) : IrExpr(Loc);
 
 // --- spec-only expression forms -------------------------------------------
 
@@ -330,7 +355,17 @@ public abstract record IrStmt(IrLoc Loc);
 
 public sealed record IrBlock(IrLoc Loc, ImmutableArray<IrStmt> Statements) : IrStmt(Loc);
 
-public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? Init) : IrStmt(Loc);
+public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? Init) : IrStmt(Loc)
+{
+    /// <summary>
+    /// Set on R13.3's snapshot of an incremented variable. Such a binding is written
+    /// once and read once, so it is an immutable <c>let</c> rather than R5.2's cell —
+    /// and, more to the point, it must be: a cell is a resource, and a resource declared
+    /// inside a loop body would be carried into the ambient context of every enclosing
+    /// block, where its name is out of scope.
+    /// </summary>
+    public bool Immutable { get; init; }
+}
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
 

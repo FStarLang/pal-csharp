@@ -103,6 +103,17 @@ The rules below depend on the following, each **verified against the pinned tool
 
 | F44 | `[]` and `::` are *notation* for the ordinary prefix constructors `Nil` and `Cons`, which work in every position the notation does — as a term, as a **pattern**, and under the discriminator `Cons?`. So a scheme phrased over "the empty constructor" and "the non-empty constructor" covers `list` with no special case, and the emitter needs only a constructor *name* and an arity. | `test/pulse_facts/UserSpecFacts.fst:nil_is_prefix`, `cons_is_prefix`, `length_prefix`, `cons_test`, verified. Relied on by R11.5. |
 | F45 | §10's whole encoding — the inductive invariant, all eight lemmas, the window, a recursive traversal and a destructive one — works verbatim over an inductive the **compiler has never heard of**, at a constructor arity that is neither a list's nor a tree's (two pure arguments and one recursive). Nothing in the template depends on which model type it is instantiated at. | `test/pulse_facts/UserSpecFacts.fst:class_Pair__inv_opt`, `class_Pair__elim_cons`, `func_Pairs_Count`, `func_Pairs_Set`, verified. Relied on by R11.6. |
+| F46 | `FStar.Int.Cast` supplies a total function for every machine-integer width pair pal-csharp maps, and each is *modular*, not partial: it carries no precondition and truncates. So an explicit C# cast has a translation with no side condition attached — which matters, because C#'s default `unchecked` context defines the same truncation. | `test/pulse_facts/ConversionFacts.fst:cast_is_total`, `cast_truncates`, verified. Relied on by R13.1. |
+| F47 | A cast is the identity on the mathematical value exactly when **every value of the source type is a value of the target** — which is strictly narrower than "the target is wider". `uint8 -> int8` and `int32 -> uint32` are both same-width and both lossy. | `test/pulse_facts/ConversionFacts.fst:widening_is_identity`, `same_width_is_not`, verified. Relied on by R13.2. |
+| F48 | A *narrowing* cast's mathematical value is `% pow2 n` when the target is unsigned and `FStar.Int.op_At_Percent` when it is signed; the two do not coincide. | `test/pulse_facts/ConversionFacts.fst:narrowing_unsigned`, `narrowing_signed`, verified. Relied on by R13.2. |
+| F49 | When the source value is already in the target's range, the modular reading collapses back to the exact one, so a user who proves the range gets exactness with no extra rule. | `test/pulse_facts/ConversionFacts.fst:narrowing_in_range`, verified. |
+| F50 | `FStar.Int` has **no** `logand_mask`. The route to a masking fact is `Int.logand a b == Int.from_uint (UInt.logand (Int.to_uint a) (Int.to_uint b))`, which holds by `()` because `to_vec`, `from_vec` and `logand` are plain reducible `let`s, followed by `FStar.UInt.logand_mask`. | `pulse/Pulse.Lib.CSharp.Casts.fst:int_logand_as_uint`, verified. Relied on by `byte_mask_ff`. |
+| F51 | `FStar.UIntN.shift_left` takes its shift amount as a **`UInt32.t` whatever the operand's width is**, so a shift whose amount C# writes as an `int` needs a conversion on the amount and only on the amount. | `test/pulse_facts/ConversionFacts.fst:shift_amount_width`, verified. Relied on by R13.5. |
+| F52 | `FStar.UInt.logor_disjoint` needs a **positive** shift amount; at zero the lemma does not apply even though the equation still holds. A general packing lemma must exclude `0`. | `pulse/Pulse.Lib.CSharp.Casts.fst:logor_shift_disjoint`; the `m: pos` requirement was reported by the checker. |
+| F53 | An SMT pattern may be placed on the **idiom** rather than on a named lemma — `[SMTPat (int32_to_uint32 (logand (uint8_to_int32 b) 255l))]` fires on the shape `(uint)(b & 0xff)` compiles to. This is how a language-level idiom is made free of annotation without the emitter knowing anything about it. | `pulse/Pulse.Lib.CSharp.Casts.fsti:byte_mask_ff_bound`, `logor_shift_disjoint`; relied on by `test/adler32`, which needs no annotation for either idiom. |
+| F54 | SharpZipLib's Adler-32 comment is **arithmetically wrong in the unsafe direction**: the true supremum of `s2` before the deferred modulo is 2 090 626 020, not the 2 090 079 800 the comment claims — larger by 546 220, because "median(s1)" approximates a triangular sum. The conclusion (`< 2^31`) survives, with 2.65% headroom rather than 2.68%. The claim about `s1` (max 1 034 520) is right. | `test/pulse_facts/ConversionFacts.fst:tri`, `tri_closed`, `adler_s2_bound`, `adler_comment_understates`, verified. |
+| F55 | A `[Spec]` function's parameters are all mathematical (R4.6) whatever their C# types, but a `[Lemma]`'s binders keep the types they were declared with (R4.7). Argument coercion is therefore **not** a property of the argument alone. | The two emitted signatures differ: `Let_RingVariant_Slot` takes `(var_head: int)` from a C# `int`, `Let_Adler32_Step` takes `(var_off: I32.t)` from the same C# type. Relied on by R13.6. |
+| F56 | A slot is a *binding*, and a binding introduced inside a block is out of scope once the block closes — including for R5.13's resource-naming bracket, which would otherwise assert `pts_to` for a cell whose Pulse binder no longer exists ("Identifier not found: var_n"). | Reproduced by a `Pal.Assert` placed after a loop whose body declared a local; fixed in `CodeEmitter.Scoped`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1779,7 +1790,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — thirty-eight cases, each
+  `test/diagnostics` is its counterpart to the verification tests — thirty-nine cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -1848,7 +1859,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the thirty-eight
+  right, since an editor has no business writing files, but eight of the thirty-nine
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every
@@ -2229,8 +2240,10 @@ R3.10b is untested); and a cast that may fail.
   window it runs in has an unfolded one, and Pulse reports the mismatch. There is nothing
   for the emitter to add.
 * **Reference identity** — `ReferenceEquals`, and `==` on a class — has no story. `Box`
-  supports equality, but nothing relates it to the ownership discipline.* Numeric conversions between machine-integer widths, and a non-tail `return` inside a
-  loop: likewise rejected rather than mistranslated.
+  supports equality, but nothing relates it to the ownership discipline.
+* A non-tail `return` **inside a loop** is rejected rather than mistranslated; R5.5b's
+  rewrite reaches every other position. (Numeric conversions between machine-integer
+  widths were on this list until §13; they are now R13.1 and R13.4.)
 * `out` is modelled exactly as `ref`, not as `pts_to_uninit` strengthening to `pts_to`, so
   a caller must initialise an `out` argument before the call.
 * A ghost argument determined only by the pure part of a contract cannot be passed at a
@@ -3612,3 +3625,136 @@ shape the next lemma wants. That is the honest price of the general case, and it
 where §0 rule 3 says it should be — in the user's annotations, visible and editable, rather
 than in a special case in the emitter. The cheap path remains §10, and §11 widens what §10
 can be cheap about; §12 is what you reach for when neither will do.
+
+---
+
+## 13. Conversions, side effects, and a production case study (M7)
+
+§§1–12 were exercised on programs written to be verified. §13 is the first section driven
+by code that was not: SharpZipLib's `Adler32` (MIT), verified in `test/adler32`.
+
+The target was chosen for one reason. Most C# checksums — MurmurHash3, the two common
+CRC32s, FNV-1a — rely on **intentional wrapping**, so the obligation pal-csharp discharges
+(absence of overflow) is the wrong one for them, and their specification ("it matches the
+reference definition") is close to circular. Adler-32 is designed to *avoid* overflow, and
+the production source carries a hand-written safety argument in a comment. There is
+therefore something specific to check rather than merely a definition to restate.
+
+### 13.1 What the case study found
+
+The comment reads:
+
+```
+// We can defer the modulo operation:
+// s1 maximally grows from 65521 to 65521 + 255 * 3800
+// s2 maximally grows by 3800 * median(s1) = 2090079800 < 2^31
+```
+
+Its conclusion is right and its figure is wrong (F54). The true supremum of `s2` is
+**2 090 626 020**, larger than the stated 2 090 079 800 by **546 220**, because
+"median(s1)" approximates a triangular sum. The comment *understates* the maximum — the
+direction that would have mattered had the margin been thinner. The real headroom against
+2^31 is 2.65%, not 2.68%. The `s1` claim (max 1 034 520) is correct.
+
+The arithmetic was pinned in `test/pulse_facts/ConversionFacts.fst` **before** any emitter
+code was written, per §0. That is the order the discipline requires and it paid: the
+case study's headline finding is machine-checked and independent of everything below it.
+
+### 13.2 Rules
+
+| Rule | Construct | Translation |
+|---|---|---|
+| **R13.1** | explicit numeric cast `(T)e` | `Cast.<src>_to_<tgt> ⟦e⟧`, from `FStar.Int.Cast`. **Modular, with no precondition** (F46). An explicit cast is the programmer *asking* for truncation, and C#'s default `unchecked` context defines it to truncate; demanding `0 <= v < 256` at a `(byte)` cast would be the emitter inventing a refusal for an operation the source language defines (§0 rule 3). A user who wants exactness proves the range and F49 hands it back. |
+| **R13.2** | a conversion in *specification* position | the identity on the mathematical value iff every value of the source type is a value of the target (F47) — **not** merely "the target is wider". Otherwise `% pow2 n` (unsigned target) or `FStar.Int.op_At_Percent` (signed) (F48). `Types.RangeFits` decides. |
+| **R13.3** | `x++`, `++x`, `x--`, `--x` in expression position | an `IrStmtExpr(prelude, value)`: the write is emitted **at the operator's own position in the tree**, not hoisted to a statement before the enclosing one. The node therefore inherits the emitter's left-to-right operand order and R6.3's short-circuit capture for free, and is faithful by construction with no side condition. Hoisting would have been wrong for `p && a[i++] > 0`. In specification position the construct is refused (PALCS0576): a specification denotes a state and never changes one. |
+| **R13.4** | implicit numeric promotion | recorded as an `IrConvert` at the same place reference conversions are. C# evaluates `byte & int` at `int` width — both operands promoted, `int`'s operator applied — and the promotion must be translated or the emitted term is ill-typed. **Literals are re-typed, not converted**: `byte b = 5;` converts at compile time, and emitting a cast would name a runtime operation the program does not perform. |
+| **R13.5** | shift | `FStar.UIntN.shift_left` takes a `UInt32.t` amount whatever the operand's width (F51), so the *amount* — and only the amount — carries a conversion. |
+| **R13.6** | argument to a `[Spec]` function or `[Lemma]` | a machine argument crosses into the mathematical world exactly when the binder it is passed to lives there. R4.6 makes every `[Spec]` parameter mathematical whatever its C# type; R4.7 leaves a `[Lemma]`'s binders as declared (F55). `IrCall.ParamTypes` carries the declared types so the decision is made per parameter, in one place, for calls from specifications and from code alike. |
+
+R13.6 replaced a blanket rule that coerced every machine argument. That was sound for
+`[Spec]` calls, which are the only kind a specification could make before M7, and silently
+wrong for a `[Lemma]` with a machine parameter — a combination `test/adler32` is the first
+program to write.
+
+### 13.3 What Adler-32 needed, and where each piece landed
+
+Every gap was closed at the layer §0 rule 3 names, and none in the emitter:
+
+| Gap | Fixed in |
+|---|---|
+| `Seq.length` unbounded, so `offset + 1` might overflow | `Pulse.Lib.CSharp.Array.arr_length_bound` — **library** |
+| nothing tied `A.length buf` to `Seq.length` | `Pal.GhostStmt("Pulse.Lib.Array.pts_to_len $&(buf)")` — **user annotation** (and it forced `$&(…)`, documented in §4.6 since M1, to actually be implemented) |
+| `(uint)(b & 0xff) <= 255` | `Pulse.Lib.CSharp.Casts.byte_mask_ff_bound`, with an SMTPat **on the idiom** (F53) — **library**, and so free of annotation |
+| `(s2 << 16) | s1` denotes `s2 * 65536 + s1` | `Pulse.Lib.CSharp.Casts.logor_shift_disjoint`, likewise patterned on the idiom — **library** |
+| the loop maintains congruence, not equality | `ModAdd`/`ModIdem`/`Step` as `[Lemma]`s in the user's own file — **user annotation** |
+
+The last row is the substance of the proof, and it is worth stating plainly, because it is
+what makes a deferred-modulo checksum verifiable at all:
+
+> The loop reduces `s1` and `s2` at every chunk boundary; the specification reduces only
+> at the end. So what the loop maintains is not equality with the specification but
+> **congruence mod BASE** — and congruence is exactly the relation that survives both
+> operations the loop performs, adding a byte and reducing.
+
+A corollary caught a real error in a first attempt. `s2 += s1` adds a value that is only
+*congruent* to the specification's accumulator, never equal to it, so the step needs
+congruence on **both** summands:
+
+```csharp
+[Requires("a % BASE == b % BASE")]
+[Requires("c % BASE == d % BASE")]
+[Ensures("(a + c) % BASE == (b + d) % BASE")]
+```
+
+The four-argument form is the honest one; the three-argument form (`c` added to both
+sides) is only enough for `s1`.
+
+### 13.4 What was proved
+
+`Func_Adler32_Update` verifies, in two tiers:
+
+* **Tier A — safety.** No array access out of bounds, no arithmetic overflow anywhere,
+  including across the deferred modulo. The invariants that carry it are linear in the
+  work remaining, which is what lets each survive a single iteration:
+
+  ```csharp
+  Pal.Invariant(s1 <= BASE - 1 + 255 * (NMAX - n));
+  Pal.Invariant(s2 <= BASE - 1 + (NMAX - n) * S1MAX);
+  ```
+
+  The coarse `s2` bound is 3 931 241 520 < 2^32, which is what the `uint` the code
+  actually uses requires. The *tight* 2^31 analysis the comment attempts lives in the
+  probe, where F54 records that the comment gets it wrong.
+
+* **Tier B — functional correctness.**
+  `Result == Adler(Old(Contents(buf)), Old(offset), Old(count))`, where `Adler` is RFC 1950
+  §8.2 stated inductively in C# as two `[Spec]` functions. This is the postcondition
+  §specreview asks for: it relates the output to the *input*, not merely to a type.
+
+### 13.5 The §7.2 detector
+
+`test/adler32/Adler32Variant.cs` is the same checksum with the inner loop written as a
+`for`, the chunk size chosen by a conditional expression rather than an `if` statement, the
+accumulators updated by compound assignment, the outer guard written `!= 0`, and every
+local renamed. **It translated with no emitter change** — which is the claim §7.2 exists to
+test. It needed five `Pal.Assert`s the original does not, splitting the invariant's
+re-establishment into its conjuncts, because the conditional chunk size reaches the solver
+as a `match` term it must case-split. That cost is charged in the annotations, where §0
+rule 3 says it belongs.
+
+### 13.6 One place fidelity was traded, and why
+
+SharpZipLib writes the inner loop as `while (--n >= 0)`. pal-csharp **translates** that
+faithfully after R13.3, but the result is hard to *specify*: Pulse requires the stateful
+guard to preserve the invariant, and the natural progress invariant is not stable under the
+guard's own decrement. Only inequalities in the weakening direction survive it, and the
+body cannot re-establish a tight bound because `n` is stale by one inside the body — the
+decrement happened in the guard, not the body. The textbook resolution is to move the
+decrement out of the guard, and that is what `test/adler32/Adler32.cs` does:
+`while (n > 0) { …; n--; }`.
+
+This is the one adaptation to the loop, and it is a genuine, reportable limitation rather
+than a translation gap. `offset++` inside the array subscript **is** retained, so R13.3 is
+still exercised by the real idiom. Two further adaptations are mechanical and touch only
+the signature: `ArraySegment<byte>` is spelled out as `(buf, offset, count)`, and the
+instance field is passed and returned rather than mutated.

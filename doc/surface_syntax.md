@@ -870,10 +870,17 @@ writes `assert False` into `TranslationErrors.fst`, so a failed translation can 
 mistaken for a passing proof.
 
 Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
-`try`/`catch`/`throw`, generics, interfaces, delegates, `async`, `string`, floating point,
-numeric conversions between machine-integer widths, struct fields that are not values,
-user-written struct constructors, static mutable fields, a class that is neither `sealed`
-nor `abstract`, and a `return` that is not in tail position.
+`switch`, `try`/`catch`/`throw`, generics, C# `interface` declarations, delegates, `async`,
+`string`, floating point, struct fields that are not values, user-written struct
+constructors, static mutable fields, a class that is neither `sealed` nor `abstract`, a
+`return` that is not in tail position **inside a loop**, and an increment or decrement
+written in a specification.
+
+Two entries left this list in M7. Conversions between machine-integer widths — explicit
+casts and C#'s implicit promotions alike — are translated by §13's R13.1 and R13.4. A
+`return` that is not in tail position is rewritten by Normalize (R5.5b) everywhere except
+inside a loop. Increment and decrement in expression position, including
+`a[i++]`, are translated by R13.3.
 
 For a recursive class (§3): a hierarchy it also takes part in, an array it also owns, a
 `[Model]` that is not one constructor application over each recursive field exactly once,

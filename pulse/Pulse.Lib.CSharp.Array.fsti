@@ -46,6 +46,15 @@ val arr_length_v (#t: Type0) (a: array t)
   : Lemma (I32.v (arr_length a) == A.length a)
           [SMTPat (I32.v (arr_length a))]
 
+/// The same bound, stated about the *length* rather than about the value read for
+/// it. `arr_length_v` only fires where a program has actually read `a.Length`, so a
+/// loop that walks an array by an offset it never compares against the length --
+/// which is what `Update` does, having been handed a count instead -- would have no
+/// bound on its index at all.
+val arr_length_bound (#t: Type0) (a: array t)
+  : Lemma (A.length a < pow2 31)
+          [SMTPat (A.length a)]
+
 /// `System.Array.Length`.
 ///
 /// The `rewrites_to` is load-bearing rather than cosmetic: without it the value

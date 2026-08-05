@@ -115,8 +115,12 @@ public sealed class CodeEmitter(
         return origins.ToImmutable();
     }
 
+    /// <summary>The plan of the method being emitted, needed by R13.3's prelude.</summary>
+    private MethodPlan? _plan;
+
     public string EmitBody(IrMethod method, MethodPlan plan)
     {
+        _plan = plan;
         foreach (var (name, slot) in plan.Slots) _slots[name] = slot;
 
         if (method is { IsConstructor: true, ReturnType: IrClassType built })
@@ -346,6 +350,10 @@ public sealed class CodeEmitter(
         Line(Names.Result);
     }
 
+
+    /// <summary>Resolves <c>$&amp;(x)</c> to the Pulse name holding <c>x</c>.</summary>
+    private string? Binder(string name) =>
+        _slots.TryGetValue(name, out var slot) ? slot.Binder : null;
 
     private bool IsObjectBinder(string text) =>
         // R10.2b. An injected reference is a binder too: `(Some t)` is the name the
@@ -838,10 +846,17 @@ public sealed class CodeEmitter(
     private void Scoped(Action emit, bool dropAtEnd)
     {
         var mark = _objectLocals.Count;
+        // A slot is a *binding*, and a binding introduced inside a block is out of scope
+        // once the block closes. Nothing outside may name it — in particular R5.13's
+        // resource-naming bracket, which would otherwise assert `pts_to` for a cell whose
+        // Pulse binder no longer exists.
+        var declared = new HashSet<string>(_slots.Keys);
         if (dropAtEnd) _closingBlocks++;
         emit();
         if (dropAtEnd) { _closingBlocks--; DropLocals(null, mark); }
         _objectLocals.RemoveRange(mark, _objectLocals.Count - mark);
+        foreach (var name in _slots.Keys.Where(n => !declared.Contains(n)).ToList())
+            _slots.Remove(name);
     }
 
     private void DropLocals(string? returned, int from = 0)
@@ -1202,8 +1217,14 @@ public sealed class CodeEmitter(
     private void LocalDeclaration(IrLocalDecl d)
     {
         var cell = Names.Local(d.Name);
-        _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
         var init = d.Init is null ? Default(d.Type) : Expr(d.Init);
+        if (d.Immutable)
+        {
+            _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, cell);
+            Line($"let {cell} = {init};");
+            return;
+        }
+        _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
         Line($"let mut {cell} = {init};");
     }
 
@@ -1782,11 +1803,12 @@ public sealed class CodeEmitter(
                 Line($"assume (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
             case GhostKind.Raw:
-                Line(Antiquotation.Expand(g.Text!, scope) + ";");
+                Line(Antiquotation.Expand(g.Text!, scope, Binder) + ";");
                 return;
             case GhostKind.LemmaCall when g.Prop is IrCall call:
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
-                     string.Join(" ", call.Args.Select(a => SpecArgument(a, scope))) + ";");
+                     string.Join(" ", call.Args.Select((a, i) =>
+                         SpecArgument(a, SpecEmitter.ParamType(call, i), scope))) + ";");
                 return;
             default:
                 return;
@@ -1839,7 +1861,13 @@ public sealed class CodeEmitter(
     /// R4.7: a lemma is applied to the values the program holds, so its arguments are
     /// passed with their program types and receive no <c>Int32.v</c> coercion.
     /// </summary>
-    private string SpecArgument(IrExpr arg, SpecScope scope) => spec.Emit(arg, scope).Text;
+    /// <summary>
+    /// R4.13. A lemma called from code takes its arguments under exactly the rule a lemma
+    /// mentioned in a specification does: a machine value entering a mathematical
+    /// parameter is C#'s implicit conversion, and is the `.v` of §6.
+    /// </summary>
+    private string SpecArgument(IrExpr arg, IrType? paramType, SpecScope scope) =>
+        spec.Argument(arg, paramType, scope);
 
     // =======================================================================
     // Expressions (R6)
@@ -2026,6 +2054,14 @@ public sealed class CodeEmitter(
             case IrConvert cv:
                 return Convert(cv);
 
+            // R13.3. Run the effect where it stands, then yield the value. Emitting the
+            // prelude through the ordinary statement path is what makes the effect land
+            // in the right place: inside a loop guard it is re-run every iteration, and
+            // inside a captured short-circuit branch it is run only when that branch is.
+            case IrStmtExpr se:
+                foreach (var s in se.Prelude) Statement(s, _plan!);
+                return Expr(se.Value);
+
             default:
                 diagnostics.Unsupported(expr.Loc, $"`{expr.GetType().Name}` in executable code");
                 return "()";
@@ -2171,6 +2207,18 @@ public sealed class CodeEmitter(
         var r = Expr(b.Right);
         var module = Types.Module((b.Left.Type as IrPrim)?.Kind ?? PrimKind.Int);
 
+        // R13.5. C# takes a shift distance as an `int` whatever the operand's width, but
+        // every one of F*'s `shift_left`/`shift_right` takes a `UInt32.t` — including
+        // `Int64`'s and `UInt8`'s. The distance is therefore converted rather than
+        // rendered at the operand's type, which is what it would otherwise inherit.
+        if (b.Op is BinOp.Shl or BinOp.Shr &&
+            (b.Right.Type as IrPrim)?.Kind is { } shiftKind && shiftKind != PrimKind.UInt)
+        {
+            r = Types.CastFunction(shiftKind, PrimKind.UInt) is { } toU32
+                ? $"({toU32} {r})"
+                : r;
+        }
+
         var op = b.Op switch
         {
             BinOp.Add => "add", BinOp.Sub => "sub", BinOp.Mul => "mul",
@@ -2227,8 +2275,27 @@ public sealed class CodeEmitter(
         var to = (cv.Target as IrPrim)?.Kind;
         if (from == to) return operand;
 
+        // R13.1. A numeric width conversion is `FStar.Int.Cast`'s corresponding function.
+        //
+        // Note what is *not* here: a proof obligation. Everywhere else pal-csharp insists
+        // arithmetic does not overflow, because C#'s wrapping `+` is almost always an
+        // accident. A cast is the opposite — writing `(byte)v` is the programmer asking
+        // for truncation, and C#'s unchecked context, which is the default, defines it to
+        // truncate. `FStar.Int.Cast`'s narrowing functions are modular, so they mean the
+        // same thing (F48). Demanding `0 <= v < 256` here would be the emitter inventing a
+        // refusal for an operation the source language defines (§0 rule 3); a user who
+        // wants exactness proves the range themselves and F49 hands it back.
+        if (from is { } f && to is { } t)
+        {
+            // `ushort` and `char` are both `U16.t`, so the conversion between them is the
+            // identity and there is no cast function to name.
+            var fn = Types.CastFunction(f, t);
+            if (fn is null && Types.Machine(f) == Types.Machine(t)) return operand;
+            if (fn is not null) return $"({fn} {operand})";
+        }
+
         diagnostics.Unsupported(cv.Loc, $"The conversion from `{from}` to `{to}`",
-            "Numeric conversions are not yet translated.");
+            "Only conversions between C#'s integer types are translated.");
         return operand;
     }
 
@@ -2277,22 +2344,35 @@ public sealed class CodeEmitter(
     }
 }
 
-/// <summary>PAL's <c>$(…)</c> antiquotation, reused verbatim.</summary>
+/// <summary>PAL's <c>$(…)</c> and <c>$&amp;(…)</c> antiquotations, reused verbatim.</summary>
 public static class Antiquotation
 {
-    public static string Expand(string text, SpecScope scope)
+    /// <param name="binder">
+    /// Resolves <c>$&amp;(x)</c>: the Pulse name of the thing <c>x</c> lives in, rather
+    /// than <c>$(x)</c>'s value of it. A ghost lemma about an array or a reference needs
+    /// the array or the reference; the value is the wrong argument and, for a lemma that
+    /// relates the two, an unusable one.
+    /// </param>
+    public static string Expand(string text, SpecScope scope, Func<string, string?>? binder = null)
     {
         var sb = new StringBuilder();
         for (var i = 0; i < text.Length; i++)
         {
-            if (text[i] != '$' || i + 1 >= text.Length || text[i + 1] != '(')
+            if (text[i] != '$' || i + 1 >= text.Length)
+            {
+                sb.Append(text[i]);
+                continue;
+            }
+
+            var cell = text[i + 1] == '&' && i + 2 < text.Length && text[i + 2] == '(';
+            if (!cell && text[i + 1] != '(')
             {
                 sb.Append(text[i]);
                 continue;
             }
 
             var depth = 0;
-            var start = i + 2;
+            var start = i + (cell ? 3 : 2);
             var j = start;
             for (; j < text.Length; j++)
             {
@@ -2301,7 +2381,9 @@ public static class Antiquotation
             }
 
             var name = text[start..j].Trim();
-            sb.Append(scope.TryGet(name, out var term) ? term.Text : name);
+            sb.Append(cell
+                ? binder?.Invoke(name) ?? name
+                : scope.TryGet(name, out var term) ? term.Text : name);
             i = j;
         }
         return sb.ToString();

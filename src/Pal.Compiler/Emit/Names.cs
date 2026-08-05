@@ -336,6 +336,62 @@ public static class Types
         _ => "I32",
     };
 
+    /// <summary>
+    /// The <c>FStar.Int.Cast</c> name for a machine integer, as it appears in a cast
+    /// function's name (R13.1). <c>char</c> is a UTF-16 code unit, so it casts exactly
+    /// as <c>ushort</c> does.
+    /// </summary>
+    private static string? CastName(PrimKind kind) => kind switch
+    {
+        PrimKind.SByte => "int8",
+        PrimKind.Byte => "uint8",
+        PrimKind.Short => "int16",
+        PrimKind.UShort or PrimKind.Char => "uint16",
+        PrimKind.Int => "int32",
+        PrimKind.UInt => "uint32",
+        PrimKind.Long => "int64",
+        PrimKind.ULong => "uint64",
+        _ => null,
+    };
+
+    /// <summary>
+    /// The <c>FStar.Int.Cast</c> function witnessing a C# numeric conversion (R13.1), or
+    /// <c>null</c> when either end is not a machine integer. A conversion whose two ends
+    /// share a representation — <c>ushort</c> and <c>char</c> are both <c>U16.t</c> — has
+    /// no cast function because it is the identity; callers test for that first.
+    /// </summary>
+    public static string? CastFunction(PrimKind from, PrimKind to)
+    {
+        var f = CastName(from);
+        var t = CastName(to);
+        if (f is null || t is null || f == t) return null;
+        return $"Cast.{f}_to_{t}";
+    }
+
+    /// <summary>Whether a machine integer type is signed (R13.2).</summary>
+    public static bool Signed(PrimKind kind) => kind is
+        PrimKind.SByte or PrimKind.Short or PrimKind.Int or PrimKind.Long;
+
+    /// <summary>
+    /// Whether every value of <paramref name="from"/> is a value of <paramref name="to"/>,
+    /// so that the conversion is the identity on mathematical values (R13.2).
+    ///
+    /// This is not simply "the target is wider". <c>uint8 -&gt; int8</c> is a conversion
+    /// between two 8-bit types that loses values above 127, and <c>int32 -&gt; uint32</c>
+    /// is a conversion between two 32-bit types that loses every negative. Both are
+    /// modular, and a specification that called either one the identity would be wrong.
+    /// </summary>
+    public static bool RangeFits(PrimKind from, PrimKind to)
+    {
+        if (CastName(from) is null || CastName(to) is null) return false;
+        var (fw, tw) = (Width(from), Width(to));
+        var (fs, ts) = (Signed(from), Signed(to));
+        if (fs == ts) return tw >= fw;
+        // Unsigned into signed needs a strictly wider target; signed into unsigned never
+        // fits, because the negatives have nowhere to go.
+        return !fs && ts && tw > fw;
+    }
+
     /// <summary>Bit width, used by the R5.9 case-2 measure.</summary>
     public static int Width(PrimKind kind) => kind switch
     {

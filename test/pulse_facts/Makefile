@@ -16,7 +16,7 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/ObjectFacts.fst.checked $(CACHE_DIR)/InheritanceFacts.fst.checked \
      $(CACHE_DIR)/ShapeHierarchy.fst.checked $(CACHE_DIR)/DeepHierarchy.fst.checked \
      $(CACHE_DIR)/RecursiveFacts.fst.checked $(CACHE_DIR)/UserSpecFacts.fst.checked \
-     $(CACHE_DIR)/SegmentFacts.fst.checked
+     $(CACHE_DIR)/SegmentFacts.fst.checked $(CACHE_DIR)/ConversionFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
@@ -45,6 +45,10 @@ $(CACHE_DIR)/DeepHierarchy.fst.checked: DeepHierarchy.fst
 $(CACHE_DIR)/RecursiveFacts.fst.checked: RecursiveFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) RecursiveFacts.fst
+
+$(CACHE_DIR)/ConversionFacts.fst.checked: ConversionFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) ConversionFacts.fst
 
 $(CACHE_DIR)/SegmentFacts.fst.checked: SegmentFacts.fst
 	@mkdir -p $(CACHE_DIR)

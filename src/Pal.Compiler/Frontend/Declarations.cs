@@ -9,8 +9,20 @@ namespace Pal.Compiler.Frontend;
 /// <summary>Attribute queries shared by the collector and the lowerers.</summary>
 public static class Declarations
 {
-    public static bool Has(ISymbol symbol, INamedTypeSymbol attribute) =>
-        symbol.GetAttributes().Any(a =>
+    /// <summary>
+    /// R4.13. The callee's parameter types in argument order, so that Emit can decide per
+    /// argument whether C#'s implicit conversion into the mathematical world applies. A
+    /// receiver occupies the leading slot and has no declared parameter, so it is null;
+    /// so is any parameter whose type the frontend could not map.
+    /// </summary>
+    public static ImmutableArray<IrType?> ParamTypes(
+        IMethodSymbol method, WellKnown known, bool receiver)
+    {
+        var declared = method.Parameters.Select(p => known.MapType(p.Type));
+        return receiver ? [null, .. declared] : [.. declared];
+    }
+
+    public static bool Has(ISymbol symbol, INamedTypeSymbol attribute) =>        symbol.GetAttributes().Any(a =>
             SymbolEqualityComparer.Default.Equals(a.AttributeClass, attribute));
 
     public static AttributeData? Find(ISymbol symbol, INamedTypeSymbol attribute) =>
