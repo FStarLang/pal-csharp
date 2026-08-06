@@ -123,6 +123,11 @@ The rules below depend on the following, each **verified against the pinned tool
 | F63 | **A generic struct is an ordinary parameterised record.** `noeq type segment (t: Type0) = { arr: A.array t; off: I32.t; cnt: I32.t }` and a pure predicate over it both typecheck, and a Pulse `fn` over the record verifies. This is the `ArraySegment<T>` / `Span<T>` shape. | `test/pulse_facts/GenericFacts.fst:segment`, `seg_ok`, `seg_first`. `examples/adler32` had to spell `ArraySegment<byte>` out as three parameters; this is why it will not have to. |
 | F64 | **Instantiation composes.** A generic `fn` may call a generic `fn` at its own type variable, with the type argument inferred exactly as a concrete one is today. So generic methods calling generic methods need no monomorphising pass. | `test/pulse_facts/GenericFacts.fst:generic_swap`, which calls `generic_get`/`generic_set` at `t`. Without it the emitter would have to specialise every instantiation, losing the module-per-method structure §2 depends on. |
 | F65 | **A C# `string` needs no separation logic.** It is immutable, so there is nothing to own: it is a pure value, `Seq.seq char` is an adequate model, and a Pulse `fn` takes and returns one under `requires emp`. | `test/pulse_facts/StringFacts.fst`. Recorded as the road not taken in M8: the *encoding* is cheap, and the cost of strings is the library surface (`Substring`, `IndexOf`, `Split`, concatenation), not the model. |
+| F66 | **A mutually recursive type group may be parameterised.** R10.1's record, its `box` abbreviation and its `option` abbreviation each repeat the binder, and the recursion is at the *same* type argument — which is all a C# `Node<T>` can say, since `Node<T>.next` is a `Node<T>?` and never a `Node<U>?`. | `test/pulse_facts/GenericClassFacts.fst:class_Node__raw`. |
+| F67 | **A model type carries its refinement across parameterisation.** R3.9d's `[Refine]` predicate is a predicate *on the model*, so it is parameterised exactly as the model is: `class_Node__model (a: Type0) = m: list a { pred m }`. | `test/pulse_facts/GenericClassFacts.fst:class_Node__model`. |
+| F68 | **A class's type parameter is *implicit* on every generated definition, and that is not a hope about inference.** Each of the twelve definitions R10.4/R10.8 emit has a value argument whose type already mentions the parameter (`x: class_Node__opt a`), so it is determined by unification with an argument the emitter writes down anyway. The payoff is that every *call site* §10 emits stays character for character what it already is. | `test/pulse_facts/GenericClassFacts.fst` F68–F70: `class_Node__inv_opt`, the six case lemmas and the recursive share/gather all take `(#a: Type0)`, and `func_Lists_Length` calls them with no type argument at all. |
+| F69 | **A generic method over a generic class composes the two rules and needs no third.** An explicit `ty_T` binder (R14.2) applied to a class type (`class_Node__opt ty_T`), with the class's own lemmas inferring `a` from it. | `test/pulse_facts/GenericClassFacts.fst:func_Lists_Length`. |
+| F70 | **A probe written outside the emitter's idiom measures the probe.** The first draft of F69 failed with "Application of a stateful or atomic computation cannot have a ghost effect"; a control at a *fixed* element type failed identically, and both succeeded once rewritten in R10.7's actual shape — an `erased` model with `requires`/`ensures` spelled out rather than `preserves`. Generics were never involved. | `test/pulse_facts/GenericClassFacts.fst:ctrl_Length`, kept beside `func_Lists_Length` as the control. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1965,14 +1970,14 @@ Rules are recorded here as they are validated.
   `[Model]`, rather than letting its members fall through to the generic `PALCS0530`.
 * **The emitter implements R2–R6 and reproduces the probe from source.** The whole M1
   acceptance suite translates and verifies from annotated C#: `swap`, `abs_max`,
-  `out_param`, `spec_let`, `sum_array`, `reverse`, `insertion_sort`, `insertion_sort_sorted`,
+  `out_param`, `spec_let`, `sum_array`, `array_reverse`, `insertion_sort`, `insertion_sort_sorted`,
   `binary_search`, `lemma_call`, `ghost_arg`, `pulse_interop`, `break_continue`,
   `compare_elements`, `point_struct` and `circular_buffer`.
 * **Ill-formed C# stops at the C# level.** `Passes/Check.cs` is the standalone
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — forty-three cases, each
+  `test/diagnostics` is its counterpart to the verification tests — forty-six cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -2001,7 +2006,7 @@ Rules are recorded here as they are validated.
      (`Pulse.Lib.CSharp.Seq.upd_shift_is_permutation`) reached through a `[Lemma]` method.
      That is precisely the split §0 rule 3 mandates: **no emitter change was made for this
      proof.**
-* **The contortion detector is running.** `abs_max`, `sum_array`, `reverse` and
+* **The contortion detector is running.** `abs_max`, `sum_array`, `array_reverse` and
   `insertion_sort` each ship a *variant*: the same contract and algorithm written
   differently — `for` against `while`, inverted branches, renamed and reordered locals,
   an exchanged guard, an index computed rather than carried, an inferred measure against a
@@ -2041,7 +2046,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the forty-three
+  right, since an editor has no business writing files, but eight of the forty-six
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every
@@ -4105,3 +4110,156 @@ Each of these is a refusal to *translate* — a construct with no image under th
 
 A type parameter used as the receiver of anything, or compared with `==`, needs no rule
 here: C# itself rejects it, so it cannot reach the translation.
+
+---
+
+## 15. Generic types (M9)
+
+M8 refused a generic class or struct declaration (PALCS0581) on a stated ground: the record
+is representable (F63), but "the invariant and the ownership predicate of a type
+parameterised by a type have not been designed". F66–F70 design them. The refusal was
+honest and is now discharged, which is the only way a refusal in this document is ever
+meant to be removed.
+
+The whole of §15 is one observation. A class's F\* image is a *family* of definitions — a
+record, two abbreviations, a model type, an invariant, six case lemmas, two permission
+lemmas — and every one of them either mentions the class's representation type or is a
+predicate over it. So parameterising the class parameterises all of them uniformly, and the
+question is only where the argument has to be written down.
+
+### 15.1 Where the parameter is written
+
+**R15.1 — A class's or struct's type parameters become binders on every definition its
+module emits, in declaration order.** The record, the `box` abbreviation, the `option`
+abbreviation, the model type, the invariant, the case lemmas and the share/gather lemmas
+all take them. R14.1 applies unchanged: a constrained parameter is refused (PALCS0580).
+
+**R15.2 — On a *type* definition the binders are explicit; on everything else they are
+implicit.** This is the one rule of §15 with a choice in it, and F68 is why it goes this
+way.
+
+A type has no value argument to infer from, so `class_Node__opt` must be applied: a method
+binder reads `(var_n: class_Node__opt ty_T)`. Everything else — the invariant, and all
+eight lemmas — has a value argument whose type already mentions the parameter, so the
+argument is determined by unification with something the emitter is writing down anyway.
+Making it explicit would be writing the same information twice.
+
+That is not a stylistic preference. §10's client rules emit lemma calls by the hundred
+(`class_Node__cases var_n;`, `class_Node__elim_cons var_n;`, `class_Node__intro_cons
+var_n;`), each in a context where the emitter has a *C#* type in hand and would have to
+render its F\* image to supply an argument. Under R15.2 not one of those call sites
+changes. The client half of §15 is therefore almost empty, and that is the rule's whole
+justification.
+
+Contrast R14.2, which made a *method*'s type parameter explicit. The two rules disagree
+because the two situations do: Roslyn resolved a method's type argument and the emitter has
+it, whereas a generated lemma's type argument is a function of an argument already present.
+Neither rule is asking F\* to guess.
+
+**R15.3 — A class type is named with its type arguments applied.** `Node<T>` inside a
+generic method is `class_Node__opt ty_T`; `Node<int>` in a non-generic one is
+`class_Node__opt I32.t`. The arguments come from Roslyn's constructed type symbol, so — as
+in R14.5 — an inferred instantiation and a written one are indistinguishable by the time
+the translator sees them.
+
+**R15.4 — The recursion is at the same type argument.** A recursive field of `Node<T>` has
+type `Node<T>?`, never `Node<U>?`, because that is what C# writes: a field's type is a type
+in the class's own scope. So the mutually recursive group is parameterised uniformly and
+F66's well-foundedness argument is the monomorphic one.
+
+This is worth stating because the alternative — *non-uniform* (polymorphic) recursion, as
+in `Nest<T> { Nest<(T,T)>? next; }` — is expressible in C# and has no `type … and …` image
+at all. It is refused (PALCS0582): a field whose type instantiates the enclosing class at
+anything but its own parameters.
+
+### 15.2 What the model is
+
+**R15.5 — A generic class's model type is parameterised by the same parameters.** R10.5
+reads the `[Model]` member backwards to obtain the induction, and the constructor
+application it reads is now at the element type: `SpecList.Cons(value, next!.Items)` where
+`value` is a `T` gives `list ty_T`, and the pure conjunct relating the head to the field is
+`m0 == r.fld_value` rather than R6's `I32.v r.fld_value`, because there is no conversion to
+apply at an abstract type.
+
+That last clause is not a special case. §6 puts `I32.v` on an integer field because a C#
+`int` field and its `SpecInt` model are different types; a `T` field and its `T` model are
+the *same* type, so the identity is what §6 already prescribes.
+
+### 15.3 Saying things about an abstract value
+
+**R15.6 — Equality on a type parameter is `Pal.Same(a, b)`.** C# refuses `a == b` on an
+unconstrained `T`, so a specification that needs it has nothing to write; `Pal.Same` is a
+`[Spec]`-level intrinsic that lowers to `BinOp.Eq` and is otherwise a `==`. It exists for
+exactly the reason the rest of §15 does: the C# surface is missing an operator that the F\*
+image has, and the annotation layer is where that gap is filled.
+
+`test/generic_tree`'s `GetOr` is the case: it returns a `T`, and
+`Pal.Same(Result, SpecTree.Get(t.Elements, k, fallback))` is its whole postcondition.
+
+**R15.7 — The list vocabulary lives in `Pulse.Lib.CSharp.List`.** `SpecList.Take`, `Drop`,
+`InsertAt`, `RemoveAt` and `Reverse` denote `CL.take`, `CL.drop`, `CL.insert_at`,
+`CL.remove_at` and `CL.rev`. Every one is **total and takes an `int`, never a refined
+`nat`**, and that is a rule rather than an omission: R3.9b puts a method's precondition in a
+*later* conjunct than the postcondition that mentions these terms, so `CL.take m (I32.v
+var_i)` has to be well typed where a bound on `var_i` is not yet available. Clamping a
+negative or oversized index is therefore part of the specification, and the library says
+what the clamp does.
+
+**R15.8 — `null` at a generic class is named before it is introduced.** `None` says nothing
+about what it is empty *of*, so R15.2's implicit type argument to `class_C__intro_nil` has
+nothing to resolve against. The emitter binds it first, at its type
+(`let t : class_C__opt ty_T = None;`), and introduces the invariant at the binder. A
+monomorphic class has no ambiguity and keeps the shorter form, so every pre-M9 emission is
+byte-identical.
+
+**R15.9 — A type in argument position is bracketed.** `tree (kv ty_T)`, not `tree kv ty_T`.
+This is R15.3 applied one level down, and it is what makes a *nested* generic specification
+type — a map is `SpecTree<SpecKv<T>>` — render correctly.
+
+### 15.4 What stays refused
+
+* **A constrained type parameter (PALCS0580).** R14.1, unchanged. This is what keeps an
+  ordered container generic in its *value* and concrete in its *key*: a `TreeNode<T>` with
+  an `int key` and a `T value` is a map, is fully general in what it stores, and needs no
+  comparison on `T` at all. A `TreeNode<T>` ordered *by* `T` needs `IComparable<T>` and is
+  refused.
+* **Non-uniform recursion (PALCS0582).** R15.4.
+* **A generic `struct` (PALCS0581).** A struct is a *value* here: copied at every
+  assignment, stored inline in whatever holds it, and represented by §8's record rather
+  than by a reference with an invariant. Parameterising a record is a different problem
+  from parameterising a class and has not been designed.
+* **A generic class in a hierarchy (PALCS0581).** §9's vtable is a record whose field types
+  mention the class, so parameterising the class parameterises the vtable, and the cast
+  lemmas relating a derived record to its base have to be parameterised alongside it.
+  Neither is designed. The refusal fires at the derived class too, so that no hierarchy
+  anywhere contains a parameterised class.
+
+§11's user-defined specification types are *not* on this list: `[SpecType]` has always been
+generic where the F\* type behind it is, and R15.9 is what makes the nested case
+(`SpecTree<SpecKv<T>>`) come out right.
+
+### 15.5 What §15 does not reach
+
+Three shapes are expressible in C#, are not about generics at all, and are refused or fail
+for reasons §10 and §4 own. They are recorded here because they are what a "complete"
+container library runs into, and because the honest response to each is a rule, not an
+emitter patch.
+
+* **A field read through a non-null recursive reference.** R10.7 opens a window at a *null
+  test*, so a receiver of type `Cell<T>` (not `Cell<T>?`) has no window to be read in.
+  This is why `test/generic_list` has no `First`. The rule that would fix it — open a
+  non-null receiver directly with `as_opt`, `cases` and `elim_cons` — is designable and is
+  not designed.
+* **A windowed reference passed as an argument.** R10.7 closes the window at the end of the
+  branch, so a reference handed to a call *while open* is handed over open. This is what
+  makes an in-place `Reverse` (which passes `x` to its own recursive call after rewriting
+  `x.next`) fail, and why `test/generic_list`'s `Reverse` is the persistent one.
+* **A `[Consumes]` parameter given away on two different paths.** R4.9c is a statement about
+  the *method*: the first consuming use moves the argument, and a second use is PALCS0550
+  even when the two are in disjoint branches. Splitting the branches into two methods says
+  one thing each, and is what `test/generic_list` does.
+
+The persistent style these push a library towards is not a consolation prize. An operation
+that allocates what it returns leaves its argument `[Frac]`-observed, so the caller keeps
+the list it passed in — which is the ordinary contract of a container operation in a garbage
+collected language, and the one C# programmers expect.

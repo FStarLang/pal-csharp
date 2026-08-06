@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Emit;
@@ -415,8 +416,8 @@ public static class Types
     public static string Render(IrType type) => type switch
     {
         IrPrim p => Machine(p.Kind),
-        IrArrayType a => $"array {Render(a.Element)}",
-        IrSeqType s => $"Seq.seq {Render(s.Element)}",
+        IrArrayType a => $"array {Atom(a.Element)}",
+        IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
         // R14.4. A type parameter is a type like any other; only its name changes.
@@ -424,15 +425,38 @@ public static class Types
         // R10.2. A nullable reference is `option class_C`, named through the class's own
         // abbreviation so that every rule below reads the same whether or not the class
         // is recursive.
-        IrClassType { Nullable: true } c => $"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}",
-        IrClassType c => $"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}",
-        IrSpecListType l => $"list {Render(l.Element)}",
+        IrClassType { Nullable: true } c =>
+            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}", c.TypeArguments),
+        IrClassType c =>
+            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}", c.TypeArguments),
+        IrSpecListType l => $"list {Atom(l.Element)}",
         IrUserSpecType u => u.Args.IsEmpty
             ? u.FStar
-            : $"{u.FStar} {string.Join(" ", u.Args.Select(Render))}",
+            : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
         IrPulseType p => p.PulseText,
         _ => "unit",
     };
+
+    /// <summary>
+    /// A type in argument position. An application binds tighter than nothing at all, so
+    /// <c>tree (kv ty_T)</c> is not <c>tree kv ty_T</c>; a type that is already a single
+    /// token, or already bracketed by R15.3, is left as it stands so that every emission
+    /// that was right before stays byte-identical.
+    /// </summary>
+    public static string Atom(IrType type)
+    {
+        var text = Render(type);
+        return text.Contains(' ') && !text.StartsWith('(') ? $"({text})" : text;
+    }
+
+    /// <summary>
+    /// R15.3. A type constructor applied to its arguments. The parentheses are not
+    /// optional: a class type appears in argument position (<c>B.box (class_C ty_T)</c>,
+    /// <c>option (class_C ty_T)</c>), where the bare application would associate wrongly.
+    /// A nullary application is left bare, so every pre-M9 emission is unchanged.
+    /// </summary>
+    public static string Applied(string head, ImmutableArray<IrType> args) =>
+        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Render))})";
 
     /// <summary>The literal syntax for a value of a machine-integer type.</summary>
     public static string Literal(object? value, IrType? type)
@@ -460,4 +484,39 @@ public static class Types
         };
         return text.StartsWith('-') ? $"({text}{suffix})" : text + suffix;
     }
+}
+
+/// <summary>
+/// R15.1/R15.2. The type binders a generic declaration's module repeats on every
+/// definition it emits. Explicit on a type definition, implicit everywhere else — see
+/// F68: every other definition has a value argument whose type already mentions the
+/// parameter, so writing it again would be writing the same thing twice, and leaving it
+/// implicit is what keeps every emitted *call site* unchanged from the monomorphic case.
+/// </summary>
+internal readonly record struct TypeBinders(ImmutableArray<string> Parameters)
+{
+    public static readonly TypeBinders None = new([]);
+
+    public static TypeBinders Of(IrClass c) => new(c.TypeParameters);
+
+    public bool IsEmpty => Parameters.IsEmpty;
+
+    /// <summary>Explicit binders, with a leading space: <c> (ty_T: Type0)</c>.</summary>
+    public string Explicit => Render(p => $"({p}: Type0)");
+
+    /// <summary>Implicit binders, with a leading space: <c> (#ty_T: Type0)</c>.</summary>
+    public string Implicit => Render(p => $"(#{p}: Type0)");
+
+    /// <summary>The parameters as arguments, with a leading space: <c> ty_T</c>.</summary>
+    public string Arguments => Render(p => p);
+
+    /// <summary>
+    /// A head applied to the parameters, parenthesised. The parentheses matter: the
+    /// result appears in argument position (<c>B.box (class_C__raw ty_T)</c>).
+    /// </summary>
+    public string App(string head) => IsEmpty ? head : $"({head}{Arguments})";
+
+    private string Render(System.Func<string, string> f) => IsEmpty
+        ? ""
+        : " " + string.Join(" ", Parameters.Select(p => f(Names.TypeParam(p))));
 }

@@ -208,7 +208,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrNull n:
                 return new Term(
                     n.Type is IrClassType nullClass
-                        ? $"(None #{Names.ClassModule(nullClass.Name)}.{Names.ClassType(nullClass.Name)})"
+                        ? "(None #" + Types.Applied(
+                              $"{Names.ClassModule(nullClass.Name)}.{Names.ClassType(nullClass.Name)}",
+                              nullClass.TypeArguments) + ")"
                         : "None",
                     TermKind.Other);
 
@@ -462,6 +464,19 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             $"(List.Tot.tl {Emit(l.Args[0], scope).Text})", TermKind.Other),
         ListOpKind.Index => new Term(
             $"(List.Tot.index {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Math),
+        // R15.7. `Pulse.Lib.CSharp.List` states each of these as a *total* function of an
+        // `int`, so the term is well typed wherever a C# index is, with no side condition.
+        ListOpKind.Take => new Term(
+            $"(CL.take {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Other),
+        ListOpKind.Drop => new Term(
+            $"(CL.drop {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Other),
+        ListOpKind.InsertAt => new Term(
+            $"(CL.insert_at {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)} " +
+            $"{AsMath(Emit(l.Args[2], scope))})", TermKind.Other),
+        ListOpKind.RemoveAt => new Term(
+            $"(CL.remove_at {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Other),
+        ListOpKind.Reverse => new Term(
+            $"(CL.rev {Emit(l.Args[0], scope).Text})", TermKind.Other),
         _ => new Term("True", TermKind.Prop),
     };
 

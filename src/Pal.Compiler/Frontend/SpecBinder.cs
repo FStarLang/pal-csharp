@@ -202,6 +202,14 @@ public static class SpecBinder
         }
 
         sb.AppendLine("}");
+        // The shim is the only artefact a spec-binding diagnostic is really *about*: a
+        // `PALCS0100` names a C# error at a position inside a generated file the user
+        // never sees, and mapping it back by eye is guesswork. `PALCS_DUMP_SHIM=1` prints
+        // the file. It earned its place finding that `using static` cannot name an open
+        // generic type (R15.1), which surfaced as an unresolved `T` in an unrelated
+        // `[Ensures]` several members away.
+        if (System.Environment.GetEnvironmentVariable("PALCS_DUMP_SHIM") is not null)
+            System.Console.Error.WriteLine(sb.ToString());
         return (sb.ToString(), lineMap);
     }
 

@@ -24,6 +24,13 @@ fi
 status=0
 
 # 1. No test directory name may appear in the compiler sources.
+#
+# A corollary worth stating, because it has bitten once: a test directory may not be named
+# after a word the *surface vocabulary* uses. `test/reverse` had to become
+# `test/array_reverse` when `SpecList.Reverse` was added, because otherwise the rule is
+# unenforceable -- there is no way to tell "the compiler knows about the reverse example"
+# from "the compiler knows what SpecList.Reverse denotes". Name directories after the
+# construct they exercise, not after an operation the language offers.
 while IFS= read -r name; do
   if grep -rniq --include='*.cs' -- "$name" "$COMPILER_DIR"; then
     echo "error: test name '$name' appears in Pal.Compiler:" >&2

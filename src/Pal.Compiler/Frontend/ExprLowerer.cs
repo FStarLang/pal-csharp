@@ -194,7 +194,10 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 [.. (node.ArgumentList?.Arguments ?? default).Select(LowerArgument)])
             {
                 Kind = CalleeKind.Method,
-                ResultType = new IrClassType(klass.Name),
+                ResultType = known.MapType(klass) ?? new IrClassType(klass.Name),
+                // R15.1. A constructor of a generic class is a function of the class's
+                // type arguments exactly as any other of its methods is.
+                TypeArguments = known.TypeArguments(ctor),
             };
         }
 
@@ -228,7 +231,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
             if (Construct(loc, plain.Name, plain, inits) is not IrNew record)
                 return new IrLiteral(loc, null);
-            return new IrAlloc(loc, plain.Name, record) { Type = new IrClassType(plain.Name) };
+            return new IrAlloc(loc, plain.Name, record) { Type = known.MapType(plain) ?? new IrClassType(plain.Name) };
         }
 
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
@@ -668,6 +671,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 "Empty" => ListOpKind.Empty,
                 "Cons" => ListOpKind.Cons,
                 "Append" => ListOpKind.Append,
+                "Take" => ListOpKind.Take,
+                "Drop" => ListOpKind.Drop,
+                "InsertAt" => ListOpKind.InsertAt,
+                "RemoveAt" => ListOpKind.RemoveAt,
+                "Reverse" => ListOpKind.Reverse,
                 _ => (ListOpKind?)null,
             };
             if (op is null) return Unsupported(node, loc);
@@ -735,6 +743,8 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             case nameof(PalLang.Pal.Live): return new IrLive(loc, Arg(0));
             case nameof(PalLang.Pal.Implies): return new IrBinary(loc, BinOp.Implies, Arg(0), Arg(1));
             case nameof(PalLang.Pal.Iff): return new IrBinary(loc, BinOp.Iff, Arg(0), Arg(1));
+            // R15.6. The same equality `==` denotes everywhere else in spec position.
+            case nameof(PalLang.Pal.Same): return new IrBinary(loc, BinOp.Eq, Arg(0), Arg(1));
             case nameof(PalLang.Pal.Contents): return new IrContents(loc, Arg(0));
             case nameof(PalLang.Pal.IsPermutation):
                 return new IrSeqOp(loc, SeqOpKind.IsPermutation, [Arg(0), Arg(1)]);

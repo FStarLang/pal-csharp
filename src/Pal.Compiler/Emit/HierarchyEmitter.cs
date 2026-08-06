@@ -1098,10 +1098,15 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         var pred = c.ModelRefinements.Length == 0
             ? "True"
             : SpecEmitter.Conjunction(c.ModelRefinements.Select(r => spec.AsProp(spec.Emit(r, modelScope))));
-        sb.AppendLine($"let {Names.ClassModelPred(c.Name)} ({Model}: {Types.Render(c.ModelType)}) : prop =");
+        // R15.2. The refinement is a predicate on the model, so it takes the parameter
+        // implicitly like every other non-type definition; the model type is a type
+        // definition, so it takes it explicitly.
+        var tb = TypeBinders.Of(c);
+        sb.AppendLine($"let {Names.ClassModelPred(c.Name)}{tb.Implicit} " +
+                      $"({Model}: {Types.Render(c.ModelType)}) : prop =");
         sb.AppendLine($"  {pred}");
         sb.AppendLine();
-        sb.AppendLine($"type {Names.ClassModel(c.Name)} = " +
+        sb.AppendLine($"type {Names.ClassModel(c.Name)}{tb.Explicit} = " +
                       $"{Model}: {Types.Render(c.ModelType)} {{ {Names.ClassModelPred(c.Name)} {Model} }}");
         sb.AppendLine();
     }
@@ -1119,8 +1124,9 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
                 IrPrim { IsMachineInt: true } => ("int", spec.Math(o.Body, obsScope)),
                 _ => (Types.Render(o.ReturnType), spec.Emit(o.Body, obsScope).Text),
             };
-            sb.AppendLine($"let {Names.Observation(c.Name, o.Name)} " +
-                          $"({Model}: {Names.ClassModel(c.Name)}) : {ret} =");
+            var tb = TypeBinders.Of(c);
+            sb.AppendLine($"let {Names.Observation(c.Name, o.Name)}{tb.Implicit} " +
+                          $"({Model}: {tb.App(Names.ClassModel(c.Name))}) : {ret} =");
             sb.AppendLine($"  {text}");
             sb.AppendLine();
         }

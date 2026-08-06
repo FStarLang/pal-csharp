@@ -169,7 +169,12 @@ public sealed class MethodPlan
                     // same shape `inv x #p m`, which is why one substitution suffices and
                     // no other rule below changes.
                     var view = p.Name == Names.This && method.Overrides is { } b ? b : klass.Name;
-                    var modelType = $"{Names.ClassModule(view)}.{Names.ClassModel(view)}";
+                    // R15.3. The receiver's model type is the class's model applied to
+                    // the arguments the receiver's *type* carries; for a method of
+                    // `Node<T>` they are the method's own type binders (R15.1).
+                    var modelType = Types.Applied(
+                        $"{Names.ClassModule(view)}.{Names.ClassModel(view)}",
+                        (p.Type as IrClassType)?.TypeArguments ?? []);
                     var inv = view == klass.Name
                         ? $"{Names.ClassModule(klass.Name)}.{Names.ClassInv(klass.Name)}"
                         : $"{Names.ClassModule(klass.Name)}.{Names.ClassAsBase(klass.Name, view)}";

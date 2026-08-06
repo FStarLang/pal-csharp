@@ -662,7 +662,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     /// <summary>R3.10b. The sub-object's model type, qualified by its own module.</summary>
     internal static string SubModelType(IrType t) =>
-        $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassModel(((IrClassType)t).Name)}";
+        Types.Applied(
+            $"{Names.ClassModule(((IrClassType)t).Name)}.{Names.ClassModel(((IrClassType)t).Name)}",
+            ((IrClassType)t).TypeArguments);
 
     /// <summary>R3.10d. A sub-object's own <c>share</c>, qualified by its module.</summary>
     private static string SubShare(IrType t) =>
@@ -688,9 +690,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private string EmitPlainClass(IrClass c)
     {
-        var raw = Names.ClassRaw(c.Name);
-        var self = Names.ClassType(c.Name);
-        var opt = Names.ClassOpt(c.Name);
+        var tb = TypeBinders.Of(c);
+        var raw = tb.App(Names.ClassRaw(c.Name));
+        var self = tb.App(Names.ClassType(c.Name));
+        var opt = tb.App(Names.ClassOpt(c.Name));
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.ClassModule(c.Name)}");
@@ -704,19 +707,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // F35. The three declarations are one mutually recursive group whether or not the
         // class actually refers to itself, which costs nothing and means a self-reference
         // needs no separate rule.
-        sb.Append("noeq type ").Append(raw).AppendLine(" = {");
+        sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
         foreach (var f in c.Fields)
-            sb.AppendLine($"  {Names.Field(f.Name)}: {PlainFieldType(c, f.Type, opt)};");
+            sb.AppendLine($"  {Names.Field(f.Name)}: {PlainFieldType(c, f.Type, opt, self)};");
         sb.AppendLine("}");
-        sb.AppendLine($"and {self} = B.box {raw}");
-        sb.AppendLine($"and {opt} = option {self}");
+        sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = B.box {raw}");
+        sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = option {self}");
         return sb.ToString();
     }
 
     /// <summary>A field of a <c>[Plain]</c> class; a self-reference is the nullable form.</summary>
-    private static string PlainFieldType(IrClass c, IrType t, string opt) =>
+    private static string PlainFieldType(IrClass c, IrType t, string opt, string self) =>
         t is IrClassType ct && ct.Name == c.Name
-            ? (ct.Nullable ? opt : Names.ClassType(c.Name))
+            ? (ct.Nullable ? opt : self)
             : Types.Render(t);
 
     private EmittedModule EmitClass(IrClass c)
@@ -801,7 +804,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("module T = FStar.Tactics");
         sb.AppendLine();
 
-        sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).AppendLine(" = {");
+        var tb = TypeBinders.Of(c);
+        sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
         foreach (var f in c.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
         sb.AppendLine("}");
@@ -809,7 +813,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R3.8: a CLR object reference is a `Box.box` of the representation. `Box` is the
         // sound heap cell (F14); `Reference.alloc` is marked unsound and never emitted.
-        sb.AppendLine($"let {Names.ClassType(c.Name)} = B.box {Names.ClassRaw(c.Name)}");
+        sb.AppendLine($"let {Names.ClassType(c.Name)}{tb.Explicit} = " +
+                      $"B.box {tb.App(Names.ClassRaw(c.Name))}");
         sb.AppendLine();
 
         // R3.9d. Emitted even when the predicate is `True`, for the same reason
@@ -825,9 +830,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // conjunct. The binder is meta-argument-defaulted (F21), so `class_C__inv x m`
         // still means full ownership and no other rule's output changes: the whole feature
         // is reached by asking for it.
-        sb.AppendLine($"let {Names.ClassInv(c.Name)} (this: {Names.ClassType(c.Name)}) " +
-                      $"(#[T.exact (`1.0R)] p: perm) (m: {Names.ClassModel(c.Name)}) : slprop =");
-        var existentials = new List<string> { $"(r: {Names.ClassRaw(c.Name)})" };
+        sb.AppendLine($"let {Names.ClassInv(c.Name)}{tb.Implicit} " +
+                      $"(this: {tb.App(Names.ClassType(c.Name))}) " +
+                      $"(#[T.exact (`1.0R)] p: perm) (m: {tb.App(Names.ClassModel(c.Name))}) : slprop =");
+        var existentials = new List<string> { $"(r: {tb.App(Names.ClassRaw(c.Name))})" };
         existentials.AddRange(arrays.Select(f =>
             $"({Names.Contents(f.Name)}: Seq.seq {Types.Render(((IrArrayType)f.Type).Element)})"));
         existentials.AddRange(objects.Select(f =>
@@ -885,14 +891,15 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         StringBuilder sb, IrClass c,
         ImmutableArray<IrFieldDecl> arrays, ImmutableArray<IrFieldDecl> objects)
     {
+        var tb = TypeBinders.Of(c);
         var inv = Names.ClassInv(c.Name);
-        var ty = Names.ClassType(c.Name);
-        var model = Names.ClassModel(c.Name);
+        var ty = tb.App(Names.ClassType(c.Name));
+        var model = tb.App(Names.ClassModel(c.Name));
         var half = "(p /. 2.0R)";
 
         // -- share -----------------------------------------------------------
         sb.AppendLine();
-        sb.AppendLine($"ghost fn {Names.ClassInvShare(c.Name)} (this: {ty}) " +
+        sb.AppendLine($"ghost fn {Names.ClassInvShare(c.Name)}{tb.Implicit} (this: {ty}) " +
                       $"(#p: perm) (#m: {model})");
         sb.AppendLine($"  requires {inv} this #p m");
         sb.AppendLine($"  ensures {inv} this #{half} m ** {inv} this #{half} m");
@@ -929,7 +936,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // wanted `p +. q` — provably the same permission, but slprop matching is syntactic
         // and a user-defined slprop gets no normalisation (F24). Naming them at the call
         // fixes the order once and the whole nesting composes.
-        sb.AppendLine($"ghost fn {Names.ClassInvGatherGen(c.Name)} (this: {ty}) " +
+        sb.AppendLine($"ghost fn {Names.ClassInvGatherGen(c.Name)}{tb.Implicit} (this: {ty}) " +
                       $"(p q: perm) (#m #alt_m: {model})");
         sb.AppendLine($"  requires {inv} this #p m ** {inv} this #q alt_m");
         sb.AppendLine($"  ensures {inv} this #(p +. q) m ** pure (m == alt_m)");
@@ -991,7 +998,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // it would be a proof step about the encoding rather than about the program.
         sb.AppendLine();
         sb.AppendLine("[@@allow_ambiguous]");
-        sb.AppendLine($"ghost fn {Names.ClassInvGather(c.Name)} (this: {ty}) " +
+        sb.AppendLine($"ghost fn {Names.ClassInvGather(c.Name)}{tb.Implicit} (this: {ty}) " +
                       $"(#p: perm) (#m #alt_m: {model})");
         sb.AppendLine($"  requires {inv} this #{half} m ** {inv} this #{half} alt_m");
         sb.AppendLine($"  ensures {inv} this #p m ** pure (m == alt_m)");
@@ -1255,6 +1262,7 @@ public static class Preamble
         module U64 = FStar.UInt64
         module Seq = FStar.Seq
         module CS = Pulse.Lib.CSharp.Seq
+        module CL = Pulse.Lib.CSharp.List
         module List = FStar.List.Tot
         module Cast = FStar.Int.Cast
         """;

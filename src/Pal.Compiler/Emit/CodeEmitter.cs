@@ -363,7 +363,12 @@ public sealed class CodeEmitter(
         // R10.6b. A method may hand back an object it was *given*, which is what a
         // traversal that returns one of its arguments does. The binder rule is the same:
         // re-binding it would leave the invariant in the context under the old name.
-        _slots.Values.Any(s => s.Kind is SlotKind.Object && s.Binder == text);
+        _slots.Values.Any(s => s.Kind is SlotKind.Object && s.Binder == text) ||
+        // R10.6c. A call's result is held under the binder the call bound it to.
+        _objectResults.Contains(text);
+
+    /// <summary>R10.6c. Binders that a call produced an object under.</summary>
+    private readonly HashSet<string> _objectResults = new(StringComparer.Ordinal);
 
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
@@ -1956,6 +1961,19 @@ public sealed class CodeEmitter(
                 && classes is not null && classes.TryGetValue(pk.Name, out var pnd) && pnd.IsPlain:
                 return "None";
 
+            // R15.8. `None` at a generic class says nothing about what it is empty *of*,
+            // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
+            // resolve against. Naming the empty structure first, at its type, is the
+            // smallest thing that gives the implicit a source; the monomorphic case has
+            // no ambiguity and so keeps the shorter form.
+            case IrNull n when n.Type is IrClassType { TypeArguments.IsEmpty: false } gk:
+            {
+                var t = Fresh();
+                Line($"let {t} : {Types.Render(gk with { Nullable = true })} = None;");
+                Line($"{Names.ClassModule(gk.Name)}.{Names.ClassIntroNil(gk.Name)} {t} 1.0R;");
+                return t;
+            }
+
             case IrNull n when n.Type is IrClassType k:
                 Line($"{Names.ClassModule(k.Name)}.{Names.ClassIntroNil(k.Name)} None 1.0R;");
                 return "None";
@@ -2082,12 +2100,22 @@ public sealed class CodeEmitter(
         // invariant, so the index is dropped here, where it is in the way.
         // The arguments are computed first, because one of them may *be* a conversion
         // (R9.15) and the reference it produces is what the index has to be read off.
-        var args = call.Args.Select(Expr).ToImmutableArray();
+        var raw = call.Args.Select(Expr).ToImmutableArray();
+
+        // R10.2b, at an argument. A non-null reference passed where a nullable one is
+        // declared is injected here for the same reason it is at a return (R4.13) and at
+        // a field write (R10.4): C# erases the distinction, the encoding does not. The
+        // uninjected binders are kept because they, not `(Some b)`, are what the slot
+        // table and R4.9c's ownership transfer are stated about.
+        var args = raw
+            .Select((text, i) => Inject(
+                i < call.ParamTypes.Length ? call.ParamTypes[i] : null, call.Args[i], text))
+            .ToImmutableArray();
 
         var indexed = false;
-        for (var i = 0; i < args.Length; i++)
+        for (var i = 0; i < raw.Length; i++)
         {
-            if (SlotByBinder(args[i]) is not { Index: not null } ix) continue;
+            if (SlotByBinder(raw[i]) is not { Index: not null } ix) continue;
             if (i == 0 && call.HasReceiver && owner is not null) { indexed = true; continue; }
             Forget(ix);
         }
@@ -2097,7 +2125,7 @@ public sealed class CodeEmitter(
         // folded back at the end of the block (R4.14) and must not be handed to anything
         // else. C# would leave the name usable, so PALCS0550 says so at the next use rather
         // than leaving Pulse to fail on a resource that moved several statements earlier.
-        Moved(call, args);
+        Moved(call, raw);
         // R9.12. A call resolved to an `abstract` declaration is a virtual call: it goes
         // to the dispatching wrapper, which recovers the object and runs its vtable slot.
         // Nothing else about the call changes — the arguments, the implicit model binder
@@ -2120,7 +2148,7 @@ public sealed class CodeEmitter(
         // way. The bracket is R9.14's view, opened and closed around one call; it is the
         // same two ghost steps R9.15's conversion emits, for the same reason, and it is
         // not a proof step but the rendering of "this reference is being used as a B".
-        var view = Bracket(owner is null ? call : null, args);
+        var view = Bracket(owner is null ? call : null, raw);
 
         // R14.5. Type arguments apply first, positionally, in declaration order. A generic
         // method with no value parameters still applies them, so the `()` below is reached
@@ -2132,6 +2160,13 @@ public sealed class CodeEmitter(
 
         Line($"let {binder} = {callee} {applied};");
         Close(view);
+        // R10.6c. The binder a call produced an object under is the name the context holds
+        // that object's invariant under, exactly as for a `new` (R10.2b) or a parameter
+        // (R10.6b). Recording it here is what stops R4.13 from re-binding it on the way
+        // out of a method that hands back what it called: `let t' = t;` is not a rule of
+        // the translation, and the frame rule cannot see through it.
+        if (call.ResultType is IrClassType rk && !(classes?.TryGetValue(rk.Name, out var rc) == true && rc.IsPlain))
+            _objectResults.Add(binder);
         return binder;
     }
 

@@ -96,6 +96,7 @@ Both forms lower to the same thing. Mix them freely.
 | `IsPermutation(s, t)` | `s` is a rearrangement of `t` |
 | `SetAt(s, i, v)`, `Slice(s, i, j)` | ghost sequence update and subsequence |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
+| `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
 | `PtsTo(p, v)`, `Pure(p)`, `ExistsProp(v => …)` | separation-logic resources |
 
@@ -511,12 +512,29 @@ else                    { return t; }
 ```
 
 Two model types ship, and the rule is stated over a constructor's arity rather than over the
-type: `SpecList<T>` (`SpecList.Empty<T>()`, `SpecList.Cons(head, tail)`, `.Length`, `.Head`,
-`.Tail`, `SpecList.Append`) and `SpecTree<T>` (`SpecTree.Leaf<T>()`,
-`SpecTree.Branch(left, value, right)`, `.Size`, `SpecTree.Insert`). `test/linked_list` and
-`test/binary_tree` are the worked examples; the tree one proves an in-place BST insert equal
-to the mathematical insertion, which is full functional correctness rather than "the result
-is still a tree".
+type.
+
+`SpecList<T>` — `SpecList.Empty<T>()`, `SpecList.Cons(head, tail)`, `.Length`, `.Head`,
+`.Tail`, `.IsEmpty`, `SpecList.Append`, `SpecList.Take`, `SpecList.Drop`,
+`SpecList.InsertAt`, `SpecList.RemoveAt`, `SpecList.Reverse`.
+
+`SpecTree<T>` — `SpecTree.Leaf<T>()`, `SpecTree.Branch(left, value, right)`, `.Size`,
+`.Height`, `.IsLeaf`, `SpecTree.Elements`, `SpecTree.Insert`.
+
+`SpecTree<SpecKv<T>>` is a **map**: `SpecTree.Entry(key, value)` builds a keyed entry, and
+`SpecTree.HasKey`, `SpecTree.Get`, `SpecTree.Keys` and the three-argument `SpecTree.Insert`
+read and write one. It exists because an ordered container over an unconstrained `T` has no
+comparison to be ordered by; the order lives in an `int` key beside the value.
+
+The indexing operations are **total**: a negative or oversized index clamps rather than
+being ill-defined, so `SpecList.Take(xs, -1)` is empty and `SpecList.RemoveAt(xs, 99)`
+removes nothing. That is deliberate — a postcondition mentioning an index must be well
+formed before the precondition that bounds it has been read.
+
+`test/linked_list` and `test/binary_tree` are the worked examples at `int`;
+`test/generic_list` and `test/generic_tree` are the same libraries generic in the element.
+The tree ones prove an in-place BST insert equal to the mathematical insertion, which is
+full functional correctness rather than "the result is still a tree".
 
 **What is refused, rather than approximated.** A recursive class that also takes part in a
 hierarchy, or that owns an array; a `[Model]` that is not a single constructor application,
@@ -864,7 +882,9 @@ See `test/dll_segment` for the whole of the above as a working test.
 
 ---
 
-## 10. Generic methods
+## 10. Generics
+
+### 10.1 Methods
 
 A method may be generic, provided its type parameters are **unconstrained**:
 
@@ -896,10 +916,59 @@ Two restrictions:
 * **A constraint is rejected** (`PALCS0580`). `where T : IComparable<T>` is a typeclass
   obligation — every call site must supply a dictionary, and dispatch through it is a
   translation pal-csharp has not designed. Write the method at the concrete type instead.
-* **A generic type declaration is rejected** (`PALCS0581`). `class Box<T>` is refused even
-  though the F* record would be unremarkable, because a class or struct is given meaning
-  here by its invariant and its ownership predicate, and neither is designed for a type
-  parameterised by a type. Keep the polymorphism in the methods.
+* **A generic `struct` is rejected** (`PALCS0581`). A struct is a value here — copied at
+  every assignment, stored inline in whatever holds it — and its representation record has
+  not been designed with a type parameter. Write it at the element type you need, or make
+  it a class.
+
+### 10.2 Classes
+
+A class may be generic on the same terms:
+
+```csharp
+public sealed class Cell<T>
+{
+    internal T value;
+    internal Cell<T>? next;
+
+    [Model] private SpecList<T> Items => SpecList.Cons(value, next!.Items);
+    [Spec]  public SpecList<T> Elements => Items;
+
+    [Ensures("@this.Elements == SpecList.Cons(v, n.Elements)")]
+    public Cell(T v, Cell<T>? n) { value = v; next = n; }
+}
+```
+
+Everything §3 says about a recursive class applies unchanged — the `[Model]` is still one
+constructor application using each recursive field once, the null test still opens the
+window, `[Consumes]` and `[Frac]` still mean what they meant. The type parameter is simply
+carried along.
+
+Callers write the call they would write anyway; a method of a generic class is generic in
+the class's parameters as well as its own, and Roslyn resolves both.
+
+Two things are worth knowing:
+
+* **`==` is not available on an unconstrained `T`**, so a specification about a value of
+  type-parameter type says `Pal.Same(a, b)` instead. It means `==` and nothing else.
+* **An ordered container is keyed, not compared.** `where T : IComparable<T>` is refused
+  (`PALCS0580`), so `test/generic_tree` is a `TreeNode<T>` with an `int key` and a `T
+  value` — a map, fully general in what it stores, needing no comparison on `T` at all.
+
+`test/generic_list` and `test/generic_tree` are complete libraries in this style: length,
+concatenation, copy, take, drop, insert-at, remove-at and reverse for the list; size,
+height, containment, lookup, insert and copy for the tree. Most of them are **persistent** —
+they allocate what they return and leave the argument `[Frac]`-observed — because an
+operation that rebuilds its result is the one whose ownership is simplest to state, and
+because that is the ordinary contract of a container operation in a garbage-collected
+language.
+
+The destructive operations are the ones with nothing to allocate: `Prepend` and `Concat`
+for the list, `Insert` for the tree. Three shapes are *not* expressible today, and the
+reasons are §3's rather than §10's: reading a field through a **non-null** reference (there
+is no null test to open the window at), passing a reference to a call **while its window is
+open**, and giving a `[Consumes]` parameter away on **two different paths** of the same
+method. `doc/translation.md` §15.5 records each with the rule that would lift it.
 
 ## 11. What is rejected
 

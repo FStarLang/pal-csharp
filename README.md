@@ -43,7 +43,7 @@ Pulse out — and the whole M1 acceptance suite passes.
 - [x] **Insertion sort proved sorted *and* a permutation of its input**
 - [x] Classes and objects — abstract invariants over a pure model, a class owning its
       array, and a class owning other objects three levels deep
-- [x] Thirty-four acceptance directories verify, each with an independently written variant
+- [x] Thirty-six acceptance directories verify, each with an independently written variant
       that must verify with no translator change
 - [x] **A production checksum verified as it ships** — SharpZipLib's `Adler32`
       ([`examples/adler32`](examples/adler32)), proved free of overflow *and* equal to
@@ -53,8 +53,13 @@ Pulse out — and the whole M1 acceptance suite passes.
 - [x] **Unconstrained generics** — a generic method over `T[]` verifies, calls another
       generic method, and is instantiated at a concrete type, with no monomorphising pass
       ([`doc/translation.md`](doc/translation.md) §14)
-- [ ] `Span<T>`, interfaces, constrained generics — see
-      [`doc/translation.md`](doc/translation.md) §8
+- [x] **Generic classes** — `Cell<T>` and `TreeNode<T>` with parameterised invariants, and
+      a full library over each proved against `Pulse.Lib.CSharp.List` /
+      `Pulse.Lib.CSharp.Tree` ([`test/generic_list`](test/generic_list),
+      [`test/generic_tree`](test/generic_tree),
+      [`doc/translation.md`](doc/translation.md) §15)
+- [ ] `Span<T>`, interfaces, constrained generics, iterators — see
+      [`doc/translation.md`](doc/translation.md) §8 and §15.5
 
 ## Quick start
 

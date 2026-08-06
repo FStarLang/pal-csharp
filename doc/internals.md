@@ -83,6 +83,14 @@ Consequences to be aware of when changing it:
 * `Loader.ReferenceSet()` must not reference the translator's own assemblies: the
   namespace `Pal.*` would shadow `PalLang.Pal`, and every intrinsic would resolve to the
   wrong thing.
+* **`using static` cannot name an open generic type.** `BuildSpecSites` and `BuildUsings`
+  both emit `using static` for the helper types a spec string may call unqualified, and a
+  generic one has to be skipped. The symptom is not local: an unresolvable `T` is reported
+  against whichever spec string in the same shim class Roslyn reaches first.
+
+**Debugging.** `PALCS_DUMP_SHIM=1 palcs …` prints the generated shim to stderr. A
+spec-binding diagnostic is about a file the user never sees, and mapping one back by eye is
+guesswork; the `using static` rule above was found this way.
 
 The alternative surface — contracts as leading `Pal.Requires(...)` statements — needs none
 of this, and is why it exists. Both lower to the same IR node.

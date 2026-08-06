@@ -83,7 +83,19 @@ public sealed record IrGhostType(IrType Inner) : IrType
 /// </summary>
 public sealed record IrClassType(string Name, bool Nullable = false) : IrType
 {
-    protected override string Describe() => Nullable ? Name + "?" : Name;
+    protected override string Describe()
+    {
+        var head = TypeArguments.IsEmpty
+            ? Name
+            : $"{Name}<{string.Join(", ", TypeArguments)}>";
+        return Nullable ? head + "?" : head;
+    }
+
+    /// <summary>
+    /// R15.3. The class's type arguments, in declaration order, as Roslyn resolved them.
+    /// Empty for a non-generic class, which is every class before M9.
+    /// </summary>
+    public ImmutableArray<IrType> TypeArguments { get; init; } = [];
 
     /// <summary>R10.2. The same class, held through an <c>option</c>.</summary>
     public IrClassType AsNullable => Nullable ? this : this with { Nullable = true };
@@ -176,7 +188,12 @@ public sealed record IrNull(IrLoc Loc) : IrExpr(Loc);
 /// <see cref="ListOpKind.Empty"/> and <see cref="ListOpKind.Cons"/> are its constructors,
 /// and it is those two that R10.5 reads a recursive class's invariant off.
 /// </summary>
-public enum ListOpKind { Empty, Cons, Append, Length, Head, Tail, Index, IsEmpty }
+public enum ListOpKind
+{
+    Empty, Cons, Append, Length, Head, Tail, Index, IsEmpty,
+    // R15.7. The vocabulary `FStar.List.Tot` does not already supply.
+    Take, Drop, InsertAt, RemoveAt, Reverse,
+}
 
 public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
 
@@ -622,6 +639,9 @@ public sealed record IrStruct(
     ImmutableArray<IrFieldDecl> Fields,
     ImmutableArray<IrExpr> Refinements) : IrDecl(Loc, Name)
 {
+    /// <summary>R15.1. The struct's own type parameters, in declaration order.</summary>
+    public ImmutableArray<string> TypeParameters { get; init; } = [];
+
     /// <summary>
     /// R3.9a. <c>[Spec]</c> on a struct makes it a *spec-only* type: erased, never
     /// present in executable code, and — unlike an ordinary struct — free to hold
@@ -670,6 +690,9 @@ public sealed record IrClass(
     ImmutableArray<IrExpr> Invariants,
     ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name)
 {
+    /// <summary>R15.1. The class's own type parameters, in declaration order.</summary>
+    public ImmutableArray<string> TypeParameters { get; init; } = [];
+
     /// <summary>
     /// R12.1. <c>[Plain]</c>: the class carries no derived ownership. Only its
     /// representation is emitted — no model type, no invariant, no case lemmas — and no

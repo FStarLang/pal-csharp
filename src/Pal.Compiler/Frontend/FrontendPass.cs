@@ -497,6 +497,7 @@ public static class FrontendPass
             Locations.From(s.Syntax.Identifier), s.Symbol.Name, fields, refinements.ToImmutable())
         {
             IsSpecOnly = s.IsSpecOnly,
+            TypeParameters = [.. s.Symbol.TypeParameters.Select(t => t.Name)],
         };
     }
 
@@ -797,7 +798,10 @@ public static class FrontendPass
             // R3.10b it carries a sub-object's `class_D__inv` the same way. What is still
             // refused is a field with no ownership story at all — a `Seq`, a `Ghost`, an
             // unannotated class — because there is nothing for the invariant to hold.
-            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType))
+            // R15.5. A field at a type parameter is a value like any other: it is not an
+            // array and not an object, so the invariant owns it by holding it in the
+            // record, and its model is itself.
+            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType or IrTypeParamType))
             {
                 diagnostics.Error("PALCS0531",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
@@ -1103,6 +1107,7 @@ public static class FrontendPass
                 ModelRefinements: [], Invariants: [], Observations: [])
             {
                 IsPlain = true,
+                TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
             };
 
         // The abstraction reads the fields; an observation reads the model. Both are
@@ -1175,6 +1180,7 @@ public static class FrontendPass
             IsAbstract = c.IsAbstract,
             ForgetBody = forgetBody,
             Recursion = Recursion(c, fields, modelBody, known, diagnostics),
+            TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
         };
     }
 
@@ -1236,7 +1242,10 @@ public static class FrontendPass
         foreach (var f in fields)
         {
             if (f.Type is IrClassType { Nullable: true } t && t.Name == self) continue;
-            if (f.Type is IrPrim or IrNamedType) continue;
+            // R15.5. A type parameter is such a value: unconstrained, it carries no
+            // ownership of its own, so the cons case states it as an equation on the
+            // model and the induction is unaffected.
+            if (f.Type is IrPrim or IrNamedType or IrTypeParamType) continue;
             diagnostics.Error("PALCS0563", f.Loc,
                 $"`{self}.{f.Name}` has type `{f.Type}`, but `{self}` is recursive: it holds a field " +
                 "of its own type. A recursive class's invariant is an induction on its model " +
@@ -1387,6 +1396,11 @@ public static class FrontendPass
             .Select(c => c.Symbol.ContainingType)
             .Distinct(SymbolEqualityComparer.Default)
             .Cast<INamedTypeSymbol>()
+            // R15.1. `using static` names a *closed* type, so a generic helper type
+            // cannot be imported. Nothing is lost: what the import buys is unqualified
+            // access to a *static* helper, and a [Spec] member of a generic class is
+            // reached through a receiver whose type supplies the arguments anyway.
+            .Where(t => t.TypeParameters.Length == 0)
             .Select(t => $"using static {t.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};")
             .ToImmutableArray();
 
@@ -1405,7 +1419,7 @@ public static class FrontendPass
                     Parameters: ShimParameters(candidate.Symbol, known, wantsResult),
                     Usings: usings)
                 {
-                    TypeParameters = [.. candidate.Symbol.TypeParameters.Select(t => t.Name)],
+                    TypeParameters = MethodTypeParameters(candidate.Symbol),
                 });
             }
         }
@@ -1421,7 +1435,12 @@ public static class FrontendPass
             .Select(u => u.ToString())
             .ToImmutableArray();
 
-        var own = $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
+        // R15.1. A generic declaring type cannot be `using static`-imported: the
+        // directive names a closed type and there is nothing to close it with. The
+        // members it would have imported are reached through a receiver instead.
+        var own = candidate.Symbol.ContainingType.TypeParameters.Length > 0
+            ? null
+            : $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
 
         // A specification string is written as if it were an expression inside the
         // annotated method, so the method's own namespace has to be in scope: without
@@ -1438,7 +1457,7 @@ public static class FrontendPass
             .. enclosing,
             $"using {WellKnown.Namespace};",
             $"using static {WellKnown.Namespace}.Pal;",
-            .. helperTypes.Contains(own) ? ImmutableArray<string>.Empty : [own],
+            .. own is null || helperTypes.Contains(own) ? ImmutableArray<string>.Empty : [own],
             .. helperTypes,
         ];
     }
@@ -1460,22 +1479,141 @@ public static class FrontendPass
     }
 
     /// <summary>
-    /// R14.1 refusal for type declarations. A parameterised record is representable (F63),
-    /// but the invariant, the ownership predicate and `pts_to` of a generic type are not
-    /// designed, so M8 ships generic *methods* only.
+    /// R15 refusals for type declarations. M9 translates a generic class or struct that
+    /// stands alone; the cases below are the ones whose translation is not designed.
     /// </summary>
     private static bool RefuseGenericType(INamedTypeSymbol symbol, DiagnosticBag diagnostics)
     {
+        var loc = Locations.From(symbol.Locations.FirstOrDefault() ?? Location.None);
+
+        // A generic base is refused at the derived class as well as at the base, so that
+        // no hierarchy anywhere contains a parameterised class.
+        if (symbol.BaseType is { SpecialType: not SpecialType.System_Object } derivedBase &&
+            derivedBase.TypeParameters.Length > 0)
+        {
+            diagnostics.Error("PALCS0581", loc,
+                $"`{symbol.Name}` derives from the generic class `{derivedBase.Name}`. " +
+                "pal-csharp translates a generic class that stands alone (doc/translation.md " +
+                "R15.1): the vtable and the cast lemmas of a parameterised hierarchy have not " +
+                "been designed. Write the base at a concrete element type.");
+            return true;
+        }
+
         if (symbol.TypeParameters.Length == 0) return false;
-        diagnostics.Error("PALCS0581", Locations.From(
-                symbol.Locations.FirstOrDefault() ?? Location.None),
-            $"`{symbol.Name}` is a generic type declaration. pal-csharp translates generic " +
-            "methods, not generic types (doc/translation.md R14.1): the invariant and the " +
-            "ownership predicate of a type parameterised by a type have not been designed. " +
-            "Write the type at a concrete element type, and keep the polymorphism in the " +
-            "methods that operate on it.");
+
+        // R14.1, restated for a type: a constraint is a typeclass obligation the scheme
+        // does not carry, at a method and equally at the type that declares the parameter.
+        foreach (var tp in symbol.TypeParameters)
+        {
+            if (WellKnown.Unconstrained(tp)) continue;
+            diagnostics.Error("PALCS0580", Locations.From(
+                    tp.Locations.FirstOrDefault() ?? symbol.Locations.FirstOrDefault() ?? Location.None),
+                $"The type parameter `{tp.Name}` of `{symbol.Name}` is constrained. " +
+                "pal-csharp translates unconstrained type parameters (doc/translation.md R14.1): " +
+                "a constraint is a typeclass obligation, and the dictionary a call through it " +
+                "would need has not been designed. Drop the constraint, or write the type at " +
+                "the concrete type you need.");
+            return true;
+        }
+
+        // R15.1. A generic `struct` is a *value*: it is copied at every assignment and
+        // stored inline in whatever holds it, and §8's representation is a record, not a
+        // reference with an invariant. Parameterising that record is not the same problem
+        // as parameterising a class and has not been designed, so it is refused here
+        // rather than translated by analogy.
+        if (symbol.TypeKind == TypeKind.Struct)
+        {
+            diagnostics.Error("PALCS0581", loc,
+                $"`{symbol.Name}` is a generic struct. pal-csharp translates a generic class " +
+                "(doc/translation.md R15.1): a struct is a value, copied at every assignment " +
+                "and stored inline, and its representation record has not been designed with " +
+                "a type parameter. Write the struct at the element type you need, or make it " +
+                "a class.");
+            return true;
+        }
+
+        // R15.1. A parameterised hierarchy would need a parameterised vtable, and the
+        // cast lemmas that relate a derived record to its base would have to be
+        // parameterised alongside it. Neither is designed, so M9 refuses the case rather
+        // than emitting a vtable whose type arguments do not line up.
+        if (symbol.IsAbstract ||
+            symbol.BaseType is { SpecialType: not SpecialType.System_Object })
+        {
+            diagnostics.Error("PALCS0581", loc,
+                $"`{symbol.Name}` is a generic class that participates in a hierarchy. " +
+                "pal-csharp translates a generic class that stands alone (doc/translation.md " +
+                "R15.1): the vtable and the cast lemmas of a parameterised hierarchy have not " +
+                "been designed. Make the class sealed and standalone, or write it at a " +
+                "concrete element type.");
+            return true;
+        }
+
+        // R15.4. C# guarantees that a *direct* recursive occurrence is at the same
+        // arguments only when they are the declaring parameters themselves; `Nest<T>`
+        // with a `Nest<(T, T)>` field is legal C# and would need a non-uniform (and in
+        // F* an inductive-inductive) definition. Refused rather than mistranslated.
+        foreach (var field in symbol.GetMembers().OfType<IFieldSymbol>())
+        {
+            if (field.IsStatic || field.IsImplicitlyDeclared) continue;
+            if (!UniformlyRecursive(field.Type, symbol))
+            {
+                diagnostics.Error("PALCS0582", Locations.From(
+                        field.Locations.FirstOrDefault() ?? symbol.Locations.FirstOrDefault() ?? Location.None),
+                    $"The field `{field.Name}` makes `{symbol.Name}` non-uniformly recursive: it " +
+                    "mentions the declaring type at type arguments other than the declaring " +
+                    "type parameters. pal-csharp translates uniform recursion " +
+                    "(doc/translation.md R15.4): a type whose recursive occurrences change " +
+                    "their arguments is not an F* inductive. Write the field at the declaring " +
+                    "type parameters.");
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// R15.4. Whether every occurrence of <paramref name="decl"/> inside
+    /// <paramref name="type"/> is at exactly <paramref name="decl"/>'s own type
+    /// parameters, in order.
+    /// </summary>
+    private static bool UniformlyRecursive(ITypeSymbol type, INamedTypeSymbol decl)
+    {
+        if (type is IArrayTypeSymbol array) return UniformlyRecursive(array.ElementType, decl);
+        if (type is not INamedTypeSymbol named) return true;
+
+        if (SymbolEqualityComparer.Default.Equals(named.OriginalDefinition, decl.OriginalDefinition))
+        {
+            if (named.TypeArguments.Length != decl.TypeParameters.Length) return false;
+            for (var i = 0; i < named.TypeArguments.Length; i++)
+            {
+                if (!SymbolEqualityComparer.Default.Equals(
+                        named.TypeArguments[i], decl.TypeParameters[i]))
+                    return false;
+            }
+        }
+
+        foreach (var arg in named.TypeArguments)
+        {
+            if (SymbolEqualityComparer.Default.Equals(arg.OriginalDefinition, decl.OriginalDefinition) &&
+                !UniformlyRecursive(arg, decl))
+                return false;
+            if (arg is INamedTypeSymbol { TypeArguments.Length: > 0 } && !UniformlyRecursive(arg, decl))
+                return false;
+        }
         return true;
     }
+
+    /// <summary>
+    /// R15.1. A method's binders are its declaring type's type parameters followed by its
+    /// own: a method of `Node&lt;T&gt;` mentions `T` in its signature exactly as a generic
+    /// method mentions the parameter it declares itself, and the two are bound the same way.
+    /// </summary>
+    private static ImmutableArray<string> MethodTypeParameters(IMethodSymbol symbol) =>
+    [
+        .. symbol.ContainingType?.TypeParameters.Select(t => t.Name) ?? [],
+        .. symbol.TypeParameters.Select(t => t.Name),
+    ];
 
     private static bool Same(ISymbol? a, ISymbol b) => SymbolEqualityComparer.Default.Equals(a, b);
 
@@ -1529,7 +1667,9 @@ public static class FrontendPass
         if (symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary, ContainingType: { } self } &&
             known.HasModel(self))
         {
-            parameters = [new IrParam(loc, Names.This, new IrClassType(self.Name), ParamMode.Value),
+            // R15.3. The receiver of a method of `Node<T>` is a `Node<T>`, not a `Node`.
+            parameters = [new IrParam(loc, Names.This,
+                              known.MapType(self) ?? new IrClassType(self.Name), ParamMode.Value),
                           .. parameters];
         }
 
@@ -1537,7 +1677,7 @@ public static class FrontendPass
             return LowerSpecFunction(candidate, model, known, diagnostics, loc, parameters, specs);
 
         var returnType = symbol.MethodKind == MethodKind.Constructor
-            ? new IrClassType(symbol.ContainingType.Name)
+            ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : known.MapType(symbol.ReturnType);
         if (returnType is null)
         {
@@ -1606,7 +1746,7 @@ public static class FrontendPass
             // R14.2. Type parameters become binders ahead of every value parameter. The
             // constrained case never reaches here: MapType declines a constrained type
             // parameter, so the signature that mentions it is refused first.
-            TypeParameters = [.. symbol.TypeParameters.Select(t => t.Name)],
+            TypeParameters = MethodTypeParameters(symbol),
             Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
                 ? baseName
                 : null,
@@ -1642,7 +1782,7 @@ public static class FrontendPass
         return new IrSpecFunction(loc, Naming.Of(candidate.Symbol), parameters, returnType,
             specs.Requires, lowerer.Lower(bodyExpression))
         {
-            TypeParameters = [.. candidate.Symbol.TypeParameters.Select(t => t.Name)],
+            TypeParameters = MethodTypeParameters(candidate.Symbol),
             IsRecursive = recursive,
             Decreases = specs.Decreases,
         };

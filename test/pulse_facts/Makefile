@@ -18,7 +18,8 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/RecursiveFacts.fst.checked $(CACHE_DIR)/UserSpecFacts.fst.checked \
      $(CACHE_DIR)/SegmentFacts.fst.checked $(CACHE_DIR)/ConversionFacts.fst.checked \
      $(CACHE_DIR)/MatchFacts.fst.checked \
-     $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked
+     $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked \
+     $(CACHE_DIR)/GenericClassFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
@@ -67,6 +68,10 @@ $(CACHE_DIR)/UserSpecFacts.fst.checked: UserSpecFacts.fst
 $(CACHE_DIR)/GenericFacts.fst.checked: GenericFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) GenericFacts.fst
+
+$(CACHE_DIR)/GenericClassFacts.fst.checked: GenericClassFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) GenericClassFacts.fst
 
 $(CACHE_DIR)/StringFacts.fst.checked: StringFacts.fst
 	@mkdir -p $(CACHE_DIR)

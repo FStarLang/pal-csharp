@@ -172,6 +172,29 @@ public static class SpecList
 
     /// <summary>F*'s <c>List.Tot.append</c>.</summary>
     public static SpecList<T> Append<T>(SpecList<T> left, SpecList<T> right) => throw Ghost();
+
+    /// <summary>
+    /// The first <paramref name="count"/> elements (R15.7). Total: a negative count takes
+    /// nothing and an over-long one takes everything, so the term is meaningful wherever a
+    /// C# <c>int</c> is, and the bound the caller cares about is stated in its own
+    /// <c>[Requires]</c> rather than smuggled into the type of this operation.
+    /// </summary>
+    public static SpecList<T> Take<T>(SpecList<T> list, SpecInt count) => throw Ghost();
+
+    /// <summary>Everything but the first <paramref name="count"/> elements (R15.7).</summary>
+    public static SpecList<T> Drop<T>(SpecList<T> list, SpecInt count) => throw Ghost();
+
+    /// <summary>
+    /// <paramref name="list"/> with <paramref name="value"/> spliced in as element
+    /// <paramref name="index"/> (R15.7).
+    /// </summary>
+    public static SpecList<T> InsertAt<T>(SpecList<T> list, SpecInt index, T value) => throw Ghost();
+
+    /// <summary><paramref name="list"/> without element <paramref name="index"/> (R15.7).</summary>
+    public static SpecList<T> RemoveAt<T>(SpecList<T> list, SpecInt index) => throw Ghost();
+
+    /// <summary>The elements in the opposite order (R15.7).</summary>
+    public static SpecList<T> Reverse<T>(SpecList<T> list) => throw Ghost();
 }
 
 /// <summary>
@@ -199,6 +222,10 @@ public readonly struct SpecTree<T>
     /// <summary>The number of interior nodes.</summary>
     [SpecOp("Pulse.Lib.CSharp.Tree.size")]
     public SpecInt Size => throw Ghost();
+
+    /// <summary>The length of the longest path to a leaf.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.height")]
+    public SpecInt Height => throw Ghost();
 
     /// <summary>True of the empty tree. A discriminator is an ordinary prefix function.</summary>
     [SpecOp("Pulse.Lib.CSharp.Tree.Leaf?")]
@@ -230,6 +257,35 @@ public static class SpecTree
     [SpecOp("Pulse.Lib.CSharp.Tree.elements")]
     public static SpecList<T> Elements<T>(SpecTree<T> tree) => throw Ghost();
 
+    /// <summary>A keyed entry, <c>Pulse.Lib.CSharp.Tree.entry</c>.</summary>
+    [SpecCtor("Pulse.Lib.CSharp.Tree.entry")]
+    public static SpecKv<T> Entry<T>(SpecInt key, T value) => throw Ghost();
+
+    /// <summary>Whether a map holds <paramref name="key"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.khas")]
+    public static bool HasKey<T>(SpecTree<SpecKv<T>> map, SpecInt key) => throw Ghost();
+
+    /// <summary>
+    /// What <paramref name="map"/> holds at <paramref name="key"/>, or
+    /// <paramref name="fallback"/>. A lookup that returns a value rather than a nullable
+    /// reference, because an unconstrained <c>T</c> has no null.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.kget")]
+    public static T Get<T>(SpecTree<SpecKv<T>> map, SpecInt key, T fallback) => throw Ghost();
+
+    /// <summary>The keys, in order.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.kkeys")]
+    public static SpecList<SpecInt> Keys<T>(SpecTree<SpecKv<T>> map) => throw Ghost();
+
+    /// <summary>
+    /// Insertion into a map, <c>Pulse.Lib.CSharp.Tree.kinsert</c>. The model of the
+    /// destructive operation, in the sense §0 rule 3 means: the library supplies what the
+    /// implementation is proved equal to.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.kinsert")]
+    public static SpecTree<SpecKv<T>> Insert<T>(SpecTree<SpecKv<T>> map, SpecInt key, T value) =>
+        throw Ghost();
+
     /// <summary>
     /// Binary-search-tree insertion, <c>Pulse.Lib.CSharp.Tree.insert_int</c>. It is the
     /// <em>model</em> of the destructive operation, supplied by the library rather than
@@ -239,4 +295,31 @@ public static class SpecTree
     [SpecOp("Pulse.Lib.CSharp.Tree.insert_int")]
     public static SpecTree<SpecInt> Insert(SpecTree<SpecInt> tree, SpecInt value) =>
         throw Ghost();
+}
+
+/// <summary>
+/// A keyed entry, <c>Pulse.Lib.CSharp.Tree.kv</c>. It is what makes a class with an
+/// unconstrained type parameter a search tree: C# would order the values with
+/// <c>IComparable&lt;T&gt;</c>, and a constrained type parameter is refused (R15.4), so
+/// the order lives in an <c>int</c> key carried beside the value.
+/// </summary>
+[SpecType("Pulse.Lib.CSharp.Tree.kv")]
+public readonly struct SpecKv<T>
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecKv<T> is a specification-only construct and has no runtime meaning.");
+
+    /// <summary>The key it is ordered by.</summary>
+    [SpecOp("Mkkv?.kv_key")]
+    public SpecInt Key => throw Ghost();
+
+    /// <summary>The value it carries.</summary>
+    [SpecOp("Mkkv?.kv_value")]
+    public T Value => throw Ghost();
+
+    public static bool operator ==(SpecKv<T> a, SpecKv<T> b) => throw Ghost();
+    public static bool operator !=(SpecKv<T> a, SpecKv<T> b) => throw Ghost();
+
+    public override bool Equals(object? obj) => throw Ghost();
+    public override int GetHashCode() => throw Ghost();
 }

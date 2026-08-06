@@ -180,9 +180,15 @@ public sealed class WellKnown
     /// </summary>
     public ImmutableArray<IrType> TypeArguments(IMethodSymbol method)
     {
-        if (method.TypeArguments.IsEmpty) return ImmutableArray<IrType>.Empty;
+        // R15.1. The declaring type's arguments come first, matching the order the
+        // callee's binders were emitted in: a method of `Node<T>` is a function of `T`
+        // exactly as a generic method is a function of the parameter it declares itself.
+        var all = method.ContainingType is { TypeArguments.IsEmpty: false } owner
+            ? owner.TypeArguments.AddRange(method.TypeArguments)
+            : method.TypeArguments;
+        if (all.IsEmpty) return ImmutableArray<IrType>.Empty;
         var mapped = ImmutableArray.CreateBuilder<IrType>();
-        foreach (var a in method.TypeArguments)
+        foreach (var a in all)
         {
             if (MapType(a) is not { } t) return ImmutableArray<IrType>.Empty;
             mapped.Add(t);
@@ -233,10 +239,23 @@ public sealed class WellKnown
             // recognised by the attribute rather than by the `[Model]` member.
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
                 when HasModel(named) || Declarations.Has(named.OriginalDefinition, PlainAttribute):
+            {
+                // R15.3. A constructed generic class carries its resolved arguments. An
+                // argument this cannot map makes the whole type unmappable, so the
+                // refusal lands on the class type rather than silently dropping a
+                // parameter and emitting a term with a free variable in it.
+                var classArgs = ImmutableArray.CreateBuilder<IrType>();
+                foreach (var a in named.TypeArguments)
+                {
+                    if (MapType(a) is not { } mapped) return null;
+                    classArgs.Add(mapped);
+                }
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {
                     Plain = Declarations.Has(named.OriginalDefinition, PlainAttribute),
+                    TypeArguments = classArgs.ToImmutable(),
                 };
+            }
         }
 
         if (SymbolEqualityComparer.Default.Equals(type, SpecInt)) return new IrPrim(PrimKind.SpecInt);

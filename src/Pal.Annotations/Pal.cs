@@ -112,6 +112,16 @@ public static class Pal
     /// <summary>Logical equivalence.</summary>
     public static bool Iff(bool left, bool right) => throw Ghost();
 
+    /// <summary>
+    /// Specification-level equality (R15.6). C#'s <c>==</c> is not defined on an
+    /// unconstrained type parameter — there is no operator to resolve and no
+    /// <c>IEquatable</c> to call — so a contract about a value of such a type says
+    /// <c>Pal.Same(a, b)</c> instead. It denotes F*'s <c>==</c>, which is the equality
+    /// every other spec-position <c>==</c> already denotes; only the C# spelling differs,
+    /// and only because C# has no spelling of its own here.
+    /// </summary>
+    public static bool Same<T>(T left, T right) => throw Ghost();
+
     public static bool Forall<T1>(Func<T1, bool> body) => throw Ghost();
     public static bool Forall<T1, T2>(Func<T1, T2, bool> body) => throw Ghost();
     public static bool Forall<T1, T2, T3>(Func<T1, T2, T3, bool> body) => throw Ghost();
