@@ -1,3 +1,5 @@
+using System.IO;
+using System.Text.RegularExpressions;
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -45,7 +47,7 @@ public static class FrontendPass
             if (decl is not null) declarations.Add(decl);
         }
 
-        foreach (var include in CollectIncludes(compilation, known))
+        foreach (var include in CollectIncludes(compilation, known, diagnostics))
             declarations.Add(include);
 
         InheritContracts(declarations, diagnostics);
@@ -245,7 +247,8 @@ public static class FrontendPass
         }
     }
 
-    private static IEnumerable<IrIncludePulse> CollectIncludes(Compilation compilation, WellKnown known)
+    private static IEnumerable<IrIncludePulse> CollectIncludes(
+        Compilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
         foreach (var data in Declarations.All(compilation.Assembly, known.IncludePulseAttribute))
         {
@@ -255,6 +258,68 @@ public static class FrontendPass
             yield return new IrIncludePulse(
                 Locations.From(Declarations.ArgumentLocation(data)), module, body);
         }
+
+        foreach (var data in Declarations.All(compilation.Assembly, known.IncludePulseFileAttribute))
+        {
+            var include = ReadIncludeFile(data, diagnostics);
+            if (include is not null) yield return include;
+        }
+    }
+
+    /// <summary>
+    /// R12.6. Reads an <c>[IncludePulseFile]</c>. The module name is the file's base name
+    /// rather than a second argument, and the file's own <c>module</c> header is checked
+    /// against it: a Pulse module that is emitted under one name and declares another is a
+    /// verification failure two passes later, pointing at generated output rather than at
+    /// the attribute that caused it.
+    /// </summary>
+    private static IrIncludePulse? ReadIncludeFile(AttributeData data, DiagnosticBag diagnostics)
+    {
+        var location = Locations.From(Declarations.ArgumentLocation(data));
+        var relative = Declarations.StringArgument(data, 0);
+        if (relative is null) return null;
+
+        var declaring = data.ApplicationSyntaxReference?.SyntaxTree.FilePath;
+        var directory = string.IsNullOrEmpty(declaring)
+            ? Directory.GetCurrentDirectory()
+            : Path.GetDirectoryName(Path.GetFullPath(declaring!))!;
+        var full = Path.GetFullPath(Path.Combine(directory, relative));
+
+        if (!File.Exists(full))
+        {
+            diagnostics.Error("PALCS0583", location,
+                $"`[IncludePulseFile(\"{relative}\")]` names `{full}`, which does not exist. " +
+                "The path is resolved relative to the directory of the C# file carrying the " +
+                "attribute (doc/translation.md R12.6).");
+            return null;
+        }
+
+        var module = Path.GetFileNameWithoutExtension(full);
+        string text;
+        try
+        {
+            text = File.ReadAllText(full);
+        }
+        catch (IOException e)
+        {
+            diagnostics.Error("PALCS0583", location,
+                $"`[IncludePulseFile(\"{relative}\")]` names `{full}`, which could not be read: " +
+                e.Message);
+            return null;
+        }
+
+        var declared = Regex.Match(text, @"(?m)^\s*module\s+([A-Za-z0-9_.]+)");
+        if (declared.Success && declared.Groups[1].Value != module)
+        {
+            diagnostics.Error("PALCS0584", location,
+                $"`{full}` declares `module {declared.Groups[1].Value}`, but pal-csharp emits it " +
+                $"as `{module}` — the module name is the file's base name, so that the two cannot " +
+                "drift (doc/translation.md R12.6). Rename the file or the `module` header so they " +
+                "agree.");
+            return null;
+        }
+
+        return new IrIncludePulse(location, module, text);
     }
 
     // -----------------------------------------------------------------------

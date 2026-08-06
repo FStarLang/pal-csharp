@@ -315,3 +315,23 @@ public sealed class IncludePulseAttribute(string module, string body) : Attribut
     public string Body { get; } = body;
 }
 
+/// <summary>
+/// Emit a verbatim Pulse module read from a file beside the C# source. Applied at
+/// assembly scope.
+///
+/// <para>This is <see cref="IncludePulseAttribute"/> with the body in its own
+/// <c>.fst</c> file, which is how anything longer than a few lines should be written:
+/// the file is real F* that an editor, <c>fstar.exe</c> and the IDE can all see, rather
+/// than the inside of a C# string literal. The module name is <em>not</em> given
+/// separately — it is the file's base name, so it cannot drift from the <c>module</c>
+/// header the file already carries.</para>
+///
+/// <para><paramref name="path"/> is resolved relative to the directory of the C# file
+/// carrying the attribute.</para>
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly | AttributeTargets.Class, AllowMultiple = true)]
+public sealed class IncludePulseFileAttribute(string path) : Attribute
+{
+    public string Path { get; } = path;
+}
+

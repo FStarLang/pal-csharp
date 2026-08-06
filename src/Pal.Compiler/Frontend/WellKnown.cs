@@ -50,6 +50,7 @@ public sealed class WellKnown
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
+        IncludePulseFileAttribute = Type("IncludePulseFileAttribute");
         BackwardAttribute = Type("BackwardAttribute");
         SpecTypeAttribute = Type("SpecTypeAttribute");
         SpecOpAttribute = Type("SpecOpAttribute");
@@ -88,6 +89,7 @@ public sealed class WellKnown
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }
+    public INamedTypeSymbol IncludePulseFileAttribute { get; }
     public INamedTypeSymbol BackwardAttribute { get; }
     public INamedTypeSymbol SpecTypeAttribute { get; }
     public INamedTypeSymbol SpecOpAttribute { get; }

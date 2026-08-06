@@ -80,6 +80,7 @@ public sealed class MethodPlan
             Pre = pre,
             ResultTerm = returnsObject ? resultModel : Names.Result,
             ResultKind = returnsObject ? TermKind.Math : KindOf(method.ReturnType),
+            ResultType = returnsObject ? null : method.ReturnType,
         };
         var slots = ImmutableDictionary.CreateBuilder<string, Slot>();
 

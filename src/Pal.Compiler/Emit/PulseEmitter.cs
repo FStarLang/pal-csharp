@@ -546,23 +546,27 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             scope.Bind(p.Name, new Term(name, kind, p.Type));
         }
 
-        var requires = SpecEmitter.Conjunction(lemma.Requires.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
-        var ensures = SpecEmitter.Conjunction(
-            lemma.Ensures.Concat(lemma.Preserves).Select(e => _spec.AsProp(_spec.Emit(e, scope))));
+        // R12.7. A lemma whose contract mentions ownership is a *ghost function*, not an
+        // F* `Lemma`. The two are told apart by exactly the test R12.2 already applies to
+        // a method's clauses — an `SlProp` clause is a resource — so nothing new is
+        // declared and a lemma about pure values is emitted as before, byte for byte.
+        static bool IsResource(IrExpr e) => e.Type is IrPrim { Kind: PrimKind.SlProp };
+        var isGhostFn = lemma.Requires.Concat(lemma.Ensures).Concat(lemma.Preserves).Any(IsResource);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.SpecModule(lemma.Name)}");
+        if (isGhostFn) sb.AppendLine("#lang-pulse");
         sb.AppendLine();
         foreach (var open in Dependencies(
                      Names.SpecModule(lemma.Name), null, lemma.Requires, lemma.Ensures, lemma.Preserves))
             sb.AppendLine($"open {open}");
+        if (isGhostFn)
+        {
+            sb.AppendLine(Preamble.Opens);
+            sb.AppendLine();
+        }
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
-        sb.Append("let ").Append(Names.Lemma(lemma.Name));
-        foreach (var b in binders) sb.Append(' ').Append(b);
-        sb.AppendLine();
-        sb.AppendLine($"  : Lemma (requires ({requires}))");
-        sb.AppendLine($"          (ensures ({ensures}))");
 
         var body = lemma switch
         {
@@ -570,6 +574,46 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             { PulseBody: { } raw } => Antiquotation.Expand(raw, scope),
             _ => "()",
         };
+
+        if (isGhostFn)
+        {
+            // The clauses are assembled exactly as R12.2 assembles a method's: resources
+            // separated by `**`, everything else inside one `pure`. `[Preserves]` appears
+            // on both sides, which is what the word means.
+            string Clause(IEnumerable<IrExpr> resources, IEnumerable<IrExpr> propositions)
+            {
+                var res = resources.Select(r => _spec.Emit(r, scope).Text).ToList();
+                var pure = SpecEmitter.Conjunction(
+                    propositions.Select(e => _spec.AsProp(_spec.Emit(e, scope))));
+                if (pure != "True") res.Add($"pure ({pure})");
+                return res.Count == 0 ? "emp" : string.Join(" **\n           ", res);
+            }
+
+            sb.Append("ghost fn ").Append(Names.Lemma(lemma.Name));
+            foreach (var b in binders) sb.Append(' ').Append(b);
+            sb.AppendLine();
+            sb.AppendLine("  requires " + Clause(
+                lemma.Requires.Where(IsResource).Concat(lemma.Preserves.Where(IsResource)),
+                lemma.Requires.Where(r => !IsResource(r))));
+            sb.AppendLine("  ensures  " + Clause(
+                lemma.Ensures.Where(IsResource).Concat(lemma.Preserves.Where(IsResource)),
+                lemma.Ensures.Where(e => !IsResource(e))
+                    .Concat(lemma.Preserves.Where(e => !IsResource(e)))));
+            sb.AppendLine("{");
+            sb.AppendLine($"  {body}");
+            sb.AppendLine("}");
+            return new EmittedModule(Names.SpecModule(lemma.Name), sb.ToString());
+        }
+
+        var requires = SpecEmitter.Conjunction(lemma.Requires.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
+        var ensures = SpecEmitter.Conjunction(
+            lemma.Ensures.Concat(lemma.Preserves).Select(e => _spec.AsProp(_spec.Emit(e, scope))));
+
+        sb.Append("let ").Append(Names.Lemma(lemma.Name));
+        foreach (var b in binders) sb.Append(' ').Append(b);
+        sb.AppendLine();
+        sb.AppendLine($"  : Lemma (requires ({requires}))");
+        sb.AppendLine($"          (ensures ({ensures}))");
         sb.AppendLine($"  = {body}");
 
         return new EmittedModule(Names.SpecModule(lemma.Name), sb.ToString());

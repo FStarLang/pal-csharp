@@ -58,6 +58,13 @@ Pulse out — and the whole M1 acceptance suite passes.
       `Pulse.Lib.CSharp.Tree` ([`test/generic_list`](test/generic_list),
       [`test/generic_tree`](test/generic_tree),
       [`doc/translation.md`](doc/translation.md) §15)
+- [x] **Bring your own ownership predicate** — a `[Plain]` class about which the translator
+      derives nothing, its separation-logic predicate written in an ordinary `.fst` file
+      beside the C# and pulled in with `[assembly: IncludePulseFile]`, and every proof step
+      in a body an ordinary typed C# call to a `[Lemma]` the predicate publishes. Reaches a
+      doubly linked list — including a `PushFront` that *writes the old head's back pointer*
+      ([`test/dll_segment`](test/dll_segment),
+      [`doc/translation.md`](doc/translation.md) §12)
 - [ ] `Span<T>`, interfaces, constrained generics, iterators — see
       [`doc/translation.md`](doc/translation.md) §8 and §15.5
 

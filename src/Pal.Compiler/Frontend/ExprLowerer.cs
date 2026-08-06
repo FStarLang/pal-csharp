@@ -345,12 +345,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                               ExpressionSyntax node, IrLoc loc)
     {
         if (known.SpecOpName(symbol) is { } op)
-            return new IrSpecOp(loc, op, args);
+            return new IrSpecOp(loc, op, args) { ParamTypes = SpecParamTypes(symbol, args) };
 
         if (symbol is not null &&
             Declarations.Find(symbol, known.SpecCtorAttribute) is { } data &&
             Declarations.StringArgument(data) is { } ctor)
-            return new IrSpecOp(loc, ctor, args) { SiblingEmpty = EmptyCtor(symbol, data) };
+            return new IrSpecOp(loc, ctor, args)
+            {
+                SiblingEmpty = EmptyCtor(symbol, data),
+                ParamTypes = SpecParamTypes(symbol, args),
+            };
 
         diagnostics.Error("PALCS0573", loc,
             $"`{Trim(node)}` names a member of a specification type that does not say what " +
@@ -359,6 +363,17 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             "from a C# one.");
         return new IrLiteral(loc, null);
     }
+
+    /// <summary>
+    /// The declared parameter types of a specification operation, when it is a method
+    /// whose arity matches the arguments lowered for it. An instance member puts the
+    /// receiver first, and the receiver has no declared parameter, so the two only line up
+    /// for a static call; anything else contributes no types and no coercion.
+    /// </summary>
+    private ImmutableArray<IrType?> SpecParamTypes(ISymbol? symbol, ImmutableArray<IrExpr> args) =>
+        symbol is IMethodSymbol m && m.Parameters.Length == args.Length
+            ? Declarations.ParamTypes(m, known, receiver: false)
+            : [];
 
     /// <summary>
     /// R11.3. The empty constructor of this constructor's type — the sibling declared

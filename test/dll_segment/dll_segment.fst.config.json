@@ -1,6 +1,7 @@
 {
   "fstar_exe": "../../tools/run-fstar.sh",
   "include_dirs": [
+    ".",
     "out",
     "_cache",
     "../../pulse",

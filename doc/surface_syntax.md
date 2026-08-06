@@ -626,6 +626,32 @@ admitted lemma is assumed rather than proved.
 | `[Admit]` | assume the contract; warned about |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 
+### 5.1 Lemmas that move ownership
+
+A lemma whose contract mentions any `SlProp` clause is a **ghost function**: it consumes the
+resources in its `[Requires]` and produces those in its `[Ensures]`, exactly as a `[Lemma]`
+over pure propositions consumes and produces facts. Nothing in the syntax changes — the
+translator notices the `SlProp` and emits a Pulse `ghost fn` instead of an F\* `Lemma`.
+
+```csharp
+[Lemma]
+[Requires("Dll.Seg(from, prev, to, last, xs)")]
+[Requires("!xs.IsEmpty && from == node")]
+[Ensures("Dll.Opened(from, node, prev, to, last, xs)")]
+[PulseBody("DllSeg.seg_open $(from) $(node) $(prev) $(to) $(last) $(xs)")]
+[Conditional("PAL")]
+public static void Open(DNode? from, DNode node, DNode? prev, DNode? to, DNode? last,
+                        Ghost<SpecList<SpecInt>> xs) { }
+```
+
+Two conventions matter here and nowhere else:
+
+* A ghost parameter is declared `Ghost<T>`, not `T` — `Ghost<SpecList<SpecInt>> xs` above.
+* A parameter that will carry a *mathematical* integer into an `SlProp` should be declared
+  `SpecInt`, not `int`, since that is what a C# `int` becomes in specification position.
+
+This is the shape §9 uses to give a user-defined ownership predicate a C# face.
+
 ---
 
 ## 6. Ghost data
@@ -656,6 +682,13 @@ Escape hatches, in increasing order of bluntness.
 | `[PulseBody("…")]` | a verbatim body for a `[Lemma]` or `[Spec]` |
 | `[PulseType("…")]` on a struct | maps the C# type onto a Pulse type |
 | `[assembly: IncludePulse("M", "…")]` | a whole verbatim module `M.fst` |
+| `[assembly: IncludePulseFile("M.fst")]` | the same, read from a file beside the source |
+
+Prefer `IncludePulseFile` to `IncludePulse` for anything longer than a couple of lines: a
+`.fst` in your source tree is an ordinary F\* file, so your editor highlights it, F\*'s IDE
+mode checks it, and errors point at it rather than into the middle of a string literal. The
+module name is the file's base name; the path is resolved relative to the file carrying the
+attribute.
 
 Inside any raw-Pulse string, PAL's antiquotation syntax works unchanged:
 
@@ -797,10 +830,15 @@ no `[Model]`, no invariant, no case lemmas, no constructor. Nothing is owned by 
 reference's *type*: a `DNode?` parameter is a bare binder, and ownership is only ever what a
 clause says.
 
-In exchange, you may say anything. Write the predicate and its lemmas in Pulse:
+In exchange, you may say anything. Write the predicate and its lemmas in Pulse, in an
+ordinary `.fst` file beside your C# source:
 
 ```csharp
-[assembly: IncludePulse("DllSeg", """
+[assembly: IncludePulseFile("DllSeg.fst")]
+```
+
+```fstar
+// DllSeg.fst
 module DllSeg
 #lang-pulse
 open Pulse
@@ -816,7 +854,6 @@ let rec dll_seg (p: perm) ([@@@mkey] from: Class_DNode.class_DNode__opt)
 unfold
 let seg (from prev to_ last: Class_DNode.class_DNode__opt) (l: list int) : slprop =
   dll_seg 1.0R from prev to_ last l
-""")]
 ```
 
 Two conventions matter. The class module is `Class_<Name>`, its record `class_<Name>__raw`,
@@ -824,6 +861,11 @@ its reference `class_<Name>`, its nullable reference `class_<Name>__opt`, and it
 `fld_<name>` — that is the whole of what `[Plain]` publishes. And the friendly wrapper you
 name from C# should be `unfold`, so that Pulse's resource matching (which is syntactic)
 still sees `dll_seg` and every lemma you wrote about it applies.
+
+(`[assembly: IncludePulse("DllSeg", "…")]` takes the same text as a string literal, and is
+what you want for two or three lines. For anything larger use the file form: you get syntax
+highlighting, F\*'s IDE mode, and errors that point at F\* source rather than into the middle
+of a C# string.)
 
 ### `SlProp` clauses
 
@@ -863,20 +905,58 @@ A `[Plain]` reference behaves the way the encoding does and no more:
 * `new DNode { value = v, prev = null, next = head }` allocates. **Object-initializer syntax
   only** — a constructor call is refused, because reading a constructor body to learn which
   argument lands in which field is exactly the deriving `[Plain]` opts out of.
-* Proof steps are `Pal.GhostStmt("DllSeg.dll_seg_elim_cons 1.0R $(from) …")`, with `$(x)`
-  splicing the Pulse name of a C# variable and `with r tl. assert (…)` naming what a lemma
-  existentially quantified.
+* Proof steps are **ordinary C# calls** to the ghost lemmas your predicate publishes (§5.1).
+
+### One lemma per step
+
+The style rule that makes the above workable: *a user predicate publishes one ghost lemma per
+step a C# body takes, whose signature mentions only what C# can name — parameters, locals,
+`null`, spec lists — and keeps every `with` and every `rewrite` inside the `.fst` file.*
+
+```csharp
+DllProof.Cases(from, prev, last, xs);
+if (from == null) { return 0; }
+DllProof.Open(from, from!, prev, null, last, xs);
+int rest = Length(from.next, from, last);
+DllProof.Close(from, from!, prev, null, last, xs);
+return rest + 1;
+```
+
+The one thing the lemmas have to absorb is that C# cannot declare a refined binder. A
+predicate stated over a nullable cursor needs, at the point a field is read, to talk about
+the *box*; so have it **name the head node twice** — once as the cursor the contract already
+mentions and once as the box — tied by a `pure (from == Some v)`:
+
+```fstar
+unfold
+let opened (from: class_DNode__opt) (v: class_DNode)
+           (prev to_ last: class_DNode__opt) (l: list int) : slprop
+  = exists* r tl.
+      B.pts_to v r **
+      dll_seg 1.0R r.fld_next from to_ last tl **
+      pure (from == Some v /\ l == I32.v r.fld_value :: tl /\ r.fld_prev == prev)
+```
+
+The call site then writes `DllProof.Open(from, from!, …)`, supplying both. `from!` is C#'s
+null-forgiving operator, which the C# compiler already demands in order to pass a `DNode?`
+where a `DNode` is declared; pal-csharp reads the same declaration and projects. Inside an
+`if (from != null)` branch, where C# narrows the type for you, plain `from` means exactly the
+same thing.
 
 Writing `head.prev = node` and having it cost nothing is the payoff: because the predicate
 only ever constrained `prev` with an equation, re-closing the segment simply reports what
 the field now holds.
 
+`Pal.GhostStmt("…")` (§7) remains available for a step you have not bothered to publish as a
+lemma — `unreachable ()` in a dead branch is the usual one.
+
 `[Plain]` may not be combined with `[Model]` (`PALCS0574`), and a `[Plain]` class may not
 take part in a hierarchy (`PALCS0575`).
 
-The honest caveat: a segment operation costs five or six ghost lines, most of them
-`rewrite`s that talk the boundary pointers into the shape the next lemma expects. Reach for
-`[Plain]` when §3's recursive classes will not do, and not before.
+The honest caveat: a segment operation still costs four or five explicit proof steps. What
+this buys you is that they are typed C# calls to lemmas someone wrote once, rather than
+`rewrite`s every caller has to rediscover. Reach for `[Plain]` when §3's recursive classes
+will not do, and not before.
 
 See `test/dll_segment` for the whole of the above as a working test.
 

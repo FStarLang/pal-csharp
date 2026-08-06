@@ -206,6 +206,14 @@ public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> A
 public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
 {
     /// <summary>
+    /// The declared type of each argument's parameter, positionally, or empty when the
+    /// operation is not a method (a property has no parameters to declare). R10.2b/R10.2c
+    /// read this: a class reference and a nullable one are different Pulse types, so an
+    /// argument may need injecting or projecting, and only the declaration says which.
+    /// </summary>
+    public ImmutableArray<IrType?> ParamTypes { get; init; } = [];
+
+    /// <summary>
     /// R11.3. When this is a <c>[SpecCtor]</c>, the F* name of its type's <em>empty</em>
     /// constructor — the sibling marked <c>Empty = true</c>. Null when this is an ordinary
     /// operation. It is carried here because §10 needs both constructors of a model, and a

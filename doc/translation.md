@@ -3176,6 +3176,24 @@ above — and never off Roslyn's flow analysis, which narrows a nullable local t
 inside a branch and would make the same expression an injection in one place and not in
 another. Whether a name is nullable is read off its **declaration**.
 
+**R10.2c.** The converse. A `C?` used where a `C` is expected becomes `Some?.v e`. In C#
+this position is spelled with the null-forgiving operator, `f(x!)`, or is reached by flow
+narrowing inside an `if (x != null)` branch; both are the same rule, because R10.5 makes `!`
+transparent and R10.2b's last paragraph refuses to read flow analysis. As with R10.2b, the
+projection is driven by the **declared parameter type** of the callee, so `f(x)` and `f(x!)`
+translate identically.
+
+R10.2b and R10.2c apply in *specification* position as well as in code — an argument of a
+`[SpecOp]` (R12.2) or of a `[Lemma]` (R12.7) is coerced exactly as a call argument is. There
+is one wrinkle worth stating, because getting it wrong produces silence rather than an
+error. Specification strings are bound by a generated shim compiled with `#nullable
+disable`, so a type recovered from the *shim's* symbols can never distinguish `C` from `C?`.
+The coercion is therefore driven by the type the **emitted term** carries, which comes from
+the real declaration the term names. Where a term has no such type — a bare `null`, or a
+construct the scope does not type — no coercion is emitted. That is conservative rather than
+wrong: the worst case is an "ill-typed term" reported against the annotation, never a silent
+change of meaning.
+
 ### 10.3 The invariant
 
 **R10.3.** The invariant of a recursive class is a `let rec` over the *nullable* reference,
@@ -3797,9 +3815,9 @@ reason R3.8's alias case shares a slot rather than rebinding one.
 
 ### 12.4 What the user supplies
 
-Everything §10 would have derived, written in Pulse through `[assembly: IncludePulse]` and
-named from C# through `[SpecOp]`, and applied in bodies through `Pal.GhostStmt`. For the
-doubly linked list that is the predicate
+Everything §10 would have derived, written in Pulse through `[assembly: IncludePulseFile]`
+(R12.6) and named from C# through `[SpecOp]`, and applied in bodies through `[Lemma]` calls
+(R12.7). For the doubly linked list that is the predicate
 
 ```fstar
 let rec dll_seg (p: perm) ([@@@mkey] from) (prev) (to_) (last) (l: list int)
@@ -3839,31 +3857,115 @@ wrong produces failures that look like unrelated problems:
   directly and the C# body can read a field of a *program* pointer. Getting `Some? from` in
   the first place is its own preserving lemma, `some`.
 
-### 12.5 Status
+### 12.5 The C# face of a user predicate (M10)
+
+§12.4 as first delivered had two blemishes. The predicate and its lemmas were a ~190-line
+string literal inside an attribute argument, so no editor gave them syntax highlighting,
+type checking, or a jump-to-definition; and every proof step in a body was a raw
+`Pal.GhostStmt("…")`, so the caller repeated the callee's binder names, `rewrite`s and
+`with`s in a language the C# compiler cannot see. Both are fixed by giving the predicate a
+C# *face*, and the fix is a style rule as much as it is two translation rules.
+
+**R12.6.** `[assembly: IncludePulseFile("path")]` is `[assembly: IncludePulse]` (R12.0) with
+the text read from a file beside the annotated source rather than written inline. The path is
+resolved relative to the file carrying the attribute; the module name is the file's base
+name, and a `module` header inside the file that disagrees with it is an error (PALCS0584),
+as is a file that cannot be read (PALCS0583). The emitted module is byte-for-byte the file's
+contents, exactly as R12.0 emits the literal's. Nothing else changes: a `.fst` in the source
+tree is an ordinary F* file, so `fstar.fst.config.json`, IDE mode and `--cache_checked_modules`
+all work on it with no special arrangement.
+
+**R12.7.** A `[Lemma]` whose contract mentions **any** `SlProp` clause is emitted as a Pulse
+`ghost fn` rather than an F* `Lemma`: the `SlProp` clauses become the resource conjuncts,
+joined with `**`, and the remaining pure clauses are collected into a single trailing
+`pure (…)`. A `[Lemma]` with no `SlProp` clause is emitted exactly as before, byte for byte.
+The call site needs nothing new — R5.11 already emits a lemma application as `Module.name
+args;`, which is also how a Pulse `ghost fn` is called. Ghost parameters are declared
+`Ghost<T>` and erase to the underlying type, as everywhere else.
+
+Together these turn a proof step into a C# call:
+
+```csharp
+DllProof.Open(from, from!, prev, null, last, xs);
+int rest = Length(from.next, from, last);
+DllProof.Close(from, from!, prev, null, last, xs);
+```
+
+**The style rule.** *A user predicate publishes one ghost lemma per step a C# body takes,
+whose signature mentions only what C# can name — parameters, locals, `null`, spec lists — and
+keeps every `with` and every `rewrite` inside the `.fst` file.* The obstacle this navigates
+is real and is worth recording, because it is what R12.4's advice about refined binders runs
+into. `dll_seg`'s cons case is stated over the *nullable* cursor, so eliminating it wants a
+binder `(from: class_DNode__opt { Some? from })` — and C# has no way to declare a refinement.
+The resolution is to have the predicate **name the head node twice**:
+
+```fstar
+unfold
+let opened (from: class_DNode__opt) (v: class_DNode)
+           (prev to_ last: class_DNode__opt) (l: list int) : slprop
+  = exists* (r: class_DNode__raw) (tl: list int).
+      B.pts_to v r **
+      dll_seg 1.0R r.fld_next from to_ last tl **
+      pure (from == Some v /\ l == I32.v r.fld_value :: tl /\ r.fld_prev == prev)
+```
+
+once as the cursor `from` the contract already talks about, and once as the box `v` a field
+access reads through, tied by `pure (from == Some v)`. The C# call `Open(from, from!, …)`
+then supplies both, R10.2c projects the second, and the resulting `B.pts_to` is syntactically
+at `Some?.v var_from` — which is what the emitter's field reads (R10.4) ask for. Note that
+the tail segment's `prev` is `from` and *not* `Some v`: that is what lets the recursive call
+`Length(from.next, from, last)` match with no `rewrite` at the call site.
+
+One convention has to be observed on the F* side. R4.13 sends a C# `int` into a
+specification as its mathematical value, so a predicate parameter a C# `[SpecOp]` passes an
+`int` to must be declared `int`, not `I32.t`, with the machine value existentially bound:
+
+```fstar
+unfold
+let cell (v: class_DNode) (value: int) (prev next: class_DNode__opt) : slprop
+  = exists* (x: I32.t).
+      B.pts_to v ({ fld_value = x; fld_prev = prev; fld_next = next }) **
+      pure (I32.v x == value)
+```
+
+Declaring the C# parameter `SpecInt` rather than `int` says the same thing on the C# side and
+is the clearer of the two.
+
+### 12.6 Status
 
 Pinned first, and independently of the compiler, by `test/pulse_facts/SegmentFacts.fst`:
-the representation exactly as the emitter produces it, `dll_seg`, the whole-list wrapper,
-all eight lemmas, a forward traversal and a `push_front` that writes the old head's back
-pointer.
+§§1–5 give the representation exactly as the emitter produces it, `dll_seg`, the whole-list
+wrapper, all eight lemmas, a forward traversal and a `push_front` that writes the old head's
+back pointer; §6 pins R12.7's C# face — `opened`, `cell`, `seg_open`, `seg_close`, `seg_cons`
+— and redoes both worked programs with **no `with` and no `rewrite` in the caller**. That
+§6 verified on the first attempt is the fact the whole of M10 rests on: Pulse's matcher does
+cope with the read-then-recurse pattern, so the only thing the lemmas must absorb is the
+nullable-cursor-to-boxed-node conversion.
 
-Delivered end to end from C#: `test/dll_segment`. `Dll.cs` carries the predicate and its
-lemmas in one `[assembly: IncludePulse]`, declares `[Plain] DNode`, and gives the predicate
-a C# face as two `SlProp`-valued `[SpecOp]`s. `DllOps.cs` has a recursive `Length` over a
-segment and a `PushFront` that allocates a node and **writes the old head's back pointer** —
-the operation a doubly linked list exists for, and the one §10 could not reach at all.
+Delivered end to end from C#: `test/dll_segment`. `DllSeg.fst` is the predicate and its
+lemmas as a real F* file, pulled in by `[assembly: IncludePulseFile("DllSeg.fst")]`. `Dll.cs`
+declares `[Plain] DNode`, gives the predicate a C# face as four `SlProp`-valued `[SpecOp]`s,
+and publishes four `[Lemma]`s — `Cases`, `Open`, `Close`, `Cons` — one per step a body takes.
+`DllOps.cs` has a recursive `Length` over a segment and a `PushFront` that allocates a node
+and **writes the old head's back pointer** — the operation a doubly linked list exists for,
+and the one §10 could not reach at all. Between them the two bodies contain exactly one raw
+`Pal.GhostStmt`, `unreachable ()`, in a branch the user's own `Cases` lemma has just shown to
+be dead.
 
 The §7.2 detector applies: `DllOpsVariant.cs` is the same two operations written with the
 null tests inverted and their branches swapped, the cursor read into a local before the
-recursive call, the fields initialized in a different order, the locals renamed and the
-addition written the other way round. It verifies with no emitter change. Two diagnostics
-cases cover PALCS0574 and PALCS0575.
+recursive call, the allocation moved past the case split, the locals renamed and the addition
+written the other way round — and with the non-null node passed by flow narrowing rather than
+by `!`, which R10.2c makes the same translation. It verifies with no emitter change. Two
+diagnostics cases cover PALCS0574 and PALCS0575.
 
-What §12 does *not* do is make the proofs short. A segment operation costs the user five or
-six `Pal.GhostStmt` lines, most of them `rewrite`s that talk the boundary pointers into the
-shape the next lemma wants. That is the honest price of the general case, and it is charged
-where §0 rule 3 says it should be — in the user's annotations, visible and editable, rather
-than in a special case in the emitter. The cheap path remains §10, and §11 widens what §10
-can be cheap about; §12 is what you reach for when neither will do.
+What §12 does *not* do is make the proofs disappear. A segment operation still costs the user
+four or five explicit proof steps. What R12.7 changes is *where they live and what they look
+like*: they are now typed C# calls to lemmas the predicate's author published once, rather
+than `rewrite`s the caller has to rediscover. That is §0 rule 3 working as intended — the
+difficulty is in the user's annotations and in a reusable library, visible and editable,
+rather than in a special case in the emitter. The cheap path remains §10, and §11 widens what
+§10 can be cheap about; §12 is what you reach for when neither will do.
 
 ---
 

@@ -30,6 +30,14 @@ public sealed class SpecScope
     /// </summary>
     public TermKind ResultKind { get; init; } = TermKind.Machine;
 
+    /// <summary>
+    /// The declared type <c>Result</c> denotes, when the emitter knows it. A specification
+    /// string is bound in a shim that erases nullable annotations, so the type on an
+    /// <c>IrResult</c> node cannot tell <c>C</c> from <c>C?</c>; this can, and R10.2b needs
+    /// the difference.
+    /// </summary>
+    public IrType? ResultType { get; init; }
+
     public SpecScope() { }
 
     public SpecScope(SpecScope other)
@@ -39,6 +47,7 @@ public sealed class SpecScope
         ResultTerm = other.ResultTerm;
         DefiningClass = other.DefiningClass;
         ResultKind = other.ResultKind;
+        ResultType = other.ResultType;
     }
 
     public void Bind(string name, Term term) => _values[name] = term;
@@ -142,7 +151,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return new Term("()", TermKind.Other);
 
             case IrResult r when scope.ResultTerm is { } result:
-                return new Term(result, scope.ResultKind, r.Type);
+                return new Term(result, scope.ResultKind, scope.ResultType ?? r.Type);
 
             case IrResult r:
                 diagnostics.Error("PALCS0302", r.Loc, "`Pal.Result` is only meaningful in a postcondition.");
@@ -417,6 +426,14 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     {
         var left = Emit(b.Left, scope);
         var right = Emit(b.Right, scope);
+        // R10.2b, at an equality. C# lets a `C` be compared with a `C?` — the conversion is
+        // implicit and invisible — but `class_C` and `option class_C` are different types,
+        // so the comparison has to be made at the wider one.
+        if (left.Type is IrClassType l && right.Type is IrClassType r && l.Name == r.Name)
+        {
+            if (l.Nullable && !r.Nullable) right = new Term($"(Some {right.Text})", right.Kind, l);
+            else if (!l.Nullable && r.Nullable) left = new Term($"(Some {left.Text})", left.Kind, r);
+        }
         var comparable = left.Kind is TermKind.Seq or TermKind.Bool or TermKind.Prop or TermKind.Other;
         var text = comparable
             ? $"({left.Text} == {right.Text})"
@@ -498,7 +515,10 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     {
         var text = op.Args.IsEmpty
             ? op.Function
-            : $"({op.Function} {string.Join(" ", op.Args.Select(a => AsMath(Emit(a, scope))))})";
+            : $"({op.Function} {string.Join(" ", op.Args.Select((a, i) =>
+                i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
+                    ? Argument(a, op.ParamTypes[i], scope)
+                    : AsMath(Emit(a, scope))))})";
         return new Term(text, Kind(op.Type));
     }
 
@@ -581,10 +601,34 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// parameter it is passed to lives there. A <c>[Spec]</c> function or <c>[Lemma]</c>
     /// may equally declare an <c>int</c> parameter — C# performs no conversion then, and
     /// neither does the translation.
+    ///
+    /// <para>R10.2b/R10.2c, in specification position. A class reference and a nullable
+    /// reference to the same class are <em>different</em> Pulse types — <c>class_C</c> and
+    /// <c>option class_C</c> — so crossing between them is a real coercion and not a
+    /// no-op. C# already writes both directions: an implicit conversion one way, and the
+    /// null-forgiving <c>e!</c> the other. Neither is visible in the IR (R10.5 makes
+    /// <c>!</c> transparent, as it is to the C# compiler's own semantics), so the coercion
+    /// is driven by the declared parameter type, which is the only thing that carries the
+    /// information.</para>
     /// </summary>
     internal string Argument(IrExpr arg, IrType? paramType, SpecScope scope)
     {
         var term = Emit(arg, scope);
+        // The coercion is decided by the *emitted term's* type, never by the argument
+        // expression's. A specification string is bound in a shim (SpecBinder), and the
+        // shim erases nullable annotations, so `arg.Type` cannot tell `C` from `C?`; the
+        // term's type comes from the declaration the scope was built from and can. Where
+        // the scope carries no type — `null`, `Result` — there is nothing to coerce and
+        // the term is already at the type the parameter expects.
+        if (paramType is IrClassType want && term.Type is IrClassType have
+            && want.Name == have.Name)
+        {
+            if (want.Nullable && !have.Nullable) return $"(Some {term.Text})";
+            // The projection is well-typed only where the reference is known non-null, and
+            // that is exactly where C# demands the `!` the user has already written: F*
+            // discharges `Some? t` from the same branch condition C#'s flow analysis used.
+            if (!want.Nullable && have.Nullable) return $"(Some?.v {term.Text})";
+        }
         return term.Kind == TermKind.Machine && paramType is not IrPrim { IsMachineInt: true }
             ? AsMath(term)
             : term.Text;

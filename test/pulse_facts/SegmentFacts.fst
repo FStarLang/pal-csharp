@@ -321,3 +321,155 @@ fn dll_push_front (head: class_DNode__opt) (tail: class_DNode__opt) (v: I32.t)
     n
   }
 }
+
+// ===========================================================================
+// 6. The style §12 asks for: one publishable lemma per C# step
+// ===========================================================================
+
+/// §5 above is faithful Pulse, and it is unusable as a *target*. Every program there
+/// carries `with r tl. assert (...)` to name an existential the predicate hid, and a
+/// `rewrite ... as ...` to move between the nullable cursor `from` and the boxed node
+/// `Some?.v from` the emitter reads through. Neither is a step the user chose: they are
+/// artefacts of how `dll_seg`'s cons case is written. Leaving them in the C# means the
+/// annotation surface exposes Pulse's unifier.
+///
+/// The fix is to make the *predicate library* absorb them. A user predicate publishes,
+/// for each step a C# body takes, one ghost lemma whose signature mentions only things
+/// the C# can name -- parameters, locals, `null`, and spec-level lists. Everything the
+/// signature cannot say stays existential *inside* the predicate, and every `rewrite`
+/// stays inside the lemma that needs it.
+
+/// `opened p from v prev to_ last l` is `dll_seg p from prev to_ last l` with its first
+/// node unfolded: the node's cell is owned outright, and the rest of the segment hangs off
+/// its `next` field.
+///
+/// It names the head node *twice* -- once as the nullable cursor `from` the caller's
+/// context and specification already talk about, and once as the box `v` the emitter's
+/// field access reads through -- tied by `pure (from == Some v)`. That redundancy is the
+/// whole trick: it is what lets a C# call site write `Dll.Open(from, from!, ...)` and get
+/// a predicate whose `B.pts_to` is syntactically at `Some?.v var_from`, without ever
+/// needing a refined binder `(from: ... { Some? from })` that C# has no way to declare.
+unfold
+let opened (p: perm) (from: class_DNode__opt) (v: class_DNode)
+           (prev: class_DNode__opt) (to_: class_DNode__opt) (last: class_DNode__opt)
+           (l: list int)
+  : slprop
+  = exists* (r: class_DNode__raw) (tl: list int).
+      B.pts_to v #p r **
+      dll_seg p r.fld_next from to_ last tl **
+      pure (from == Some v /\ l == I32.v r.fld_value :: tl /\ r.fld_prev == prev)
+
+/// `cell p v value prev next` is the ownership a freshly allocated node has, stated over
+/// the three field values the C# `new DNode { ... }` supplies. Because the emitter's
+/// `B.alloc` writes a record *literal*, this folds with no `with` binder at all.
+///
+/// `value` is the *mathematical* integer, not the machine one: R4.13 sends a C# `int` into
+/// a specification as its `.v`, so a predicate a C# `[SpecOp]` can name must be stated that
+/// way. The machine value is existential here for exactly that reason, and the `pure` ties
+/// the two together.
+unfold
+let cell (p: perm) (v: class_DNode) (value: int)
+         (prev: class_DNode__opt) (next: class_DNode__opt)
+  : slprop
+  = exists* (x: I32.t).
+      B.pts_to v #p ({ fld_value = x; fld_prev = prev; fld_next = next }) **
+      pure (I32.v x == value)
+
+/// Open the first node of a non-empty segment. The `rewrite` that moves the segment from
+/// the cursor `from` to the box `Some v`, and the one `dll_seg_elim_cons` needs to name
+/// the node as `Some?.v from`, are both discharged here and neither escapes.
+ghost fn seg_open (p: perm) (from: class_DNode__opt) (v: class_DNode)
+    (prev: class_DNode__opt) (to_: class_DNode__opt) (last: class_DNode__opt)
+    (#l: list int)
+  requires dll_seg p from prev to_ last l ** pure (Cons? l /\ from == Some v)
+  ensures  opened p from v prev to_ last l
+{
+  dll_seg_elim_cons p from prev to_ last #l;
+  with r tl. assert (dll_seg p r.fld_next from to_ last tl);
+  rewrite (B.pts_to (Some?.v from) #p r) as (B.pts_to v #p r);
+}
+
+/// Close the first node again. The segment's left boundary is read off the node's own
+/// `prev` field, so a C# body that *wrote* that field simply closes at the new value --
+/// which is why `push_front` below needs no obligation of its own for the write.
+ghost fn seg_close (p: perm) (from: class_DNode__opt) (v: class_DNode)
+    (prev: class_DNode__opt) (to_: class_DNode__opt) (last: class_DNode__opt)
+    (l: list int)
+  requires opened p from v prev to_ last l
+  ensures  dll_seg p from prev to_ last l
+{
+  with r tl. assert (dll_seg p r.fld_next from to_ last tl);
+  rewrite (dll_seg p r.fld_next from to_ last tl)
+       as (dll_seg p r.fld_next (Some v) to_ last tl);
+  dll_seg_intro_cons p v to_ last #r #tl;
+  rewrite (dll_seg p (Some v) r.fld_prev to_ last (I32.v r.fld_value :: tl))
+       as (dll_seg p from prev to_ last l);
+}
+
+/// Push a node the caller owns outright onto the front of a segment. This is
+/// `dll_seg_intro_cons` restated over `cell`, so that its three field values are named
+/// rather than projected out of an existential record.
+ghost fn seg_cons (p: perm) (v: class_DNode) (value: int)
+    (prev: class_DNode__opt) (next: class_DNode__opt)
+    (to_: class_DNode__opt) (last: class_DNode__opt)
+    (#l: list int)
+  requires cell p v value prev next ** dll_seg p next (Some v) to_ last l
+  ensures  dll_seg p (Some v) prev to_ last (value :: l)
+{
+  with x. assert (B.pts_to v #p ({ fld_value = x; fld_prev = prev; fld_next = next }));
+  dll_seg_intro_cons p v to_ last
+    #({ fld_value = x; fld_prev = prev; fld_next = next }) #l;
+  rewrite (dll_seg p (Some v) prev to_ last (I32.v x :: l))
+       as (dll_seg p (Some v) prev to_ last (value :: l));
+}
+
+// ---------------------------------------------------------------------------
+// 6.1 The same two programs, with every proof step a call the C# can make
+// ---------------------------------------------------------------------------
+
+/// Compare with `seg_length` in §5: same control flow, same lemma *placement*, but no
+/// `with` and no `rewrite`. Every ghost line is a call whose arguments are a parameter, a
+/// local, `null`, or the ghost list -- so every one of them is expressible as a C#
+/// `[Lemma]` call under §12's style rule.
+fn rec seg_length_lemma_style (p: perm) (from: class_DNode__opt) (prev: class_DNode__opt)
+    (#l: erased (list int))
+  requires dll_seg p from prev None None l ** pure (L.length l < 2147483647)
+  returns  n: I32.t
+  ensures  dll_seg p from prev None None l ** pure (I32.v n == L.length l)
+  decreases (reveal l)
+{
+  dll_cases p from prev None #l;
+  if (None? from) {
+    0l
+  } else {
+    seg_open p from (Some?.v from) prev None None #l;
+    let node = B.op_Bang (Some?.v from);
+    let rest = seg_length_lemma_style p node.fld_next from;
+    seg_close p from (Some?.v from) prev None None l;
+    I32.add rest 1l
+  }
+}
+
+/// Compare with `dll_push_front` in §5: five `rewrite`s, two of them four lines long,
+/// become three lemma calls.
+fn dll_push_front_lemma_style (head: class_DNode__opt) (tail: class_DNode__opt) (v: I32.t)
+    (#l: erased (list int))
+  requires is_dll 1.0R head tail l ** pure (Cons? l)
+  returns  h: class_DNode__opt
+  ensures  is_dll 1.0R h tail (I32.v v :: l)
+{
+  let n = B.alloc ({ fld_value = v; fld_prev = None; fld_next = head });
+  unfold (is_dll 1.0R head tail l);
+  dll_cases 1.0R head None tail #l;
+  if (None? head) {
+    unreachable ()
+  } else {
+    seg_open 1.0R head (Some?.v head) None None tail #l;
+    let t0 = B.op_Bang (Some?.v head);
+    B.op_Colon_Equals (Some?.v head) ({ t0 with fld_prev = Some n });
+    seg_close 1.0R head (Some?.v head) (Some n) None tail l;
+    seg_cons 1.0R n (I32.v v) None head None tail #l;
+    fold (is_dll 1.0R (Some n) tail (I32.v v :: l));
+    Some n
+  }
+}
