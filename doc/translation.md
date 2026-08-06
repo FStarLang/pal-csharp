@@ -119,6 +119,10 @@ The rules below depend on the following, each **verified against the pinned tool
 | F59 | Pulse's `match` **can** scrutinise a machine integer, since FStarLang/FStar#4374 (merged 2026-08-02); before it, `0l` in pattern position was read as a `Prims.int` and rejected against an `Int32.t` scrutinee. But an arm's hypothesis is just the equality `I32.v k == 0` — a machine integer is not an inductive type, so there is no case split to be had that an `if` does not already give. | `test/pulse_facts/MatchFacts.fst:match_i32`, `match_u8`, and `match_gives_equality` beside `chain_gives_equality`, which discharge the same assertion. Requires the toolchain pinned at 2026-08-05 or later. |
 | F60 | **Pulse has no or-patterns**, though F\* does. `match k { 0l \| 1l -> … }` is a syntax error, while `let f n = match n with \| 0 \| 1 -> 10 \| _ -> 1` verifies. A C# section carries a *set* of labels, so `match` can express `case 0: case 1: S; break;` only by duplicating `S` once per label, without bound. | `test/pulse_facts/MatchFacts.fst` §4 records the error (`Error 168: Syntax error`) and the disjunction that replaces it. This is what decides R5.14 against `match`. |
 | F61 | **C's implicit fallthrough is what forces PAL's `hit` flag.** `pal/cpp/impl.cpp` desugars `switch` into a *sequence* of `if (!brk && (hit \|\| scrut == v))` guards with two threaded flags; C# forbids fallthrough (CS0163), so its sections are disjoint and a plain if/else chain suffices with neither flag. | Read from `pal/cpp/impl.cpp:1834`. This is why R5.14 does not import PAL's machinery, and why `goto case`/`goto default` — the one way back into fallthrough — are refused rather than approximated. |
+| F62 | **`Pulse.Lib.CSharp.Array` already works at an abstract element type.** `CA.read`/`CA.write` are declared `(#t: Type0)`, so a Pulse `fn` polymorphic in `t` can call them with the type variable it was given. A generic method over `T[]` therefore needs no new library. | `test/pulse_facts/GenericFacts.fst:generic_get`, `generic_set`. This is the fact that makes generics a frontend milestone rather than a library one. |
+| F63 | **A generic struct is an ordinary parameterised record.** `noeq type segment (t: Type0) = { arr: A.array t; off: I32.t; cnt: I32.t }` and a pure predicate over it both typecheck, and a Pulse `fn` over the record verifies. This is the `ArraySegment<T>` / `Span<T>` shape. | `test/pulse_facts/GenericFacts.fst:segment`, `seg_ok`, `seg_first`. `examples/adler32` had to spell `ArraySegment<byte>` out as three parameters; this is why it will not have to. |
+| F64 | **Instantiation composes.** A generic `fn` may call a generic `fn` at its own type variable, with the type argument inferred exactly as a concrete one is today. So generic methods calling generic methods need no monomorphising pass. | `test/pulse_facts/GenericFacts.fst:generic_swap`, which calls `generic_get`/`generic_set` at `t`. Without it the emitter would have to specialise every instantiation, losing the module-per-method structure §2 depends on. |
+| F65 | **A C# `string` needs no separation logic.** It is immutable, so there is nothing to own: it is a pure value, `Seq.seq char` is an adequate model, and a Pulse `fn` takes and returns one under `requires emp`. | `test/pulse_facts/StringFacts.fst`. Recorded as the road not taken in M8: the *encoding* is cheap, and the cost of strings is the library surface (`Substring`, `IndexOf`, `Split`, concatenation), not the model. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -2446,6 +2450,48 @@ R3.10b is untested); and a cast that may fail.
 * `out` parameters are modelled exactly like `ref` — `pts_to` in both pre- and
   post-condition — rather than `pts_to_uninit` in the precondition. This is sound but
   demands more of the caller than C# does.
+
+### What is next (M8), and why it is generics
+
+Three constructs are the obvious candidates, and the choice between them was made by
+probing rather than by ranking them for importance. All three are on §10's rejection list;
+all three appear in the upstream code `examples/adler32` was ported from, whose
+`Adler32 : IChecksum` needs an interface, a generic struct (`ArraySegment<byte>`) and a
+property at once.
+
+**Generics, first.** F62–F64 measure the cost and it is almost entirely in the frontend.
+`Pulse.Lib.CSharp.Array` is already `(#t: Type0)`, so a generic method over `T[]` needs no
+new library; a generic struct is an ordinary parameterised record, which is the
+`ArraySegment<T>` / `Span<T>` shape; and instantiation composes, so no monomorphising pass
+is needed and §2's module-per-method structure survives. The frontend is also further along
+than it looks: `IrUserSpecType` already carries type *arguments* (R11.1), so generic
+specification types work today — what is missing is a `MapType` case for a type
+*parameter*. This is also the milestone that unblocks the other two, since the interfaces
+worth having (`IComparable<T>`, `IEnumerable<T>`) are generic, and it is the prerequisite
+for `Span<T>`/`ReadOnlySpan<T>`, which §10 has called planned since M1.
+
+The honest limit: C# generics are usually *constrained*, and a constraint is a typeclass
+obligation this milestone does not attempt. What is unblocked without constraints is
+exactly the element-agnostic part of the language — segments, spans, copies, swaps,
+containers — which is what the case study wanted.
+
+**Strings, later, and cheaply.** F65 records that the encoding is nearly free: a string is
+immutable, so there is nothing to own, and it is a pure value under `requires emp` where an
+array parameter costs a `pts_to` at both ends. Strings are not deferred because they are
+hard but because the cost is not in the model at all — it is the library surface
+(`Substring`, `IndexOf`, `Split`, concatenation, formatting), each item of which is an
+obligation with a specification to get right.
+
+**Interfaces, last, and not for the reason one expects.** An interface is very nearly a
+construct §9 already has: R9.2 requires an abstract class to have no fields and R9.3
+requires its virtual methods to be abstract, which is the definition of an interface. What
+a C# `interface` adds is *multiple* implementation, and R9.8 already pins why that is hard
+— a `dyn` is made at one witness type and `mkdyn` is not injective, so one value cannot be
+viewed at two unrelated roots. But the blocker for the motivating example is elsewhere and
+is worth naming: `IChecksum.Update(byte[] buffer)` takes an array, and **R9.9a restricts a
+virtual method to plain values**. Interfaces would therefore deliver the declaration
+without delivering `IChecksum`; the real prerequisite is ownership in a virtual method's
+signature, which is its own design problem.
 
 ---
 
