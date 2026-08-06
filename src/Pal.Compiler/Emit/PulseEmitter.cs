@@ -448,6 +448,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var scope = new SpecScope();
         var binders = new List<string>();
 
+        // R14.2. Type binders first, so that a value binder may mention them.
+        foreach (var t in fn.TypeParameters)
+            binders.Add($"({Names.TypeParam(t)}: Type0)");
+
         foreach (var p in fn.Parameters)
         {
             var name = Names.Local(p.Name);
@@ -471,7 +475,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R4.6: the [Requires] clauses refine the last binder, so that the body
         // type-checks under them.
-        if (fn.Requires.Length > 0 && binders.Count > 0)
+        if (fn.Requires.Length > 0 && binders.Count > fn.TypeParameters.Length)
         {
             var refinement = SpecEmitter.Conjunction(fn.Requires.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
             var last = binders[^1];
@@ -523,6 +527,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var scope = new SpecScope { ResultTerm = Names.Result };
         var binders = new List<string>();
+
+        // R14.2. Type binders first, so that a value binder may mention them.
+        foreach (var t in lemma.TypeParameters)
+            binders.Add($"({Names.TypeParam(t)}: Type0)");
 
         foreach (var p in lemma.Parameters)
         {

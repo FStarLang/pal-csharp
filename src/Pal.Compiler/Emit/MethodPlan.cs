@@ -49,6 +49,13 @@ public sealed class MethodPlan
 
         var binders = ImmutableArray.CreateBuilder<string>();
         var ghostBinders = ImmutableArray.CreateBuilder<string>();
+
+        // R14.2. Type parameters bind first, ahead of every value parameter, because a
+        // value parameter's type may mention them. They are explicit rather than `#`
+        // binders: R14.5 applies the type argument Roslyn already resolved at each call,
+        // so no F* inference is relied on.
+        foreach (var tp in method.TypeParameters)
+            binders.Add($"({Names.TypeParam(tp)}: Type0)");
         var preResources = ImmutableArray.CreateBuilder<string>();
         var postResources = ImmutableArray.CreateBuilder<string>();
         var postExistentials = ImmutableArray.CreateBuilder<string>();

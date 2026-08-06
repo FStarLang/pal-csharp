@@ -157,6 +157,39 @@ public sealed class WellKnown
             SymbolEqualityComparer.Default.Equals(f.Type, type) &&
             f.NullableAnnotation == NullableAnnotation.Annotated);
 
+    /// <summary>
+    /// R14.1. Whether a type parameter carries no constraint at all. Every kind of
+    /// constraint is checked, not only the ones with a keyword: a base type or interface
+    /// (<c>ConstraintTypes</c>), <c>class</c>, <c>struct</c>, <c>new()</c>,
+    /// <c>notnull</c> and <c>unmanaged</c>. Each says something about <c>T</c> that the
+    /// translation would have to carry, and none has been probed.
+    /// </summary>
+    public static bool Unconstrained(ITypeParameterSymbol tp) =>
+        tp.ConstraintTypes.IsEmpty &&
+        !tp.HasReferenceTypeConstraint &&
+        !tp.HasValueTypeConstraint &&
+        !tp.HasConstructorConstraint &&
+        !tp.HasNotNullConstraint &&
+        !tp.HasUnmanagedTypeConstraint;
+
+    /// <summary>
+    /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
+    /// resolved them — inferred and explicit calls are indistinguishable here, which is
+    /// why they translate identically. An argument this cannot map yields no arguments at
+    /// all, so that the type is reported where it is rejected rather than twice.
+    /// </summary>
+    public ImmutableArray<IrType> TypeArguments(IMethodSymbol method)
+    {
+        if (method.TypeArguments.IsEmpty) return ImmutableArray<IrType>.Empty;
+        var mapped = ImmutableArray.CreateBuilder<IrType>();
+        foreach (var a in method.TypeArguments)
+        {
+            if (MapType(a) is not { } t) return ImmutableArray<IrType>.Empty;
+            mapped.Add(t);
+        }
+        return mapped.ToImmutable();
+    }
+
     public IrType? MapType(ITypeSymbol? type)
     {
         switch (type)
@@ -165,6 +198,12 @@ public sealed class WellKnown
                 return null;
             case IArrayTypeSymbol { Rank: 1 } array when MapType(array.ElementType) is { } e:
                 return new IrArrayType(e);
+            // R14.1/R14.4. An *unconstrained* type parameter is a type like any other. A
+            // constrained one is not mapped here: the constraint is a typeclass obligation
+            // the scheme does not carry, and R14.1 refuses it with PALCS0580 rather than
+            // translate it with the constraint dropped.
+            case ITypeParameterSymbol tp when Unconstrained(tp):
+                return new IrTypeParamType(tp.Name);
             case INamedTypeSymbol named when IsSeq(named) && MapType(named.TypeArguments[0]) is { } se:
                 return new IrSeqType(se);
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:

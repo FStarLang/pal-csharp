@@ -407,7 +407,9 @@ prove and nothing to run.
 Every class must be **`sealed` or `abstract`** (`PALCS0521`). A leaf owns a representation
 and an abstract base owns a vtable; a class that were both would have to be its own
 subclass's vtable type and one of that type's values at once. C# `interface`
-implementations and generics are still rejected. A static mutable field is rejected too
+implementations are still rejected, as are generic class and struct *declarations*
+(`PALCS0581`) — a class is polymorphic in pal-csharp only through the methods that
+operate on it. A static mutable field is rejected too
 (`PALCS0522`): it is global state that no per-object invariant covers.
 
 Two things a class gets for free, and neither costs an annotation. A freshly constructed
@@ -862,7 +864,44 @@ See `test/dll_segment` for the whole of the above as a working test.
 
 ---
 
-## 10. What is rejected
+## 10. Generic methods
+
+A method may be generic, provided its type parameters are **unconstrained**:
+
+```csharp
+[Requires("0 <= i && i < a.Length")]
+[Requires("0 <= j && j < a.Length")]
+[Ensures("Contents(a) == SetAt(SetAt(Old(Contents(a)), i, Old(Contents(a))[j]), j, Old(Contents(a))[i])")]
+public static void Exchange<T>(T[] a, int i, int j)
+{
+    T x = a[i];
+    T y = a[j];
+    a[i] = y;
+    a[j] = x;
+}
+```
+
+Nothing here is new syntax: `T` is an ordinary C# type parameter, it may be used as a
+type in the signature, in locals and in specifications, and callers write the call they
+would write anyway — the type argument may be inferred or spelled out, and either way it
+is Roslyn that resolves it.
+
+An unconstrained `T` admits no operation but moving the value around, which is precisely
+what makes these specifications *complete* rather than partial: with no arithmetic and no
+comparison available, the result sequence is determined by the input sequence, and the
+postcondition can say so exactly.
+
+Two restrictions:
+
+* **A constraint is rejected** (`PALCS0580`). `where T : IComparable<T>` is a typeclass
+  obligation — every call site must supply a dictionary, and dispatch through it is a
+  translation pal-csharp has not designed. Write the method at the concrete type instead.
+* **A generic type declaration is rejected** (`PALCS0581`). `class Box<T>` is refused even
+  though the F* record would be unremarkable, because a class or struct is given meaning
+  here by its invariant and its ownership predicate, and neither is designed for a type
+  parameterised by a type. Keep the polymorphism in the methods.
+
+## 11. What is rejected
 
 pal-csharp refuses rather than mistranslates. Every rejection is a diagnostic with a source
 span, collected in `diagnostics.json` alongside the generated modules, and every error also
@@ -870,7 +909,8 @@ writes `assert False` into `TranslationErrors.fst`, so a failed translation can 
 mistaken for a passing proof.
 
 Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
-`try`/`catch`/`throw`, generics, C# `interface` declarations, delegates, `async`,
+`try`/`catch`/`throw`, constrained type parameters, generic type declarations, C#
+`interface` declarations, delegates, `async`,
 `string`, floating point, struct fields that are not values, user-written struct
 constructors, static mutable fields, a class that is neither `sealed` nor `abstract`, a
 `return` that is not in tail position **inside a loop**, an increment or decrement
@@ -906,7 +946,7 @@ C#'s guarantee and matches PAL's treatment of the corresponding undefined behavi
 
 ---
 
-## 11. A complete example
+## 12. A complete example
 
 ```csharp
 using PalLang;

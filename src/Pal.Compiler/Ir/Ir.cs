@@ -125,6 +125,16 @@ public sealed record IrNamedType(string Name) : IrType
     protected override string Describe() => Name;
 }
 
+/// <summary>
+/// R14.4. A method's type parameter, in type position. The name is the C# one (<c>T</c>);
+/// R14.3 is what turns it into a Pulse binder name, since F* reserves an initial capital
+/// for constructors and modules.
+/// </summary>
+public sealed record IrTypeParamType(string Name) : IrType
+{
+    protected override string Describe() => Name;
+}
+
 /// <summary>A type declared only in Pulse, via <c>[PulseType]</c>.</summary>
 public sealed record IrPulseType(string Name, string PulseText) : IrType
 {
@@ -261,6 +271,13 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
 
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
+
+    /// <summary>
+    /// R14.5. The callee's type arguments, in declaration order, applied ahead of the
+    /// value arguments. They come from Roslyn's resolved symbol, so an inferred call and
+    /// an explicit <c>M&lt;int&gt;(…)</c> are translated identically.
+    /// </summary>
+    public ImmutableArray<IrType> TypeArguments { get; init; } = ImmutableArray<IrType>.Empty;
 
     /// <summary>
     /// R4.13. The callee's declared parameter types, in <see cref="Args"/> order (a
@@ -489,6 +506,12 @@ public sealed record IrMethod(
 {
     public bool IsLemma { get; init; }
     public string? PulseBody { get; init; }
+
+    /// <summary>
+    /// R14.2. The method's type parameters, in declaration order. They become explicit
+    /// <c>Type0</c> binders ahead of every value parameter.
+    /// </summary>
+    public ImmutableArray<string> TypeParameters { get; init; } = ImmutableArray<string>.Empty;
     public bool Admit { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>
     public ImmutableArray<IrExpr> Preserves { get; init; } = ImmutableArray<IrExpr>.Empty;
@@ -535,6 +558,9 @@ public sealed record IrSpecFunction(
     ImmutableArray<IrExpr> Requires,
     IrExpr Body) : IrDecl(Loc, Name)
 {
+    /// <summary>R14.2: type binders, ahead of every value binder.</summary>
+    public ImmutableArray<string> TypeParameters { get; init; } = [];
+
     public bool IsRecursive { get; init; }
     public IrExpr? Decreases { get; init; }
 }

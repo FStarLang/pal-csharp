@@ -21,6 +21,14 @@ public sealed record SpecSite(
     ImmutableArray<SpecParam> Parameters,
     ImmutableArray<string> Usings)
 {
+    /// <summary>
+    /// R14.2b. The enclosing method's type parameters. A specification is bound in the
+    /// method's scope, and that scope includes them: <c>[Ensures("Result == a[i]")]</c>
+    /// on a method over <c>T[]</c> cannot bind unless the shim is generic in <c>T</c>
+    /// too. The shim needs no constraints because R14.1 admits none.
+    /// </summary>
+    public ImmutableArray<string> TypeParameters { get; init; } = [];
+
     /// <summary>Name of the generated shim method; also the lookup key.</summary>
     public string ShimName => SpecBinder.ShimMethodPrefix + Key;
 }
@@ -173,7 +181,10 @@ public static class SpecBinder
 
         foreach (var site in sites)
         {
-            sb.Append("    internal static object ").Append(site.ShimName).Append('(');
+            sb.Append("    internal static object ").Append(site.ShimName);
+            if (site.TypeParameters.Length > 0)
+                sb.Append('<').Append(string.Join(", ", site.TypeParameters)).Append('>');
+            sb.Append('(');
             sb.Append(string.Join(", ", site.Parameters.Select(RenderParam)));
             sb.AppendLine(")");
             sb.AppendLine("    {");

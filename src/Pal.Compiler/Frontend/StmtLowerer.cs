@@ -304,7 +304,11 @@ public sealed class StmtLowerer(
         if (kind == CalleeKind.Lemma)
         {
             var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
-            { Kind = CalleeKind.Lemma, ParamTypes = Declarations.ParamTypes(method, known, receiver: false) };
+            {
+                Kind = CalleeKind.Lemma,
+                ParamTypes = Declarations.ParamTypes(method, known, receiver: false),
+                TypeArguments = known.TypeArguments(method),
+            };
             return new IrGhostStmt(loc, GhostKind.LemmaCall, call, null);
         }
 

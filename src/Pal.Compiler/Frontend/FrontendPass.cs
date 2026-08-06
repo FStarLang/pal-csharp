@@ -360,6 +360,7 @@ public static class FrontendPass
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
                 if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
+                if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
                 // it never appears in executable code, and so — unlike R3.4's ordinary
@@ -571,6 +572,7 @@ public static class FrontendPass
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (symbol.IsStatic) continue;
+                if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 var modelMembers = symbol.GetMembers()
                     .Where(m => Declarations.Has(m, known.ModelAttribute))
@@ -1401,7 +1403,10 @@ public static class FrontendPass
                     Text: text,
                     Location: Declarations.ArgumentLocation(attribute),
                     Parameters: ShimParameters(candidate.Symbol, known, wantsResult),
-                    Usings: usings));
+                    Usings: usings)
+                {
+                    TypeParameters = [.. candidate.Symbol.TypeParameters.Select(t => t.Name)],
+                });
             }
         }
         return sites.ToImmutable();
@@ -1452,6 +1457,24 @@ public static class FrontendPass
             else if (Same(cls, known.PreservesValueAttribute)) yield return (a, index++, false);
             else if (Same(cls, known.DecreasesAttribute)) yield return (a, index++, false);
         }
+    }
+
+    /// <summary>
+    /// R14.1 refusal for type declarations. A parameterised record is representable (F63),
+    /// but the invariant, the ownership predicate and `pts_to` of a generic type are not
+    /// designed, so M8 ships generic *methods* only.
+    /// </summary>
+    private static bool RefuseGenericType(INamedTypeSymbol symbol, DiagnosticBag diagnostics)
+    {
+        if (symbol.TypeParameters.Length == 0) return false;
+        diagnostics.Error("PALCS0581", Locations.From(
+                symbol.Locations.FirstOrDefault() ?? Location.None),
+            $"`{symbol.Name}` is a generic type declaration. pal-csharp translates generic " +
+            "methods, not generic types (doc/translation.md R14.1): the invariant and the " +
+            "ownership predicate of a type parameterised by a type have not been designed. " +
+            "Write the type at a concrete element type, and keep the polymorphism in the " +
+            "methods that operate on it.");
+        return true;
     }
 
     private static bool Same(ISymbol? a, ISymbol b) => SymbolEqualityComparer.Default.Equals(a, b);
@@ -1543,6 +1566,22 @@ public static class FrontendPass
         var pulseBody = Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
             ? Declarations.StringArgument(pb) : null;
 
+        // R14.1. A constraint is a typeclass obligation the scheme does not carry, so a
+        // constrained type parameter is refused here rather than translated with the
+        // constraint dropped -- which would admit a program whose body cannot be written.
+        foreach (var tp in symbol.TypeParameters)
+        {
+            if (WellKnown.Unconstrained(tp)) continue;
+            diagnostics.Error("PALCS0580", Locations.From(
+                    tp.Locations.FirstOrDefault() ?? symbol.Locations.FirstOrDefault() ?? Location.None),
+                $"The type parameter `{tp.Name}` of `{symbol.Name}` is constrained. " +
+                "pal-csharp translates unconstrained type parameters (doc/translation.md R14.1): " +
+                "a constraint is a typeclass obligation, and the dictionary a call through it " +
+                "would need has not been designed. Drop the constraint, or write the method at " +
+                "the concrete type you need.");
+            return null;
+        }
+
         return new IrMethod(
             loc, Naming.Of(symbol), parameters, returnType,
             [.. specs.Requires, .. bodyRequires],
@@ -1564,6 +1603,10 @@ public static class FrontendPass
                 (Declarations.Has(symbol, known.FracAttribute) ||
                  (!symbol.IsAbstract && !Declarations.Mutates(candidate.Syntax, model))),
             IsAbstract = symbol.IsAbstract,
+            // R14.2. Type parameters become binders ahead of every value parameter. The
+            // constrained case never reaches here: MapType declines a constrained type
+            // parameter, so the signature that mentions it is refused first.
+            TypeParameters = [.. symbol.TypeParameters.Select(t => t.Name)],
             Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
                 ? baseName
                 : null,
@@ -1599,6 +1642,7 @@ public static class FrontendPass
         return new IrSpecFunction(loc, Naming.Of(candidate.Symbol), parameters, returnType,
             specs.Requires, lowerer.Lower(bodyExpression))
         {
+            TypeParameters = [.. candidate.Symbol.TypeParameters.Select(t => t.Name)],
             IsRecursive = recursive,
             Decreases = specs.Decreases,
         };

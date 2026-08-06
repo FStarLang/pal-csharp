@@ -43,6 +43,14 @@ public static class Names
     // C# field can never collide with a Pulse keyword, with the preamble, or with
     // another struct's field of the same name.
     public static string StructModule(string name) => "Struct_" + name;
+
+    /// <summary>
+    /// R14.3. A C# type parameter's Pulse binder name. F* reserves an initial capital for
+    /// constructors and modules, so <c>T</c> cannot be a binder; the C# name is kept after
+    /// the prefix so that a message about <c>ty_T</c> is legible to someone reading
+    /// <c>T</c>.
+    /// </summary>
+    public static string TypeParam(string name) => "ty_" + name;
     public static string StructType(string name) => "struct_" + name;
     public static string StructRaw(string name) => "struct_" + name + "__raw";
     public static string StructPred(string name) => "struct_" + name + "__pred";
@@ -411,6 +419,8 @@ public static class Types
         IrSeqType s => $"Seq.seq {Render(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
+        // R14.4. A type parameter is a type like any other; only its name changes.
+        IrTypeParamType t => Names.TypeParam(t.Name),
         // R10.2. A nullable reference is `option class_C`, named through the class's own
         // abbreviation so that every rule below reads the same whether or not the class
         // is recursive.

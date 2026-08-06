@@ -258,9 +258,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // R4.6: a [Spec] function returning `bool` denotes a proposition; one
                 // returning an integer denotes a mathematical value, and so may be used
                 // in arithmetic and as an array index.
+                // R14.5. A generic [Spec] function is applied to its type arguments first,
+                // exactly as a generic method is: a specification is emitted from the same
+                // IR call node and has no reason to differ.
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
-                    string.Join(" ", call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope))) + ")",
+                    string.Join(" ", call.TypeArguments.Select(Types.Render)
+                        .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
 

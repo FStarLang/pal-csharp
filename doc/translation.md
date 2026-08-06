@@ -1972,7 +1972,7 @@ Rules are recorded here as they are validated.
   well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
   and never rewrites, and covers the cross-node conditions no single lowering site can see
   (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — forty-one cases, each
+  `test/diagnostics` is its counterpart to the verification tests — forty-three cases, each
   headed by the diagnostic it must produce, each required to exit non-zero, poison
   `TranslationErrors.fst`, and carry a span in the user's own file.
 * **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
@@ -2041,7 +2041,7 @@ Rules are recorded here as they are validated.
 
   *Its own passes* includes the emitter, whose output is then thrown away. This was not
   the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the forty-one
+  right, since an editor has no business writing files, but eight of the forty-three
   diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
   specification term — are only discovered while emitting. An analyzer that reported the
   other twenty-eight would be worse than none: it would tell a user who had cleared every
@@ -4001,3 +4001,107 @@ than a translation gap. `offset++` inside the array subscript **is** retained, s
 still exercised by the real idiom. Two further adaptations are mechanical and touch only
 the signature: `ArraySegment<byte>` is spelled out as `(buf, offset, count)`, and the
 instance field is passed and returned rather than mutated.
+
+---
+
+## 14. Unconstrained generics (M8)
+
+F62–F64 measured the cost of a C# type parameter before this section was written, and the
+measurement is what fixes its shape: `Pulse.Lib.CSharp.Array` is already `(#t: Type0)`, a
+generic struct is an ordinary parameterised record, and instantiation composes. So generics
+add binders and applications to the existing scheme and change no rule that is already here.
+
+### 14.1 What is in scope
+
+**R14.1 — A type parameter is translated exactly when it is unconstrained.** A `where`
+clause is a typeclass obligation: `where T : IComparable<T>` says a call to `CompareTo`
+must resolve through a dictionary that the caller supplies, and neither the dictionary nor
+its coherence has been probed. A constrained type parameter is refused (PALCS0580) rather
+than translated with the constraint dropped, because dropping it would silently admit a
+program whose body cannot be written.
+
+This is a smaller subset than it sounds, and a well-defined one. C# permits almost nothing
+on an unconstrained `T` — no comparison, no arithmetic, no member access, not even `==`.
+What is left is the *element-agnostic* part of the language: moving values into and out of
+arrays, holding them in a container, counting them, copying them. That is precisely the
+part `Span<T>`, `ReadOnlySpan<T>` and `ArraySegment<T>` inhabit, and `examples/adler32`
+had to spell its segment out by hand for want of it.
+
+### 14.2 Type parameters are binders
+
+**R14.2 — A method's type parameters become explicit `Type0` binders, ahead of every value
+parameter, in declaration order.** `static void Swap<T>(T[] a, int i, int j)` emits
+
+```
+fn func_Swap (ty_T: Type0) (var_a: array ty_T) (var_i: I32.t) (var_j: I32.t)
+```
+
+They are *explicit*, not implicit `#`-binders, and that is a deliberate choice against the
+F* idiom. Roslyn has already resolved the type argument at every call site — for an
+inferred call as much as for `Swap<int>(…)`, since C# type inference runs at compile time —
+so the translation has the answer in hand and emitting it is structure-preserving. Relying
+on F*'s inference instead would make the emitted program's well-typedness depend on a
+second inference algorithm agreeing with C#'s, which is a thing to be avoided rather than a
+thing to be hoped for. It also keeps a type parameter that appears in no parameter type
+translatable rather than being a special case.
+
+Both forms were probed (`test/pulse_facts/GenericFacts.fst` uses implicit binders;
+`BinderProbe` confirmed the explicit form, its application at a concrete type, and a generic
+caller passing its own type variable along).
+
+**R14.2b — A specification's shim is generic in the same parameters.** R4.x binds an
+attribute's spec string by generating a shim method whose parameters are the annotated
+method's, and compiling it. A spec on a generic method mentions its type parameters —
+`[Ensures("Contents(a) == …")]` on `T[] a` cannot be *typed* without `T` — so the shim
+carries the same type parameters, by name. It carries no constraints, and needs none:
+R14.1 admits only unconstrained parameters, so a spec that would require one is already
+refused at the declaration. This is the only place in the pipeline where generics are not
+simply "a type like any other", and it is a consequence of specs being bound as real C#
+rather than parsed.
+
+**R14.3 — A type parameter `T` is named `ty_T` in Pulse.** F* reserves an initial capital
+for constructors and modules, so `T` cannot be a binder name. The prefix follows the
+existing conventions (`var_`, `spec_`, `class_`, `struct_`), and the C# name is preserved
+after it so that a message about `ty_T` is legible to someone reading `T`.
+
+**R14.4 — A type parameter in type position renders as its binder name.** `T` is `ty_T`,
+`T[]` is `array ty_T`, `Seq<T>` is `Seq.seq ty_T`. Nothing else in §3 changes: the type
+parameter is a type like any other, and every rule that maps over a type maps over it.
+
+### 14.3 Call sites
+
+**R14.5 — A call to a generic method applies its type arguments first, positionally, in
+declaration order.** `Swap(a, i, j)` inside a method with its own `T` emits
+`func_Swap ty_T var_a var_i var_j`; `Swap<int>(b, 0, 1)` emits `func_Swap I32.t var_b 0l 1l`.
+The arguments come from Roslyn's resolved symbol, so an inferred call and an explicit one
+are translated identically — as they should be, being the same call.
+
+This is the rule that keeps R2.x's module-per-method structure intact. F64 pins that
+instantiation composes, so nothing needs specialising: one `Func_` module per generic
+method, called at every instantiation, exactly as a non-generic method is.
+
+It applies to all three kinds of callee, because all three are the same IR node: a method
+(`func_`), a `[Spec]` function (`spec_`) and a `[Lemma]` (`lemma_`). Each therefore takes
+its type binders ahead of its value binders by R14.2, and each is applied to its type
+arguments here. A generic `[Spec]` function is worth calling out: it is what lets the
+*specification* of a generic method be written once — `Interchanged<T>(s, i, j)` is a
+sequence-valued function of `T`, and without R14.2 on spec functions every postcondition
+would have to be inlined at each use.
+
+### 14.4 What is refused
+
+Each of these is a refusal to *translate* — a construct with no image under the rules above
+— and not a prediction that a proof will fail (§0 rule 3):
+
+* **A constraint (PALCS0580).** R14.1. Includes `where T : class`, `struct`, `new()`, a base
+  type and an interface: each says something about `T` that the translation would have to
+  carry, and none has been probed.
+* **A generic type declaration (PALCS0581).** A generic `class` or `struct` needs a
+  parameterised record *and* a parameterised invariant, and §3.4's class encoding fixes the
+  representation type at the reference type. F63 shows the record is available; the
+  invariant is not yet designed, so the declaration is refused rather than half-translated.
+  A generic *method* on a non-generic type is unaffected, which is where the value is.
+* **A generic local function or lambda.** Neither exists in the supported subset already.
+
+A type parameter used as the receiver of anything, or compared with `==`, needs no rule
+here: C# itself rejects it, so it cannot reach the translation.

@@ -1806,9 +1806,11 @@ public sealed class CodeEmitter(
                 Line(Antiquotation.Expand(g.Text!, scope, Binder) + ";");
                 return;
             case GhostKind.LemmaCall when g.Prop is IrCall call:
+                // R14.5. A generic [Lemma] is applied to its type arguments first.
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
-                     string.Join(" ", call.Args.Select((a, i) =>
-                         SpecArgument(a, SpecEmitter.ParamType(call, i), scope))) + ";");
+                     string.Join(" ", call.TypeArguments.Select(Types.Render)
+                         .Concat(call.Args.Select((a, i) =>
+                             SpecArgument(a, SpecEmitter.ParamType(call, i), scope)))) + ";");
                 return;
             default:
                 return;
@@ -2120,8 +2122,15 @@ public sealed class CodeEmitter(
         // not a proof step but the rendering of "this reference is being used as a B".
         var view = Bracket(owner is null ? call : null, args);
 
-        Line($"let {binder} = {callee} " +
-             (args.Length == 0 ? "()" : string.Join(" ", args)) + ";");
+        // R14.5. Type arguments apply first, positionally, in declaration order. A generic
+        // method with no value parameters still applies them, so the `()` below is reached
+        // only by a call that is nullary in both senses.
+        var tyArgs = call.TypeArguments.Select(Types.Render).ToImmutableArray();
+        var applied = args.Length == 0 && tyArgs.Length == 0
+            ? "()"
+            : string.Join(" ", tyArgs.Concat(args));
+
+        Line($"let {binder} = {callee} {applied};");
         Close(view);
         return binder;
     }
