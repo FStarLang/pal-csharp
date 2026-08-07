@@ -72,6 +72,13 @@ Pulse out — and the whole M1 acceptance suite passes.
       lookup is proved to return the value the map holds
       ([`test/list_cursor`](test/list_cursor), [`test/tree_cursor`](test/tree_cursor),
       [`doc/translation.md`](doc/translation.md) §16)
+- [x] **`null` is a pointer, not a wrapper.** A Pulse `box` is already nullable, so `C?` is
+      that box and `C` is its non-null refinement — one type and a refinement, exactly as C#
+      has one runtime type and an annotation. Passing a `C` where a `C?` is wanted is the
+      identity; `x!` is a refinement the surrounding `if` already proves. Every recursive
+      invariant loses an existential, and every hand-written cursor lemma takes its cursor
+      once instead of twice ([`doc/translation.md`](doc/translation.md) R10.2,
+      [`test/pulse_facts/NullFacts.fst`](test/pulse_facts/NullFacts.fst))
 - [ ] `Span<T>`, interfaces, constrained generics, `IEnumerable<T>` iterators — see
       [`doc/translation.md`](doc/translation.md) §8, §15.5 and §16.5
 

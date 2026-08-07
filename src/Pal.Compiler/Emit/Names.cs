@@ -81,18 +81,19 @@ public static class Names
     public static string Permission(string parameter) => "perm_" + parameter;
 
     // -----------------------------------------------------------------------
-    // §10. Recursive classes. `C?` is `option class_C`, the invariant is stated at the
-    // *option* so that null is a pattern the prover can case on (R10.3), and six lemmas
-    // take it apart. Nothing here is per-example: every name is a function of the class.
+    // §10. Recursive classes. `C?` is `B.box class_C__raw`, which is already nullable;
+    // `C` is its non-null refinement. The invariant is stated at the nullable type so that
+    // null is a case the prover can split on (R10.3), and six lemmas take it apart.
+    // Nothing here is per-example: every name is a function of the class.
     // -----------------------------------------------------------------------
 
-    /// <summary>R10.2. The nullable object reference, <c>option class_C</c>.</summary>
+    /// <summary>R10.2. The nullable object reference, <c>B.box class_C__raw</c>.</summary>
     public static string ClassOpt(string name) => "class_" + name + "__opt";
 
-    /// <summary>R10.3. The primitive, model-recursive invariant, stated at the option.</summary>
+    /// <summary>R10.3. The primitive, model-recursive invariant, stated at the nullable type.</summary>
     public static string ClassInvOpt(string name) => "class_" + name + "__inv_opt";
 
-    /// <summary>R10.4. <c>Some? x &lt;==&gt; </c> the model is a non-empty constructor.</summary>
+    /// <summary>R10.4. <c>not (B.is_null x) &lt;==&gt; </c> the model is a non-empty constructor.</summary>
     public static string ClassCases(string name) => "class_" + name + "__cases";
 
     /// <summary>R10.4. The null case, preserving the invariant.</summary>
@@ -422,7 +423,7 @@ public static class Types
         IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
         // R14.4. A type parameter is a type like any other; only its name changes.
         IrTypeParamType t => Names.TypeParam(t.Name),
-        // R10.2. A nullable reference is `option class_C`, named through the class's own
+        // R10.2. A nullable reference is `class_C__opt`, named through the class's own
         // abbreviation so that every rule below reads the same whether or not the class
         // is recursive.
         IrClassType { Nullable: true } c =>
@@ -451,8 +452,8 @@ public static class Types
 
     /// <summary>
     /// R15.3. A type constructor applied to its arguments. The parentheses are not
-    /// optional: a class type appears in argument position (<c>B.box (class_C ty_T)</c>,
-    /// <c>option (class_C ty_T)</c>), where the bare application would associate wrongly.
+    /// optional: a class type appears in argument position (<c>B.box (class_C__raw ty_T)</c>),
+    /// where the bare application would associate wrongly.
     /// A nullary application is left bare, so every pre-M9 emission is unchanged.
     /// </summary>
     public static string Applied(string head, ImmutableArray<IrType> args) =>

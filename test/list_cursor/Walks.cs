@@ -57,10 +57,10 @@ public static class Walks
             Pal.Decreases(xs.Value.Length - i);
 
             ChainProof.AtEnd(cur, i, xs);
-            ChainProof.Open(cur, cur!, SpecList.Drop(xs.Value, i));
+            ChainProof.Open(cur, SpecList.Drop(xs.Value, i));
             T v = cur.value;
             Cell<T>? nx = cur.next;
-            ChainProof.Advance(head, cur, cur!, v, nx, i, xs);
+            ChainProof.Advance(head, cur, v, nx, i, xs);
             cur = nx;
             i = i + 1;
         }
@@ -99,10 +99,10 @@ public static class Walks
             Pal.Decreases(n - i);
 
             ChainProof.AtEnd(cur, i, xs);
-            ChainProof.Open(cur, cur!, SpecList.Drop(xs.Value, i));
+            ChainProof.Open(cur, SpecList.Drop(xs.Value, i));
             T skipped = cur!.value;
             Cell<T>? nx = cur!.next;
-            ChainProof.Advance(head, cur, cur!, skipped, nx, i, xs);
+            ChainProof.Advance(head, cur, skipped, nx, i, xs);
             cur = nx;
             i = i + 1;
         }
@@ -110,10 +110,10 @@ public static class Walks
         // Out of the loop with `i == n`, so the cell under the cursor is the one wanted. The
         // last three lines are the loop body again, with `Close` in place of the assignments.
         ChainProof.AtEnd(cur, i, xs);
-        ChainProof.Open(cur, cur!, SpecList.Drop(xs.Value, i));
+        ChainProof.Open(cur, SpecList.Drop(xs.Value, i));
         T found = cur!.value;
         Cell<T>? rest = cur!.next;
-        ChainProof.Advance(head, cur, cur!, found, rest, i, xs);
+        ChainProof.Advance(head, cur, found, rest, i, xs);
         ChainProof.Close(head, rest, i + 1, xs);
         return found;
     }

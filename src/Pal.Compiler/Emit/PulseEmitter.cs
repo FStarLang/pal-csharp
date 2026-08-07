@@ -107,7 +107,11 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     public bool Window { get; init; }
 
     /// <summary>R10.7. The reference, as a non-null one. Legal only in a window.</summary>
-    public string NonNull => Type is IrClassType { Nullable: true } ? $"(Some?.v {Binder})" : Binder;
+    // R10.2 (F76). A nullable reference and a non-nullable one are the same term: the
+    // non-nullable type is the nullable one under a refinement, so "the non-null form of
+    // this slot" is the slot. Kept as a name because the *concept* still exists — a
+    // position that requires non-nullness — even though extracting it now costs nothing.
+    public string NonNull => Binder;
 
     /// <summary>R9.14. The binder for this class's own model inside an <c>override</c>.</summary>
     public string OwnModel => "own_" + Name;
@@ -771,8 +775,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         foreach (var f in c.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {PlainFieldType(c, f.Type, opt, self)};");
         sb.AppendLine("}");
-        sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = B.box {raw}");
-        sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = option {self}");
+        sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = B.box {raw}");
+        sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = b: {opt} {{ not (B.is_null b) }}");
         return sb.ToString();
     }
 

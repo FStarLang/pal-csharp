@@ -113,26 +113,26 @@ public static class Search
             }
             else
             {
-                DescentProof.Open(cur, cur, Descent.Sub(t.Value, key, n));
+                DescentProof.Open(cur, Descent.Sub(t.Value, key, n));
                 int nk = cur.key;
                 T nv = cur.value;
                 Knot<T>? nl = cur.left;
                 Knot<T>? nr = cur.right;
                 if (key == nk)
                 {
-                    DescentProof.Found(cur, cur, nv, nl, nr, key, n, fallback, t);
+                    DescentProof.Found(cur, nv, nl, nr, key, n, fallback, t);
                     found = nv;
                     live = 0;
                 }
                 else if (key < nk)
                 {
-                    DescentProof.Left(root, cur, cur, nv, nl, nr, key, n, t);
+                    DescentProof.Left(root, cur, nv, nl, nr, key, n, t);
                     cur = nl;
                     n = n + 1;
                 }
                 else
                 {
-                    DescentProof.Right(root, cur, cur, nv, nl, nr, key, n, t);
+                    DescentProof.Right(root, cur, nv, nl, nr, key, n, t);
                     cur = nr;
                     n = n + 1;
                 }

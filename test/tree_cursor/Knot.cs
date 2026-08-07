@@ -117,7 +117,7 @@ public static class Descent
 
     /// <summary>The ownership a freshly allocated node has: its four field values.</summary>
     [SpecOp("KnotPath.knot_held")]
-    public static SlProp Held<T>(Knot<T> node, SpecInt key, T value, Knot<T>? left, Knot<T>? right)
+    public static SlProp Held<T>(Knot<T>? node, SpecInt key, T value, Knot<T>? left, Knot<T>? right)
         => throw Ghost();
 
     /// <summary>
@@ -127,7 +127,7 @@ public static class Descent
     /// fields*.
     /// </summary>
     [SpecOp("KnotPath.knot_open_some")]
-    public static SlProp Opened<T>(Knot<T>? from, Knot<T> node, SpecTree<SpecKv<T>> sub)
+    public static SlProp Opened<T>(Knot<T>? from, SpecTree<SpecKv<T>> sub)
         => throw Ghost();
 
     /// <summary>
@@ -136,7 +136,7 @@ public static class Descent
     /// read.
     /// </summary>
     [SpecOp("KnotPath.knot_opened")]
-    public static SlProp OpenedAt<T>(Knot<T>? from, Knot<T> node, T value,
+    public static SlProp OpenedAt<T>(Knot<T>? from, T value,
                                      Knot<T>? left, Knot<T>? right, SpecTree<SpecKv<T>> sub)
         => throw Ghost();
 
@@ -198,7 +198,7 @@ public static class DescentProof
     [Requires("Descent.Holds(left, lt)")]
     [Requires("Descent.Holds(right, rt)")]
     [Ensures("Descent.Holds(node, SpecTree.Branch(lt, SpecTree.Entry(key, value), rt))")]
-    public static void Node<T>(Knot<T> node, SpecInt key, T value, Knot<T>? left, Knot<T>? right,
+    public static void Node<T>(Knot<T>? node, SpecInt key, T value, Knot<T>? left, Knot<T>? right,
                                Ghost<SpecTree<SpecKv<T>>> lt, Ghost<SpecTree<SpecKv<T>>> rt) { }
 
     /// <summary>
@@ -240,17 +240,16 @@ public static class DescentProof
                                  Ghost<SpecTree<SpecKv<T>>> tree) { }
 
     /// <summary>
-    /// Open the node at the cursor so that its four fields can be read.
-    /// <paramref name="from"/> and <paramref name="node"/> are the same node named twice —
-    /// once as the nullable cursor the invariant talks about, once as the reference a field
-    /// access reads through (R10.2c).
+    /// Open the node at the cursor so that its four fields can be read. The cursor is
+    /// named once: R10.2 makes <c>Knot&lt;T&gt;</c> and <c>Knot&lt;T&gt;?</c> one Pulse
+    /// type, so the reference a field access reads through is the cursor itself.
     /// </summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("KnotPath.tree_open $(from) $(node) $(sub)")]
+    [PulseBody("KnotPath.tree_open $(from) $(sub)")]
     [Requires("Descent.Holds(from, sub)")]
-    [Requires("!sub.IsLeaf && from == node")]
-    [Ensures("Descent.Opened(from, node, sub)")]
-    public static void Open<T>(Knot<T>? from, Knot<T> node, Ghost<SpecTree<SpecKv<T>>> sub) { }
+    [Requires("!sub.IsLeaf")]
+    [Ensures("Descent.Opened(from, sub)")]
+    public static void Open<T>(Knot<T>? from, Ghost<SpecTree<SpecKv<T>>> sub) { }
 
     /// <summary>
     /// The hit: the node at the cursor carries the key, so the value read out of it is the
@@ -258,15 +257,15 @@ public static class DescentProof
     /// spine is still exactly <c>Ctx(t, key, n)</c>.
     /// </summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("KnotPath.tree_found $(from) $(node) $(value) $(left) $(right) " +
+    [PulseBody("KnotPath.tree_found $(from) $(value) $(left) $(right) " +
                "$(key) $(steps) $(fallback) $(tree)")]
-    [Requires("Descent.OpenedAt(from, node, value, left, right, " +
+    [Requires("Descent.OpenedAt(from, value, left, right, " +
               "Descent.Sub(tree, key, steps))")]
     [Requires("key == Descent.NodeKey(Descent.Sub(tree, key, steps))")]
     [Ensures("Descent.Holds(from, Descent.Sub(tree, key, steps))")]
     [Ensures("Pal.Same(SpecTree.Get(tree, key, fallback), value)")]
     [Ensures("SpecTree.HasKey(tree, key)")]
-    public static void Found<T>(Knot<T>? from, Knot<T> node, T value,
+    public static void Found<T>(Knot<T>? from, T value,
                                 Knot<T>? left, Knot<T>? right,
                                 SpecInt key, SpecInt steps, T fallback,
                                 Ghost<SpecTree<SpecKv<T>>> tree) { }
@@ -278,31 +277,31 @@ public static class DescentProof
     /// <c>Pal.Decreases</c> needs — a tree has no length, so a counter alone cannot bound it.
     /// </summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("KnotPath.tree_left $(root) $(from) $(node) $(value) $(left) " +
+    [PulseBody("KnotPath.tree_left $(root) $(from) $(value) $(left) " +
                "$(right) $(key) $(steps) $(tree)")]
     [Requires("Descent.Spine(root, from, Descent.Ctx(tree, key, steps))")]
-    [Requires("Descent.OpenedAt(from, node, value, left, right, " +
+    [Requires("Descent.OpenedAt(from, value, left, right, " +
               "Descent.Sub(tree, key, steps))")]
     [Requires("0 <= steps && key < Descent.NodeKey(Descent.Sub(tree, key, steps))")]
     [Ensures("Descent.Spine(root, left, Descent.Ctx(tree, key, steps + 1))")]
     [Ensures("Descent.Holds(left, Descent.Sub(tree, key, steps + 1))")]
     [Ensures("Descent.Sub(tree, key, steps + 1).Size < Descent.Sub(tree, key, steps).Size")]
-    public static void Left<T>(Knot<T>? root, Knot<T>? from, Knot<T> node, T value,
+    public static void Left<T>(Knot<T>? root, Knot<T>? from, T value,
                                Knot<T>? left, Knot<T>? right, SpecInt key, SpecInt steps,
                                Ghost<SpecTree<SpecKv<T>>> tree) { }
 
     /// <summary>The step to the right child.</summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("KnotPath.tree_right $(root) $(from) $(node) $(value) $(left) " +
+    [PulseBody("KnotPath.tree_right $(root) $(from) $(value) $(left) " +
                "$(right) $(key) $(steps) $(tree)")]
     [Requires("Descent.Spine(root, from, Descent.Ctx(tree, key, steps))")]
-    [Requires("Descent.OpenedAt(from, node, value, left, right, " +
+    [Requires("Descent.OpenedAt(from, value, left, right, " +
               "Descent.Sub(tree, key, steps))")]
     [Requires("0 <= steps && key > Descent.NodeKey(Descent.Sub(tree, key, steps))")]
     [Ensures("Descent.Spine(root, right, Descent.Ctx(tree, key, steps + 1))")]
     [Ensures("Descent.Holds(right, Descent.Sub(tree, key, steps + 1))")]
     [Ensures("Descent.Sub(tree, key, steps + 1).Size < Descent.Sub(tree, key, steps).Size")]
-    public static void Right<T>(Knot<T>? root, Knot<T>? from, Knot<T> node, T value,
+    public static void Right<T>(Knot<T>? root, Knot<T>? from, T value,
                                 Knot<T>? left, Knot<T>? right, SpecInt key, SpecInt steps,
                                 Ghost<SpecTree<SpecKv<T>>> tree) { }
 

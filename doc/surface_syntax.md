@@ -417,8 +417,10 @@ compiler error — it translates perfectly well — it is an unprovable one, and
 it as `Cannot prove: class_Stack__inv var_s _` on the calling line. pal-csharp refuses what
 it cannot translate; what cannot be *proved* is the prover's to say, and keeping that
 boundary sharp is why the frontend is small. Ownership also means a `C`-typed reference is never
-`null`, so no method needs a null check to satisfy the translator. A `C?` is a different
-type and is the subject of *Recursive classes* below.
+`null`, so no method needs a null check to satisfy the translator. A `C?` is the *same*
+Pulse pointer with the non-null refinement dropped, which is why passing a `C` where a `C?`
+is wanted costs nothing and why the null-forgiving `x!` costs only what the surrounding
+`if` already proves. It is the subject of *Recursive classes* below.
 
 To allow the aliasing, mark the parameters `[Frac]` and split at the call site with
 `Pal.Share` (§3). `SameSize([Frac("pa")] Stack a, [Frac("pb")] Stack b)` may be called on
@@ -909,8 +911,12 @@ let seg (from prev to_ last: Class_DNode.class_DNode__opt) (l: list int) : slpro
 ```
 
 Two conventions matter. The class module is `Class_<Name>`, its record `class_<Name>__raw`,
-its reference `class_<Name>`, its nullable reference `class_<Name>__opt`, and its fields
-`fld_<name>` — that is the whole of what `[Plain]` publishes. And the friendly wrapper you
+its nullable reference `class_<Name>__opt` (a `Pulse.Lib.Box.box` of the record — already
+nullable, so `B.null` and `B.is_null` apply), its non-null reference `class_<Name>` (the
+refinement `b: class_<Name>__opt { not (B.is_null b) }`), and its fields `fld_<name>` — that
+is the whole of what `[Plain]` publishes. Because the two reference types are one type and a
+refinement, a lemma you write takes a cursor **once**: the pointer a contract talks about is
+the pointer a field read goes through. And the friendly wrapper you
 name from C# should be `unfold`, so that Pulse's resource matching (which is syntactic)
 still sees `dll_seg` and every lemma you wrote about it applies.
 

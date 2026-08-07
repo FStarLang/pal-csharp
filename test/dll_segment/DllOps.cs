@@ -32,9 +32,9 @@ public static class DllOps
         // demands in order to pass a `DNode?` where a `DNode` is declared. R10.2c reads the
         // same declaration and projects, so the opened predicate lands on exactly the node
         // the field reads below go through.
-        DllProof.Open(from, from!, prev, null, last, xs);
+        DllProof.Open(from, prev, null, last, xs);
         int rest = Length(from.next, from, last);
-        DllProof.Close(from, from!, prev, null, last, xs);
+        DllProof.Close(from, prev, null, last, xs);
         return rest + 1;
     }
 
@@ -63,9 +63,9 @@ public static class DllOps
         }
         else
         {
-            DllProof.Open(head, head!, null, null, tail, xs);
+            DllProof.Open(head, null, null, tail, xs);
             head.prev = node;
-            DllProof.Close(head, head!, node, null, tail, xs);
+            DllProof.Close(head, node, null, tail, xs);
             DllProof.Cons(node, v, null, head, null, tail, xs);
             return node;
         }

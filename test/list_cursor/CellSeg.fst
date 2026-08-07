@@ -83,9 +83,8 @@ let rec cell_seg (#a: Type0) (p: perm)
   = match l with
     | [] -> pure (from == to_)
     | hd :: tl ->
-      exists* (v: Class_Cell.class_Cell a) (r: Class_Cell.class_Cell__raw a).
-        pure (from == Some v) **
-        B.pts_to v #p r **
+      exists* (r: Class_Cell.class_Cell__raw a).
+        B.pts_to from #p r **
         pure (hd == r.Class_Cell.fld_value) **
         cell_seg p r.Class_Cell.fld_next to_ tl
 
@@ -100,7 +99,7 @@ let seg (#a: Type0) (from to_: Class_Cell.class_Cell__opt a) (l: list a) : slpro
 /// predicate, which is what makes `advance` a statement about one thing rather than two.
 unfold
 let whole (#a: Type0) (from: Class_Cell.class_Cell__opt a) (l: list a) : slprop =
-  cell_seg 1.0R from None l
+  cell_seg 1.0R from B.null l
 
 // ===========================================================================
 // 4. The structural lemmas
@@ -115,21 +114,22 @@ ghost fn seg_nil (#a: Type0) (x: Class_Cell.class_Cell__opt a)
 }
 
 /// The null test is a statement about the *list*, and for a segment it is valid only when
-/// the right boundary is `None`. §12 refuses to derive it and makes the user state it;
+/// the right boundary is `null`. §12 refuses to derive it and makes the user state it;
 /// stated once here, every loop that tests its cursor against null gets it by calling.
 ghost fn seg_cases (#a: Type0) (from: Class_Cell.class_Cell__opt a) (l: list a)
   preserves whole from l
-  ensures  pure (Some? from <==> Cons? l)
+  ensures  pure (not (B.is_null from) <==> Cons? l)
 {
   match l {
     Nil -> {
-      unfold (cell_seg 1.0R from None ([] <: list a));
-      fold (cell_seg 1.0R from None ([] <: list a));
+      unfold (cell_seg 1.0R from B.null ([] <: list a));
+      fold (cell_seg 1.0R from B.null ([] <: list a));
     }
     Cons hd tl -> {
-      unfold (cell_seg 1.0R from None (hd :: tl));
-      with v r. assert (B.pts_to v r);
-      fold (cell_seg 1.0R from None (hd :: tl));
+      unfold (cell_seg 1.0R from B.null (hd :: tl));
+      with r. assert (B.pts_to from r);
+      B.pts_to_not_null from;
+      fold (cell_seg 1.0R from B.null (hd :: tl));
     }
   }
 }
@@ -138,12 +138,12 @@ ghost fn seg_cases (#a: Type0) (from: Class_Cell.class_Cell__opt a) (l: list a)
 /// projected out of an existential record, which is what lets a C# caller -- who has just
 /// *read* those two fields -- name them too.
 ghost fn seg_intro_cons (#a: Type0)
-    (v: Class_Cell.class_Cell a) (value: a) (next to_: Class_Cell.class_Cell__opt a) (tl: list a)
+    (v: Class_Cell.class_Cell__opt a) (value: a) (next to_: Class_Cell.class_Cell__opt a) (tl: list a)
   requires B.pts_to v ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next }) **
            cell_seg 1.0R next to_ tl
-  ensures  cell_seg 1.0R (Some v) to_ (value :: tl)
+  ensures  cell_seg 1.0R v to_ (value :: tl)
 {
-  fold (cell_seg 1.0R (Some v) to_ (value :: tl));
+  fold (cell_seg 1.0R v to_ (value :: tl));
 }
 
 /// Two adjacent segments compose. §12.4 called this "the lemma no `[Model]` could produce",
@@ -166,12 +166,12 @@ ghost fn rec seg_append (#a: Type0)
     }
     Cons hd tl -> {
       unfold (cell_seg 1.0R head from (hd :: tl));
-      with w r. assert (B.pts_to w #1.0R r);
+      with r. assert (B.pts_to head #1.0R r);
       seg_append r.Class_Cell.fld_next from to_ tl l2;
-      rewrite (B.pts_to w #1.0R r)
-           as (B.pts_to w ({ Class_Cell.fld_value = r.Class_Cell.fld_value; Class_Cell.fld_next = r.Class_Cell.fld_next }));
-      seg_intro_cons w r.Class_Cell.fld_value r.Class_Cell.fld_next to_ (L.append tl l2);
-      rewrite (cell_seg 1.0R (Some w) to_ (r.Class_Cell.fld_value :: L.append tl l2))
+      rewrite (B.pts_to head #1.0R r)
+           as (B.pts_to head ({ Class_Cell.fld_value = r.Class_Cell.fld_value; Class_Cell.fld_next = r.Class_Cell.fld_next }));
+      seg_intro_cons head r.Class_Cell.fld_value r.Class_Cell.fld_next to_ (L.append tl l2);
+      rewrite (cell_seg 1.0R head to_ (r.Class_Cell.fld_value :: L.append tl l2))
            as (cell_seg 1.0R head to_ (L.append (hd :: tl) l2));
     }
   }
@@ -185,17 +185,14 @@ ghost fn rec seg_append (#a: Type0)
 /// than by its own induction is the point: the *step* of a loop is not a new idea, it is the
 /// composition lemma at a particular pair of boundaries.
 ghost fn seg_snoc (#a: Type0)
-    (head from: Class_Cell.class_Cell__opt a) (v: Class_Cell.class_Cell a)
+    (head from: Class_Cell.class_Cell__opt a)
     (value: a) (next: Class_Cell.class_Cell__opt a) (l: list a)
   requires cell_seg 1.0R head from l **
-           B.pts_to v ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next }) **
-           pure (from == Some v)
+           B.pts_to from ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next })
   ensures  cell_seg 1.0R head next (L.append l [value])
 {
   seg_nil next;
-  seg_intro_cons v value next next ([] <: list a);
-  rewrite (cell_seg 1.0R (Some v) next [value])
-       as (cell_seg 1.0R from next [value]);
+  seg_intro_cons from value next next ([] <: list a);
   seg_append head from next l [value];
 }
 
@@ -205,40 +202,40 @@ ghost fn seg_snoc (#a: Type0)
 
 /// `opened from v value next to_ l` is `seg from to_ l` with its first cell unfolded.
 ///
-/// It names four things the caller can also name: the nullable cursor `from` that the loop
-/// invariant talks about, the box `v` a field access reads through, and the two field
-/// *values* `value` and `next` the C# body is about to read out. `SegmentFacts` §6
-/// established the first pair; the second pair is what an *iterative* step needs, because
+/// It names three things the caller can also name: the cursor `from` that the loop
+/// invariant talks about -- which under R10.2 is also the reference a field access reads
+/// through, so it is named once -- and the two field *values* `value` and `next` the C#
+/// body is about to read out. That second pair is what an *iterative* step needs, because
 /// the new split point is `next` -- a value that exists only once the heap has been read.
 ///
 /// So `seg_open` produces it existentially and the C# body picks the witnesses up by reading
 /// the fields; `seg_advance` takes them back as ordinary arguments.
 unfold
-let opened (#a: Type0) (from: Class_Cell.class_Cell__opt a) (v: Class_Cell.class_Cell a)
+let opened (#a: Type0) (from: Class_Cell.class_Cell__opt a)
            (value: a) (next: Class_Cell.class_Cell__opt a)
            (to_: Class_Cell.class_Cell__opt a) (l: list a)
   : slprop
   = exists* (tl: list a).
-      B.pts_to v ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next }) **
+      B.pts_to from ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next }) **
       cell_seg 1.0R next to_ tl **
-      pure (from == Some v /\ l == value :: tl)
+      pure (l == value :: tl)
 
 /// The ownership a freshly allocated cell has, stated over the two field values a C#
 /// `new Cell<T> { ... }` supplies. Because R12.4 emits that as a record *literal*, the
 /// caller needs no `with` binder to fold it.
 unfold
-let held (#a: Type0) (v: Class_Cell.class_Cell a) (value: a) (next: Class_Cell.class_Cell__opt a)
+let held (#a: Type0) (v: Class_Cell.class_Cell__opt a) (value: a) (next: Class_Cell.class_Cell__opt a)
   : slprop
   = B.pts_to v ({ Class_Cell.fld_value = value; Class_Cell.fld_next = next })
 
 /// Push a cell the caller owns outright onto the front of a chain. This is `seg_intro_cons`
 /// at the boundaries a whole chain has, and it is what lets a test *build* something to walk.
 ghost fn seg_push (#a: Type0)
-    (v: Class_Cell.class_Cell a) (value: a) (next: Class_Cell.class_Cell__opt a) (l: list a)
+    (v: Class_Cell.class_Cell__opt a) (value: a) (next: Class_Cell.class_Cell__opt a) (l: list a)
   requires held v value next ** whole next l
-  ensures  whole (Some v) (value :: l)
+  ensures  whole v (value :: l)
 {
-  seg_intro_cons v value next None l;
+  seg_intro_cons v value next B.null l;
 }
 
 /// The shape a C# `[Ensures]` can name. `opened` fixes the two field values, which is what
@@ -249,19 +246,19 @@ ghost fn seg_push (#a: Type0)
 /// call site, and the reads then produce exactly the terms `seg_advance` takes back as
 /// ordinary arguments.
 unfold
-let opened_some (#a: Type0) (from: Class_Cell.class_Cell__opt a) (v: Class_Cell.class_Cell a)
+let opened_some (#a: Type0) (from: Class_Cell.class_Cell__opt a)
                 (to_: Class_Cell.class_Cell__opt a) (l: list a)
   : slprop
-  = exists* (value: a) (next: Class_Cell.class_Cell__opt a). opened from v value next to_ l
+  = exists* (value: a) (next: Class_Cell.class_Cell__opt a). opened from value next to_ l
 
 /// The loop condition, stated once so that no C# body has to reason about it. `seg_cases`
 /// ties the null test to the *shape* of the suffix; this ties it to the *counter*, which is
 /// what a loop invariant indexed by `take`/`drop` actually needs.
 ghost fn seg_at_end (#a: Type0) (from: Class_Cell.class_Cell__opt a) (i: int) (l: list a)
-  preserves seg from None (CL.drop l i)
+  preserves seg from B.null (CL.drop l i)
   requires pure (0 <= i /\ i <= L.length l)
-  ensures  pure ((None? from <==> i == L.length l) /\
-                 (Some? from <==> Cons? (CL.drop l i)))
+  ensures  pure ((B.is_null from <==> i == L.length l) /\
+                 (not (B.is_null from) <==> Cons? (CL.drop l i)))
 {
   drop_cons_iff l i;
   seg_cases from (CL.drop l i);
@@ -271,28 +268,27 @@ ghost fn seg_at_end (#a: Type0) (from: Class_Cell.class_Cell__opt a) (i: int) (l
 /// `cur = head` and `i = 0` and the invariant holds by construction.
 ghost fn seg_start (#a: Type0) (head: Class_Cell.class_Cell__opt a) (l: list a)
   requires whole head l
-  ensures  seg head head (CL.take l 0) ** seg head None (CL.drop l 0)
+  ensures  seg head head (CL.take l 0) ** seg head B.null (CL.drop l 0)
 {
   seg_nil head;
   rewrite (cell_seg 1.0R head head ([] <: list a))
        as (cell_seg 1.0R head head (CL.take l 0));
-  rewrite (cell_seg 1.0R head None l)
-       as (cell_seg 1.0R head None (CL.drop l 0));
+  rewrite (cell_seg 1.0R head B.null l)
+       as (cell_seg 1.0R head B.null (CL.drop l 0));
 }
 
 /// Open the first cell of a non-empty suffix. Every `rewrite` the elimination needs stays
 /// inside; what comes out is `opened`, whose two field values the C# body then reads.
-ghost fn seg_open (#a: Type0) (from: Class_Cell.class_Cell__opt a) (v: Class_Cell.class_Cell a) (l: list a)
-  requires whole from l ** pure (Cons? l /\ from == Some v)
-  ensures  opened_some from v None l
+ghost fn seg_open (#a: Type0) (from: Class_Cell.class_Cell__opt a) (l: list a)
+  requires whole from l ** pure (Cons? l)
+  ensures  opened_some from B.null l
 {
-  rewrite (cell_seg 1.0R from None l) as (cell_seg 1.0R from None (L.hd l :: L.tl l));
-  unfold (cell_seg 1.0R from None (L.hd l :: L.tl l));
-  with w r. assert (B.pts_to w #1.0R r);
-  rewrite each w as v;
-  rewrite (B.pts_to v #1.0R r)
-       as (B.pts_to v ({ Class_Cell.fld_value = r.Class_Cell.fld_value; Class_Cell.fld_next = r.Class_Cell.fld_next }));
-  fold (opened from v r.Class_Cell.fld_value r.Class_Cell.fld_next None l);
+  rewrite (cell_seg 1.0R from B.null l) as (cell_seg 1.0R from B.null (L.hd l :: L.tl l));
+  unfold (cell_seg 1.0R from B.null (L.hd l :: L.tl l));
+  with r. assert (B.pts_to from #1.0R r);
+  rewrite (B.pts_to from #1.0R r)
+       as (B.pts_to from ({ Class_Cell.fld_value = r.Class_Cell.fld_value; Class_Cell.fld_next = r.Class_Cell.fld_next }));
+  fold (opened from r.Class_Cell.fld_value r.Class_Cell.fld_next B.null l);
 }
 
 /// The step. `seg_advance` moves the split point one cell to the right: the cell just
@@ -304,22 +300,22 @@ ghost fn seg_open (#a: Type0) (from: Class_Cell.class_Cell__opt a) (v: Class_Cel
 /// reports what was read, which is how a C# body learns that the value it just took out of
 /// the cell is element `i` of the list it was given.
 ghost fn seg_advance (#a: Type0)
-    (head from: Class_Cell.class_Cell__opt a) (v: Class_Cell.class_Cell a)
+    (head from: Class_Cell.class_Cell__opt a)
     (value: a) (next: Class_Cell.class_Cell__opt a) (i: int) (l: list a)
   requires seg head from (CL.take l i) **
-           opened from v value next None (CL.drop l i) **
+           opened from value next B.null (CL.drop l i) **
            pure (0 <= i /\ i < L.length l)
   ensures  seg head next (CL.take l (i + 1)) **
-           seg next None (CL.drop l (i + 1)) **
+           seg next B.null (CL.drop l (i + 1)) **
            pure ((0 <= i /\ i < L.length l) ==> value == L.index l i)
 {
   drop_step l i;
   take_step l i;
-  unfold (opened from v value next None (CL.drop l i));
-  with tl. assert (cell_seg 1.0R next None tl);
-  rewrite (cell_seg 1.0R next None tl)
-       as (cell_seg 1.0R next None (CL.drop l (i + 1)));
-  seg_snoc head from v value next (CL.take l i);
+  unfold (opened from value next B.null (CL.drop l i));
+  with tl. assert (cell_seg 1.0R next B.null tl);
+  rewrite (cell_seg 1.0R next B.null tl)
+       as (cell_seg 1.0R next B.null (CL.drop l (i + 1)));
+  seg_snoc head from value next (CL.take l i);
   rewrite (cell_seg 1.0R head next (L.append (CL.take l i) [value]))
        as (cell_seg 1.0R head next (CL.take l (i + 1)));
 }
@@ -332,13 +328,13 @@ ghost fn seg_advance (#a: Type0)
 /// compose at any split point, not only at the end.
 ghost fn seg_close (#a: Type0)
     (head from: Class_Cell.class_Cell__opt a) (i: int) (l: list a)
-  requires seg head from (CL.take l i) ** seg from None (CL.drop l i)
+  requires seg head from (CL.take l i) ** seg from B.null (CL.drop l i)
   ensures  whole head l
 {
-  seg_append head from None (CL.take l i) (CL.drop l i);
+  seg_append head from B.null (CL.take l i) (CL.drop l i);
   CL.take_drop l i;
-  rewrite (cell_seg 1.0R head None (L.append (CL.take l i) (CL.drop l i)))
-       as (cell_seg 1.0R head None l);
+  rewrite (cell_seg 1.0R head B.null (L.append (CL.take l i) (CL.drop l i)))
+       as (cell_seg 1.0R head B.null l);
 }
 
 /// Reaching `null` ends the walk: the counter has arrived at the length, and the list comes
@@ -346,8 +342,8 @@ ghost fn seg_close (#a: Type0)
 ghost fn seg_finish (#a: Type0)
     (head from: Class_Cell.class_Cell__opt a) (i: int) (l: list a)
   requires seg head from (CL.take l i) **
-           seg from None (CL.drop l i) **
-           pure (0 <= i /\ i <= L.length l /\ from == None)
+           seg from B.null (CL.drop l i) **
+           pure (0 <= i /\ i <= L.length l /\ B.is_null from)
   ensures  whole head l ** pure (i == L.length l)
 {
   seg_at_end from i l;

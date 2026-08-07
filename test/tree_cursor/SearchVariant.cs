@@ -90,26 +90,26 @@ public static class SearchVariant
             }
             else
             {
-                DescentProof.Open(at, at, Descent.Sub(t.Value, key, steps));
+                DescentProof.Open(at, Descent.Sub(t.Value, key, steps));
                 int here = at.key;
                 T payload = at.value;
                 Knot<T>? lo = at.left;
                 Knot<T>? hi = at.right;
                 if (here > key)
                 {
-                    DescentProof.Left(root, at, at, payload, lo, hi, key, steps, t);
+                    DescentProof.Left(root, at, payload, lo, hi, key, steps, t);
                     steps = steps + 1;
                     at = lo;
                 }
                 else if (here < key)
                 {
-                    DescentProof.Right(root, at, at, payload, lo, hi, key, steps, t);
+                    DescentProof.Right(root, at, payload, lo, hi, key, steps, t);
                     steps = steps + 1;
                     at = hi;
                 }
                 else
                 {
-                    DescentProof.Found(at, at, payload, lo, hi, key, steps, payload, t);
+                    DescentProof.Found(at, payload, lo, hi, key, steps, payload, t);
                     answer = true;
                     going = 0;
                 }

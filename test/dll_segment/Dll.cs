@@ -57,18 +57,17 @@ public static class Dll
         => throw new InvalidOperationException();
 
     /// <summary>
-    /// <see cref="Seg"/> with its first node unfolded. <paramref name="from"/> and
-    /// <paramref name="node"/> are the same node named twice — once as the nullable cursor
-    /// the caller's contract talks about, once as the reference a field access reads
-    /// through — which is what lets a C# body open a segment without a refined type.
+    /// <see cref="Seg"/> with its first node unfolded. The node is named once: R10.2 makes
+    /// <c>DNode</c> and <c>DNode?</c> one Pulse type, so the cursor the contract talks about
+    /// is already the reference a field access reads through.
     /// </summary>
     [SpecOp("DllSeg.opened")]
-    public static SlProp Opened(DNode? from, DNode node, DNode? prev, DNode? to, DNode? last,
+    public static SlProp Opened(DNode? from, DNode? prev, DNode? to, DNode? last,
                                 SpecList<SpecInt> values) => throw new InvalidOperationException();
 
     /// <summary>The ownership a freshly allocated node has: its three field values.</summary>
     [SpecOp("DllSeg.cell")]
-    public static SlProp Cell(DNode node, SpecInt value, DNode? prev, DNode? next)
+    public static SlProp Cell(DNode? node, SpecInt value, DNode? prev, DNode? next)
         => throw new InvalidOperationException();
 }
 
@@ -103,19 +102,19 @@ public static class DllProof
 
     /// <summary>Open the first node of a non-empty segment.</summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("DllSeg.seg_open $(from) $(node) $(prev) $(to) $(last) $(values)")]
+    [PulseBody("DllSeg.seg_open $(from) $(prev) $(to) $(last) $(values)")]
     [Requires("Dll.Seg(from, prev, to, last, values)")]
-    [Requires("!values.IsEmpty && from == node")]
-    [Ensures("Dll.Opened(from, node, prev, to, last, values)")]
-    public static void Open(DNode? from, DNode node, DNode? prev, DNode? to, DNode? last,
+    [Requires("!values.IsEmpty")]
+    [Ensures("Dll.Opened(from, prev, to, last, values)")]
+    public static void Open(DNode? from, DNode? prev, DNode? to, DNode? last,
                             Ghost<SpecList<SpecInt>> values) { }
 
     /// <summary>Close it again, at whatever left boundary its <c>prev</c> field now holds.</summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("DllSeg.seg_close $(from) $(node) $(prev) $(to) $(last) $(values)")]
-    [Requires("Dll.Opened(from, node, prev, to, last, values)")]
+    [PulseBody("DllSeg.seg_close $(from) $(prev) $(to) $(last) $(values)")]
+    [Requires("Dll.Opened(from, prev, to, last, values)")]
     [Ensures("Dll.Seg(from, prev, to, last, values)")]
-    public static void Close(DNode? from, DNode node, DNode? prev, DNode? to, DNode? last,
+    public static void Close(DNode? from, DNode? prev, DNode? to, DNode? last,
                              Ghost<SpecList<SpecInt>> values) { }
 
     /// <summary>Push a node the caller owns outright onto the front of a segment.</summary>
@@ -124,6 +123,6 @@ public static class DllProof
     [Requires("Dll.Cell(node, value, prev, next)")]
     [Requires("Dll.Seg(next, node, to, last, values)")]
     [Ensures("Dll.Seg(node, prev, to, last, SpecList.Cons(value, values))")]
-    public static void Cons(DNode node, SpecInt value, DNode? prev, DNode? next, DNode? to,
+    public static void Cons(DNode? node, SpecInt value, DNode? prev, DNode? next, DNode? to,
                             DNode? last, Ghost<SpecList<SpecInt>> values) { }
 }

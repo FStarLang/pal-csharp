@@ -88,7 +88,7 @@ public static class Chain
     /// <c>next</c> field is a pointer, and no specification of the contents mentions it.
     /// </summary>
     [SpecOp("CellSeg.opened_some")]
-    public static SlProp Opened<T>(Cell<T>? from, Cell<T> cell, Cell<T>? to, SpecList<T> values)
+    public static SlProp Opened<T>(Cell<T>? from, Cell<T>? to, SpecList<T> values)
         => throw new InvalidOperationException();
 
     /// <summary>
@@ -97,18 +97,14 @@ public static class Chain
     /// heap has been read, which is what an iterative walk needs and a recursive one does
     /// not. A C# body reaches it the only way it can — by reading the fields — and then names
     /// the locals it read into.
-    ///
-    /// <para><paramref name="from"/> and <paramref name="cell"/> are the same cell named
-    /// twice: once as the nullable cursor the invariant talks about, once as the reference a
-    /// field access reads through (R10.2c).</para>
     /// </summary>
     /// <summary>The ownership a freshly allocated cell has: its two field values.</summary>
     [SpecOp("CellSeg.held")]
-    public static SlProp Held<T>(Cell<T> cell, T value, Cell<T>? next)
+    public static SlProp Held<T>(Cell<T>? cell, T value, Cell<T>? next)
         => throw new InvalidOperationException();
 
     [SpecOp("CellSeg.opened")]
-    public static SlProp OpenedAt<T>(Cell<T>? from, Cell<T> cell, T value, Cell<T>? next,
+    public static SlProp OpenedAt<T>(Cell<T>? from, T value, Cell<T>? next,
                                      Cell<T>? to, SpecList<T> values)
         => throw new InvalidOperationException();
 }
@@ -149,7 +145,7 @@ public static class ChainProof
     [Requires("Chain.Held(cell, value, next)")]
     [Requires("Chain.Whole(next, xs)")]
     [Ensures("Chain.Whole(cell, SpecList.Cons(value, xs))")]
-    public static void Push<T>(Cell<T> cell, T value, Cell<T>? next, Ghost<SpecList<T>> xs) { }
+    public static void Push<T>(Cell<T>? cell, T value, Cell<T>? next, Ghost<SpecList<T>> xs) { }
 
     /// <summary>
     /// The loop condition, stated once so that no C# body has to reason about it. The null
@@ -166,17 +162,16 @@ public static class ChainProof
     public static void AtEnd<T>(Cell<T>? from, SpecInt i, Ghost<SpecList<T>> xs) { }
 
     /// <summary>
-    /// Open the first cell of a non-empty suffix, so that its two fields can be read.
-    /// <paramref name="from"/> and <paramref name="cell"/> are the same cell named twice —
-    /// once as the nullable cursor the invariant talks about, once as the reference a field
-    /// access reads through (R10.2c).
+    /// Open the first cell of a non-empty suffix, so that its two fields can be read. The
+    /// cursor is named once: R10.2 makes <c>Cell&lt;T&gt;</c> and <c>Cell&lt;T&gt;?</c> one
+    /// Pulse type, so the reference a field access reads through is the cursor itself.
     /// </summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("CellSeg.seg_open $(from) $(cell) $(rest)")]
+    [PulseBody("CellSeg.seg_open $(from) $(rest)")]
     [Requires("Chain.Whole(from, rest)")]
-    [Requires("!rest.IsEmpty && from == cell")]
-    [Ensures("Chain.Opened(from, cell, null, rest)")]
-    public static void Open<T>(Cell<T>? from, Cell<T> cell, Ghost<SpecList<T>> rest) { }
+    [Requires("!rest.IsEmpty")]
+    [Ensures("Chain.Opened(from, null, rest)")]
+    public static void Open<T>(Cell<T>? from, Ghost<SpecList<T>> rest) { }
 
     /// <summary>
     /// The step: move the split point one cell to the right. The cell just opened is
@@ -191,14 +186,14 @@ public static class ChainProof
     /// <c>i &lt; xs.Length</c> is a hypothesis.</para>
     /// </summary>
     [Lemma, System.Diagnostics.Conditional("PAL")]
-    [PulseBody("CellSeg.seg_advance $(head) $(from) $(cell) $(value) $(next) $(i) $(xs)")]
+    [PulseBody("CellSeg.seg_advance $(head) $(from) $(value) $(next) $(i) $(xs)")]
     [Requires("Chain.Seg(head, from, SpecList.Take(xs, i))")]
-    [Requires("Chain.OpenedAt(from, cell, value, next, null, SpecList.Drop(xs, i))")]
+    [Requires("Chain.OpenedAt(from, value, next, null, SpecList.Drop(xs, i))")]
     [Requires("0 <= i && i < xs.Length")]
     [Ensures("Chain.Seg(head, next, SpecList.Take(xs, i + 1))")]
     [Ensures("Chain.Whole(next, SpecList.Drop(xs, i + 1))")]
     [Ensures("Pal.Same(value, xs[i])")]
-    public static void Advance<T>(Cell<T>? head, Cell<T>? from, Cell<T> cell, T value,
+    public static void Advance<T>(Cell<T>? head, Cell<T>? from, T value,
                                   Cell<T>? next, SpecInt i, Ghost<SpecList<T>> xs) { }
 
     /// <summary>

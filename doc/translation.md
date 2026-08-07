@@ -132,6 +132,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F72 | **A branching cursor needs no more loop machinery than a linear one.** A *search* path is determined by the tree and the key, both fixed for the loop, so a one-hole context is as much a function of the counter as a prefix is. The context lemmas recurse on the **tree** (`decreases t`), which keeps the counter an unrefined `int`. | `test/pulse_facts/TreeCursorFacts.fst:dsub`, `dctx`, `path_append`, `path_close`. |
 | F73 | **An `exists*` binder that appears only inside `pure` can never be solved.** Pulse's matcher recovers a binder from the `pts_to`s it unifies; folding a predicate whose existential has no resource to be recovered from fails with "Cannot check relation with uvars". This is what decides whether a predicate may hide a machine value (R16.3). | Reproduced while writing `TreeCursorFacts.knot_open`; resolved by the explicit-field-plus-wrapper shape now in `KnotPath.fst`. |
 | F74 | **Pulse cannot disambiguate two conjuncts of one predicate whose only difference is a pointer just read from the heap.** The fix is definitional, not a lemma: make each conjunct's model half a total projection (`subl`/`subr`) of a model the invariant already names (R16.2). | Reproduced in `TreeCursorFacts.knot_open`; the projections are in `KnotPath.fst`. |
+| F76 | **A Pulse `box` is already a nullable pointer.** `Pulse.Lib.Box` exports `null`, `is_null (r: box a) : b:bool{b <==> r == null}` and `pts_to_not_null`. So `option (box …)` is a *second* nullability layer over one that already exists, and its entire content is the two coercions R10.2b/R10.2c used to describe. Replacing it with a refinement (`class_C = b: class_C__opt { not (B.is_null b) }`) makes both coercions the identity text, deletes a `pure`-trapped existential from every recursive invariant (cf. F73), and lets each user-written cursor lemma take its cursor once instead of twice. | `test/pulse_facts/NullFacts.fst` N1–N7, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Box.fsti:33,35,108`. Relied on by R10.2, R10.2b, R10.2c, R10.2d. |
+| F77 | **Pulse does not see through an ordinary `let` when matching resources.** `class_C__inv this p m` and `class_C__inv_opt this p m` are the same term after delta, but a goal stated with one is not found in a context holding the other; an explicit `rewrite … as …` is required. This is why R10.2b being the identity *conversion* still leaves `class_C__as_opt` and `class_C__intro` in place as one-line rewrite lemmas rather than deleting them. | Reproduced in `test/pulse_facts/NullFacts.fst` while writing `inv_share`/`inv_gather_gen`. |
 | F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
@@ -3174,60 +3176,65 @@ noeq type class_Node__raw = {
   fld_value: I32.t;
   fld_next: class_Node__opt;
 }
-and class_Node = B.box class_Node__raw
-and class_Node__opt = option class_Node
+and class_Node__opt = B.box class_Node__raw
+and class_Node = b: class_Node__opt { not (B.is_null b) }
 ```
 
-**R10.2.** `C?` is `option C`. Nullability is not a refinement of the reference type and
-not a separate pointer kind. That choice is what makes the null test a *pattern match* and
-therefore what makes the base case of the induction reachable by the prover: `x == None` on
-one side, `[]` on the other, and `class_C__cases` (R10.4) bridging them.
+**R10.2.** `C?` is `B.box C__raw`, and `C` is its **non-null refinement**. A Pulse `box` is
+already a nullable pointer (F76): the library gives `B.null`, `B.is_null` with
+`b <==> r == null`, and `B.pts_to_not_null`. C#'s `C` and `C?` are likewise one runtime type
+plus an annotation. So the honest image of the pair is one type plus a refinement, and the
+subtyping `class_C <: class_C__opt` is F*'s ordinary refinement subtyping.
 
-`Box.null` and `Box.is_null` exist (F14) and would have been the other candidate. They are
-rejected: `is_null` is a pure function on a `box`, so the *type* would not record that a
-non-null reference had been established, and every field access would carry a `pure` side
-condition rather than being ruled out by typing. pal-csharp does no C extraction (the
-executable artifact is the original C#), so `option` costs nothing.
+The null test is then `B.is_null x`, whose boolean is *definitionally* the equation
+`x == B.null`, so the base case of the induction stays reachable by the prover: `pure (x ==
+B.null)` on one side, `[]` on the other, and `class_C__cases` (R10.4) bridging them — the
+same shape as before, with the constructor replaced by a decidable equality.
 
-**R10.2a.** A nullable reference is *owned through the option*: the resource for a slot of
-type `C?` is `class_C__inv_opt x #p m`, not `class_C__inv`. R10.3a defines the non-null
-invariant in terms of the nullable one, so every §3, §4 and §5 rule that mentions
+> *Earlier revisions of this rule made `C?` be `option class_C` and **rejected**
+> `B.null`/`B.is_null` on the grounds that "the type would not record that a non-null
+> reference had been established, so every field access would carry a `pure` side condition
+> rather than being ruled out by typing". **Since revised.** The premise was wrong: a
+> refinement type *does* record it, and records it more usably. Under `option` the fact
+> available was `Some? x`, a fact about the *encoding*; under the refinement it is
+> `not (B.is_null x)`, which is exactly the annotation the C# programmer wrote. The option
+> layer turned out to be a second nullability layer over one that already existed, and its
+> entire content was the two coercions R10.2b/R10.2c used to describe.*
+
+**R10.2a.** A nullable reference is *owned through the nullable type*: the resource for a
+slot of type `C?` is `class_C__inv_opt x #p m`, not `class_C__inv`. R10.3a defines the
+non-null invariant in terms of the nullable one, so every §3, §4 and §5 rule that mentions
 `class_C__inv` keeps working with no case for recursion.
 
 **R10.2b.** A non-null `C` used where a `C?` is expected — an argument, a `return`, the
-right-hand side of a field write — is an *injection*, not a no-op. C# calls it an identity
-conversion because nullability is an annotation rather than a type; the encoding disagrees,
-because `C` is a box and `C?` is an `option` of one. So the value becomes `Some e` and the
-invariant is moved to the injected form by one derived lemma:
+right-hand side of a field write — is **the identity**. C# calls it an identity conversion
+because nullability is an annotation rather than a type, and R10.2 makes the encoding agree:
+`class_C` is a refinement of `class_C__opt`, so the term is already at the wider type. No
+coercion is emitted and no lemma is needed to move the invariant, because
+`class_C__inv this p m` *is* `class_C__inv_opt this p m` (R10.3a).
 
-```fstar
-ghost fn class_Node__as_opt (x: class_Node) (#p: perm) (#m: class_Node__model)
-  requires class_Node__inv x #p m
-  ensures  class_Node__inv_opt (Some x) p m
-```
+**R10.2c.** The converse is also the identity *text*, but not a free step: a `C?` used where
+a `C` is expected obliges the solver to discharge `not (B.is_null e)`. In C# that position is
+spelled with the null-forgiving operator, `f(x!)`, or is reached by flow narrowing inside an
+`if (x != null)` branch. Both work, and for the same reason: the branch condition C#'s own
+flow analysis used is the hypothesis F* discharges the refinement from. So `f(x)` and `f(x!)`
+translate identically (R10.5 makes `!` transparent), and neither needs the emitter to read
+flow analysis — the SMT context already has what the branch put there.
 
-The rule fires at the point the *expected type* is known — the emitter's three positions
-above — and never off Roslyn's flow analysis, which narrows a nullable local to non-null
-inside a branch and would make the same expression an injection in one place and not in
-another. Whether a name is nullable is read off its **declaration**.
+R10.2b and R10.2c therefore have **no emitter component at all**, in code or in
+specification position. That is the whole of what M12 removed: `SpecEmitter.Argument`'s
+nullable arms, the `(Some …)`/`(Some?.v …)` wrappers, the widening at an equality, the
+`Slot.NonNull` distinction, and the `class_C__as_opt` lemma's reason to exist. It also
+retires a wrinkle: specification strings are bound by a shim compiled with `#nullable
+disable`, so a type recovered from the shim's symbols could never distinguish `C` from `C?`
+— which no longer matters, because there is nothing to distinguish them *for*.
 
-**R10.2c.** The converse. A `C?` used where a `C` is expected becomes `Some?.v e`. In C#
-this position is spelled with the null-forgiving operator, `f(x!)`, or is reached by flow
-narrowing inside an `if (x != null)` branch; both are the same rule, because R10.5 makes `!`
-transparent and R10.2b's last paragraph refuses to read flow analysis. As with R10.2b, the
-projection is driven by the **declared parameter type** of the callee, so `f(x)` and `f(x!)`
-translate identically.
-
-R10.2b and R10.2c apply in *specification* position as well as in code — an argument of a
-`[SpecOp]` (R12.2) or of a `[Lemma]` (R12.7) is coerced exactly as a call argument is. There
-is one wrinkle worth stating, because getting it wrong produces silence rather than an
-error. Specification strings are bound by a generated shim compiled with `#nullable
-disable`, so a type recovered from the *shim's* symbols can never distinguish `C` from `C?`.
-The coercion is therefore driven by the type the **emitted term** carries, which comes from
-the real declaration the term names. Where a term has no such type — a bare `null`, or a
-construct the scope does not type — no coercion is emitted. That is conservative rather than
-wrong: the worst case is an "ill-typed term" reported against the annotation, never a silent
-change of meaning.
+**R10.2d.** Allocation is where the refinement is *established*. `B.alloc` returns
+`class_C__opt`; a constructor returns `class_C`. The bridging step is `B.pts_to_not_null`,
+applied to the `pts_to` the allocation just produced, and it is emitted immediately after
+every `B.alloc` (R10.6a, R12.4). This is not the emitter inventing a proof: `new` is
+non-null in C#, the surface type already says so, and the step that discharges it is a Pulse
+library lemma applied uniformly.
 
 ### 10.3 The invariant
 
@@ -3238,14 +3245,18 @@ by cases on the **model**, with `decreases` on the model (F36):
 let rec class_Node__inv_opt ([@@@mkey] x: class_Node__opt) (p: perm) (m: class_Node__model)
   : Tot slprop (decreases m)
   = match m with
-    | [] -> pure (x == None)
+    | [] -> pure (x == B.null)
     | hd :: tl ->
-      exists* (v: class_Node) (r: class_Node__raw).
-        pure (x == Some v) **
-        B.pts_to v #p r **
+      exists* (r: class_Node__raw).
+        B.pts_to x #p r **
         pure (hd == I32.v r.fld_value) **
         class_Node__inv_opt r.fld_next p tl
 ```
+
+Note what the cons case does *not* have. Under the option encoding it bound a second
+existential `v` for the node, reachable only through `pure (x == Some v)` — precisely the
+shape R16.3 identifies as one Pulse's matcher cannot solve for. R10.2 removes it at the
+source, and with it the commonest instance of that problem.
 
 Three things are load-bearing and none is a choice.
 
@@ -3261,8 +3272,12 @@ Three things are load-bearing and none is a choice.
 ```fstar
 let class_Node__inv (this: class_Node) (#[T.exact (`1.0R)] p: perm) (m: class_Node__model)
   : slprop
-  = class_Node__inv_opt (Some this) p m
+  = class_Node__inv_opt this p m
 ```
+
+The argument is `this` and not an injection of it, because R10.2 makes the two types one.
+That is what makes R10.2b free, and it is why the derived `class_C__as_opt` and
+`class_C__intro` lemmas are now one `rewrite` each rather than a re-fold.
 
 so a recursive class is an ordinary class whose invariant happens to be defined by
 recursion, and R4.5's contracts, R4.10's fold/unfold window and R3.10b's nesting need no new
@@ -3355,20 +3370,24 @@ apply here unchanged, and it is the whole of the improvement over PAL's `_includ
 
 | Lemma | Meaning |
 |---|---|
-| `class_C__cases x` | preserves the invariant; `Some? x <==> <the model is a K>`. The bridge between the C# null test and the induction. |
-| `class_C__nil_case x` | preserves; `x == None` implies the model is `<Nil>`. |
-| `class_C__elim_nil x` | **consumes**; `x == None` implies the model is `<Nil>`. |
-| `class_C__intro_nil x p` | `x == None` gives the invariant at `<Nil>`. |
-| `class_C__elim_cons x` | on `x: C?{Some? x}`, gives up the head cell and each sub-invariant, with the model equation. |
+| `class_C__cases x` | preserves the invariant; `not (B.is_null x) <==> <the model is a K>`. The bridge between the C# null test and the induction. |
+| `class_C__nil_case x` | preserves; `B.is_null x` implies the model is `<Nil>`. |
+| `class_C__elim_nil x` | **consumes**; `B.is_null x` implies the model is `<Nil>`. |
+| `class_C__intro_nil x p` | `B.is_null x` gives the invariant at `<Nil>`. |
+| `class_C__elim_cons x` | on `x: class_C` — R10.2's refinement type *is* "known non-null", so this needs no extra binder and no `pure` — gives up the head cell and each sub-invariant, with the model equation. |
 | `class_C__intro_cons x` | its inverse. |
 
-Two more are derived from `intro_cons` and are what makes R10.6a's constructor and R10.2b's
-injection one line each:
+The forward halves of `cases` and `nil_case` are where the one cost of R10.2 is paid. Under
+the option encoding `Some? x` held definitionally; under the box encoding non-nullness must
+be recovered from the `pts_to`, by **`B.pts_to_not_null`**. That is a Pulse library lemma
+applied at a fixed place, so it is a step, not a special case.
+
+Two more are derived from `intro_cons`, and R10.2 has reduced both to a single `rewrite`:
 
 | Lemma | Meaning |
 |---|---|
-| `class_C__intro x` | R10.4c. `intro_cons` at the **non-null** form: a constructor's result is a `C`, and its postcondition owes `class_C__inv`, not the invariant of an option that happens to be `Some`. |
-| `class_C__as_opt x` | R10.2b's injection. |
+| `class_C__intro x` | R10.4c. `intro_cons` at the **non-null** form: a constructor's result is a `C`, and its postcondition owes `class_C__inv`. Since R10.3a defines `class_C__inv this` as `class_C__inv_opt this`, this is now `intro_cons` plus one rewrite through that definition. |
+| `class_C__as_opt x` | R10.2b used to be an injection; it is now the identity, so this lemma survives only because `class_C__inv` is an ordinary `let` that Pulse's matcher does not see through (F77). It is one `rewrite`. |
 
 `nil_case` and `elim_nil` differ only in whether the invariant survives. Which one the
 emitter uses at a null test is read off the *contract* — whether the postcondition still
@@ -3411,17 +3430,18 @@ the lemmas go — the user invokes nothing:
 `class_C__cases` comes first and unconditionally: it is what tells the prover that the two
 case analyses — on the reference, which the program does, and on the model, which the
 predicate does — agree. Inside the `else` branch every field of `n` is accessible by R3.11's
-ordinary rules, reached through `Some?.v var_n`, and every field *write* by R3.12's (F39).
+ordinary rules, reached through `var_n` itself, and every field *write* by R3.12's (F39).
 
 The tests `n == null`, `n != null`, `null == n` and `null != n` all lower to the same
-`None? var_n`, with the branches exchanged where C# exchanges them. A null test that is not
+`B.is_null var_n`, with the branches exchanged where C# exchanges them. A null test that is not
 the condition of an `if` — inside a `&&`, or assigned to a `bool` — is PALCS0569: the window
 it would open has no branch to be the extent of.
 
-**R10.7a.** Inside the window the slot's *type* stays nullable and its binder stays
-`var_n`; what `elim_cons` adds is a non-null projection `Some?.v var_n` for field access.
-That is why `return n` and `Append(n.next, y)` inside the branch still produce the option
-unchanged, with no re-binding and no injection.
+**R10.7a.** Inside the window the slot's binder stays `var_n` and `elim_cons` adds a
+`B.pts_to var_n`; the non-nullness the branch established is a hypothesis, so R10.2's
+refinement is discharged wherever a `C` is expected. That is why `return n` and
+`Append(n.next, y)` inside the branch still produce the reference unchanged, with no
+re-binding, no projection and no injection.
 
 **R10.7b.** Branch-local mutation has to be written in **tail position**. Two arms that
 leave the object in *different* states — one subtree replaced, the other not — cannot be
@@ -3789,10 +3809,10 @@ Consequently, and mechanically:
 
 * A `[Plain]` parameter contributes a **binder and no resource** to a contract. Nothing is
   owned by virtue of a reference's type; ownership is only ever what a clause says.
-* `null` on a plain class is `None`, with **no `intro_nil`** — there is no derived predicate
-  for a lemma to be about (R12.2).
-* A non-null reference used where a nullable one is expected is `Some x`, with **no
-  `__as_opt`** — there is no invariant to re-read at the injected form.
+* `null` on a plain class is `B.null`, with **no `intro_nil`** — there is no derived
+  predicate for a lemma to be about (R12.2).
+* A non-null reference used where a nullable one is expected is the reference itself, by
+  R10.2's subtyping, with **no `__as_opt`** — there is no invariant to re-read.
 * A method returning a plain class returns a **bare reference**: no existentially quantified
   result model, no `__inv` conjunct. `Result` denotes the reference itself.
 
@@ -3911,13 +3931,14 @@ wrong produces failures that look like unrelated problems:
 * An `ensures` cannot mention `L.hd l` — `Cons? l` is not in scope there. Existentially
   quantify the tail and state `pure (l == I32.v r.fld_value :: tl)`, which is the idiom the
   emitter already uses.
-* A binder introduced by `with v r.` is **ghost** and cannot feed a stateful call or a box
-  write. The node has to be *read* (`let node = B.op_Bang (Some?.v from)`), which is exactly
-  what the emitter does anyway (R3.8).
-* `elim_cons` should take a **refined** binder `(from: …__opt { Some? from })` and
-  `rewrite each v as (Some?.v from)`, so that it ensures `B.pts_to (Some?.v from) …`
-  directly and the C# body can read a field of a *program* pointer. Getting `Some? from` in
-  the first place is its own preserving lemma, `some`.
+* A binder introduced by `with r.` is **ghost** and cannot feed a stateful call or a box
+  write. The node has to be *read* (`let node = B.op_Bang from`), which is exactly what the
+  emitter does anyway (R3.8).
+* `elim_cons` should state its `pts_to` **at the cursor the caller passed**, so that the C#
+  body can read a field of a *program* pointer. Under R10.2 that is automatic: the cursor is
+  the pointer. (Before R10.2 it needed a refined binder `(from: …__opt { Some? from })` and
+  a `rewrite each v as (Some?.v from)`, plus a separate preserving lemma to establish
+  `Some? from` in the first place — all three are gone.)
 
 ### 12.5 The C# face of a user predicate (M10)
 
@@ -3964,26 +3985,36 @@ hypothesis. A `ghost fn` is a Pulse function, so it needs the same treatment, an
 whose signature mentions only what C# can name — parameters, locals, `null`, spec lists — and
 keeps every `with` and every `rewrite` inside the `.fst` file.* The obstacle this navigates
 is real and is worth recording, because it is what R12.4's advice about refined binders runs
-into. `dll_seg`'s cons case is stated over the *nullable* cursor, so eliminating it wants a
-binder `(from: class_DNode__opt { Some? from })` — and C# has no way to declare a refinement.
-The resolution is to have the predicate **name the head node twice**:
+into. A predicate's cons case is stated over the *nullable* cursor, and a C# body has to read
+a field through the very same pointer:
 
 ```fstar
 unfold
-let opened (from: class_DNode__opt) (v: class_DNode)
+let opened (from: class_DNode__opt)
            (prev to_ last: class_DNode__opt) (l: list int) : slprop
   = exists* (r: class_DNode__raw) (tl: list int).
-      B.pts_to v r **
+      B.pts_to from r **
       dll_seg 1.0R r.fld_next from to_ last tl **
-      pure (from == Some v /\ l == I32.v r.fld_value :: tl /\ r.fld_prev == prev)
+      pure (l == I32.v r.fld_value :: tl /\ r.fld_prev == prev)
 ```
 
-once as the cursor `from` the contract already talks about, and once as the box `v` a field
-access reads through, tied by `pure (from == Some v)`. The C# call `Open(from, from!, …)`
-then supplies both, R10.2c projects the second, and the resulting `B.pts_to` is syntactically
-at `Some?.v var_from` — which is what the emitter's field reads (R10.4) ask for. Note that
-the tail segment's `prev` is `from` and *not* `Some v`: that is what lets the recursive call
-`Length(from.next, from, last)` match with no `rewrite` at the call site.
+Under R10.2 this is straightforward: `DNode` and `DNode?` are one Pulse type, so the cursor
+the contract talks about *is* the reference the field access reads through. The C# call is
+`Open(from, …)` and the resulting `B.pts_to` is syntactically at `var_from`, which is what
+the emitter's field reads (R10.4) ask for. Note that the tail segment's `prev` is `from`,
+which is what lets the recursive call `Length(from.next, from, last)` match with no
+`rewrite` at the call site.
+
+> *Earlier revisions of this rule resolved the same obstacle by having the predicate **name
+> the head node twice** — once nullable, once not, tied by `pure (from == Some v)` — because
+> a binder `(from: class_DNode__opt { Some? from })` is a refinement C# cannot declare, and
+> every call site then read `Open(from, from!, …)`. **Since revised.** R10.2 removed the two
+> types, so it removed the need for the two names: every lemma in `DllSeg.fst`,
+> `CellSeg.fst` and `KnotPath.fst` now takes its cursor once, and every call site in
+> `DllOps.cs`, `Walks.cs` and `Search.cs` lost its `x, x!` pair. The residual observation
+> still stands, and is why the predicates keep their other doubled parameters: a value the
+> body learns by **reading the heap** — a `next` field, a payload — must be named explicitly
+> if a later step is to take it back as an ordinary argument (F73).*
 
 One convention has to be observed on the F* side. R4.13 sends a C# `int` into a
 specification as its mathematical value, so a predicate parameter a C# `[SpecOp]` passes an
@@ -4024,8 +4055,8 @@ be dead.
 The §7.2 detector applies: `DllOpsVariant.cs` is the same two operations written with the
 null tests inverted and their branches swapped, the cursor read into a local before the
 recursive call, the allocation moved past the case split, the locals renamed and the addition
-written the other way round — and with the non-null node passed by flow narrowing rather than
-by `!`, which R10.2c makes the same translation. It verifies with no emitter change. Two
+written the other way round — and with the null test spelled the other way about, which
+R10.2c makes the same translation. It verifies with no emitter change. Two
 diagnostics cases cover PALCS0574 and PALCS0575.
 
 What §12 does *not* do is make the proofs disappear. A segment operation still costs the user
@@ -4544,6 +4575,13 @@ hidden:
 * a predicate only ever **matched as a precondition** may take a mathematical `int` with the
   machine value existentially bound, because the caller's context supplies it. `DllSeg.cell`
   is this shape.
+
+R10.2 removed the commonest instance of this rule. Under the option encoding *every*
+recursive invariant's cons case bound a node existential reachable only through
+`pure (x == Some v)`, so every user predicate imitating one inherited the problem and every
+lemma over it needed the cursor twice. The box encoding puts the `pts_to` at the cursor
+itself, so nothing has to be recovered. What survives is the case the rule was really about:
+a value the body learns by *reading the heap* and a later step takes back as an argument.
 
 **R16.4 — A model-level guard is stated over the model.** R4.13 sends a C# `int` in
 specification position into F\* as its `.v`, by *position* and not by declared type, so a

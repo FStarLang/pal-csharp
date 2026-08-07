@@ -66,16 +66,24 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine("module T = FStar.Tactics");
         sb.AppendLine();
 
-        // R10.1/F35. The representation, the reference and the nullable reference are one
+        // R10.1/F35. The representation, the nullable reference and the reference are one
         // mutually recursive group. A `type … and …` may mix a record with a type
         // abbreviation, so R3.7's record and R3.8's box come out unchanged and nothing new
         // is needed to tie the knot.
+        //
+        // R10.2 (F76). The *nullable* form is the box itself, because a Pulse `box` already
+        // is a nullable pointer: `B.null`, `B.is_null` with a decidable `<==>`, and
+        // `B.pts_to_not_null`. The non-nullable form is that same type under the refinement
+        // C# itself wrote. So `class_C` is a **subtype** of `class_C__opt` and the two
+        // coercions R10.2's option layer needed — `Some` up and `Some?.v` down — are both
+        // the identity: up by subtyping, down by a refinement check the SMT solver
+        // discharges from the branch hypothesis a null test already puts in scope.
         sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
         foreach (var f in c.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {FieldType(c, f.Type, opt, self)};");
         sb.AppendLine("}");
-        sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = B.box {raw}");
-        sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = option {self}");
+        sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = B.box {raw}");
+        sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = b: {opt} {{ not (B.is_null b) }}");
         sb.AppendLine();
 
         hierarchy.EmitModelType(sb, c);
@@ -87,11 +95,16 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
                       $"({Model}: {model})");
         sb.AppendLine($"  : Tot slprop (decreases {Model})");
         sb.AppendLine($"  = match {Model} with");
-        sb.AppendLine($"    | {NilPattern(rec)} -> pure ({Reference} == None)");
+        sb.AppendLine($"    | {NilPattern(rec)} -> pure ({Reference} == B.null)");
         sb.AppendLine($"    | {ConsPattern(rec)} ->");
-        sb.AppendLine($"      exists* ({Value}: {self}) ({Record}: {raw}).");
-        sb.AppendLine($"        pure ({Reference} == Some {Value}) **");
-        sb.AppendLine($"        B.pts_to {Value} #{Perm} {Record} **");
+        // R10.3 (F76). One binder, not two. Under the option layer the cons case had to
+        // introduce a `class_C` alongside the record and tie it to the reference with
+        // `pure (x == Some v)` — and a binder reachable only through a `pure` is exactly
+        // what F73 says Pulse's matcher cannot solve. Here the reference *is* the pointer,
+        // so the binder is the record and it is determined by the `pts_to` the matcher is
+        // already looking at.
+        sb.AppendLine($"      exists* ({Record}: {raw}).");
+        sb.AppendLine($"        B.pts_to {Reference} #{Perm} {Record} **");
         sb.AppendLine($"        pure ({Equations(c, rec)}) **");
         var conjuncts = rec.Args
             .Select((a, i) => (a, i))
@@ -103,12 +116,19 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
 
         // R10.3a. The non-null invariant every §3/§4 rule already talks about is derived,
-        // not primitive: a `C` is a `C?` that happens to be `Some`. So R4.10's model
-        // binders, R4.5's contracts and R3.10b's nested objects need no new case — a
-        // recursive class is an ordinary class whose invariant happens to be a recursion.
+        // not primitive: a `C` is a `C?` that is not null. So R4.10's model binders, R4.5's
+        // contracts and R3.10b's nested objects need no new case — a recursive class is an
+        // ordinary class whose invariant happens to be a recursion.
+        //
+        // It is the *same function* at the *same argument*: `this` coerces to the nullable
+        // type by subtyping. The fact the option layer bought — that a non-nullable
+        // reference cannot have the empty model — is kept and improved on, since
+        // `inv this p Nil` unfolds to `pure (this == B.null)`, which the refinement on
+        // `this` refutes. `Some this =!= None` was a fact about the encoding; this is the
+        // annotation the C# programmer wrote.
         sb.AppendLine($"let {Names.ClassInv(c.Name)}{tb.Implicit} (this: {self}) " +
                       $"(#[T.exact (`1.0R)] {Perm}: perm) ({Model}: {model}) : slprop =");
-        sb.AppendLine($"  {invOpt} (Some this) {Perm} {Model}");
+        sb.AppendLine($"  {invOpt} this {Perm} {Model}");
         sb.AppendLine();
 
         EmitLemmas(sb, c, rec, tb);
@@ -213,14 +233,16 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         var raw = tb.App(Names.ClassRaw(c.Name));
         var model = tb.App(Names.ClassModel(c.Name));
         var inv = Names.ClassInvOpt(c.Name);
+        // R10.2: the non-null reference type is a refinement of the nullable one, so
+        // "known non-null" is expressible as a binder type rather than a `pure`.
+        var self = tb.App(Names.ClassType(c.Name));
         var nil = NilTerm(rec);
         var cons = ConsPattern(rec);
         var recursive = rec.Args.Select((a, i) => (a, i)).Where(t => t.a is IrRecField).ToImmutableArray();
 
-        // Unfolding at the cons case leaves two existentials; naming both is required,
-        // because binding only one leaves the other a uvar and the assertion cannot be
-        // checked (F36a).
-        var witness = $"    with {Value} {Record}. assert (B.pts_to {Value} #{Perm} {Record});";
+        // Unfolding at the cons case leaves one existential (R10.3), and naming it is what
+        // puts the `pts_to` in scope for `B.pts_to_not_null` (F36a).
+        var witness = $"    with {Record}. assert (B.pts_to {Reference} #{Perm} {Record});";
 
         // -- the shape equivalence -------------------------------------------
         // R10.4a. What a client needs *before* it has tested anything: the shape of the
@@ -230,7 +252,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"ghost fn {Names.ClassCases(c.Name)}{tb.Implicit} ({Reference}: {opt}) " +
                       $"(#{Perm}: perm) (#{Model}: {model})");
         sb.AppendLine($"  preserves {inv} {Reference} {Perm} {Model}");
-        sb.AppendLine($"  ensures pure (Some? {Reference} <==> {ConsTest(rec)} {Model})");
+        sb.AppendLine($"  ensures pure (not (B.is_null {Reference}) <==> {ConsTest(rec)} {Model})");
         sb.AppendLine("{");
         sb.AppendLine($"  match {Model} {{");
         sb.AppendLine($"    {NilPattern(rec)} -> {{");
@@ -240,6 +262,10 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"    {cons} -> {{");
         sb.AppendLine($"      unfold ({inv} {Reference} {Perm} ({cons}));");
         sb.AppendLine($"  {witness}");
+        // The one step the box encoding costs that the option encoding did not: `Some? x`
+        // held definitionally, whereas non-nullness has to be got from the `pts_to`.
+        // `B.pts_to_not_null` is that step, and it is a Pulse library lemma.
+        sb.AppendLine($"      B.pts_to_not_null {Reference};");
         sb.AppendLine($"      fold ({inv} {Reference} {Perm} ({cons}));");
         sb.AppendLine("    }");
         sb.AppendLine("  }");
@@ -250,7 +276,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"ghost fn {Names.ClassNilCase(c.Name)}{tb.Implicit} ({Reference}: {opt}) " +
                       $"(#{Perm}: perm) (#{Model}: {model})");
         sb.AppendLine($"  preserves {inv} {Reference} {Perm} {Model}");
-        sb.AppendLine($"  requires pure ({Reference} == None)");
+        sb.AppendLine($"  requires pure (B.is_null {Reference})");
         sb.AppendLine($"  ensures pure ({Model} == {nil})");
         sb.AppendLine("{");
         sb.AppendLine($"  match {Model} {{");
@@ -258,6 +284,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"    {cons} -> {{");
         sb.AppendLine($"      unfold ({inv} {Reference} {Perm} ({cons}));");
         sb.AppendLine($"  {witness}");
+        sb.AppendLine($"      B.pts_to_not_null {Reference};");
         sb.AppendLine("      unreachable ()");
         sb.AppendLine("    }");
         sb.AppendLine("  }");
@@ -272,7 +299,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         // R4.10 already reads it.
         sb.AppendLine($"ghost fn {Names.ClassElimNil(c.Name)}{tb.Implicit} ({Reference}: {opt}) " +
                       $"(#{Perm}: perm) (#{Model}: {model})");
-        sb.AppendLine($"  requires {inv} {Reference} {Perm} {Model} ** pure ({Reference} == None)");
+        sb.AppendLine($"  requires {inv} {Reference} {Perm} {Model} ** pure (B.is_null {Reference})");
         sb.AppendLine($"  ensures pure ({Model} == {nil})");
         sb.AppendLine("{");
         sb.AppendLine($"  {Names.ClassNilCase(c.Name)} {Reference};");
@@ -283,7 +310,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         // -- the empty invariant, out of nothing -----------------------------
         // The empty model owns nothing, which is what makes `C? x = null;` free.
         sb.AppendLine($"ghost fn {Names.ClassIntroNil(c.Name)}{tb.Implicit} ({Reference}: {opt}) ({Perm}: perm)");
-        sb.AppendLine($"  requires pure ({Reference} == None)");
+        sb.AppendLine($"  requires pure (B.is_null {Reference})");
         sb.AppendLine($"  ensures {inv} {Reference} {Perm} {nil}");
         sb.AppendLine("{");
         sb.AppendLine($"  fold ({inv} {Reference} {Perm} {nil})");
@@ -291,19 +318,20 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
 
         // -- opening a non-null reference ------------------------------------
-        // F36b. Stated over a *refined* binder, not over a bare `class_C` and not over a
-        // plain option with `requires pure (Some? x)`: the latter is ill-typed, because the
-        // `pure` in `requires` is not in scope when the `ensures` is typed, and the former
-        // makes the client's goal `inv_opt (Some var_n)` where it holds `inv_opt var_n`.
+        // F36b. Stated over a *refined* binder rather than with `requires pure (…)`,
+        // because the `pure` in a `requires` is not in scope when the `ensures` is typed.
+        // Under R10.2's collapsed types that refined binder *is* `class_C`, so the
+        // signature says exactly what C# says: this step takes a reference known not to be
+        // null. There is no longer a second thing it could have been stated over.
         var elimResults = string.Join(" ", recursive.Select(t => Sub(t.i)));
         // Every sub-model is its own implicit: `(#m0 m2: t)` would make the second one
         // explicit, and a class with two recursive fields would be partially applied.
         var elimImplicits = string.Join(" ", recursive.Select(t => "#" + Sub(t.i)));
-        sb.AppendLine($"ghost fn {Names.ClassElimCons(c.Name)}{tb.Implicit} ({Reference}: {opt} {{ Some? {Reference} }}) " +
+        sb.AppendLine($"ghost fn {Names.ClassElimCons(c.Name)}{tb.Implicit} ({Reference}: {self}) " +
                       $"(#{Perm}: perm) (#{Model}: {model})");
         sb.AppendLine($"  requires {inv} {Reference} {Perm} {Model}");
         sb.AppendLine($"  ensures exists* ({Record}: {raw}) ({elimResults}: {model}).");
-        sb.AppendLine($"    B.pts_to (Some?.v {Reference}) #{Perm} {Record} **");
+        sb.AppendLine($"    B.pts_to {Reference} #{Perm} {Record} **");
         foreach (var (a, i) in recursive)
             sb.AppendLine($"    {inv} {Record}.{Names.Field(((IrRecField)a).Field)} {Perm} {Sub(i)} **");
         sb.AppendLine($"    pure ({Model} == {ConsTerm(c, rec, Sub)})");
@@ -315,8 +343,6 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine("    }");
         sb.AppendLine($"    {cons} -> {{");
         sb.AppendLine($"      unfold ({inv} {Reference} {Perm} ({cons}));");
-        sb.AppendLine($"  {witness}");
-        sb.AppendLine($"      rewrite each {Value} as (Some?.v {Reference});");
         sb.AppendLine("      ()");
         sb.AppendLine("    }");
         sb.AppendLine("  }");
@@ -324,19 +350,16 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
 
         // -- closing it again ------------------------------------------------
-        var some = $"(Some (Some?.v {Reference}))";
         var built = ConsTerm(c, rec, Sub);
-        sb.AppendLine($"ghost fn {Names.ClassIntroCons(c.Name)}{tb.Implicit} ({Reference}: {opt} {{ Some? {Reference} }})");
+        sb.AppendLine($"ghost fn {Names.ClassIntroCons(c.Name)}{tb.Implicit} ({Reference}: {self})");
         sb.AppendLine($"    (#{Perm}: perm) (#{Record}: {raw}) ({elimImplicits}: {model})");
-        sb.Append($"  requires B.pts_to (Some?.v {Reference}) #{Perm} {Record}");
+        sb.Append($"  requires B.pts_to {Reference} #{Perm} {Record}");
         foreach (var (a, i) in recursive)
             sb.Append($" **\n           {inv} {Record}.{Names.Field(((IrRecField)a).Field)} {Perm} {Sub(i)}");
         sb.AppendLine();
         sb.AppendLine($"  ensures {inv} {Reference} {Perm} ({built})");
         sb.AppendLine("{");
-        sb.AppendLine($"  fold ({inv} {some} {Perm} ({built}));");
-        sb.AppendLine($"  rewrite ({inv} {some} {Perm} ({built}))");
-        sb.AppendLine($"       as ({inv} {Reference} {Perm} ({built}));");
+        sb.AppendLine($"  fold ({inv} {Reference} {Perm} ({built}))");
         sb.AppendLine("}");
         sb.AppendLine();
 
@@ -354,22 +377,23 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
         sb.AppendLine($"  ensures {invNn0} this #{Perm} ({built})");
         sb.AppendLine("{");
-        sb.AppendLine($"  rewrite (B.pts_to this #{Perm} {Record}) as (B.pts_to (Some?.v (Some this)) #{Perm} {Record});");
-        sb.AppendLine($"  {Names.ClassIntroCons(c.Name)} (Some this);");
-        sb.AppendLine($"  rewrite ({inv} (Some this) {Perm} ({built}))");
+        sb.AppendLine($"  {Names.ClassIntroCons(c.Name)} this;");
+        sb.AppendLine($"  rewrite ({inv} this {Perm} ({built}))");
         sb.AppendLine($"       as ({invNn0} this #{Perm} ({built}));");
         sb.AppendLine("}");
         sb.AppendLine();
 
         // R10.2b. The injection. A `C` used where a `C?` is expected is the identity in
-        // C#, so it must be free here too: the two forms are related by R10.3a's
-        // definition and the whole lemma is the rewrite that says so.
+        // C#, and under R10.2's collapsed types it is the identity here too — `this` is
+        // already of the nullable type. What is left is not a coercion at all but the
+        // unfolding of R10.3a's abbreviation, which Pulse needs because `class_C__inv` is
+        // an ordinary `let` it does not see through.
         sb.AppendLine($"ghost fn {Names.ClassAsOpt(c.Name)}{tb.Implicit} (this: {self0}) " +
                       $"(#{Perm}: perm) (#{Model}: {model})");
         sb.AppendLine($"  requires {invNn0} this #{Perm} {Model}");
-        sb.AppendLine($"  ensures {inv} (Some this) {Perm} {Model}");
+        sb.AppendLine($"  ensures {inv} this {Perm} {Model}");
         sb.AppendLine("{");
-        sb.AppendLine($"  rewrite ({invNn0} this #{Perm} {Model}) as ({inv} (Some this) {Perm} {Model});");
+        sb.AppendLine($"  rewrite ({invNn0} this #{Perm} {Model}) as ({inv} this {Perm} {Model});");
         sb.AppendLine("}");
         sb.AppendLine();
     }
@@ -409,17 +433,17 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"  decreases {Model}");
         sb.AppendLine("{");
         sb.AppendLine($"  {Names.ClassCases(c.Name)} {Reference};");
-        sb.AppendLine($"  if (None? {Reference}) {{");
+        sb.AppendLine($"  if (B.is_null {Reference}) {{");
         sb.AppendLine($"    {Names.ClassElimNil(c.Name)} {Reference};");
         sb.AppendLine($"    {Names.ClassIntroNil(c.Name)} {Reference} {half};");
         sb.AppendLine($"    {Names.ClassIntroNil(c.Name)} {Reference} {half};");
         sb.AppendLine("  } else {");
         sb.AppendLine($"    {Names.ClassElimCons(c.Name)} {Reference};");
         sb.AppendLine($"    with {Record} {subs}. assert (" +
-                      $"B.pts_to (Some?.v {Reference}) #{Perm} {Record}" +
+                      $"B.pts_to {Reference} #{Perm} {Record}" +
                       string.Concat(recursive.Select(t =>
                           $" ** {inv} {Record}.{Names.Field(t.Field!)} {Perm} {Sub(t.Index)}")) + ");");
-        sb.AppendLine($"    B.share (Some?.v {Reference});");
+        sb.AppendLine($"    B.share {Reference};");
         foreach (var t in recursive)
             sb.AppendLine($"    {Names.ClassInvOptShare(c.Name)} {Record}.{Names.Field(t.Field!)} " +
                           $"#{Perm} #{Sub(t.Index)};");
@@ -442,23 +466,23 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine("{");
         sb.AppendLine($"  {Names.ClassCases(c.Name)} {Reference} #p #{Model};");
         sb.AppendLine($"  {Names.ClassCases(c.Name)} {Reference} #q #{Names.Alt(Model)};");
-        sb.AppendLine($"  if (None? {Reference}) {{");
+        sb.AppendLine($"  if (B.is_null {Reference}) {{");
         sb.AppendLine($"    {Names.ClassElimNil(c.Name)} {Reference} #p #{Model};");
         sb.AppendLine($"    {Names.ClassElimNil(c.Name)} {Reference} #q #{Names.Alt(Model)};");
         sb.AppendLine($"    {Names.ClassIntroNil(c.Name)} {Reference} (p +. q);");
         sb.AppendLine("  } else {");
         sb.AppendLine($"    {Names.ClassElimCons(c.Name)} {Reference} #p #{Model};");
         sb.AppendLine($"    with {Record} {subs}. assert (" +
-                      $"B.pts_to (Some?.v {Reference}) #p {Record}" +
+                      $"B.pts_to {Reference} #p {Record}" +
                       string.Concat(recursive.Select(t =>
                           $" ** {inv} {Record}.{Names.Field(t.Field!)} p {Sub(t.Index)}")) + ");");
         sb.AppendLine($"    {Names.ClassElimCons(c.Name)} {Reference} #q #{Names.Alt(Model)};");
         sb.AppendLine($"    with {Names.Alt(Record)} {altSubs}. assert (" +
-                      $"B.pts_to (Some?.v {Reference}) #q {Names.Alt(Record)}" +
+                      $"B.pts_to {Reference} #q {Names.Alt(Record)}" +
                       string.Concat(recursive.Select(t =>
                           $" ** {inv} {Names.Alt(Record)}.{Names.Field(t.Field!)} q " +
                           $"{Names.Alt(Sub(t.Index))}")) + ");");
-        sb.AppendLine($"    B.gather (Some?.v {Reference});");
+        sb.AppendLine($"    B.gather {Reference};");
         // After `gather` the context holds one box at the joined permission, under whichever
         // of the two record names the prover matched first. Renaming the other onto it is
         // what leaves exactly one candidate for every existential below.
@@ -485,11 +509,11 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         // the two forms are related by an explicit rewrite rather than by unfolding. F*
         // discharges each of these by delta.
         sb.AppendLine($"  rewrite ({invNn} this #{Perm} {Model}) " +
-                      $"as ({invOpt} (Some this) {Perm} {Model});");
-        sb.AppendLine($"  {Names.ClassInvOptShare(c.Name)} (Some this);");
-        sb.AppendLine($"  rewrite ({invOpt} (Some this) {half} {Model}) " +
+                      $"as ({invOpt} this {Perm} {Model});");
+        sb.AppendLine($"  {Names.ClassInvOptShare(c.Name)} this;");
+        sb.AppendLine($"  rewrite ({invOpt} this {half} {Model}) " +
                       $"as ({invNn} this #{half} {Model});");
-        sb.AppendLine($"  rewrite ({invOpt} (Some this) {half} {Model}) " +
+        sb.AppendLine($"  rewrite ({invOpt} this {half} {Model}) " +
                       $"as ({invNn} this #{half} {Model});");
         sb.AppendLine("}");
         sb.AppendLine();
@@ -501,11 +525,11 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine($"  ensures {invNn} this #(p +. q) {Model} ** " +
                       $"pure ({Model} == {Names.Alt(Model)})");
         sb.AppendLine("{");
-        sb.AppendLine($"  rewrite ({invNn} this #p {Model}) as ({invOpt} (Some this) p {Model});");
+        sb.AppendLine($"  rewrite ({invNn} this #p {Model}) as ({invOpt} this p {Model});");
         sb.AppendLine($"  rewrite ({invNn} this #q {Names.Alt(Model)}) " +
-                      $"as ({invOpt} (Some this) q {Names.Alt(Model)});");
-        sb.AppendLine($"  {Names.ClassInvOptGather(c.Name)} (Some this) p q;");
-        sb.AppendLine($"  rewrite ({invOpt} (Some this) (p +. q) {Model}) " +
+                      $"as ({invOpt} this q {Names.Alt(Model)});");
+        sb.AppendLine($"  {Names.ClassInvOptGather(c.Name)} this p q;");
+        sb.AppendLine($"  rewrite ({invOpt} this (p +. q) {Model}) " +
                       $"as ({invNn} this #(p +. q) {Model});");
         sb.AppendLine("}");
         sb.AppendLine();

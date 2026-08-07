@@ -22,10 +22,10 @@ public static class DllOpsVariant
         DllProof.Cases(cursor, back, final, items);
         if (cursor != null)
         {
-            DllProof.Open(cursor, cursor, back, null, final, items);
+            DllProof.Open(cursor, back, null, final, items);
             DNode? onward = cursor.next;
             int seen = Count(onward, cursor, final);
-            DllProof.Close(cursor, cursor, back, null, final, items);
+            DllProof.Close(cursor, back, null, final, items);
             return 1 + seen;
         }
         return 0;
@@ -45,9 +45,9 @@ public static class DllOpsVariant
         }
 
         DNode fresh = new DNode { value = x, prev = null, next = first };
-        DllProof.Open(first, first, null, null, stop, items);
+        DllProof.Open(first, null, null, stop, items);
         first.prev = fresh;
-        DllProof.Close(first, first, fresh, null, stop, items);
+        DllProof.Close(first, fresh, null, stop, items);
         DllProof.Cons(fresh, x, null, first, null, stop, items);
         return fresh;
     }

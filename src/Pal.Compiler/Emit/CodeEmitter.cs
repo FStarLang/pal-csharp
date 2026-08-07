@@ -330,6 +330,14 @@ public sealed class CodeEmitter(
         }
 
         Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
+        // R10.6b. `new` never returns null in C#, and under R10.2 that is a *typing*
+        // obligation rather than a fact about the encoding: the constructor returns
+        // `class_C`, the non-null refinement, while `B.alloc` returns `class_C__opt`.
+        // The step that bridges them is `B.pts_to_not_null`, a Pulse library lemma
+        // applied to the `pts_to` the allocation just produced. The emitter is not
+        // inventing a proof here — it is discharging, once and uniformly, the C#
+        // guarantee that the surface type already states.
+        Line($"B.pts_to_not_null {Names.Result};");
 
         // R10.6a. Allocation is the one place a new cell enters the induction, and R10.4's
         // `intro_cons` is R3.10b's `fold` — the sub-object's invariant is already in the
@@ -356,9 +364,6 @@ public sealed class CodeEmitter(
         _slots.TryGetValue(name, out var slot) ? slot.Binder : null;
 
     private bool IsObjectBinder(string text) =>
-        // R10.2b. An injected reference is a binder too: `(Some t)` is the name the
-        // context holds its invariant under, and re-binding it would lose it.
-        (text.StartsWith("(Some ", StringComparison.Ordinal) && text.EndsWith(")", StringComparison.Ordinal)) ||
         _objectLocals.Any(l => l.Binder == text) || _objects.Any(o => o.Binder == text) ||
         // R10.6b. A method may hand back an object it was *given*, which is what a
         // traversal that returns one of its arguments does. The binder rule is the same:
@@ -1019,6 +1024,7 @@ public sealed class CodeEmitter(
                     // mention asked for `pts_to var_node _` — the same reason R3.8's alias
                     // case shares a slot instead of rebinding one.
                     Line($"let {pbinder} = B.alloc {AllocRecord(pal)};");
+                    Line($"B.pts_to_not_null {pbinder};");
                 }
                 else if (d.Immutable)
                 {
@@ -1416,20 +1422,24 @@ public sealed class CodeEmitter(
 
     /// <summary>
     /// R10.2b. A non-null reference where a nullable one is expected. C# calls this the
-    /// identity, because nullability is an annotation there; the encoding does not, because
-    /// `C` is a box and `C?` is an `option` of one. So the reference is injected and its
-    /// invariant re-read at the injected form, which is the whole of `as_opt`.
+    /// identity because nullability is an annotation there, and under R10.2 the encoding
+    /// agrees: `C` is `C?` under a refinement. So the *term* is unchanged. What is left is
+    /// the invariant, which R10.3a states through an abbreviation Pulse's matcher does not
+    /// see through (F77), so `as_opt` survives as a one-line rewrite.
     /// </summary>
     private string Inject(IrType? expected, IrExpr value, string text)
     {
         if (expected is not IrClassType { Nullable: true } k) return text;
         if (value.Type is not IrClassType { Nullable: false } nn || nn.Name != k.Name) return text;
-        // R12.2. A plain reference carries no invariant to re-read, so the injection is
-        // the `Some` and nothing more.
+        // R10.2 (F76). The *term* is unchanged: `class_C` is `class_C__opt` under a
+        // refinement, so a non-nullable reference already is a nullable one, and C#'s
+        // identity coercion is F*'s. What remains is not about the reference but about its
+        // invariant, which is stated through R10.3a's abbreviation and must be unfolded.
+        // R12.2. A plain reference carries no invariant, so for it there is nothing at all.
         if (classes is not null && classes.TryGetValue(k.Name, out var kd) && kd.IsPlain)
-            return $"(Some {text})";
+            return text;
         Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
-        return $"(Some {text})";
+        return text;
     }
 
     /// <summary>R12.4. The record an allocation boxes.</summary>
@@ -1459,7 +1469,7 @@ public sealed class CodeEmitter(
         // R12.3c. For a `[Plain]` class there is no derived invariant and so no window: §12
         // gave the ownership of the record to the user's predicate, and whether it is held
         // here is that predicate's business, not the emitter's. So the projection is
-        // emitted and Pulse checks the `Some?` refinement against whatever the user's
+        // emitted and Pulse checks the non-null refinement against whatever the user's
         // annotations establish — a loop guard, a lemma, an `if`. Refusing it here would be
         // the emitter inventing a refusal (§0 rule 3): it would rule out every cursor, and
         // a cursor's null test is a *loop condition*, which no window can be the extent of.
@@ -1493,7 +1503,7 @@ public sealed class CodeEmitter(
     /// §12 derived no predicate for a <c>[Plain]</c> class, so there is nothing to case
     /// split and no lemma the emitter would be entitled to place; what remains is the
     /// branch itself and the one fact the branch establishes — that in the <c>else</c>
-    /// arm the reference is <c>Some</c>, so the record behind it can be projected. Whether
+    /// arm the reference is non-null, so the record behind it can be projected. Whether
     /// that projection is <em>owned</em> is the user's predicate's business, and a missing
     /// <c>pts_to</c> is a failure in their annotations rather than in the translation.
     /// </summary>
@@ -1505,7 +1515,7 @@ public sealed class CodeEmitter(
         var nullBranch = test.ThenIsNull ? i.Then : i.Else;
         var otherBranch = test.ThenIsNull ? i.Else : i.Then;
 
-        Line($"if (None? {opt}) {{");
+        Line($"if (B.is_null {opt}) {{");
         _indent++;
         branch(nullBranch);
         if (!tail) Line("()");
@@ -1565,7 +1575,7 @@ public sealed class CodeEmitter(
         var consBranch = thenIsNull ? i.Else : i.Then;
 
         Line($"{mod}.{Names.ClassCases(klass.Name)} {opt};");
-        Line($"if (None? {opt}) {{");
+        Line($"if (B.is_null {opt}) {{");
         _indent++;
         // R10.4b. Preserving or consuming, read off the contract: a method that gave the
         // object away (R4.9c) owes nothing back, and leaving the empty invariant behind
@@ -2056,15 +2066,15 @@ public sealed class CodeEmitter(
             // R10.2. `null` is the empty structure, and owning it is free — which is what
             // `intro_nil` says. Emitting the step here rather than at each position a null
             // may appear keeps `new Node(v, null)` and `x.next = null` the same rule.
-            // R12.2. `null` on a `[Plain]` class is the empty option and nothing else:
+            // R12.2. `null` on a `[Plain]` class is the null pointer and nothing else:
             // §12 derived no `intro_nil`, because it derived no predicate for the lemma to
-            // be about. Whether `None` may stand where a segment is wanted is the user's
-            // predicate's business.
+            // be about. Whether a null pointer may stand where a segment is wanted is the
+            // user's predicate's business.
             case IrNull pn when pn.Type is IrClassType pk
                 && classes is not null && classes.TryGetValue(pk.Name, out var pnd) && pnd.IsPlain:
-                return "None";
+                return "B.null";
 
-            // R15.8. `None` at a generic class says nothing about what it is empty *of*,
+            // R15.8. `B.null` at a generic class says nothing about what it is empty *of*,
             // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
             // resolve against. Naming the empty structure first, at its type, is the
             // smallest thing that gives the implicit a source; the monomorphic case has
@@ -2072,14 +2082,14 @@ public sealed class CodeEmitter(
             case IrNull n when n.Type is IrClassType { TypeArguments.IsEmpty: false } gk:
             {
                 var t = Fresh();
-                Line($"let {t} : {Types.Render(gk with { Nullable = true })} = None;");
+                Line($"let {t} : {Types.Render(gk with { Nullable = true })} = B.null;");
                 Line($"{Names.ClassModule(gk.Name)}.{Names.ClassIntroNil(gk.Name)} {t} 1.0R;");
                 return t;
             }
 
             case IrNull n when n.Type is IrClassType k:
-                Line($"{Names.ClassModule(k.Name)}.{Names.ClassIntroNil(k.Name)} None 1.0R;");
-                return "None";
+                Line($"{Names.ClassModule(k.Name)}.{Names.ClassIntroNil(k.Name)} B.null 1.0R;");
+                return "B.null";
 
             case IrNewArray na:
             {
@@ -2102,7 +2112,6 @@ public sealed class CodeEmitter(
                 // A cell slot holds the *reference*, so it is read first and the box is
                 // projected out of what was read; a value slot already is the reference.
                 var precv = pobj.Kind is SlotKind.Cell ? Expr(pv) : pobj.Binder;
-                if (pobj.Type is IrClassType { Nullable: true }) precv = $"(Some?.v {precv})";
                 var pt = Fresh();
                 Line($"let {pt} = B.op_Bang {precv};");
                 return $"{pt}.{Names.ClassProjection(pc.Name, pf.Field)}";
@@ -2141,6 +2150,8 @@ public sealed class CodeEmitter(
             {
                 var box = Fresh();
                 Line($"let {box} = B.alloc {AllocRecord(al)};");
+                // R10.6b, again: `new` is non-null, and the proof of it is a library call.
+                Line($"B.pts_to_not_null {box};");
                 return box;
             }
 
@@ -2155,12 +2166,14 @@ public sealed class CodeEmitter(
             case IrUnary u:
                 return Unary(u);
             // R12.3. A null test on a `[Plain]` reference in value position is the
-            // representation's own question and nothing more: is the option `None`?
+            // representation's own question and nothing more: is the pointer null?
             case IrBinary { Op: BinOp.Eq or BinOp.Ne } pb when PlainNullTest(pb) is { } pt:
             {
                 var t = Expr(pt.Tested);
                 var name = Fresh();
-                Line($"let {name} = {(pb.Op is BinOp.Eq ? "None?" : "Some?")} {t};");
+                Line(pb.Op is BinOp.Eq
+                    ? $"let {name} = B.is_null {t};"
+                    : $"let {name} = not (B.is_null {t});");
                 return name;
             }
 
@@ -2209,11 +2222,10 @@ public sealed class CodeEmitter(
         // (R9.15) and the reference it produces is what the index has to be read off.
         var raw = call.Args.Select(Expr).ToImmutableArray();
 
-        // R10.2b, at an argument. A non-null reference passed where a nullable one is
-        // declared is injected here for the same reason it is at a return (R4.13) and at
-        // a field write (R10.4): C# erases the distinction, the encoding does not. The
-        // uninjected binders are kept because they, not `(Some b)`, are what the slot
-        // table and R4.9c's ownership transfer are stated about.
+        // R10.2b, at an argument. Under R10.2 the reference itself needs no coercion, but
+        // its *invariant* is still stated through R10.3a's abbreviation, so `Inject` is
+        // called here for the same reason it is at a return (R4.13) and at a field write
+        // (R10.4). It returns the text unchanged; what it may emit is the rewrite.
         var args = raw
             .Select((text, i) => Inject(
                 i < call.ParamTypes.Length ? call.ParamTypes[i] : null, call.Args[i], text))

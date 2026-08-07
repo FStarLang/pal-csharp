@@ -44,10 +44,10 @@ public static class WalksVariant
             Pal.Decreases(ys.Value.Length - seen);
 
             ChainProof.AtEnd(walk, seen, ys);
-            ChainProof.Open(walk, walk!, SpecList.Drop(ys.Value, seen));
+            ChainProof.Open(walk, SpecList.Drop(ys.Value, seen));
             Cell<T>? onward = walk.next;
             T here = walk.value;
-            ChainProof.Advance(start, walk, walk!, here, onward, seen, ys);
+            ChainProof.Advance(start, walk, here, onward, seen, ys);
             walk = onward;
         }
         ChainProof.Finish(start, walk, seen, ys);
@@ -77,19 +77,19 @@ public static class WalksVariant
             Pal.Decreases(k - passed);
 
             ChainProof.AtEnd(walk, passed, ys);
-            ChainProof.Open(walk, walk!, SpecList.Drop(ys.Value, passed));
+            ChainProof.Open(walk, SpecList.Drop(ys.Value, passed));
             Cell<T>? onward = walk!.next;
             T here = walk!.value;
-            ChainProof.Advance(start, walk, walk!, here, onward, passed, ys);
+            ChainProof.Advance(start, walk, here, onward, passed, ys);
             walk = onward;
             passed = passed + 1;
         }
 
         ChainProof.AtEnd(walk, passed, ys);
-        ChainProof.Open(walk, walk!, SpecList.Drop(ys.Value, passed));
+        ChainProof.Open(walk, SpecList.Drop(ys.Value, passed));
         Cell<T>? tail = walk!.next;
         T wanted = walk!.value;
-        ChainProof.Advance(start, walk, walk!, wanted, tail, passed, ys);
+        ChainProof.Advance(start, walk, wanted, tail, passed, ys);
         ChainProof.Close(start, tail, passed + 1, ys);
         return wanted;
     }
