@@ -134,6 +134,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F74 | **Pulse cannot disambiguate two conjuncts of one predicate whose only difference is a pointer just read from the heap.** The fix is definitional, not a lemma: make each conjunct's model half a total projection (`subl`/`subr`) of a model the invariant already names (R16.2). | Reproduced in `TreeCursorFacts.knot_open`; the projections are in `KnotPath.fst`. |
 | F76 | **A Pulse `box` is already a nullable pointer.** `Pulse.Lib.Box` exports `null`, `is_null (r: box a) : b:bool{b <==> r == null}` and `pts_to_not_null`. So `option (box …)` is a *second* nullability layer over one that already exists, and its entire content is the two coercions R10.2b/R10.2c used to describe. Replacing it with a refinement (`class_C = b: class_C__opt { not (B.is_null b) }`) makes both coercions the identity text, deletes a `pure`-trapped existential from every recursive invariant (cf. F73), and lets each user-written cursor lemma take its cursor once instead of twice. | `test/pulse_facts/NullFacts.fst` N1–N7, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Box.fsti:33,35,108`. Relied on by R10.2, R10.2b, R10.2c, R10.2d. |
 | F77 | **Pulse does not see through an ordinary `let` when matching resources.** `class_C__inv this p m` and `class_C__inv_opt this p m` are the same term after delta, but a goal stated with one is not found in a context holding the other; an explicit `rewrite … as …` is required. This is why R10.2b being the identity *conversion* still leaves `class_C__as_opt` and `class_C__intro` in place as one-line rewrite lemmas rather than deleting them. | Reproduced in `test/pulse_facts/NullFacts.fst` while writing `inv_share`/`inv_gather_gen`. |
+| F78 | **`Pulse.Lib.Slice` is the `Span<T>` shape, and the whole of what is missing is on the C# side.** A `slice t` is a first-class value with a non-ghost `len`, a `pts_to` over its contents, `split`/`join`, `subslice` with a `subslice_rest` residue, `share`/`gather`, `copy`, and an `is_from_array` provenance token. Returning a subslice is *derivable* from the two `is_split`s `subslice_rest` is defined over — no library request is needed. What is not derivable is knowing *where in a C# program* the split and the join happen. | `test/pulse_facts/SliceFacts.fst` S1–S6, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Slice.fsti`. Relied on by §17. |
+| F79 | **A span value may be copied; the span's resource may not.** After `var t = s;` there is still exactly one `pts_to`, so a write through either name is a write to the memory both describe. This is precisely the duplication `PALCS0511` refuses a struct with a reference-typed field (§3.4) — and a `Span<T>` *is* such a struct. So a span cannot go through §3's struct rules; it has to be a **slot kind**, like `T[]`. | `test/pulse_facts/SliceFacts.fst:s4_copy_is_alias`. Note the `rewrite` the probe needs to move the resource between the two names: F77 again, and it is why the aliasing is invisible to Pulse's matcher unless the translation makes it explicit. |
 | F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
@@ -2438,7 +2440,9 @@ R3.10b is untested); and a cast that may fail.
   where it would not be.
 * `Span<T>` and `ReadOnlySpan<T>`. A method mentioning either is rejected with a diagnostic
   rather than mistranslated; fractional permissions are reached through `[Frac]` instead
-  (R4.9).
+  (R4.9). Probed since, and the answer is longer than it looks: the Pulse side is
+  `Pulse.Lib.Slice` and is nearly free, but a span is a struct that owns memory and slicing
+  has no syntax to hang a split and a join on. See §17.
 * A struct field must be a value — a scalar or another translated struct. An array or
   class field is **PALCS0511**, and that is the model rather than a shortcut: a struct
   copy would duplicate ownership of the same memory. Storage therefore travels alongside
@@ -4622,3 +4626,85 @@ which is what §0 rule 3 asks for and is the whole claim of §16.
   window, so §10.7's refusal stands for *derived* structures — narrowed, not removed.
 * **`break`.** R16.1's flag is the idiom; making R5.10's flag interact with an owning
   invariant is untried.
+
+## 17. `Span<T>`: what the probe says (planned)
+
+§8's *Not yet done* has listed `Span<T>` and `ReadOnlySpan<T>` since M1, and §14 named
+generics as their prerequisite, which M8 delivered. This section is not a milestone. It is
+the §0 step that comes before one: the facts are probed and pinned
+(`test/pulse_facts/SliceFacts.fst`, F78 and F79), and what they say is written down while it
+is still cheap to change one's mind.
+
+The headline is that the Pulse side is nearly free and the C# side is not. `Pulse.Lib.Slice`
+already *is* a span (F78). What the milestone has to design is a **surface language**, and
+that is a bigger question than any rule in this document so far, because it is the first
+time C#'s type system and the encoding's ownership discipline disagree about something C#
+programmers do constantly.
+
+### 17.1 Why the promised table row is not enough
+
+R4.9's parameter table has said since M1 that
+
+| C# parameter | Pulse binder | `requires` | `ensures` |
+|---|---|---|---|
+| `T[] a`, `Span<T> a` | `var_a: array ⟦T⟧` | `array_pts_to_full var_a 1.0R s` | `array_pts_to_full var_a 1.0R s'` |
+
+and `SliceFacts` S1 confirms it — *for a span that is never sliced*. Indexing, writing and
+`.Length` all behave exactly as an array's do, with `Slice.pts_to` in place of
+`array_pts_to_full` and `Slice.len` a non-ghost function, so a counted `for` over a span has
+a pure guard exactly as one over an array does. A span that is only passed and indexed is an
+array with a different spelling, and would be a small milestone.
+
+Four things break that, and only the first is about Pulse.
+
+### 17.2 The four obstacles
+
+**A span is a struct that owns memory (F79).** §3.4 rejects a struct field of reference type
+as `PALCS0511`, on the ground that copying the struct would duplicate ownership of the same
+memory — and a `Span<T>` is exactly such a struct. Rejecting it under that rule would be
+correct and useless. So a span cannot be a *translated struct*; it must be a **slot kind**,
+primitive like `T[]`, with its own row in R4.9's table, no field projections, and no struct
+copying. That is a frontend classification decision, taken before anything is emitted.
+
+**Slicing has no syntax.** `var w = s.Slice(i, n);` is an ordinary method call. Its result
+aliases `s`, and `s` stays in scope, assignable and indexable, with the C# compiler content.
+`SliceFacts.s2_take` shows what the encoding must do instead: `subslice` *consumes* the
+parent's `pts_to` and leaves an opaque `subslice_rest`, and `s2_give_back` shows the join is
+derivable. Both endpoints are therefore available; what is missing is the information about
+*where in the C# text they go*. Recovering it from Roslyn's flow analysis is a borrow
+checker, and R10.2b refuses on principle to read flow analysis — the same refusal that made
+`f(x)` and `f(x!)` translate identically. So the split and the join must be **written**, as
+PAL writes its ghost steps: a scoped `Pal.Span(s, i, n, w => { … })`, or an explicit
+`Pal.Split`/`Pal.Join` pair, or a `[Lemma]`-shaped pair over a `[Plain]` span predicate the
+way §12 does everything else. Choosing between those is the milestone's design work, and
+§12's machinery is very likely enough to express whichever wins.
+
+**A span slot may carry a token.** `Span<T> s = arr;` is an implicit conversion in C#. In
+the encoding it is `Slice.from_array`, which consumes `A.pts_to a` and yields
+`Slice.pts_to s` **plus `is_from_array a s`** — a receipt the array cannot be indexed again
+without redeeming (`SliceFacts.s3_lend_and_redeem`). So a span slot is a resource *and*,
+where it came from an array the caller still names, a token; and a `stackalloc` span is a
+third provenance again. R4.9's table has one column per slot and no column for a token, and
+this is where the milestone's real work is. It is the same shape as §12's `[Plain]`
+predicates, which is encouraging: the token is an `slprop` the user can be made to name.
+
+**The mechanics are not free either.** `s[i]` on a span is a call to a `ref T`-returning
+`get_Item`, not an `ElementAccessExpression` over an array — pal-csharp has no `ref` returns,
+so *recognising* an element write is new frontend work. `stackalloc` adds a scoped lifetime,
+which interacts with F75's rule about `let mut` and tail position. And `Slice.len` is a
+`SizeT.t` where C#'s `Length` is an `int`, which is R3.3's bridge again — that one genuinely
+is free, and should be built the way `Pulse.Lib.CSharp.Array` builds it: an `.fsti` of
+modeling axioms over the Pulse library (`SliceFacts` S6), not a new theory.
+
+### 17.3 The order to do it in
+
+`ReadOnlySpan<T>` first. A fractional view is duplicable — `SliceFacts.s4_share_gather` is
+`Slice.share`/`gather` and nothing else — so the aliasing that makes `Span<T>` hard is
+already expressible with `[Frac]` (R4.9) and needs no new surface syntax at all. A
+read-only, never-sliced `ReadOnlySpan<T>` parameter is the table row above and is close to
+free; `examples/adler32`, which had to spell `ArraySegment<byte>` out as three parameters,
+is the acceptance test that already exists.
+
+Then non-sliced `Span<T>`, which is the same row at full permission plus the F79
+classification. Then slicing, which is where the surface-syntax question has to be answered
+and where §12 is the toolbox. Then `stackalloc`, or never.

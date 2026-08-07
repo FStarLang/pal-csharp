@@ -80,7 +80,12 @@ Pulse out — and the whole M1 acceptance suite passes.
       once instead of twice ([`doc/translation.md`](doc/translation.md) R10.2,
       [`test/pulse_facts/NullFacts.fst`](test/pulse_facts/NullFacts.fst))
 - [ ] `Span<T>`, interfaces, constrained generics, `IEnumerable<T>` iterators — see
-      [`doc/translation.md`](doc/translation.md) §8, §15.5 and §16.5
+      [`doc/translation.md`](doc/translation.md) §8, §15.5 and §16.5. `Span<T>` is probed
+      but not yet specified: `Pulse.Lib.Slice` is already the right shape, so the open
+      question is a *surface* one — a span is a struct that owns memory, and C# marks
+      neither the point where a slice borrows from its parent nor the point where it gives
+      it back ([`doc/translation.md`](doc/translation.md) §17,
+      [`test/pulse_facts/SliceFacts.fst`](test/pulse_facts/SliceFacts.fst))
 
 ## Quick start
 

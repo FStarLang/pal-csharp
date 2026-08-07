@@ -20,7 +20,8 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/MatchFacts.fst.checked \
      $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked \
      $(CACHE_DIR)/GenericClassFacts.fst.checked $(CACHE_DIR)/CursorFacts.fst.checked \
-     $(CACHE_DIR)/TreeCursorFacts.fst.checked $(CACHE_DIR)/NullFacts.fst.checked
+     $(CACHE_DIR)/TreeCursorFacts.fst.checked $(CACHE_DIR)/NullFacts.fst.checked \
+     $(CACHE_DIR)/SliceFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
@@ -65,6 +66,10 @@ $(CACHE_DIR)/SegmentFacts.fst.checked: SegmentFacts.fst
 $(CACHE_DIR)/NullFacts.fst.checked: NullFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) NullFacts.fst
+
+$(CACHE_DIR)/SliceFacts.fst.checked: SliceFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) SliceFacts.fst
 
 $(CACHE_DIR)/UserSpecFacts.fst.checked: UserSpecFacts.fst
 	@mkdir -p $(CACHE_DIR)
