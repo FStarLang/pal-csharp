@@ -528,9 +528,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var scope = new SpecScope { ResultTerm = Names.Result };
         var binders = new List<string>();
 
-        // R14.2. Type binders first, so that a value binder may mention them.
+        // R14.2. Type binders first, so that a value binder may mention them. They are also
+        // bound in the specification scope: R4.9's `$(x)` resolves a C# name to the Pulse
+        // term that stands for it, and a type parameter is such a name. Without this, a
+        // `[PulseBody]` on a generic lemma whose value arguments do not mention `T` — an
+        // introduction rule for the empty case of a predicate, say — has no way to say
+        // which type it is about, and the implicit is left as an unresolved uvar.
         foreach (var t in lemma.TypeParameters)
+        {
             binders.Add($"({Names.TypeParam(t)}: Type0)");
+            scope.Bind(t, new Term(Names.TypeParam(t), TermKind.Other));
+        }
 
         foreach (var p in lemma.Parameters)
         {
@@ -580,25 +588,33 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             // The clauses are assembled exactly as R12.2 assembles a method's: resources
             // separated by `**`, everything else inside one `pure`. `[Preserves]` appears
             // on both sides, which is what the word means.
-            string Clause(IEnumerable<IrExpr> resources, IEnumerable<IrExpr> propositions)
+            string Clause(IEnumerable<IrExpr> resources, IEnumerable<string> propositions)
             {
                 var res = resources.Select(r => _spec.Emit(r, scope).Text).ToList();
-                var pure = SpecEmitter.Conjunction(
-                    propositions.Select(e => _spec.AsProp(_spec.Emit(e, scope))));
+                var pure = SpecEmitter.Conjunction(propositions);
                 if (pure != "True") res.Add($"pure ({pure})");
                 return res.Count == 0 ? "emp" : string.Join(" **\n           ", res);
             }
+
+            var pre = lemma.Requires.Where(r => !IsResource(r))
+                .Select(r => _spec.AsProp(_spec.Emit(r, scope))).ToImmutableArray();
+            var post = lemma.Ensures.Where(e => !IsResource(e))
+                .Concat(lemma.Preserves.Where(e => !IsResource(e)))
+                .Select(e => _spec.AsProp(_spec.Emit(e, scope))).ToImmutableArray();
 
             sb.Append("ghost fn ").Append(Names.Lemma(lemma.Name));
             foreach (var b in binders) sb.Append(' ').Append(b);
             sb.AppendLine();
             sb.AppendLine("  requires " + Clause(
-                lemma.Requires.Where(IsResource).Concat(lemma.Preserves.Where(IsResource)),
-                lemma.Requires.Where(r => !IsResource(r))));
+                lemma.Requires.Where(IsResource).Concat(lemma.Preserves.Where(IsResource)), pre));
+            // R4.8, at a lemma. A Pulse `ghost fn`'s `ensures` is type-checked without its
+            // `requires` in scope, exactly as a method's is, so a postcondition that reports
+            // `l[i]` is ill-typed until `i < l.Length` is restated as a hypothesis. An F*
+            // `Lemma` needs none of this — there the `requires` *is* in scope — which is why
+            // the pure-lemma form below is untouched.
             sb.AppendLine("  ensures  " + Clause(
                 lemma.Ensures.Where(IsResource).Concat(lemma.Preserves.Where(IsResource)),
-                lemma.Ensures.Where(e => !IsResource(e))
-                    .Concat(lemma.Preserves.Where(e => !IsResource(e)))));
+                MethodPlan.UnderPrecondition(pre, post)));
             sb.AppendLine("{");
             sb.AppendLine($"  {body}");
             sb.AppendLine("}");

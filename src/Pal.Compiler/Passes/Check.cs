@@ -43,12 +43,20 @@ public static class Check
             .Where(c => c.BaseClass is not null)
             .ToImmutableDictionary(c => c.Name, c => c.BaseClass!);
 
+        // R12.3c. R10.7's window exists to place §10's case lemmas, so its rule about where
+        // a null test may appear is a rule about classes that *have* a derived invariant.
+        // A `[Plain]` class has none, so a null test of one is an ordinary comparison and
+        // may appear wherever C# allows — including a loop condition, which is where a
+        // cursor's is and which no window could ever be the extent of.
+        var plain = program.Declarations.OfType<IrClass>()
+            .Where(c => c.IsPlain).Select(c => c.Name).ToImmutableHashSet();
+
         foreach (var decl in program.Declarations)
         {
             switch (decl)
             {
                 case IrMethod m when m.IsLemma: CheckLemma(m, diagnostics); break;
-                case IrMethod m: CheckMethod(m, specOnlyStructs, diagnostics); break;
+                case IrMethod m: CheckMethod(m, specOnlyStructs, plain, diagnostics); break;
                 case IrSpecFunction s: CheckSpecFunction(s, program, diagnostics); break;
             }
 
@@ -89,7 +97,8 @@ public static class Check
     // -----------------------------------------------------------------------
 
     private static void CheckMethod(
-        IrMethod m, ImmutableHashSet<string> specOnlyStructs, DiagnosticBag diagnostics)
+        IrMethod m, ImmutableHashSet<string> specOnlyStructs,
+        ImmutableHashSet<string> plain, DiagnosticBag diagnostics)
     {
         // An executable method's signature is read with the *program* meaning of each
         // type (R4.2). A spec-only type has no program meaning, so it cannot appear.
@@ -141,7 +150,7 @@ public static class Check
                 "(doc/translation.md R10.7). Without one the translation is divergent and " +
                 "no caller can use it.");
 
-        if (m.Body is not null) CheckBody(m.Body, diagnostics);
+        if (m.Body is not null) CheckBody(m.Body, plain, diagnostics);
     }
 
     private static void CheckLemma(IrMethod m, DiagnosticBag diagnostics)
@@ -221,7 +230,7 @@ public static class Check
     // Bodies
     // -----------------------------------------------------------------------
 
-    private static void CheckBody(IrStmt body, DiagnosticBag diagnostics)
+    private static void CheckBody(IrStmt body, ImmutableHashSet<string> plain, DiagnosticBag diagnostics)
     {
         foreach (var stmt in Statements(body))
         {
@@ -250,7 +259,7 @@ public static class Check
                 // `bool`, there is no branch for the window to be the extent of — and the
                 // reference would then be tested in one place and used in another, with
                 // nothing to carry the case analysis between them.
-                case var s2 when NullTestOutOfPosition(s2) is { } bad:
+                case var s2 when NullTestOutOfPosition(s2, plain) is { } bad:
                     diagnostics.Error("PALCS0569", bad.Loc,
                         "A null test of a recursive class's reference has to be the whole " +
                         "condition of an `if`: it is what opens the window in which the " +
@@ -382,21 +391,25 @@ public static class Check
     /// argument, an initialiser, the right-hand side of an assignment — is an ordinary
     /// empty reference and is not a test, so it is not looked at here.
     /// </summary>
-    private static IrExpr? NullTestOutOfPosition(IrStmt stmt)
+    private static IrExpr? NullTestOutOfPosition(IrStmt stmt, ImmutableHashSet<string> plain)
     {
-        var allowed = stmt is IrIf i && IsNullTest(i.Cond) ? i.Cond : null;
+        var allowed = stmt is IrIf i && IsNullTest(i.Cond, plain) ? i.Cond : null;
         foreach (var held in Expressions(stmt))
         {
             if (ReferenceEquals(held, allowed)) continue;
             foreach (var sub in Subexpressions(held))
-                if (IsNullTest(sub)) return sub;
+                if (IsNullTest(sub, plain)) return sub;
         }
         return null;
     }
 
-    private static bool IsNullTest(IrExpr e) =>
-        e is IrBinary { Op: BinOp.Eq or BinOp.Ne } b &&
-        (b.Left is IrNull || b.Right is IrNull);
+    private static bool IsNullTest(IrExpr e, ImmutableHashSet<string> plain)
+    {
+        if (e is not IrBinary { Op: BinOp.Eq or BinOp.Ne } b) return false;
+        var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
+        if (tested?.Type is not IrClassType k) return false;
+        return !plain.Contains(k.Name);
+    }
 
     /// <summary>The expressions a statement holds directly, not counting its substatements.</summary>
     internal static IEnumerable<IrExpr> Expressions(IrStmt stmt) => stmt switch

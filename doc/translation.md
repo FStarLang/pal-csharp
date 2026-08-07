@@ -128,6 +128,11 @@ The rules below depend on the following, each **verified against the pinned tool
 | F68 | **A class's type parameter is *implicit* on every generated definition, and that is not a hope about inference.** Each of the twelve definitions R10.4/R10.8 emit has a value argument whose type already mentions the parameter (`x: class_Node__opt a`), so it is determined by unification with an argument the emitter writes down anyway. The payoff is that every *call site* §10 emits stays character for character what it already is. | `test/pulse_facts/GenericClassFacts.fst` F68–F70: `class_Node__inv_opt`, the six case lemmas and the recursive share/gather all take `(#a: Type0)`, and `func_Lists_Length` calls them with no type argument at all. |
 | F69 | **A generic method over a generic class composes the two rules and needs no third.** An explicit `ty_T` binder (R14.2) applied to a class type (`class_Node__opt ty_T`), with the class's own lemmas inferring `a` from it. | `test/pulse_facts/GenericClassFacts.fst:func_Lists_Length`. |
 | F70 | **A probe written outside the emitter's idiom measures the probe.** The first draft of F69 failed with "Application of a stateful or atomic computation cannot have a ghost effect"; a control at a *fixed* element type failed identically, and both succeeded once rewritten in R10.7's actual shape — an `erased` model with `requires`/`ensures` spelled out rather than `preserves`. Generics were never involved. | `test/pulse_facts/GenericClassFacts.fst:ctrl_Length`, kept beside `func_Lists_Length` as the control. |
+| F71 | **The part of a structure a loop has walked is a function of the loop counter.** So it can be named by a total function (`Take`/`Drop`; `Ctx`/`Sub`) rather than accumulated in a ghost variable, and closing it at the end is an ordinary lemma about the user's segment predicate — not the magic wand §10.7 refused for. | `test/pulse_facts/CursorFacts.fst`, `test/pulse_facts/TreeCursorFacts.fst:knot_find`, verified. Relied on by §16. |
+| F72 | **A branching cursor needs no more loop machinery than a linear one.** A *search* path is determined by the tree and the key, both fixed for the loop, so a one-hole context is as much a function of the counter as a prefix is. The context lemmas recurse on the **tree** (`decreases t`), which keeps the counter an unrefined `int`. | `test/pulse_facts/TreeCursorFacts.fst:dsub`, `dctx`, `path_append`, `path_close`. |
+| F73 | **An `exists*` binder that appears only inside `pure` can never be solved.** Pulse's matcher recovers a binder from the `pts_to`s it unifies; folding a predicate whose existential has no resource to be recovered from fails with "Cannot check relation with uvars". This is what decides whether a predicate may hide a machine value (R16.3). | Reproduced while writing `TreeCursorFacts.knot_open`; resolved by the explicit-field-plus-wrapper shape now in `KnotPath.fst`. |
+| F74 | **Pulse cannot disambiguate two conjuncts of one predicate whose only difference is a pointer just read from the heap.** The fix is definitional, not a lemma: make each conjunct's model half a total projection (`subl`/`subr`) of a model the invariant already names (R16.2). | Reproduced in `TreeCursorFacts.knot_open`; the projections are in `KnotPath.fst`. |
+| F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1309,6 +1314,36 @@ For an **object**, "assigned" is R4.11c's question, not `Assigned`'s: a loop tha
 level up, as the defect R4.11c describes — a loop that dispatches a reader on a shape it
 was handed must still be able to return that shape to its caller with the model the caller
 named.
+
+**R5.8c (an invariant that owns).** A `Pal.Invariant` clause is sorted by exactly the test
+R12.2 applies to a contract: a clause of type `SlProp` is a **resource** and joins the
+`pts_to`s; anything else is a proposition and joins the single `pure`. There is no third
+case and no analysis of what the clause says.
+
+The rule is small and it is what makes a *cursor* expressible. R5.8's inference computes the
+ownership of the loop's **locals**; it has nothing to say about the part of a heap data
+structure the loop is standing in the middle of, because that is not a function of the
+body's free variables — it is a function of the loop counter. Without R5.8c an invariant
+could state facts about values only, and every iterative traversal would stay out of reach
+whatever the library offered.
+
+**R5.8d (the last statement of a loop body is in tail position).** Exactly as the last
+statement of a method body is. A `let mut` in Pulse needs a postcondition at the end of its
+scope, and it has one only where that scope ends in a construct carrying an annotation; an
+`if` terminated by `()` is not such a construct, so a `let mut` inside either of its
+branches is rejected with *"Allocating a mutable local variable expects an annotated
+post-condition"*. Since §12 asks every cursor loop to read fields inside the non-null branch
+of a test, and a field read binds a cell, the same body was typable as a method's tail and
+untypable as a loop's.
+
+The rule recurses through blocks and two-armed `if`s, so a nest of them is a nest of tails.
+Two exclusions, both principled rather than incidental:
+
+* a null test that opens a §10 window is **not** a tail, because the window's closing lemma
+  is emitted on the non-tail path — moving it would be a change to R10.7, not to where a
+  block ends;
+* a loop with a `for` step, a `break` flag or a `continue` flag is **not** a tail, because
+  in each of those the body is followed by something.
 
 **R5.9 (`decreases` obligation).** By F2 every emitted `while` **must** carry `decreases`.
 The measure is obtained, in order:
@@ -3518,6 +3553,12 @@ crossing a hierarchy (PALCS0565), a recursive class that also owns an array (PAL
 *iterative* traversal — which needs a magic wand to give the tail back, and has not been
 probed — and mutual recursion between two classes.
 
+*Since revised.* §12 answers the back-pointer refusal by handing the predicate to the user,
+and §16 answers the iterative one: a segment predicate **is** the magic wand that was
+wanted, and a traversal written against it needs no rule §5 does not already have. Both
+refusals stand for a **derived** invariant, which still has only R10.7's window; neither
+stands for the language.
+
 ---
 
 ## 11. User-defined specification types
@@ -3685,7 +3726,8 @@ diagnostics cases cover PALCS0570–0573.
 What is *not* delivered: a user cannot yet declare a spec type whose recursive constructor
 has more than one recursive argument in a *class* (§10's window opens one sub-object), and
 the iterative traversal of §10.7 is still refused. Neither is a limit of §11 — both are
-§10's, and §11 does not make them worse.
+§10's, and §11 does not make them worse. §16 discharges the second for a §12 predicate,
+using a §11 spec type (`SpecFrame<T>`) to name the spine it walks.
 
 ---
 
@@ -3802,6 +3844,26 @@ The `prev` write is where this pays off. Because the user's predicate only ever
 segment simply reports what the field now holds. A derived predicate could not have offered
 this, because it would have had to own the field it folded over.
 
+**R12.3b (a plain reference the body assigns is a cell).** R5.2 gives every assigned local a
+`let mut`, and a local that happens to hold a class reference is not an exception. Its slot
+is a cell and its resource is an ordinary `R.pts_to`; a field read through it reads the cell
+first and projects the box out of what was read. This is what a *cursor* is — a reference
+the loop moves — and it needs no rule of its own, only the ordinary one not being skipped
+because the local holds a reference.
+
+**R12.3c (a plain class's null test is an ordinary comparison).** R10.7 confines a null test
+to the whole condition of an `if` because that `if` is the *extent of a window* — the region
+in which §10's case lemmas have been applied. A `[Plain]` class has no derived invariant and
+so no window: §12 gave the ownership of the record to the user's predicate, and whether it
+is held at a given point is that predicate's business. So PALCS0569 and PALCS0567 both step
+aside for a plain class, the projection is emitted, and Pulse checks the `Some?` refinement
+against whatever the user's annotations establish — a loop guard, a `[Lemma]` call, an `if`.
+
+Keeping the restriction would have been the emitter inventing a **refusal** (§0 rule 3, read
+in its second direction). A cursor's null test is a *loop condition*; no window can be the
+extent of a loop condition, so the rule would have ruled out every iterative traversal on
+the strength of a constraint whose reason does not apply.
+
 **R12.4.** `new C { f = e, … }` on a plain class allocates: the record is built exactly as
 R3.5 builds a struct's, then boxed with `B.alloc`. **Object-initializer syntax only** — a
 constructor call is refused with a diagnostic, because a constructor has a *body*, and
@@ -3890,6 +3952,13 @@ DllProof.Open(from, from!, prev, null, last, xs);
 int rest = Length(from.next, from, last);
 DllProof.Close(from, from!, prev, null, last, xs);
 ```
+
+**R12.7b (a `ghost fn` lemma's postcondition is read under its precondition).** R4.8 already
+says this of a method: a Pulse `ensures` is type-checked with the `requires` *not* in scope,
+so a postcondition that mentions `l[i]` is ill-typed until `i < l.Length` is restated as a
+hypothesis. A `ghost fn` is a Pulse function, so it needs the same treatment, and a
+`[Lemma]` that owns anything is a `ghost fn`. The pure-`Lemma` form is untouched: there the
+`requires` *is* in scope, and restating it would only slow the SMT query down.
 
 **The style rule.** *A user predicate publishes one ghost lemma per step a C# body takes,
 whose signature mentions only what C# can name — parameters, locals, `null`, spec lists — and
@@ -4134,6 +4203,14 @@ arrays, holding them in a container, counting them, copying them. That is precis
 part `Span<T>`, `ReadOnlySpan<T>` and `ArraySegment<T>` inhabit, and `examples/adler32`
 had to spell its segment out by hand for want of it.
 
+**R14.1b — `Ghost<T>.Value` is transparent.** `Ghost<T>` erases to `T` in a type (R14.1) and
+a spec string is bound against parameters that are *already* unwrapped, so a spec string
+never writes `.Value` at all. But a specification written in **statement position** —
+`Pal.Invariant(…)`, `Pal.Decreases(…)`, a `[Lemma]` argument — is an ordinary C# expression,
+where `Ghost<T>` is a real type and C# demands the projection. Nothing about the *meaning*
+changes when it is written, so nothing in the translation does either: `g.Value` lowers to
+whatever `g` lowers to.
+
 ### 14.2 Type parameters are binders
 
 **R14.2 — A method's type parameters become explicit `Type0` binders, ahead of every value
@@ -4142,6 +4219,13 @@ parameter, in declaration order.** `static void Swap<T>(T[] a, int i, int j)` em
 ```
 fn func_Swap (ty_T: Type0) (var_a: array ty_T) (var_i: I32.t) (var_j: I32.t)
 ```
+
+A type binder is also bound **in the specification scope**, so R4.9's `$(T)` resolves to
+`ty_T` exactly as `$(x)` resolves a value parameter. Without it a generic `[Lemma]` whose
+value arguments do not mention `T` — an introduction rule for the empty case of a predicate,
+say — has no way to say which type it is about, and the implicit is left as an unresolved
+uvar (*"Unexpected unresolved uvars"*). A type parameter is a C# name in scope; `$(…)`
+resolves C# names in scope; the rule is the absence of an exception.
 
 They are *explicit*, not implicit `#`-binders, and that is a deliberate choice against the
 F* idiom. Roslyn has already resolved the type argument at every call site — for an
@@ -4365,3 +4449,138 @@ The persistent style these push a library towards is not a consolation prize. An
 that allocates what it returns leaves its argument `[Frac]`-observed, so the caller keeps
 the list it passed in — which is the ordinary contract of a container operation in a garbage
 collected language, and the one C# programmers expect.
+
+---
+
+## 16. Cursors: iterative traversal (M11)
+
+§10.7 refused iterative traversal and gave a reason — *"needs a magic wand to give the tail
+back, and has not been probed"*. §12.8 then answered the first half without noticing: a
+**segment** predicate is what a magic wand was wanted for, and `test/dll_segment` already
+had one. §16 probes the rest. The refusal is discharged, and it is discharged the way §0
+asks — a probe first, then rules, then two acceptance directories and their variants.
+
+The section's one observation is this:
+
+> **The part of a structure a loop has walked is a function of the loop counter, not a
+> history.** So it can be *named* in the invariant by a total function of the counter, and
+> the loop needs no ghost accumulator, no wand, and no rule beyond R5.8c.
+
+### 16.1 The linear case
+
+`test/list_cursor` walks a singly linked list. The user's Pulse file `CellSeg.fst` declares
+one predicate, `seg p from to_ l` — the cells from `from` up to (not including) `to_`, and
+the values in them — plus `whole = seg from None`. The loop invariant then owns two halves:
+
+```csharp
+Pal.Invariant(Cells.Seg(head, at, SpecList.Take(xs.Value, i)));   // walked
+Pal.Invariant(Cells.Held(at, SpecList.Drop(xs.Value, i)));        // remaining
+```
+
+`Take` and `Drop` are the two total functions of the counter. Advancing is `seg_snoc` —
+moving one cell from the right half to the left — and finishing is `seg_close`, which is the
+"magic wand" §10.7 wanted, except that it is an ordinary lemma about an ordinary predicate
+and needed no wand at all.
+
+### 16.2 The branching case
+
+`test/tree_cursor` walks a binary search tree. Nothing about the shape of §16.1 changes; the
+walked part is just a **one-hole context** rather than a prefix. `KnotPath.fst` declares
+
+| linear | branching |
+|---|---|
+| `SpecList.Take(xs, i)` | `Descent.Ctx(t, key, n)` — the spine, outermost-first |
+| `SpecList.Drop(xs, i)` | `Descent.Sub(t, key, n)` — the subtree still to search |
+| `Append` | `plug c sub` |
+| `seg_snoc` | `path_append` — one frame appended to the spine |
+| `seg_close` | `path_close` |
+
+The frame carries the node's key, its value, and **the off-path child**, so a step down owns
+the sibling subtree it did not take. A descent's path is in general path-dependent, but a
+*search* path is determined by the tree and the key, both of which are fixed for the loop —
+so `Ctx` and `Sub` really are functions of `n`, and a branching cursor needs no more loop
+machinery than a linear one.
+
+Two details are worth pinning because they were not obvious:
+
+* **`Sub` and `Ctx` recurse on the tree, not the counter** (`decreases t`), so `n` stays an
+  unrefined `int` and no `n <= depth` refinement has to be threaded. They stop early at a
+  hit, which is what makes `Sub`'s relationship to `kfind` hold unconditionally.
+* **No ordering hypothesis is needed.** `kfind` on a `Branch` is *defined* by comparing the
+  key with the entry, so following the comparison is following the definition. An
+  out-of-order tree makes lookup useless, not unsound — and a precondition demanding
+  sortedness would have been a proof obligation invented for the emitter's convenience.
+
+### 16.3 Rules the cursor needs
+
+**R16.1 — Two exits, no `break`.** `break` is R5.10, which allocates a flag; a loop with a
+data-structure invariant does not need it. The device the probe pinned instead: an `int`
+local `live` is the loop condition, and the measure is `size(Sub(t, key, n)) + live`. A
+descent shrinks the subtree; a stop clears the flag; either strictly decreases the sum. This
+is general to any pal-csharp loop with an early exit, and it is written by the user, not by
+the emitter.
+
+The measure **must** use the walked structure's size, not the counter: R5.9's case-2
+measure bounds a counter by its own type, and a tree has no length by which to bound `n`.
+`Pal.Decreases` (R5.9 case 1) is how a user says so.
+
+**R16.2 — Every conjunct of an invariant must be distinguishable by its resource.** Pulse
+matches by resource, so two conjuncts of the *same* predicate whose only difference is an
+argument the body just read from the heap cannot be told apart. The fix is not a lemma but a
+definition: make each conjunct's model half a **total projection** of a model the invariant
+already names — `subl t` and `subr t` rather than two existentials. Then the two conjuncts
+differ syntactically and the matcher never has to guess.
+
+**R16.3 — An existential reachable only through `pure` can never be solved.** Pulse's
+matcher recovers an `exists*` binder from the `pts_to`s it unifies. A binder that appears
+*only* inside a `pure (…)` has nothing to be recovered from, and folding such a predicate
+fails with *"Cannot check relation with uvars"*. This decides where a machine value may be
+hidden:
+
+* a predicate that is **folded** by a body — one that describes an open node — keeps its
+  machine field explicit, because the record literal determines it; a wrapper with
+  `exists* (k: I32.t)` then hides it for the invariant's benefit, and the matcher recovers
+  `k` from the `pts_to`;
+* a predicate only ever **matched as a precondition** may take a mathematical `int` with the
+  machine value existentially bound, because the caller's context supplies it. `DllSeg.cell`
+  is this shape.
+
+**R16.4 — A model-level guard is stated over the model.** R4.13 sends a C# `int` in
+specification position into F\* as its `.v`, by *position* and not by declared type, so a
+predicate parameter of type `I32.t` is unwritable from a C# contract. The consequence is a
+style rule, not a limitation: publish a total projection of the model (`Descent.NodeKey`)
+and let the contract compare against **that**. The body's own `key < nk` on machine ints
+implies it, because the open-node predicate ties the field to the model. The signatures get
+shorter, and the contract stops mentioning machine words.
+
+**R16.5 — A pure lemma call goes first.** A pure `Lemma` placed *last* in a `ghost fn` body
+has its postcondition dropped. Call it before the step it justifies.
+
+### 16.4 What is delivered
+
+`test/list_cursor` — `CellSeg.fst`, `Cell.cs` (the `[Plain] Cell<T>`, five `[SpecOp]`s and
+six `[Lemma]` steps), `Walks.cs` with an iterative `Count`, and §7.2's `WalksVariant`.
+
+`test/tree_cursor` — `KnotPath.fst`, `Knot.cs` (the `[Plain] Knot<T>`, the `SpecFrame<T>`
+spec type with its two `[SpecCtor]`s, and ten `[Lemma]` steps), `Search.cs` with an
+iterative BST `Find` proved to return `SpecTree.Get(t, key, fallback)`, and §7.2's
+`SearchVariant` — which builds its tree by nesting constructor calls, tests membership
+rather than lookup, spells the comparison the other way round, checks equality last, and
+names its flag differently. It verifies with no emitter change.
+
+The emitter changes §16 required are R5.8c, R5.8d, R12.3b, R12.3c and R14.2's scope
+extension. Every one of them is a rule about a C# construct — an invariant clause, a tail
+position, an assigned local, a null test, a name in scope — and none mentions a cursor.
+Everything that *is* about cursors is in the user's Pulse file and the user's annotations,
+which is what §0 rule 3 asks for and is the whole claim of §16.
+
+### 16.5 What §16 does not reach
+
+* **A cursor that mutates.** Every step here is `[Frac]`-observing or full-permission
+  read-only; an iterative in-place insert would have to re-close the spine around a *changed*
+  subtree, which is a different `path_close` and is not probed.
+* **A cursor over a structure the compiler derives.** §16 is written entirely against §12's
+  user-defined predicates. A `[Recursive]` class's derived invariant still has only R10.7's
+  window, so §10.7's refusal stands for *derived* structures — narrowed, not removed.
+* **`break`.** R16.1's flag is the idiom; making R5.10's flag interact with an owning
+  invariant is untried.

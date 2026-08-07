@@ -149,6 +149,11 @@ override for what inference cannot see.
 are *not* in scope inside the loop. Restating one as an invariant is the single most common
 fix when a correct loop will not verify.
 
+**An invariant may own.** `Pal.Invariant` also accepts an `SlProp` — an `[SpecOp]` that
+denotes ownership (§9) — and then states what the loop *holds* at the top of each
+iteration, not merely what is true of its values. This is what a loop that walks a data
+structure needs, and §2.2 is about writing one.
+
 ### 2.1 `break` and `continue`
 
 Both are supported. One limitation is worth stating up front: the flag the translation uses
@@ -156,6 +161,42 @@ is internal, so an invariant cannot mention it, and a postcondition **cannot say
 loop ran to completion**. If your contract needs that, carry the exit condition in the
 guard instead — `while (i < n && !done)` rather than `if (…) break;`. `test/compare_elements`
 does exactly this and says why.
+
+### 2.2 Cursors
+
+A loop that walks a linked structure owns a different part of it on each iteration. The
+idiom, in full:
+
+```csharp
+Cells.Start(head, xs);                       // establish the invariant
+Cell<T>? at = head;
+int i = 0;
+while (at != null)
+{
+    Pal.Invariant(Cells.Seg(head, at, SpecList.Take(xs.Value, i)));   // walked
+    Pal.Invariant(Cells.Held(at, SpecList.Drop(xs.Value, i)));        // remaining
+    Pal.Invariant(0 <= i && i <= xs.Value.Length);
+    Pal.Decreases(SpecList.Drop(xs.Value, i).Length);
+    …
+}
+Cells.Finish(head, at, i, xs);               // give the whole structure back
+```
+
+Three things make this work, and all three are things *you* write:
+
+* **Name the walked part with a function of the counter.** `Take`/`Drop` for a list, a
+  one-hole context for a tree (`test/tree_cursor`). Never accumulate it in a ghost variable:
+  a total function of `i` is what lets the invariant be re-established without a history.
+* **Give the measure the structure's size, not the counter.** `Pal.Decreases` is required
+  here — a tree has no length by which a counter could be bounded.
+* **For a loop with two ways out, use a flag in the measure.** `break` cannot be mentioned
+  by an invariant (§2.1), so write `int live = 1;` as the loop condition and
+  `Pal.Decreases(remaining.Size + live)`. A step shrinks the structure; stopping clears the
+  flag; both decrease the sum. `test/tree_cursor/Search.cs` is the worked example.
+
+Inside the loop, a null test of a `[Plain]` reference is an ordinary comparison — it may be
+a loop condition, and a field read after it is checked against whatever your lemmas
+establish. That is §9's bargain: you own the predicate, so you own the case analysis.
 
 ---
 
@@ -626,6 +667,11 @@ admitted lemma is assumed rather than proved.
 | `[Admit]` | assume the contract; warned about |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 
+Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**
+parameter is such a name: `$(T)` is how a generic lemma says which type it is about, and it
+is needed whenever the lemma's value arguments do not already determine it — an
+introduction rule for the empty case of a predicate, say.
+
 ### 5.1 Lemmas that move ownership
 
 A lemma whose contract mentions any `SlProp` clause is a **ghost function**: it consumes the
@@ -668,6 +714,12 @@ Ghost parameters must come last, so that callers can omit them. A ghost argument
 resolved by unification, which means one that appears **only** in the pure part of a
 contract cannot be inferred, and such a method cannot currently be called from translated
 C# (`translation.md` §8).
+
+In a *spec string* you write the parameter's name and nothing else — `[Ensures("result ==
+xs.Length")]` — because a spec string is bound against parameters that are already
+unwrapped. In a *statement*-position specification (`Pal.Invariant`, `Pal.Decreases`, a
+`[Lemma]` argument) you are writing ordinary C#, where `Ghost<T>` is a real type, so write
+`xs.Value`. The `.Value` is transparent: it means exactly what `xs` means.
 
 ---
 

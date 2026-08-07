@@ -443,6 +443,15 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
 
+        // R14.1b. `g.Value` on a `Ghost<T>` is the ghost value, and is transparent — exactly
+        // as `Ghost<T>` is transparent in a type (R14.1) and as a spec string, which is
+        // bound against parameters already unwrapped, never has to write it at all. A
+        // statement-position specification is an ordinary C# expression, so there `Ghost<T>`
+        // is a real type and C# demands the projection; nothing about the *meaning* changes
+        // when it is written, so nothing here does either.
+        if (known.IsGhost(receiverType) && node.Name.Identifier.ValueText == "Value")
+            return Lower(node.Expression);
+
         // R10.5. The ghost inductive types' observations. They are recognised by symbol,
         // before any class rule, because `SpecList<T>` is a struct and would otherwise
         // fall through to the struct-field rule.

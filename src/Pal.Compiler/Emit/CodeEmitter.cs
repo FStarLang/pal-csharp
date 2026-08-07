@@ -1020,9 +1020,21 @@ public sealed class CodeEmitter(
                     // case shares a slot instead of rebinding one.
                     Line($"let {pbinder} = B.alloc {AllocRecord(pal)};");
                 }
-                else
+                else if (d.Immutable)
                 {
                     _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, Expr(d.Init));
+                    return;
+                }
+                else
+                {
+                    // R12.3b. A `[Plain]` reference the body *assigns* is a local like any
+                    // other, so R5.2 applies unchanged: it gets a `let mut`, and its slot is
+                    // a cell whose resource is an ordinary `R.pts_to`. That is what a cursor
+                    // is — a reference the loop moves — and it needs no rule of its own,
+                    // only the ordinary one not being skipped because the local happens to
+                    // hold a reference.
+                    Line($"let mut {pbinder} = {Expr(d.Init)};");
+                    _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, pbinder);
                     return;
                 }
                 _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, pbinder);
@@ -1443,7 +1455,15 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool Reachable(Slot obj, IrLoc loc, string field)
     {
-        if (obj.Type is not IrClassType { Nullable: true } || obj.Window) return true;
+        if (obj.Type is not IrClassType { Nullable: true } k || obj.Window) return true;
+        // R12.3c. For a `[Plain]` class there is no derived invariant and so no window: §12
+        // gave the ownership of the record to the user's predicate, and whether it is held
+        // here is that predicate's business, not the emitter's. So the projection is
+        // emitted and Pulse checks the `Some?` refinement against whatever the user's
+        // annotations establish — a loop guard, a lemma, an `if`. Refusing it here would be
+        // the emitter inventing a refusal (§0 rule 3): it would rule out every cursor, and
+        // a cursor's null test is a *loop condition*, which no window can be the extent of.
+        if (classes is not null && classes.TryGetValue(k.Name, out var d) && d.IsPlain) return true;
         diagnostics.Error("PALCS0567", loc,
             $"`{obj.Name}.{field}` reads through a reference that may be null. A field behind a " +
             "nullable class reference is reachable only inside a null test — write `if (" + obj.Name +
@@ -1669,7 +1689,19 @@ public sealed class CodeEmitter(
         _indent--;
         Line(")");
 
-        pure.AddRange(w.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))));
+        // R5.8c. A loop invariant is assembled by exactly the test R12.2 applies to a
+        // contract: an `SlProp` clause is a resource and goes next to the `pts_to`s,
+        // anything else is a proposition and goes inside the one `pure`. Without this a
+        // loop could only ever state facts about values, so a loop that *walks* a data
+        // structure — a cursor — has nowhere to say which part of it the invariant owns,
+        // and every iterative traversal stays out of reach.
+        foreach (var i in w.Invariants)
+        {
+            if (i.Type is IrPrim { Kind: PrimKind.SlProp })
+                resources.Add(spec.Emit(i, scope).Text);
+            else
+                pure.Add(spec.AsProp(spec.Emit(i, scope)));
+        }
         Line("invariant " + MethodPlan.Clause(
             resources.ToImmutable(), pure.ToImmutable(), existentials.ToImmutable()));
 
@@ -1687,6 +1719,24 @@ public sealed class CodeEmitter(
         Line("{");
         _indent++;
         if (contCell is not null) Line($"let mut {contCell} = false;");
+
+        // R5.8d. The last statement of a loop body is in *tail position*, exactly as the
+        // last statement of a method body is (R4.2). It matters for the same reason: a
+        // Pulse `let mut` needs a postcondition at the end of its scope, and it has one
+        // only where the scope ends at a construct that carries an annotation. A field read
+        // inside the non-null branch of a test — which is what §12 asks every cursor loop to
+        // write — is therefore typable in tail position and untypable one statement short of
+        // it. Emitting the branch as a tail rather than terminating it with `()` is what
+        // closes that gap, and it is the same rule the method case already applies.
+        if (w.Step.IsEmpty && brkCell is null && contCell is null)
+        {
+            UnitTail(w.Body, plan);
+            _indent--;
+            Line("};");
+            _escape = outerEscape;
+            return;
+        }
+
         Statement(w.Body, plan);
         if (!w.Step.IsEmpty)
         {
@@ -1713,6 +1763,59 @@ public sealed class CodeEmitter(
         _indent--;
         Line("};");
         _escape = outerEscape;
+    }
+
+    /// <summary>
+    /// R5.8d. A statement in tail position whose value is unit — the last statement of a
+    /// loop body. It is <see cref="Tail"/> without the return value or the object epilogue,
+    /// and it recurses through blocks and two-armed <c>if</c>s so that a nest of them is a
+    /// nest of tails; anything else is an ordinary statement and keeps its <c>()</c>.
+    ///
+    /// <para>A null test that opens a §10 window is deliberately *not* treated as a tail:
+    /// the window's closing lemma is emitted by the non-tail path, and moving it would be a
+    /// change to R10.7 rather than to where a block ends.</para>
+    /// </summary>
+    private void UnitTail(IrStmt stmt, MethodPlan plan)
+    {
+        switch (stmt)
+        {
+            case IrBlock { Statements.IsEmpty: true }:
+                Line("()");
+                return;
+
+            case IrBlock b:
+                Scoped(() =>
+                {
+                    Sequence(b.Statements.RemoveAt(b.Statements.Length - 1), plan);
+                    UnitTail(b.Statements[^1], plan);
+                }, dropAtEnd: false);
+                return;
+
+            case IrIf { Else: not null } i when NullTest(i.Cond) is null:
+            {
+                if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
+                {
+                    PlainNullWindow(ptest, i, branch => UnitTail(branch!, plan), tail: true);
+                    return;
+                }
+                var cond = Expr(i.Cond);
+                Line($"if ({cond}) {{");
+                _indent++;
+                UnitTail(i.Then, plan);
+                _indent--;
+                Line("} else {");
+                _indent++;
+                UnitTail(i.Else, plan);
+                _indent--;
+                Line("}");
+                return;
+            }
+
+            default:
+                Statement(stmt, plan);
+                Line("()");
+                return;
+        }
     }
 
     private static bool ContainsBreak(IrStmt stmt) => stmt switch
@@ -1991,13 +2094,17 @@ public sealed class CodeEmitter(
             // because a plain reference carries no model and so is an ordinary value.
             case IrField { Receiver: IrVar pv } pf when
                 _slots.TryGetValue(pv.Name, out var pobj)
-                && pobj is { Kind: SlotKind.Value, Type: IrClassType pc }
+                && pobj is { Kind: SlotKind.Value or SlotKind.Cell, Type: IrClassType pc }
                 && classes is not null && classes.TryGetValue(pc.Name, out var pdecl)
                 && pdecl.IsPlain:
             {
                 if (!Reachable(pobj, pf.Loc, pf.Field)) return "()";
+                // A cell slot holds the *reference*, so it is read first and the box is
+                // projected out of what was read; a value slot already is the reference.
+                var precv = pobj.Kind is SlotKind.Cell ? Expr(pv) : pobj.Binder;
+                if (pobj.Type is IrClassType { Nullable: true }) precv = $"(Some?.v {precv})";
                 var pt = Fresh();
-                Line($"let {pt} = B.op_Bang {pobj.NonNull};");
+                Line($"let {pt} = B.op_Bang {precv};");
                 return $"{pt}.{Names.ClassProjection(pc.Name, pf.Field)}";
             }
 

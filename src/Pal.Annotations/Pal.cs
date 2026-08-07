@@ -47,6 +47,16 @@ public static class Pal
     [Conditional(Cond)]
     public static void Invariant(bool predicate) { }
 
+    /// <summary>
+    /// A loop invariant that *owns* something: the ownership a loop holds at the top of
+    /// every iteration. This is what a cursor needs — a loop that walks a data structure
+    /// owns a different part of it on each iteration, and a proposition about values
+    /// cannot say that. Written exactly like the other form, with an <c>SlProp</c>-valued
+    /// <c>[SpecOp]</c> in place of the condition.
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Invariant(SlProp ownership) { }
+
     /// <summary>A termination measure. Written as a leading statement of the loop body.</summary>
     [Conditional(Cond)]
     public static void Decreases(int measure) { }

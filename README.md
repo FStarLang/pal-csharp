@@ -43,7 +43,7 @@ Pulse out — and the whole M1 acceptance suite passes.
 - [x] **Insertion sort proved sorted *and* a permutation of its input**
 - [x] Classes and objects — abstract invariants over a pure model, a class owning its
       array, and a class owning other objects three levels deep
-- [x] Thirty-six acceptance directories verify, each with an independently written variant
+- [x] Thirty-eight acceptance directories verify, each with an independently written variant
       that must verify with no translator change
 - [x] **A production checksum verified as it ships** — SharpZipLib's `Adler32`
       ([`examples/adler32`](examples/adler32)), proved free of overflow *and* equal to
@@ -65,8 +65,15 @@ Pulse out — and the whole M1 acceptance suite passes.
       doubly linked list — including a `PushFront` that *writes the old head's back pointer*
       ([`test/dll_segment`](test/dll_segment),
       [`doc/translation.md`](doc/translation.md) §12)
-- [ ] `Span<T>`, interfaces, constrained generics, iterators — see
-      [`doc/translation.md`](doc/translation.md) §8 and §15.5
+- [x] **Cursors — iterative traversal of a linked structure**, which §10.7 had refused as
+      needing "a magic wand". It does not: the part a loop has walked is a *function of the
+      loop counter*, so the invariant can name it with `Take`/`Drop` (a list) or a one-hole
+      context (a tree) and close it at the end with an ordinary lemma. An iterative BST
+      lookup is proved to return the value the map holds
+      ([`test/list_cursor`](test/list_cursor), [`test/tree_cursor`](test/tree_cursor),
+      [`doc/translation.md`](doc/translation.md) §16)
+- [ ] `Span<T>`, interfaces, constrained generics, `IEnumerable<T>` iterators — see
+      [`doc/translation.md`](doc/translation.md) §8, §15.5 and §16.5
 
 ## Quick start
 

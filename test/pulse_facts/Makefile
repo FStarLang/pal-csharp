@@ -19,7 +19,8 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/SegmentFacts.fst.checked $(CACHE_DIR)/ConversionFacts.fst.checked \
      $(CACHE_DIR)/MatchFacts.fst.checked \
      $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked \
-     $(CACHE_DIR)/GenericClassFacts.fst.checked
+     $(CACHE_DIR)/GenericClassFacts.fst.checked $(CACHE_DIR)/CursorFacts.fst.checked \
+     $(CACHE_DIR)/TreeCursorFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
@@ -76,6 +77,14 @@ $(CACHE_DIR)/GenericClassFacts.fst.checked: GenericClassFacts.fst
 $(CACHE_DIR)/StringFacts.fst.checked: StringFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) StringFacts.fst
+
+$(CACHE_DIR)/CursorFacts.fst.checked: CursorFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) CursorFacts.fst
+
+$(CACHE_DIR)/TreeCursorFacts.fst.checked: TreeCursorFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) TreeCursorFacts.fst
 
 clean:
 	rm -rf $(CACHE_DIR)
