@@ -122,4 +122,24 @@ public static class ShapesVariant
         int now = s.GetArea();
         return now;
     }
+
+    /// <summary>The §7.2 variants: a different leaf, arguments that are not equal to each
+    /// other, and the result taken through a local.</summary>
+    [Ensures("Result == 24")]
+    public static int ScaleAtRoot()
+    {
+        Circle c = new Circle(2);
+        Shape s = c;
+        int r = s.Scaled(2);
+        return r;
+    }
+
+    [Ensures("Result == 45")]
+    public static int WeighAtMiddle()
+    {
+        Square sq = new Square(5);
+        Quadrilateral q = sq;
+        int r = q.Weighted(4, 5);
+        return r;
+    }
 }

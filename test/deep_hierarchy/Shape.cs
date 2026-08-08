@@ -64,4 +64,18 @@ public abstract class Shape
     [Ensures("@this.TheArea == 4 * Old(@this.TheArea)")]
     [Ensures("Result == Old(@this.TheArea)")]
     public abstract int DoubleAndReport();
+
+    /// <summary>
+    /// A virtual method with a <em>parameter</em>, and the contract says what the
+    /// parameter does — which is the whole of R9.7a. R9.9 has always admitted value
+    /// parameters and all three wrappers have always emitted a binder for one, but the
+    /// scope a contract was read in bound only <c>@this</c>, so <c>Result == @this.TheArea
+    /// * k</c> was rejected as PALCS0300. A virtual method could take an argument it was
+    /// forbidden to mention: enough of the feature to look present, not enough to use.
+    /// </summary>
+    [Frac("p")]
+    [Requires("1 <= k && k <= 100")]
+    [Requires("k * @this.TheArea <= 2147483647")]
+    [Ensures("Result == k * @this.TheArea")]
+    public abstract int Scaled(int k);
 }

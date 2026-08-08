@@ -98,7 +98,21 @@ public static class Program
             if (WriteIfChanged(Path.Combine(output, module.FileName), module.Text)) written++;
         }
         current.Add("TranslationErrors.fst");
-        Prune(output, current);
+        written += Prune(output, current);
+
+        // R2.4a. A verification result describes the translation it was produced from, and
+        // does not outlive it. `verification.txt` is what `palcs report` writes and the
+        // analyzer reads back, so that a failed proof is shown on the C# that caused it;
+        // left in place it shows a failure from a translation, or a translator, that no
+        // longer exists -- which is how a phantom error survives the fix for it.
+        //
+        // The deletion is unconditional, and that costs nothing because F* writes a
+        // `.checked` file only when a module *verifies*. A module that failed therefore
+        // has none, the harness re-verifies exactly those, and a real failure is restated
+        // on the next `make verify`. Deleting only on change would be the narrower rule
+        // and the wrong one: it repairs the transition and not the state, so any file left
+        // by an interrupted run, a crash or an older build stays forever.
+        File.Delete(Path.Combine(output, VerificationDiagnostic.FileName));
 
         // PAL's sentinel: a module that fails to verify whenever translation was
         // incomplete, so a broken translation can never look like a passing proof.
@@ -128,12 +142,17 @@ public static class Program
     /// against C# that no longer exists. Only R2.1's own extensions are touched; the cache
     /// and the maps are left alone.
     /// </summary>
-    private static void Prune(string output, HashSet<string> current)
+    private static int Prune(string output, HashSet<string> current)
     {
+        var removed = 0;
         foreach (var pattern in new[] { "*.fst", "*.fsti" })
-            foreach (var path in Directory.EnumerateFiles(output, pattern))
+            foreach (var path in Directory.EnumerateFiles(output, pattern).ToArray())
                 if (!current.Contains(Path.GetFileName(path)))
+                {
                     File.Delete(path);
+                    removed++;
+                }
+        return removed;
     }
 
     /// <summary>

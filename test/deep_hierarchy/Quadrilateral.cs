@@ -63,6 +63,20 @@ public abstract class Quadrilateral : Shape
     public abstract int Perimeter();
 
     /// <summary>
+    /// R9.7a at an <em>intermediate</em> class, and with two parameters rather than one.
+    /// This is the case that exercises R9.18's forwarder — the third wrapper — carrying
+    /// arguments through, and it takes them in an order the model does not, so a scheme
+    /// that had quietly paired binders with model fields rather than with parameters
+    /// would show up here.
+    /// </summary>
+    [Frac("p")]
+    [Requires("1 <= a && a <= 100")]
+    [Requires("1 <= b && b <= 100")]
+    [Requires("a * @this.TheHeight + b * @this.TheWidth <= 2147483647")]
+    [Ensures("Result == a * @this.TheHeight + b * @this.TheWidth")]
+    public abstract int Weighted(int a, int b);
+
+    /// <summary>
     /// A <em>non-virtual</em> method of the intermediate class whose body calls one of its
     /// own virtual methods. It has no vtable slot and works for every present and future
     /// subclass.

@@ -180,4 +180,28 @@ public static class Shapes
         Shape s = new Circle(2);
         return s.DoubleAndReport();
     }
+
+    /// <summary>
+    /// R9.7a at a call site: a virtual method with a parameter, dispatched at the
+    /// <em>root</em> static type. The argument has to reach the vtable slot through the
+    /// two wrappers R9.10 emits, and the contract that justifies the result is the one
+    /// stated on the <c>abstract</c> declaration in terms of that parameter.
+    /// </summary>
+    [Ensures("Result == 75")]
+    public static int ScaleAtRoot()
+    {
+        Shape s = new Square(5);
+        return s.Scaled(3);
+    }
+
+    /// <summary>
+    /// The same for a method declared at the <em>intermediate</em> class and taking two
+    /// parameters, so R9.18's forwarder is on the path as well.
+    /// </summary>
+    [Ensures("Result == 26")]
+    public static int WeighAtMiddle()
+    {
+        Quadrilateral q = new Rectangle(2, 3);
+        return q.Weighted(4, 7);
+    }
 }

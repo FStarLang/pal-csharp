@@ -323,6 +323,32 @@ rule — a rename that also introduced an error — behaving as before. Only fil
 R2.1's extensions are removed; `_cache/`, `diagnostics.json` and the two maps are the
 tool's own and are left alone.
 
+**R2.4a (a verification result does not outlive the translation it describes).**
+`verification.txt` is the other direction of R2.2: `palcs report` writes what Pulse said,
+mapped back to the C# it was about, and the analyzer reads it so that a failed proof
+appears on the source line responsible. It is deleted at the start of every translation.
+
+Left in place it is the same failure as an unpruned module, one layer up. The symptom that
+found it is worth keeping because it is so misleading: after R9.12b's bug was *fixed* and
+the tree re-translated, `dotnet build` still reported
+
+```
+Quadrilateral.cs(33,23): error PALCS0600: Expected expression of type FStar.Int32.t
+                                          got expression () of type Prims.unit
+```
+
+— a proof failure from a translator that no longer existed, on a line that no longer
+produced it, reported by the C# compiler. Nothing was wrong; the *file* was wrong.
+
+The deletion is unconditional rather than conditional on the translation having changed,
+and the reason is the general one: **a conditional repairs the transition, a rule repairs
+the state.** Deleting only when a module was written fixes the case that produced it and
+leaves every file dropped by an interrupted run, a crash, or an older build in place
+forever. It costs nothing because F* writes a `.checked` file only when a module
+*verifies*: a module that failed has none, the harness therefore re-verifies exactly the
+failing modules, and any real failure is restated on the next `make verify`. There is no
+result that unconditional deletion can lose.
+
 ---
 
 ## 3. Types
@@ -2541,6 +2567,29 @@ square's area is `side * side`; for a shape whose model does not bound its repre
 the base precondition says nothing and the leaf will not verify. §8 works this out for a
 quadrilateral's perimeter. The fix is the user's — strengthen the base contract, or add a
 `[Refine]` to the leaf's model — and never the emitter's.
+
+**R9.7a — A virtual method's parameters are in scope in its contract.** R9.9 admits value
+parameters on a slot and all three wrappers emit a binder for each, so the missing half was
+only that the scope a contract is read in bound `@this` and nothing else. `Result == k *
+@this.TheArea` was rejected as **PALCS0300**, `k cannot be mentioned in this
+specification` — a virtual method could take an argument it was forbidden to say anything
+about, which is no use at all.
+
+The binding itself is the simple case, and R9.9 is why: a slot's parameters are machine
+integers and booleans passed by value, so there is no cell to read through and nothing
+changes across the call. One term serves the pre-state and post-state scopes, under the
+same name the wrappers bind, and `Old(k)` needs no special case because it cannot differ
+from `k`. A parameter that *was* a resource would need all of that, and R9.9's PALCS0545
+is what keeps one out of a slot.
+
+This is the second gap the R9.12b audit turned up, and it was found the same way, so the
+method is worth recording. R9.12b was one empty cell in a two-by-two — a virtual method
+that mutates *and* returns. Asking what *else* the suite never wrote about a virtual
+method answered immediately: **every virtual method in every test was nullary**. Both gaps
+were invisible for the same reason and neither was a hard problem once written down.
+**A generated construct is only as tested as the shapes of source that reach it**, and the
+cheap way to find the untested ones is to tabulate the axes an emitter branches on and
+look for the empty cells, rather than to re-read the emitter.
 
 ### 9.3 What a reference is
 

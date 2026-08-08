@@ -62,6 +62,16 @@ public sealed class Rectangle : Quadrilateral
         h = 2 * h;
     }
 
+    public override int Scaled(int k)
+    {
+        return k * (w * h);
+    }
+
+    public override int Weighted(int a, int b)
+    {
+        return a * h + b * w;
+    }
+
     public override int DoubleAndReport()
     {
         int was = w * h;

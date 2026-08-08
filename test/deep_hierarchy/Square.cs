@@ -41,6 +41,16 @@ public sealed class Square : Quadrilateral
         side = 2 * side;
     }
 
+    public override int Scaled(int k)
+    {
+        return k * (side * side);
+    }
+
+    public override int Weighted(int a, int b)
+    {
+        return a * side + b * side;
+    }
+
     public override int DoubleAndReport()
     {
         int was = side * side;

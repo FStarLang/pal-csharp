@@ -1077,6 +1077,22 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
             ? new Term(PostModel, TermKind.Math, type)
             : new Term($"(reveal {model})", TermKind.Math, type));
 
+        // R9.7a. A virtual method's parameters are in scope in its contract, under the
+        // same names the wrappers bind them by. Only `@this` used to be bound here, so a
+        // contract mentioning a parameter was rejected as PALCS0300 -- while CheckVirtual
+        // *admitted* the parameter and all three wrappers dutifully emitted a binder for
+        // it. The feature was half-present: a virtual method could take an argument it
+        // was forbidden to say anything about, which is no use at all.
+        // R9.9 makes this the simple case: a slot's parameters are machine ints and bools
+        // passed by value, so there is no cell to read through and nothing changes across
+        // the call. One term serves both scopes.
+        foreach (var p in Value(v))
+        {
+            var term = new Term(Names.Local(p.Name), MethodPlan.KindOf(p.Type), p.Type);
+            pre.Bind(p.Name, term);
+            post.Bind(p.Name, term);
+        }
+
         var requires = SpecEmitter.Conjunction(v.Requires.Select(r => spec.AsProp(spec.Emit(r, pre))));
         var ensures = SpecEmitter.Conjunction(
             v.Ensures.Concat(v.Preserves).Select(e => spec.AsProp(spec.Emit(e, post))));
