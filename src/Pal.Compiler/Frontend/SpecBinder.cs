@@ -214,7 +214,22 @@ public static class SpecBinder
     }
 
     private static string RenderParam(SpecParam p) =>
-        $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} @{p.Name}";
+        $"{RenderType(p.Type)} @{p.Name}";
+
+    /// <summary>
+    /// R17.1, in the shim. A span parameter is declared to the shim as the **array** it
+    /// denotes. Two things make this the right rendering rather than a shortcut. It is what
+    /// R17.1 says the span *is*, so `Contents(a)` binds to the same `Seq&lt;T&gt;` either
+    /// way and no spec term changes. And it is what makes a quantified contract writable at
+    /// all: `Span&lt;T&gt;` is a `ref struct`, so a shim whose parameter kept that type
+    /// would reject every `Forall((int k) =&gt; … Contents(a)[k] …)` with CS9108, "cannot
+    /// use parameter that has ref-like type inside a lambda". The array has no such rule.
+    /// </summary>
+    private static string RenderType(ITypeSymbol type) =>
+        type is INamedTypeSymbol { MetadataName: "Span`1" or "ReadOnlySpan`1" } span &&
+        span.ContainingNamespace is { Name: "System", ContainingNamespace.IsGlobalNamespace: true }
+            ? RenderType(span.TypeArguments[0]) + "[]"
+            : type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
     /// <summary>
     /// Characters of the shim line to skip before the spec text begins. A line-span

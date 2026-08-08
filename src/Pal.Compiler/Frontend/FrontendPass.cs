@@ -1921,8 +1921,15 @@ public static class FrontendPass
                 // names and nothing implicit.
                 Plain = Declarations.Has(p, known.PlainAttribute) ||
                         IsPlainClass(declared, known),
+                // R17.2. A `ReadOnlySpan<T>` is fractional whether or not `[Frac]` is
+                // written. The C# type already says read-only, so asking the author to
+                // repeat it in an attribute would be the translator demanding to be told
+                // something the program states -- §0 rule 3 in the "never invent a refusal"
+                // direction. An explicit `[Frac("p")]` still wins, because naming the
+                // permission is how two parameters are made to share one array (R4.9).
                 Fraction = Declarations.Find(p, known.FracAttribute) is { } f
-                    ? Declarations.StringArgument(f) : null,
+                    ? Declarations.StringArgument(f)
+                    : known.IsReadOnlySpan(declared) ? "p_" + p.Name : null,
             });
         }
         return result.ToImmutable();

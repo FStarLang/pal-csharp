@@ -134,8 +134,12 @@ The rules below depend on the following, each **verified against the pinned tool
 | F74 | **Pulse cannot disambiguate two conjuncts of one predicate whose only difference is a pointer just read from the heap.** The fix is definitional, not a lemma: make each conjunct's model half a total projection (`subl`/`subr`) of a model the invariant already names (R16.2). | Reproduced in `TreeCursorFacts.knot_open`; the projections are in `KnotPath.fst`. |
 | F76 | **A Pulse `box` is already a nullable pointer.** `Pulse.Lib.Box` exports `null`, `is_null (r: box a) : b:bool{b <==> r == null}` and `pts_to_not_null`. So `option (box …)` is a *second* nullability layer over one that already exists, and its entire content is the two coercions R10.2b/R10.2c used to describe. Replacing it with a refinement (`class_C = b: class_C__opt { not (B.is_null b) }`) makes both coercions the identity text, deletes a `pure`-trapped existential from every recursive invariant (cf. F73), and lets each user-written cursor lemma take its cursor once instead of twice. | `test/pulse_facts/NullFacts.fst` N1–N7, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Box.fsti:33,35,108`. Relied on by R10.2, R10.2b, R10.2c, R10.2d. |
 | F77 | **Pulse does not see through an ordinary `let` when matching resources.** `class_C__inv this p m` and `class_C__inv_opt this p m` are the same term after delta, but a goal stated with one is not found in a context holding the other; an explicit `rewrite … as …` is required. This is why R10.2b being the identity *conversion* still leaves `class_C__as_opt` and `class_C__intro` in place as one-line rewrite lemmas rather than deleting them. | Reproduced in `test/pulse_facts/NullFacts.fst` while writing `inv_share`/`inv_gather_gen`. |
-| F78 | **`Pulse.Lib.Slice` is the `Span<T>` shape, and the whole of what is missing is on the C# side.** A `slice t` is a first-class value with a non-ghost `len`, a `pts_to` over its contents, `split`/`join`, `subslice` with a `subslice_rest` residue, `share`/`gather`, `copy`, and an `is_from_array` provenance token. Returning a subslice is *derivable* from the two `is_split`s `subslice_rest` is defined over — no library request is needed. What is not derivable is knowing *where in a C# program* the split and the join happen. | `test/pulse_facts/SliceFacts.fst` S1–S6, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Slice.fsti`. Relied on by §17. |
+| F78 | **`Pulse.Lib.Slice` is the `Span<T>` shape, and the whole of what is missing is on the C# side.** A `slice t` is a first-class value with a non-ghost `len`, a `pts_to` over its contents, `split`/`join`, `subslice` with a `subslice_rest` residue, `share`/`gather`, `copy`, and an `is_from_array` provenance token. Returning a subslice is *derivable* from the two `is_split`s `subslice_rest` is defined over — no library request is needed. What is not derivable is knowing *where in a C# program* the split and the join happen. | `test/pulse_facts/SliceFacts.fst` S1–S6, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Slice.fsti`. Relied on by R17.1 and R17.5. |
 | F79 | **A span value may be copied; the span's resource may not.** After `var t = s;` there is still exactly one `pts_to`, so a write through either name is a write to the memory both describe. This is precisely the duplication `PALCS0511` refuses a struct with a reference-typed field (§3.4) — and a `Span<T>` *is* such a struct. So a span cannot go through §3's struct rules; it has to be a **slot kind**, like `T[]`. | `test/pulse_facts/SliceFacts.fst:s4_copy_is_alias`. Note the `rewrite` the probe needs to move the resource between the two names: F77 again, and it is why the aliasing is invisible to Pulse's matcher unless the translation makes it explicit. |
+| F80 | **`give_back w` recovers everything by unification.** A ghost operation whose only explicit argument is the window recovers the parent, the permission, the bounds and both contents from the receipt sitting in the context. This is what lets `Pal.Restore(w)` be a one-argument surface intrinsic (R17.6) rather than something that has to restate what was borrowed. | `test/pulse_facts/SliceFacts.fst:s8_restore_by_unification`, verified. Relied on by R17.6. |
+| F81 | **A receipt may not be indexed by `SZ.t` if its bounds are `exists*`-bound.** `Pulse.Lib.Slice.subslice_rest` carries the refinement `SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v`, which cannot be discharged for bounds bound by an existential — the receipt fails to typecheck. Putting the refinement in a `pure` *inside* the `exists*` does not help: it is not available where `subslice_rest` is typed. The fix is to inline `subslice_rest` into a predicate indexed by `nat`, moving the refinement onto that predicate's own binder. | `pulse/Pulse.Lib.CSharp.Span.fst`'s internal `rest`; found while writing `is_range_of`. Relied on by R17.5. |
+| F82 | **A `fold` does not normalise its indices.** `fold (rest s w p (I32.v i) …)` fails against a context holding `rest s w p (SZ.v lo) …` even where `SZ.v lo == I32.v i` is known to SMT; an explicit `rewrite … as …` first is required. F77 in a second guise, and the reason the library's borrow operations are written with a `rewrite` before each `fold`. | `pulse/Pulse.Lib.CSharp.Span.fst`, `intro_rest`. |
+| F83 | **A pure lemma must be called before the resource step it supports, not after.** `splice_same v i j; restore_range w;` verifies; the reverse order does not — the resource match happens first and has already failed by the time the lemma runs. Erased arguments must be passed `(reveal v)` explicitly. | `test/pulse_facts/SliceFacts.fst:s9_read_only_trip`. |
 | F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
@@ -2438,11 +2442,12 @@ R3.10b is untested); and a cast that may fail.
   its callee's contract — so it runs once per compilation and is then reported per file.
   On the programs in `test/` that is milliseconds; nothing has been measured at a scale
   where it would not be.
-* `Span<T>` and `ReadOnlySpan<T>`. A method mentioning either is rejected with a diagnostic
-  rather than mistranslated; fractional permissions are reached through `[Frac]` instead
-  (R4.9). Probed since, and the answer is longer than it looks: the Pulse side is
-  `Pulse.Lib.Slice` and is nearly free, but a span is a struct that owns memory and slicing
-  has no syntax to hang a split and a join on. See §17.
+* `Span<T>` and `ReadOnlySpan<T>`. **Done since, for a whole-array span** (§17): both map
+  to the array slot R4.9 already had, so `.Length`, indexing, bounds obligations, `[Frac]`
+  and loop invariants are the array's rules unchanged, and the implicit `T[]` conversion
+  emits nothing. A span that is a *window* — `Slice`, `s[i..j]`, `stackalloc` — is refused
+  as `PALCS0590`, because the open question there is a surface one and not a proof one
+  (§17.5).
 * A struct field must be a value — a scalar or another translated struct. An array or
   class field is **PALCS0511**, and that is the model rather than a shortcut: a struct
   copy would duplicate ownership of the same memory. Storage therefore travels alongside
@@ -4627,19 +4632,32 @@ which is what §0 rule 3 asks for and is the whole claim of §16.
 * **`break`.** R16.1's flag is the idiom; making R5.10's flag interact with an owning
   invariant is untried.
 
-## 17. `Span<T>`: what the probe says (planned)
+## 17. `Span<T>`: a borrowed window
 
 §8's *Not yet done* has listed `Span<T>` and `ReadOnlySpan<T>` since M1, and §14 named
-generics as their prerequisite, which M8 delivered. This section is not a milestone. It is
-the §0 step that comes before one: the facts are probed and pinned
-(`test/pulse_facts/SliceFacts.fst`, F78 and F79), and what they say is written down while it
-is still cheap to change one's mind.
+generics as their prerequisite, which M8 delivered. The facts were probed and pinned first
+(`test/pulse_facts/SliceFacts.fst`, F78 and F79); §17.1 to §17.3 are what that probe
+concluded, and §17.4 is the scheme it led to.
 
-The headline is that the Pulse side is nearly free and the C# side is not. `Pulse.Lib.Slice`
-already *is* a span (F78). What the milestone has to design is a **surface language**, and
-that is a bigger question than any rule in this document so far, because it is the first
-time C#'s type system and the encoding's ownership discipline disagree about something C#
-programmers do constantly.
+The conclusion is that `Span<T>` splits cleanly in two at a line C# does not draw but the
+encoding does: a span that denotes **the whole of an array** and a span that denotes a
+**window into one**. The first is not a new slot kind at all — it is the array — and §17.4
+translates it. The second is where every difficulty lives, and §17.5 refuses it, because the
+question it raises is a *surface-language* question and not a translation one.
+
+> ***Since revised, and the split abandoned.*** The identification of a whole-array span
+> with its array was the wrong economy. It bought three rules that cost nothing to write
+> and could not be extended, and it paid for them by refusing the operation `Span<T>`
+> exists for. The question that looked open — where does a borrow end, and how would the
+> translator know — was answered by observing that it does not have to know: *taking* a
+> window is already an ordinary C# expression and needs no new syntax, and *giving it back*
+> is invisible in C# precisely because it is a proof step, which is what a ghost statement
+> is for. So the author writes `Pal.Restore(w)`, exactly as they write every other proof
+> step, and no flow analysis is consulted. §17.4 and §17.5 below are the rules as
+> delivered; the paragraphs marked *Since revised* record what they replaced and why. The
+> original text is kept because the boundary it drew was real: everything §17.5 used to
+> refuse was genuinely outside the identification, and the way out was to drop the
+> identification, not to widen it.
 
 ### 17.1 Why the promised table row is not enough
 
@@ -4652,10 +4670,16 @@ R4.9's parameter table has said since M1 that
 and `SliceFacts` S1 confirms it — *for a span that is never sliced*. Indexing, writing and
 `.Length` all behave exactly as an array's do, with `Slice.pts_to` in place of
 `array_pts_to_full` and `Slice.len` a non-ghost function, so a counted `for` over a span has
-a pure guard exactly as one over an array does. A span that is only passed and indexed is an
-array with a different spelling, and would be a small milestone.
+a pure guard exactly as one over an array does.
 
-Four things break that, and only the first is about Pulse.
+The sentence to stop at is "a span that is only passed and indexed is an array with a
+different spelling". It is not a simile. Such a span **is** the array — same address, same
+length, same contents, same owner — and the C# conversion that produced it is implicit and
+carries no runtime work. So the encoding should not merely *resemble* the array's; it should
+**be** the array's, which is what R17.1 says and what the rest of §17.4 follows from.
+
+Four things looked like obstacles when this section was first written. Two of them dissolve
+under R17.1, one is small, and the fourth is real and is §17.5's.
 
 ### 17.2 The four obstacles
 
@@ -4664,7 +4688,15 @@ as `PALCS0511`, on the ground that copying the struct would duplicate ownership 
 memory — and a `Span<T>` is exactly such a struct. Rejecting it under that rule would be
 correct and useless. So a span cannot be a *translated struct*; it must be a **slot kind**,
 primitive like `T[]`, with its own row in R4.9's table, no field projections, and no struct
-copying. That is a frontend classification decision, taken before anything is emitted.
+copying.
+
+> *Written before R17.1 was. **Since revised**, in the direction the last sentence was
+> already pointing: the slot kind a span must be is not merely **like** `T[]`, it **is**
+> `T[]`. So there is no new row, no new binder type and no new classification — §3.4's
+> struct rules are simply never reached, because `MapType` never produces a struct for a
+> span in the first place. F79's conclusion is satisfied by identification rather than by
+> imitation, which is the cheaper of the two ways to satisfy it and the only one that does
+> not duplicate the array slot's code.*
 
 **Slicing has no syntax.** `var w = s.Slice(i, n);` is an ordinary method call. Its result
 aliases `s`, and `s` stays in scope, assignable and indexable, with the C# compiler content.
@@ -4679,14 +4711,30 @@ PAL writes its ghost steps: a scoped `Pal.Span(s, i, n, w => { … })`, or an ex
 way §12 does everything else. Choosing between those is the milestone's design work, and
 §12's machinery is very likely enough to express whichever wins.
 
+> ***Since resolved,*** and by something smaller than any of the three options offered. The
+> paragraph asks for syntax marking *both* endpoints, and only one of them is missing. The
+> split is `s.Slice(i, n)`: it is written, it is where the author put it, and Roslyn hands
+> it over as an ordinary expression. Only the join has no C# spelling, because C# has
+> nothing to spell — the borrow ends where the author decides it ends, and that decision
+> has no runtime content. R17.6 gives it the ordinary ghost-statement treatment,
+> `Pal.Restore(w)`, and the borrow checker this paragraph rightly refuses never comes up:
+> to know which join to emit the translator reads the *initializer* of the window's local,
+> which is syntax, and reads nothing else.
+
 **A span slot may carry a token.** `Span<T> s = arr;` is an implicit conversion in C#. In
 the encoding it is `Slice.from_array`, which consumes `A.pts_to a` and yields
 `Slice.pts_to s` **plus `is_from_array a s`** — a receipt the array cannot be indexed again
 without redeeming (`SliceFacts.s3_lend_and_redeem`). So a span slot is a resource *and*,
 where it came from an array the caller still names, a token; and a `stackalloc` span is a
 third provenance again. R4.9's table has one column per slot and no column for a token, and
-this is where the milestone's real work is. It is the same shape as §12's `[Plain]`
-predicates, which is encouraging: the token is an `slprop` the user can be made to name.
+this is where the milestone's real work is.
+
+> ***Since revised.*** This obstacle is entirely an artefact of choosing `Pulse.Lib.Slice`
+> as the image. A token records *where a span came from* so that the source can be
+> reconstituted; under R17.1 the span and its source are the same term, so there is nothing
+> to record and nothing to redeem, and the conversion emits no code at all. The probe's
+> `s3_lend_and_redeem` remains the right answer for the case where the two are genuinely
+> different terms — a window — which is §17.5's.
 
 **The mechanics are not free either.** `s[i]` on a span is a call to a `ref T`-returning
 `get_Item`, not an `ElementAccessExpression` over an array — pal-csharp has no `ref` returns,
@@ -4708,3 +4756,222 @@ is the acceptance test that already exists.
 Then non-sliced `Span<T>`, which is the same row at full permission plus the F79
 classification. Then slicing, which is where the surface-syntax question has to be answered
 and where §12 is the toolbox. Then `stackalloc`, or never.
+
+> ***Since revised**, and collapsed.* Under R17.1 the first two steps are one step and are
+> the same step, because `Span<T>` and `ReadOnlySpan<T>` differ only in which row of R4.9's
+> table they land on — full permission or fractional — and that distinction already exists
+> for `T[]`. §17.4 does both. The order that survives is the split between §17.4 and §17.5,
+> which is not an order of work but a boundary: a whole-array span is translated, a window
+> is refused with a diagnostic that says which section will answer it.
+
+### 17.4 The rules
+
+**R17.1 — `Span<T>` and `ReadOnlySpan<T>` are `Pulse.Lib.Slice.slice`.** `MapType` sends
+both, at a mappable element type, to `IrSpanType`, which `Names` renders `S.slice ⟦T⟧`.
+`T[]` is unaffected and stays `array ⟦T⟧`. A span is therefore its own slot kind
+(`SlotKind.Span`), whose resource is `S.pts_to` rather than `A.pts_to` — which satisfies
+F79's requirement that a span be primitive rather than a translated struct by making it
+primitive, which is what F79 asked for.
+
+This is what a span *is*: a base, a length and a permission, describing memory somebody
+else allocated. Everything the identification had to buy back now comes free. A window has
+a length of its own (R17.3 reads it off the slice), a base of its own (R17.4 subscripts the
+slice), and an owner who is owed it back (R17.6) — the three properties the original R17.5
+listed as reasons a window could not be admitted are exactly the three things `slice` has
+and `array` has not.
+
+The C#-facing operations live in `Pulse.Lib.CSharp.Span`, an `.fsti` of modeling axioms and
+derived operations over the Pulse library in the style `Pulse.Lib.CSharp.Array` established
+— not a new theory. §3.4's struct rules are still never reached, because `MapType` still
+never produces a struct for a span.
+
+> ***Since revised.*** What follows was R17.1, and is kept because the original R17.5's
+> refusal is unintelligible without it.
+>
+> > `MapType` sends both, at a mappable element type, to the same `array ⟦T⟧` that `T[]`
+> > maps to; there is no span type in the IR. This is an *identification*, licensed by what
+> > the C# subset §17.5 admits: within it, every span denotes the whole of exactly one
+> > array, at that array's length, owned by whoever owns the array. §3.4's struct rules are
+> > then never reached, R4.9's table needs no new row and no new column, and every existing
+> > array rule applies unchanged — R3.3's index bridge, R6.4's bounds obligations, R4.9's
+> > `[Frac]`, R5.8's loop invariants over `Seq.length`. The cost of the identification is
+> > stated, not hidden: it is exactly what R17.5 refuses, and it is why R17.5 refuses it.
+>
+> The cost was the feature. `numbers.AsSpan(1, 3)` — the first thing anyone writes with a
+> span — was refused, and no further work *inside* the identification could have admitted
+> it, because the identification is precisely the assertion that such a span does not
+> exist. That is a boundary correctly drawn around the wrong region.
+
+**R17.2 — a `ReadOnlySpan<T>` parameter is fractional.** It takes a permission variable and
+its post-state model is its pre-state model, which is R4.9's `[Frac]` row. The permission is
+the one `[Frac("p")]` names if the parameter carries the attribute, and a generated one
+otherwise. Generating it is not a convenience: `ReadOnlySpan<T>` *means* read-only in C#, so
+requiring the author to also write `[Frac]` would be the translator asking to be told
+something the program already says (§0 rule 3, in the "never invent a refusal" direction).
+A `Span<T>` parameter is the full-permission row, and takes `[Frac]` only if written.
+
+**R17.3 — `s.Length` is the span's own length.** `IrLength` again, but emitted as
+`Span.length_i32`, which is `Slice.len` composed with R3.3's `SZ.t` → `I32.t` bridge. Like
+an array's header field, `Slice.len` is pure and non-ghost, so the guard of a counted `for`
+over a span is a pure expression exactly as it is over an array, and R5.9's measure
+inference applies unchanged.
+
+The length is the *window's*, not its parent's, which is the point: `a.AsSpan(from, count)`
+has length `count`, and a method written over a span never mentions where the window came
+from.
+
+**R17.4 — `s[i]` is the slice subscript.** Roslyn models it as a call to a `ref T`-returning
+`get_Item` rather than as an element access over an array, so the frontend has to recognise
+it; what it lowers to is `IrElement`, emitted as `Span.read` / `Span.write`, with R6.4's two
+obligations (`0 <= i` and `i < s.Length`) generated at it unchanged.
+
+`ReadOnlySpan<T>` needs no rule to forbid the write, because C# forbids it: its indexer
+returns `ref readonly T` and the C# compiler rejects the assignment. This is the core
+invariant paying for itself — the annotated program is an ordinary C# program, so an
+ordinary C# rule is available to enforce a separation-logic one.
+
+**R17.6 — `Pal.Restore(w)` ends a borrow.** It is a `[Conditional("PAL")]` ghost statement
+(§12), so it is erased by the C# compiler and costs nothing at runtime, and it takes **one**
+argument: the window. Which of the three operations R17.5 lists is emitted comes from the
+`SpanOrigin` recorded on the local's slot **when the local was declared** — a syntactic
+property of its initializer, read once, never a flow analysis. After the restore the slot
+leaves scope, so a later use of `w` is "not in scope" rather than an unprovable goal.
+
+One argument suffices because the receipt in context determines everything else. `give_back
+w` recovers the parent, the permission, the bounds and both contents by unification
+(F80) — so the surface asks the author only for the thing C# cannot tell the translator,
+which is *where*.
+
+Getting it wrong fails, and fails locally. Omit the restore and the parent's `pts_to` is
+missing where the postcondition needs it. Write it too early and the window's own `pts_to`
+is gone at its next use. Both land in the author's annotations, which §0 rule 3 says is
+where a proof is fixed. Neither can make a false postcondition provable: the restore is a
+library operation with its own precondition, not a translator assumption.
+
+**R17.6a — a span parameter reaches the specification shim as an array.** §4's shim (the
+generated compilation unit that binds spec strings, `SpecBinder`) declares a span parameter
+with the array type R17.1 says it is. This is forced rather than chosen. `Span<T>` is a
+`ref struct`, and C# refuses a `ref struct` inside a lambda — *"cannot use parameter that
+has ref-like type inside an anonymous method, lambda expression, query expression, or local
+function"*, CS9108 — so a shim that kept the span type would reject every quantified
+contract, `Forall((int k) => … Contents(a)[k] …)` being the shape almost every array
+contract in `test/` has. With the array type the restriction never arises, and no spec term
+changes meaning, because `Pal.Contents` has the same `Seq<T>` for both.
+
+The restriction does bite in **statement** position, where there is no shim: a
+`Pal.Invariant(Pal.Forall(…))` that mentions a span is a real lambda over a real
+`ref struct` and C# rejects it. The idiom is to name the predicate — a `[Spec]` method over
+`Seq<T>`, which moves `Pal.Contents(a)` out of the lambda and into an ordinary argument
+position — and `test/array_view` uses it for exactly this reason. This is a genuine narrowing of
+the surface for spans relative to arrays; it is C#'s and not the scheme's, and §17.7 records
+it rather than hiding it.
+
+### 17.5 Creation is a borrow
+
+**R17.5 — every span comes from somewhere, and taking it consumes the source.** There is no
+way to make a span out of nothing (R17.7 refuses the one C# offers), so every span
+expression in the subset names a source that already owns memory, and taking the window
+takes that ownership. Five C# forms, three library operations, one receipt each:
+
+| C# | operation | receipt left in context |
+|---|---|---|
+| `Span<T> s = a;` and `a.AsSpan()` | `Span.of_array a` | `S.is_from_array a s` |
+| `a.AsSpan(i)`, `a.AsSpan(i, n)` | `Span.of_array_range a i n` | `Span.is_range_of a w p i j v` |
+| `s.Slice(i)`, `s.Slice(i, n)`, `s[i..j]` | `Span.sub s i n` | `Span.is_sub_of s w p i j v` |
+
+The one-argument forms synthesise the missing length as `source.Length - start`, so
+`s.Slice(i)` and `s.Slice(i, s.Length - i)` translate to the same term — two spellings of
+one operation, which is what §0's structure-preservation rule requires of them.
+
+The borrow is emitted **at the local's own binder**, not at a fresh temporary the local is
+then bound to. This is R12.4's reason verbatim: Pulse matches resources by name (F77), so a
+copy would leave the context holding `S.pts_to t0 _` while every later mention of the
+window asked for `S.pts_to var_w _`.
+
+Consuming the source is what makes the accounting work, and it is visible in the C# type
+system rather than enforced by the translator: while the window is out, the source has no
+`pts_to`, so an index of it does not verify. The author gets it back with R17.6.
+
+> ***Since revised.*** R17.5 was the refusal of every span that is not a whole array —
+> `Slice`, `s[i..j]`, `stackalloc`, `ToArray`, `CopyTo`, `Fill`, `string`'s implicit
+> `ReadOnlySpan<char>`, and every member besides `Length` and the indexer — on the ground
+> that R17.1 identified a span with an array and *"the identification holds only where the
+> span denotes the whole of one"*. That reasoning was sound and the refusal was honest: it
+> stated a scheme limit rather than papering over a proof, and it said in as many words
+> that windows are not hard to verify, only that *"C# marks neither the point where a
+> window borrows nor the point where it returns"*.
+>
+> It was right about the diagnosis and wrong about the remedy. C# does mark the point where
+> a window borrows — that is what `a.AsSpan(1, 3)` is — and the point where it returns is
+> not marked because there is nothing in C# to mark it *with*, the return being pure proof.
+> A proof step the author writes is a ghost statement, which §12 has supported since M9.
+> What survives of the old R17.5 is R17.7, which refuses the forms that are genuinely not
+> borrows.
+
+**R17.8 — what the parent holds afterwards is `Pal.Splice`.** After a window over
+`[from, to)` is restored, the parent's contents are its old contents with that range
+replaced by the window's: `CS.splice (old, from, to, window)` in
+`Pulse.Lib.CSharp.Seq`, written `Pal.Splice(Old(Contents(a)), from, to, Contents(a))` in a
+contract. `splice` is defined **total**, falling back to the parent when the indices do not
+fit, so it can appear in a specification without dragging a refinement along; `splice_index`
+and `splice_length` carry `[SMTPat]`, which is what discharges the usual "the window is
+zero, everything outside it is untouched" postcondition without a single lemma call.
+
+A read-only window restored unwritten gives the parent back exactly what it had, which is
+`splice_same`. So a read-only borrow costs its user nothing beyond the bounds — see
+`ReadAt` in `test/array_view`, whose `Contents(a) == Old(Contents(a))` needs no help.
+
+### 17.6 What is refused
+
+**R17.7 — the forms that are not borrows (`PALCS0590`).** The list is short now and every
+entry is on it for a reason of its own, not because a rule ran out:
+
+* **`stackalloc`.** An allocation, not a borrow: no `T[]` owns the memory, so there is no
+  parent to consume and nothing for `Pal.Restore` to give back. It would need a
+  scoped-lifetime allocation rule, interacting with F75's rule about `let mut` and tail
+  position.
+* **A range on an *array*.** `a[1..3]` where `a` is `int[]` *copies* — C# compiles it to
+  `RuntimeHelpers.GetSubArray`, producing a fresh array whose writes are invisible in `a`.
+  Translating it as a window would be translating a different program. The refusal is not a
+  limitation but a correction, and the diagnostic says so.
+* **`^k` in a range.** The from-end index is `s.Length - k`, which is ordinary arithmetic —
+  but arithmetic `System.Index`'s conversion performs and the source does not write. §0's
+  rule against inventing steps covers arithmetic as much as proofs; supporting it means a
+  rule saying what `^k` elaborates to.
+* **The implicit `T[]` → `Span<T>` conversion anywhere but a local's initializer.**
+  `Wipe(a)` would borrow `a` and hand back a receipt with no name, leaving the array
+  unrecoverable and failing far from the cause. The fix is one line the author can see:
+  name the borrow, pass the name, restore it. (A Normalize-pass rewrite to
+  `Span<T> t = a; Wipe(t); Pal.Restore(t);` would be a legitimate R2-style desugaring and is
+  deferred, not rejected.)
+* **`Pal.Restore` of a span *parameter*.** A restore returns a window to whoever lent it,
+  and R17.6 reads which operation that is off the borrow that created the window. A
+  parameter was borrowed in another method, whose receipt this one does not hold.
+* **A span local assigned after its declaration.** Not a special case: a span local is bound
+  with `let`, not `let mut`, so R7's general assignment rule refuses it. R17.6's origin is a
+  property of the initializer, and an assignment would make "which borrow is this" depend on
+  the path taken — the borrow checker §17 exists to avoid. A second window gets a second
+  name.
+* **`CopyTo`, `Fill`, `ToArray`, and `string`'s implicit `ReadOnlySpan<char>`.** Library
+  operations with no rule yet; `Span.copy_to` exists in the library for the first of them
+  and only the surface is missing.
+
+### 17.7 What §17 does not reach
+
+* **An inline quantified invariant over a span**, per R17.6a: C# forbids a `ref struct`
+  inside a lambda (CS9108), so a *statement-position* `Pal.Forall` that mentions a span
+  does not compile. Contracts are unaffected (the shim sees an array), and the idiom inside
+  a loop is a named `[Spec]` predicate over the `Seq<T>`, which moves `Pal.Contents(s)` out
+  of the lambda into ordinary argument position — `test/array_view` uses it in both the
+  acceptance file and the variant. Nothing can be done about this from inside the scheme:
+  it is a rule of the language the annotated program must keep compiling in.
+* **A span-typed return.** A method may take a window and may create one, but may not hand
+  one back to its caller: the receipt would have to travel with it, and R17.6 has no way to
+  name a borrow the caller did not take. C# itself restricts `ref struct` returns for a
+  related reason.
+* **A span-typed field**, which C# forbids outright (`Span<T>` is a `ref struct`), so this
+  costs nothing.
+* **`Memory<T>`, `ArraySegment<T>`, `IEnumerable<T>`.** `ArraySegment<T>` is now expressible
+  as a window and is a surface question only; `examples/adler32` still spells its segment out
+  as three parameters and no longer has to.
+* **The refused forms of R17.7**, each for its own stated reason.

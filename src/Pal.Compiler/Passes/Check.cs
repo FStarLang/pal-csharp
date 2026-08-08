@@ -346,6 +346,7 @@ public static class Check
         IrSeqType => t,
         IrNamedType n when specOnlyStructs.Contains(n.Name) => t,
         IrArrayType a => SpecOnly(a.Element, specOnlyStructs) is null ? null : t,
+        IrSpanType a => SpecOnly(a.Element, specOnlyStructs) is null ? null : t,
         _ => null,
     };
 

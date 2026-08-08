@@ -92,6 +92,44 @@ public static class Pal
     [Conditional(Cond)]
     public static void Gather<T>(T location) { }
 
+    // -- Spans -------------------------------------------------------------
+
+    /// <summary>
+    /// Give a borrowed span back to the array or span it was taken from.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Creating a span — <c>a.AsSpan(i, n)</c>, <c>s.Slice(i, n)</c>, <c>s[i..j]</c>, or
+    /// the implicit <c>T[]</c> conversion — <em>borrows</em>: the parent's contents can no
+    /// longer be read or written through the parent's own name until the borrow ends.
+    /// C# says nothing about where it ends, and inferring that is a borrow checker, which
+    /// pal-csharp does not have and does not want. So the end of the borrow is written,
+    /// once, by the author, exactly like every other proof step.
+    /// </para>
+    /// <para>
+    /// Forgetting it is not unsound, merely unprovable: the parent's ownership is missing
+    /// where the postcondition needs it. Writing it too early is equally safe: the span's
+    /// own ownership is gone, and the next use of <paramref name="span"/> fails to verify.
+    /// </para>
+    /// <para>
+    /// Afterwards the parent holds <see cref="Splice{T}"/> of what it lent out: the span's
+    /// current contents in the window, everything outside it untouched.
+    /// </para>
+    /// </remarks>
+    [Conditional(Cond)]
+    public static void Restore<T>(Span<T> span) { }
+
+    /// <inheritdoc cref="Restore{T}(Span{T})"/>
+    [Conditional(Cond)]
+    public static void Restore<T>(ReadOnlySpan<T> span) { }
+
+    /// <summary>
+    /// The contents of a parent after the window <c>[from, to)</c> is given back holding
+    /// <paramref name="window"/>: <c>parent</c> outside the window, <paramref name="window"/>
+    /// inside it. This is what <see cref="Restore{T}(Span{T})"/> leaves behind.
+    /// </summary>
+    public static Seq<T> Splice<T>(Seq<T> parent, int from, int to, Seq<T> window) => throw Ghost();
+
     // -- Escape hatches to raw Pulse ---------------------------------------
 
     /// <summary>Emit a verbatim Pulse statement, after antiquotation expansion.</summary>

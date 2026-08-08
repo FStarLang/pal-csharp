@@ -136,6 +136,46 @@ public sealed class MethodPlan
                     break;
                 }
 
+                // R17.1/R17.6. A span parameter, which is the array case with one word
+                // changed: `S.slice` for `array`, `S.pts_to` for `A.pts_to`. Everything
+                // else — the contents binder, the `[Frac]` treatment, what `Pal.Contents`
+                // denotes — is identical, because a span *is* its contents to a
+                // specification just as an array is.
+                //
+                // A span parameter carries no receipt. The caller borrowed it and the
+                // caller gives it back; a callee that took one is in the same position as
+                // a callee that took an array, and R17.5's `Pal.Restore` is refused on it.
+                case IrSpanType span:
+                {
+                    var preValue = "pre_" + p.Name;
+                    var postValue = "post_" + p.Name;
+                    binders.Add($"({name}: S.slice {Types.Render(span.Element)})");
+                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Render(span.Element)}))");
+
+                    var perm = p.Fraction is null ? "" : $"#{p.Fraction} ";
+                    if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");
+
+                    preResources.Add($"S.pts_to {name} {perm}{preValue}");
+                    if (p.Fraction is null)
+                    {
+                        postResources.Add($"S.pts_to {name} {postValue}");
+                        postExistentials.Add(postValue);
+                        post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
+                    }
+                    else
+                    {
+                        postResources.Add($"S.pts_to {name} {perm}{preValue}");
+                        post.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    }
+
+                    pre.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Span, name)
+                    {
+                        Fraction = p.Fraction,
+                    };
+                    break;
+                }
+
                 // R4.10. An object parameter is owned through its invariant, not through a
                 // `pts_to`: the ghost binder is the *model*, so a caller reasons about the
                 // object only through the abstraction, and the representation stays
@@ -388,6 +428,9 @@ public sealed class MethodPlan
         IrPrim { IsSpecNumeric: true } => TermKind.Math,
         IrSeqType => TermKind.Seq,
         IrArrayType => TermKind.Seq,
+        // R17.1. A span, like an array, *is* its contents wherever a specification
+        // names it; only the resource holding those contents differs.
+        IrSpanType => TermKind.Seq,
         _ => TermKind.Other,
     };
 

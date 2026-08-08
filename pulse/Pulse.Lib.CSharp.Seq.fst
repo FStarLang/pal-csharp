@@ -176,3 +176,48 @@ let mod_one_period_apart (len: pos) (x: nat) (y: nat)
   = if x + len = y
     then Math.lemma_mod_plus x 1 len
     else Math.lemma_mod_plus y 1 len
+
+// ---------------------------------------------------------------------------
+// `Pal.Splice(v, from, to, w)`: the contents of a parent after a borrowed window
+// `[from, to)` is given back holding `w`.
+//
+// This is the only new spec-level vocabulary `Span<T>` needs (doc/translation.md
+// R17.8). It is total, with the parent returned unchanged on ill-formed arguments,
+// so that it can appear in a specification without dragging a refinement along;
+// every lemma below carries the well-formedness hypotheses instead.
+// ---------------------------------------------------------------------------
+
+let splice (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t) : Seq.seq t =
+  if i <= j && j <= Seq.length v && Seq.length w = j - i
+  then Seq.append (Seq.slice v 0 i) (Seq.append w (Seq.slice v j (Seq.length v)))
+  else v
+
+let splice_length (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t)
+  : Lemma (requires i <= j /\ j <= Seq.length v /\ Seq.length w == j - i)
+          (ensures  Seq.length (splice v i j w) == Seq.length v)
+          [SMTPat (Seq.length (splice v i j w))]
+  = ()
+
+/// Pointwise: inside the window the parent shows the window's contents, outside it
+/// the parent is untouched. This is what every postcondition about an array that was
+/// written through a span ultimately reduces to, so it is patterned.
+let splice_index (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t) (k: nat)
+  : Lemma (requires i <= j /\ j <= Seq.length v /\ Seq.length w == j - i /\ k < Seq.length v)
+          (ensures  Seq.index (splice v i j w) k ==
+                    (if i <= k && k < j then Seq.index w (k - i) else Seq.index v k))
+          [SMTPat (Seq.index (splice v i j w) k)]
+  = ()
+
+/// A window given back unwritten leaves the parent exactly as it was, so a read-only
+/// borrow costs its user nothing. Not patterned: the trigger would be the same as
+/// `splice_index`'s and it is only wanted where a whole borrow is being collapsed.
+let splice_same (#t: Type0) (v: Seq.seq t) (i j: nat)
+  : Lemma (requires i <= j /\ j <= Seq.length v)
+          (ensures  splice v i j (Seq.slice v i j) == v)
+  = Seq.lemma_eq_intro (splice v i j (Seq.slice v i j)) v
+
+/// The whole of a parent, which is what `a.AsSpan(0, a.Length)` borrows.
+let splice_all (#t: Type0) (v: Seq.seq t) (w: Seq.seq t)
+  : Lemma (requires Seq.length w == Seq.length v)
+          (ensures  splice v 0 (Seq.length v) w == w)
+  = Seq.lemma_eq_intro (splice v 0 (Seq.length v) w) w

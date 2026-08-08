@@ -55,6 +55,12 @@ public sealed class WellKnown
         SpecTypeAttribute = Type("SpecTypeAttribute");
         SpecOpAttribute = Type("SpecOpAttribute");
         SpecCtorAttribute = Type("SpecCtorAttribute");
+
+        // R17.1. `Span<T>` and `ReadOnlySpan<T>` are BCL types, not pal-csharp ones, so
+        // they are looked up by metadata name and are allowed to be absent: a host whose
+        // framework does not define them is a host on which no program mentions them.
+        Span = c.GetTypeByMetadataName("System.Span`1");
+        ReadOnlySpan = c.GetTypeByMetadataName("System.ReadOnlySpan`1");
     }
 
     public static WellKnown For(Compilation compilation) => new(compilation);
@@ -95,6 +101,12 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecOpAttribute { get; }
     public INamedTypeSymbol SpecCtorAttribute { get; }
 
+    /// <summary>R17.1. <c>System.Span&lt;T&gt;</c>, or null where the framework has none.</summary>
+    public INamedTypeSymbol? Span { get; }
+
+    /// <summary>R17.1. <c>System.ReadOnlySpan&lt;T&gt;</c>, or null where the framework has none.</summary>
+    public INamedTypeSymbol? ReadOnlySpan { get; }
+
     /// <summary>True if <paramref name="symbol"/> is a member of the <c>Pal</c> intrinsics class.</summary>
     public bool IsPalIntrinsic(ISymbol? symbol) =>
         symbol is not null &&
@@ -103,6 +115,16 @@ public sealed class WellKnown
     public bool IsGhost(ITypeSymbol? t) => IsConstructedFrom(t, Ghost);
     public bool IsSeq(ITypeSymbol? t) => IsConstructedFrom(t, Seq);
     public bool IsSpecList(ITypeSymbol? t) => IsConstructedFrom(t, SpecList);
+
+    /// <summary>R17.1. A <c>Span&lt;T&gt;</c>, which is the *writable* array slot.</summary>
+    public bool IsSpan(ITypeSymbol? t) => Span is not null && IsConstructedFrom(t, Span);
+
+    /// <summary>R17.2. A <c>ReadOnlySpan&lt;T&gt;</c>, which is the *fractional* array slot.</summary>
+    public bool IsReadOnlySpan(ITypeSymbol? t) =>
+        ReadOnlySpan is not null && IsConstructedFrom(t, ReadOnlySpan);
+
+    /// <summary>Either span. R17.1 translates both to the same thing.</summary>
+    public bool IsAnySpan(ITypeSymbol? t) => IsSpan(t) || IsReadOnlySpan(t);
 
     /// <summary>
     /// R11.1. The F* type a <c>[SpecType]</c> denotes, or null if this is not one. This is
@@ -212,6 +234,16 @@ public sealed class WellKnown
             // translate it with the constraint dropped.
             case ITypeParameterSymbol tp when Unconstrained(tp):
                 return new IrTypeParamType(tp.Name);
+            // R17.1. A span is a *borrowed window*, and that is a slot kind of its own:
+            // `Pulse.Lib.Slice.slice`, with `S.pts_to` for its contents. It is not the
+            // array slot. Identifying the two would make the implicit `T[]` -> `Span<T>`
+            // conversion emit nothing, which is tempting and wrong: it works only for a
+            // span that is the whole of exactly one array, and the point of a span is that
+            // it need not be. Being its own type is what lets `a.AsSpan(i, n)` translate
+            // (R17.5) and lets a method taking `Span<T>` be called with a window.
+            case INamedTypeSymbol named when IsAnySpan(named) &&
+                                             MapType(named.TypeArguments[0]) is { } spanElement:
+                return new IrSpanType(spanElement);
             case INamedTypeSymbol named when IsSeq(named) && MapType(named.TypeArguments[0]) is { } se:
                 return new IrSeqType(se);
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:
@@ -233,9 +265,9 @@ public sealed class WellKnown
             }
             // §3.4. A class is translated exactly when it declares a [Model] member: R3.9
             // makes the model mandatory, so its presence is the same test as "annotated".
-            // R10.2. `C?` is `option C`, and the annotation is part of the type: it is what
-            // makes the null test a pattern match, and hence what makes the base case of
-            // R10.3's induction reachable by the prover.
+            // R10.2. `C?` is the nullable pointer and `C` is its non-null refinement, and
+            // the annotation is part of the type: it is what makes the base case of R10.3's
+            // induction reachable by the prover.
             // R12.1. A `[Plain]` class is translated too, and is translated for the same
             // reason: it has a representation. What it does not have is a model, so it is
             // recognised by the attribute rather than by the `[Model]` member.

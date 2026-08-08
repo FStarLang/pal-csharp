@@ -52,9 +52,14 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// contents of R10.7's window, not a different type. So a name is typed by its
     /// declaration and nothing else.
     /// </summary>
+    /// <summary>
+    /// R17.5. Set while lowering the array underneath an implicit borrow, so that the same
+    /// syntax — whose converted type is still a span — is not borrowed a second time.
+    /// </summary>
+    private bool _inImplicitBorrow;
+
     private IrType? Declared(ExpressionSyntax node)
-    {
-        if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
+    {        if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
         var symbol = model.GetSymbolInfo(node).Symbol;
         var declared = symbol switch
         {
@@ -77,6 +82,12 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         IrExpr result = node switch
         {
+            // R17.5. The implicit `T[]` -> `Span<T>` conversion is a *borrow*, so it is
+            // matched before anything else: what follows would otherwise lower the array
+            // as an array and leave the conversion to disappear silently.
+            _ when !_inImplicitBorrow && info.Type is IArrayTypeSymbol { Rank: 1 } &&
+                   known.IsAnySpan(info.ConvertedType)
+                => LowerImplicitBorrow(node, loc),
             ParenthesizedExpressionSyntax p => Lower(p.Expression),
             // R10.5. `e!` is C#'s null-forgiving operator: it changes what the *C#*
             // compiler's flow analysis believes and nothing else. It is how a model
@@ -111,10 +122,21 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
             ArrayCreationExpressionSyntax a => LowerArrayCreation(a, loc),
+            // R17.7. `stackalloc` allocates, and every other allocation in the subset is
+            // `new T[n]`, whose translation (R6.9) rests on the CLR's garbage collector.
+            // A `stackalloc` span is a stack allocation with a lifetime, which is the one
+            // thing `Pulse.Lib.CSharp.Array.alloc` was allowed to assume away.
+            StackAllocArrayCreationExpressionSyntax => SpanUnsupported("stackalloc", loc),
+            ImplicitStackAllocArrayCreationExpressionSyntax =>
+                SpanUnsupported("stackalloc", loc),
             ObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             ImplicitObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             _ => Unsupported(node, loc),
         };
+
+        // R17.5. A borrow's type is the span it produces, not the array it came from,
+        // which is what `info.Type` reports for the syntax the conversion was applied to.
+        if (result is IrSpanCreate) type = known.MapType(info.ConvertedType) ?? type;
 
         if (type is not null) result = result with { Type = type };
 
@@ -335,6 +357,108 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     }
 
     /// <summary>
+    /// R17.5. The implicit <c>T[]</c> to <c>Span&lt;T&gt;</c> conversion, admitted only where
+    /// the resulting span gets a name.
+    /// </summary>
+    /// <remarks>
+    /// The conversion borrows, so it produces a receipt, and a receipt has to be redeemed by
+    /// a <c>Pal.Restore</c> that names the span. In <c>Span&lt;int&gt; s = a;</c> there is a
+    /// name. In <c>Clear(a)</c> there is not: the span exists only for the duration of the
+    /// argument list, and the array would be unrecoverable afterwards — not unsoundly, but
+    /// with a failure some distance from its cause. Refusing here puts the message where the
+    /// mistake is, and the fix is one line: name the borrow, pass the name, restore it.
+    /// </remarks>
+    private IrExpr LowerImplicitBorrow(ExpressionSyntax node, IrLoc loc)
+    {
+        if (node.Parent is not EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax })
+        {
+            diagnostics.SpanWindow(loc,
+                $"the implicit `T[]` to `Span<T>` conversion of `{Trim(node)}` here");
+            return new IrLiteral(loc, null);
+        }
+
+        _inImplicitBorrow = true;
+        try { return new IrSpanCreate(loc, SpanOrigin.Array, Lower(node), null, null); }
+        finally { _inImplicitBorrow = false; }
+    }
+
+    /// <summary>R17.5. A construct that makes a span which is not the whole of an array.</summary>
+    private IrExpr SpanUnsupported(string construct, IrLoc loc)
+    {
+        diagnostics.SpanWindow(loc, $"`{construct}`");
+        return new IrLiteral(loc, null);
+    }
+
+    /// <summary>
+    /// R17.5. <c>a.AsSpan()</c>, <c>a.AsSpan(i)</c>, <c>a.AsSpan(i, n)</c>,
+    /// <c>s.Slice(i)</c> and <c>s.Slice(i, n)</c> — the five ways to name a borrow.
+    /// Returns null when the call is not one of them, so that the caller can fall through
+    /// to R17.7's refusal with a message naming the method that was actually written.
+    /// </summary>
+    /// <remarks>
+    /// The one-argument forms borrow to the end, which is a length the *source* knows and
+    /// the call site does not write. Rather than invent a second library operation for it,
+    /// the missing length is filled in as <c>source.Length - start</c>: an expression the
+    /// user could have written, built from the same receiver they did write. That keeps one
+    /// creation rule per origin rather than two, and makes `s.Slice(i)` and
+    /// `s.Slice(i, s.Length - i)` translate identically, which they should.
+    /// </remarks>
+    private IrExpr? LowerBorrow(
+        IMethodSymbol method,
+        MemberAccessExpressionSyntax access,
+        SeparatedSyntaxList<ArgumentSyntax> args,
+        IrLoc loc)
+    {
+        var sourceType = model.GetTypeInfo(access.Expression).Type;
+        var fromSpan = known.IsAnySpan(sourceType);
+        var fromArray = sourceType is IArrayTypeSymbol { Rank: 1 };
+
+        var expected = fromSpan ? "Slice" : "AsSpan";
+        if (method.Name != expected || (!fromSpan && !fromArray) || args.Count > 2) return null;
+
+        var source = Lower(access.Expression);
+        var origin = fromSpan ? SpanOrigin.SpanRange : SpanOrigin.ArrayRange;
+
+        if (args.Count == 0)
+        {
+            // `a.AsSpan()` borrows the whole array, which has its own receipt and its own
+            // `Pal.Restore` — the one that gives the array back unspliced.
+            if (fromArray) return new IrSpanCreate(loc, SpanOrigin.Array, source, null, null);
+            // `s.Slice()` does not exist; a zero-argument `Slice` is not ours.
+            return null;
+        }
+
+        var start = Lower(args[0].Expression);
+        var length = args.Count == 2
+            ? Lower(args[1].Expression)
+            : new IrBinary(loc, BinOp.Sub, new IrLength(loc, source), start);
+
+        return new IrSpanCreate(loc, origin, source, start, length);
+    }
+
+    /// <summary>
+    /// R17.5. <c>s[i..j]</c>. C#'s range syntax admits an omitted endpoint and an
+    /// end-relative <c>^k</c>; the first is ordinary sugar and is filled in the way
+    /// <see cref="LowerBorrow"/> fills in an omitted length, and the second is refused,
+    /// because <c>^k</c> denotes <c>Length - k</c> only after an <c>Index</c> value has been
+    /// constructed, and that value is a struct the subset does not translate.
+    /// </summary>
+    private IrExpr LowerRangeWindow(ExpressionSyntax receiver, RangeExpressionSyntax range, IrLoc loc)
+    {
+        if (range.LeftOperand is PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.IndexExpression } ||
+            range.RightOperand is PrefixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.IndexExpression })
+        {
+            return SpanUnsupported("an end-relative index `^k` in a range", loc);
+        }
+
+        var source = Lower(receiver);
+        var start = range.LeftOperand is { } lo ? Lower(lo) : new IrLiteral(loc, 0);
+        var end = range.RightOperand is { } hi ? Lower(hi) : new IrLength(loc, source);
+        return new IrSpanCreate(loc, SpanOrigin.SpanRange, source, start,
+                                new IrBinary(loc, BinOp.Sub, end, start));
+    }
+
+    /// <summary>
     /// R11.2/R11.3. Lowers a member of a user-declared specification type to the F* term
     /// it declares. There are exactly two ways for a member to have a meaning — it carries
     /// <c>[SpecOp]</c>, or it carries <c>[SpecCtor]</c> — and a third case would be the
@@ -476,8 +600,19 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return SpecMember(symbol, [Lower(node.Expression)], node, loc);
 
         // `a.Length` on a real array is a pure function of the array (doc §3, R3.3).
-        if (node.Name.Identifier.ValueText == "Length" && receiverType is IArrayTypeSymbol)
+        // R17.3. A span's `Length` is `Slice.len`, which is likewise pure and non-ghost, so
+        // a counted loop over a span has an ordinary pure guard just as one over an array
+        // does. `IrLength` covers both; the emitter picks the library by the operand's type.
+        if (node.Name.Identifier.ValueText == "Length" &&
+            (receiverType is IArrayTypeSymbol || known.IsAnySpan(receiverType)))
             return new IrLength(loc, Lower(node.Expression));
+
+        // R17.7. Every *other* member of a span is refused here rather than left to fall
+        // through to the struct-field rule below, which would project a field out of a
+        // slot kind that has no fields. `Length`, the indexer, `Slice` and `AsSpan` are the
+        // whole of §17's surface.
+        if (known.IsAnySpan(receiverType))
+            return SpanUnsupported($"Span<T>.{node.Name.Identifier.ValueText}", loc);
 
         // `s.Length` on a ghost sequence is `Seq.length`.
         if (node.Name.Identifier.ValueText == "Length" && known.IsSeq(receiverType))
@@ -565,9 +700,23 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return new IrLiteral(loc, null);
         }
 
+        var receiverType = model.GetTypeInfo(node.Expression).Type;
+
+        // R17.5. `s[i..j]` is a window, and it reaches here as an element access whose one
+        // argument is a range. It borrows exactly as `s.Slice(i, j - i)` does.
+        //
+        // The same syntax on an *array* is a different operation: `a[i..j]` calls
+        // `RuntimeHelpers.GetSubArray`, which allocates and *copies*. It borrows nothing,
+        // shares nothing, and must not be lowered to a window; R17.7 refuses it, and the
+        // fall-through below reaches `Unsupported` for it.
+        if (node.ArgumentList.Arguments[0].Expression is RangeExpressionSyntax range)
+        {
+            if (!known.IsAnySpan(receiverType)) return SpanUnsupported("a[i..j]", loc);
+            return LowerRangeWindow(node.Expression, range, loc);
+        }
+
         var receiver = Lower(node.Expression);
         var index = Lower(node.ArgumentList.Arguments[0].Expression);
-        var receiverType = model.GetTypeInfo(node.Expression).Type;
 
         if (known.IsSpecList(receiverType))
             return new IrListOp(loc, ListOpKind.Index, [receiver, index]);
@@ -685,6 +834,23 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
 
+        // R17.5. The two ways to borrow a window by name. Both are recognised by
+        // *shape* -- the name, the argument count, and the fact that the result is a span
+        // -- rather than by symbol identity, because `AsSpan` is an extension method on
+        // `MemoryExtensions` while `Slice` is an instance method on the span itself, and
+        // requiring the frontend to know which is which would make the rule about the BCL
+        // rather than about C#.
+        if (known.IsAnySpan(method.ReturnType) &&
+            node.Expression is MemberAccessExpressionSyntax borrow &&
+            LowerBorrow(method, borrow, args, loc) is { } window)
+            return window;
+
+        // R17.7. Everything else a span can do -- `CopyTo`, `Fill`, `ToArray`, `TryCopyTo`
+        // -- is refused. Each is a real operation with a real Pulse counterpart, and none
+        // of them is a *borrow*, which is what §17 is about.
+        if (known.IsAnySpan(method.ContainingType) || known.IsAnySpan(method.ReturnType))
+            return SpanUnsupported($"Span<T>.{method.Name}", loc);
+
         // R10.5. The constructors and operations of the ghost inductive types. They are
         // static methods on `SpecList`/`SpecTree`, recognised by containing type so that
         // `using static` and qualification make no difference.
@@ -776,6 +942,9 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 return new IrSeqOp(loc, SeqOpKind.SetAt, [Arg(0), Arg(1), Arg(2)]);
             case nameof(PalLang.Pal.Slice):
                 return new IrSeqOp(loc, SeqOpKind.Slice, [Arg(0), Arg(1), Arg(2)]);
+            // R17.8. What a parent holds after a window is given back.
+            case nameof(PalLang.Pal.Splice):
+                return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);
             case nameof(PalLang.Pal.Rotate):
                 return new IrSeqOp(loc, SeqOpKind.Rotate, [Arg(0), Arg(1)]);
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):

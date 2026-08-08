@@ -143,12 +143,20 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// <summary>R4.9c, R4.12b. The callee this reference's invariant was handed to.</summary>
     public string? Given { get; init; }
 
+    /// <summary>
+    /// R17.6. How a span local was borrowed, and so which receipt <c>Pal.Restore</c>
+    /// redeems. Null on a span *parameter*, which carries no receipt: the caller borrowed
+    /// it and the caller gives it back.
+    /// </summary>
+    public SpanOrigin? Origin { get; init; }
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
         SlotKind.Cell => $"R.pts_to {Binder} {value}",
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
+        SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
         SlotKind.Object when Type is IrClassType c && Index is not null =>
             $"{Names.ClassModule(c.Name)}.{Names.ClassInvAt(c.Name)} {Binder} {Index} " +
             $"{(Fraction ?? "1.0R")} {value}",
@@ -157,7 +165,8 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         _ => "",
     };
 
-    public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array or SlotKind.Object;
+    public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
+        or SlotKind.Span or SlotKind.Object;
 }
 
 public enum SlotKind
@@ -170,6 +179,8 @@ public enum SlotKind
     RefParam,
     /// <summary>An array parameter.</summary>
     Array,
+    /// <summary>R17.1. A span: a borrowed window, owned through <c>Slice.pts_to</c>.</summary>
+    Span,
     /// <summary>
     /// An object: a <c>B.box</c> of the class's representation, owned through
     /// <c>class_C__inv</c> rather than a <c>pts_to</c> (R3.8, R4.10).
@@ -465,6 +476,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     binders.Add($"({name}: Seq.seq {Types.Render(a.Element)})");
                     scope.Bind(p.Name, new Term(name, TermKind.Seq, p.Type));
                     break;
+                // R17.6. A span parameter of a [Spec] method is its contents, exactly
+                // as an array parameter is: a pure function has no resources to hold.
+                case IrSpanType a:
+                    binders.Add($"({name}: Seq.seq {Types.Render(a.Element)})");
+                    scope.Bind(p.Name, new Term(name, TermKind.Seq, p.Type));
+                    break;
                 case IrPrim { IsMachineInt: true }:
                     // R4.6: a [Spec] method's integer parameters are mathematical.
                     binders.Add($"({name}: int)");
@@ -550,6 +567,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             var (rendered, kind) = p.Type switch
             {
                 IrArrayType a => ($"Seq.seq {Types.Render(a.Element)}", TermKind.Seq),
+                IrSpanType a => ($"Seq.seq {Types.Render(a.Element)}", TermKind.Seq),
                 IrSeqType s => ($"Seq.seq {Types.Render(s.Element)}", TermKind.Seq),
                 IrGhostType g => (Types.Render(g.Inner), MethodPlan.KindOf(g.Inner)),
                 _ => (Types.Render(p.Type), MethodPlan.KindOf(p.Type)),
@@ -1315,6 +1333,8 @@ public static class Preamble
         """
         module R = Pulse.Lib.Reference
         module A = Pulse.Lib.Array
+        module S = Pulse.Lib.Slice
+        module Span = Pulse.Lib.CSharp.Span
         module B = Pulse.Lib.Box
         module I8 = FStar.Int8
         module I16 = FStar.Int16

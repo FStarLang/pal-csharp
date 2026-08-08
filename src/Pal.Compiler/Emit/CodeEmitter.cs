@@ -1012,6 +1012,39 @@ public sealed class CodeEmitter(
             // R5.2's `let mut` cell: the reference is a value, and the resource behind it
             // is matched by the binder's name, so putting it in a cell would leave every
             // later mention asking for a `pts_to` at a name Pulse cannot see through.
+            // R17.5. A span local. Like R12.4's `[Plain]` reference and unlike R5.2's
+            // ordinary local, it gets an immutable binder rather than a `let mut` cell:
+            // Pulse matches `S.pts_to` by name, so putting the slice in a cell would leave
+            // the context holding the resource at a name every later mention has to read
+            // through. C# agrees — a `Span<T>` local the subset admits is never reassigned,
+            // because a reassignment would abandon a live receipt.
+            //
+            // The slot records where the borrow came from. That is not flow analysis: it is
+            // the shape of the initializer, read once, at the declaration that wrote it.
+            case IrLocalDecl { Type: IrSpanType, Init: IrSpanCreate create } d:
+            {
+                // The borrow is emitted *at* the local's binder rather than at a fresh one
+                // it is then copied from, for the reason R12.4 gives for an allocation:
+                // Pulse matches resources by name, so a copy would leave the context
+                // holding `S.pts_to t0 _` while every later mention asked for
+                // `S.pts_to var_s _` (F77).
+                var binder = Names.Local(d.Name);
+                Borrow(create, binder);
+                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Span, binder)
+                {
+                    Origin = create.Origin,
+                };
+                return;
+            }
+
+            // R17.5. A span local with any other initializer — another span local, a span
+            // parameter, a conditional. Each would alias a live borrow under a second name
+            // (SliceFacts S4), and the receipt names only one of them.
+            case IrLocalDecl { Type: IrSpanType } d:
+                diagnostics.SpanWindow(d.Loc,
+                    $"a `Span<T>` local initialised from anything but a borrow (`{d.Name}`)");
+                return;
+
             case IrLocalDecl { Type: IrClassType pc, Init: not null } d
                 when classes is not null && classes.TryGetValue(pc.Name, out var pdecl) && pdecl.IsPlain:
             {
@@ -1279,7 +1312,7 @@ public sealed class CodeEmitter(
                 var array = Expr(el.Array);
                 var index = Expr(el.Index);
                 var value = Expr(a.Value);
-                Line($"write {array} {index} {value};");
+                Line($"{(IsSpan(el.Array) ? "Span." : "")}write {array} {index} {value};");
                 return;
             }
 
@@ -1877,6 +1910,11 @@ public sealed class CodeEmitter(
         // permission must not be preceded by an assertion that presumes it.
         if (g.Kind is GhostKind.Share or GhostKind.Gather) { Permission(g); return; }
 
+        // R17.6. The end of a borrow, before the naming bracket for the same reason a
+        // `Share` is: the bracket names every owned resource at the slot it was declared
+        // with, and `Pal.Restore` is the statement that stops the span being one.
+        if (g.Kind is GhostKind.Restore) { Restore(g); return; }
+
         // R5.12, again: inside R4.10's window the receiver is a representation, so its
         // folded invariant is not what the context holds and asserting it would fail. The
         // representation is named instead, which is also what lets a ghost statement in an
@@ -1934,6 +1972,68 @@ public sealed class CodeEmitter(
                 return;
         }
     }
+
+    /// <summary>
+    /// R17.6. <c>Pal.Restore(w)</c>: the ghost statement that gives a borrowed span back.
+    /// </summary>
+    /// <remarks>
+    /// Which of the three library operations this is depends on where the span came from,
+    /// which the slot recorded at the declaration that borrowed it. Nothing is inferred
+    /// here, and nothing needs to be: the receipt is a resource, so the array, the
+    /// permission, the bounds and both contents are recovered by unifying it against what
+    /// the context holds (SliceFacts S8). That is what lets `Pal.Restore` take one argument.
+    ///
+    /// After this the span's slot is dropped. A later use of the name is then out of scope,
+    /// which is the right message: what makes it unusable is that its ownership has gone.
+    /// </remarks>
+    private void Restore(IrGhostStmt g)
+    {
+        if (g.Prop is not IrVar v || Lookup(v.Name) is not { Kind: SlotKind.Span } slot)
+        {
+            diagnostics.SpanWindow(g.Loc, "`Pal.Restore` of anything but a borrowed span local");
+            return;
+        }
+
+        if (slot.Origin is not { } origin)
+        {
+            diagnostics.SpanWindow(g.Loc,
+                $"`Pal.Restore` of the span parameter `{v.Name}`, which this method did not borrow");
+            return;
+        }
+
+        Line($"Span.{origin switch
+        {
+            SpanOrigin.Array => "restore_array",
+            SpanOrigin.ArrayRange => "restore_array_range",
+            _ => "restore_sub",
+        }} {slot.Binder};");
+
+        _slots.Remove(v.Name);
+    }
+
+    /// <summary>
+    /// R17.5. Emits a borrow, binding the window to <paramref name="target"/>. One
+    /// operation per origin, each consuming the source's ownership and producing a receipt.
+    /// </summary>
+    private string Borrow(IrSpanCreate create, string target)
+    {
+        var source = Expr(create.Source);
+        if (create.Origin is SpanOrigin.Array)
+        {
+            Line($"let {target} = Span.of_array {source};");
+            return target;
+        }
+        var start = Expr(create.Start!);
+        var count = Expr(create.Length!);
+        var op = create.Origin is SpanOrigin.ArrayRange ? "of_array_range" : "sub";
+        Line($"let {target} = Span.{op} {source} {start} {count};");
+        return target;
+    }
+
+    /// <summary>R17.1. Whether an expression denotes a span rather than an array.</summary>
+    private bool IsSpan(IrExpr e) =>
+        e.Type is IrSpanType ||
+        (e is IrVar v && Lookup(v.Name) is { Type: IrSpanType });
 
     /// <summary>
     /// R5.13. <c>Pal.Share</c>/<c>Pal.Gather</c> translate by what their argument is: an
@@ -2043,22 +2143,31 @@ public sealed class CodeEmitter(
                     "Only a local variable or a `ref`/`out` parameter can be passed by reference.");
                 return "()";
 
+            // R3.3/R17.3. `a.Length` and `s.Length`. One node, two libraries: a span's
+            // length is `Slice.len`, which is pure and non-ghost exactly as an array's
+            // header field is, so nothing but the qualifier differs.
             case IrLength len:
             {
                 var array = Expr(len.Array);
                 var t = Fresh();
-                Line($"let {t} = length_i32 {array};");
+                Line($"let {t} = {(IsSpan(len.Array) ? "Span." : "")}length_i32 {array};");
                 return t;
             }
 
+            // R6.4/R17.4. `a[i]` and `s[i]`, with the same bounds obligations.
             case IrElement el:
             {
                 var array = Expr(el.Array);
                 var index = Expr(el.Index);
                 var t = Fresh();
-                Line($"let {t} = read {array} {index};");
+                Line($"let {t} = {(IsSpan(el.Array) ? "Span." : "")}read {array} {index};");
                 return t;
             }
+
+            // R17.5. Borrowing. Each of the three forms consumes the source's ownership and
+            // produces the window's, plus a receipt that only `Pal.Restore` can redeem.
+            case IrSpanCreate create:
+                return Borrow(create, Fresh());
 
             // R6.9. `new T[n]`. `Pulse.Lib.CSharp.Array.alloc` is where the garbage
             // collector is assumed: it carries no deallocation obligation, unlike

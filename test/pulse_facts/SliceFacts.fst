@@ -225,3 +225,178 @@ let s6_length_is_pure (#t: Type0) (s: S.slice t) (#p: perm) (v: Seq.seq t)
   : Lemma (requires SZ.v (S.len s) == Seq.length v)
           (ensures  span_length_spec s == Seq.length v)
   = ()
+
+(* ------------------------------------------------------------------------ *)
+(* S7. The design S2 asked for, now that the surface question is settled.    *)
+(*                                                                          *)
+(* S2's comment concluded that "slicing needs *surface syntax*", and read    *)
+(* that as a demand for a scoped construct -- something that marks where the *)
+(* window opens and where it closes, so the translation could insert the     *)
+(* split and the join. That was the wrong shape, and it is worth saying why, *)
+(* because the right shape is much smaller.                                  *)
+(*                                                                          *)
+(* Taking the window needs no syntax at all: `a.AsSpan(i, n)` is already an  *)
+(* ordinary C# expression, and translating it to `subslice` is an ordinary   *)
+(* compositional rule. Only *giving it back* is invisible in C#. And a step  *)
+(* that is invisible in C#, needed for the proof and erased at runtime, is   *)
+(* precisely what a proof annotation language already has a word for: it is  *)
+(* a ghost statement. `Pal.Restore(w)` is written by the user at the point   *)
+(* where the borrow ends.                                                    *)
+(*                                                                          *)
+(* Nothing has to *infer* where that point is, which is the whole of the     *)
+(* borrow-checking problem R10.2b refuses on principle. If the user writes   *)
+(* it too late, or not at all, the parent's `pts_to` is missing where the    *)
+(* postcondition needs it and the proof fails. If the user writes it too     *)
+(* early, the window's own `pts_to` is gone and the next `w[k]` fails. Both  *)
+(* failures land in the user's annotations, which is where §0 rule 3 says    *)
+(* proof difficulty belongs.                                                 *)
+(* ------------------------------------------------------------------------ *)
+
+/// The parent's contents after a window is given back: everything outside `[i, j)`
+/// unchanged, and `w` in between. This is the pure model that `Pal.Restore` leaves
+/// behind, and the only new spec-level vocabulary the milestone needs.
+let splice (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t) : Seq.seq t =
+  if i <= j && j <= Seq.length v && Seq.length w = j - i
+  then Seq.append (Seq.slice v 0 i) (Seq.append w (Seq.slice v j (Seq.length v)))
+  else v
+
+/// Length, index, and -- the one that makes a read-only borrow free -- the identity.
+let splice_length (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t)
+  : Lemma (requires i <= j /\ j <= Seq.length v /\ Seq.length w == j - i)
+          (ensures  Seq.length (splice v i j w) == Seq.length v)
+  = ()
+
+let splice_index (#t: Type0) (v: Seq.seq t) (i j: nat) (w: Seq.seq t) (k: nat)
+  : Lemma (requires i <= j /\ j <= Seq.length v /\ Seq.length w == j - i /\ k < Seq.length v)
+          (ensures  Seq.index (splice v i j w) k ==
+                    (if k < i then Seq.index v k
+                     else if k < j then Seq.index w (k - i)
+                     else Seq.index v k))
+  = ()
+
+let splice_same (#t: Type0) (v: Seq.seq t) (i j: nat)
+  : Lemma (requires i <= j /\ j <= Seq.length v)
+          (ensures  splice v i j (Seq.slice v i j) == v)
+  = Seq.lemma_eq_intro (splice v i j (Seq.slice v i j)) v
+
+(* ------------------------------------------------------------------------ *)
+(* S8. `Pal.Restore(w)` names exactly one thing: the window. Everything else *)
+(*     -- the parent, the permission, the bounds, the two contents -- has to *)
+(*     come from unification against the receipt in context, or the emitter  *)
+(*     would have to reconstruct them, and reconstructing the parent is the  *)
+(*     borrow checker again.                                                 *)
+(* ------------------------------------------------------------------------ *)
+
+ghost
+fn give_back (#t: Type0) (w: S.slice t)
+             (#s: S.slice t) (#p: perm) (#i #j: SZ.t)
+             (#v: Ghost.erased (Seq.seq t) { SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v })
+             (#v': Ghost.erased (Seq.seq t))
+  requires S.pts_to w #p v'
+  requires S.subslice_rest w s p i j v
+  ensures  S.pts_to s #p (Seq.append (Seq.slice v 0 (SZ.v i))
+                                     (Seq.append v' (Seq.slice v (SZ.v j) (Seq.length v))))
+{
+  unfold (S.subslice_rest w s p i j v);
+  with s1 s2 s3. assert (S.is_split s s1 s2 ** S.is_split s2 w s3);
+  S.join w s3 s2;
+  S.join s1 s2 s;
+}
+
+/// And the call, with `w` the only explicit argument -- which is the signature
+/// `Pal.Restore(w)` translates to.
+fn s8_restore_by_unification (#t: Type0) (s: S.slice t) (i j: SZ.t) (x: t)
+    (#v: Ghost.erased (Seq.seq t) { SZ.v i < SZ.v j /\ SZ.v j <= Seq.length v })
+  requires S.pts_to s v
+  ensures  exists* v'. S.pts_to s v'
+{
+  let w = S.subslice s i j;
+  S.pts_to_len w;
+  S.op_Array_Assignment w 0sz x;
+  give_back w;
+}
+
+(* ------------------------------------------------------------------------ *)
+(* S9. `a.AsSpan(i, n)` is *one* C# construct, so it must be *one* borrow.    *)
+(*                                                                          *)
+(* Underneath it is two Pulse steps -- `from_array` then `subslice` -- and   *)
+(* the intermediate whole-array slice has no C# name. If the receipt were    *)
+(* left as the two separate tokens the two steps produce, `Pal.Restore`      *)
+(* would have to be written twice, the second time naming something the user *)
+(* never wrote. So the receipt is packaged, with the intermediate existentially *)
+(* quantified inside it, and one `Pal.Restore` redeems the whole thing.       *)
+(*                                                                          *)
+(* The receipt also carries the window's length. Without it `restore` cannot *)
+(* even *state* its postcondition: `splice v i j v'` is the identity unless  *)
+(* `v'` is known to have length `j - i`, and after arbitrary writes through  *)
+(* the window that is a fact about the borrow, not about `v'`.                *)
+(* ------------------------------------------------------------------------ *)
+
+let is_range_of (#t: Type0) (a: A.array t) (w: S.slice t) (p: perm) (i j: SZ.t)
+                (v: Seq.seq t { SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v })
+  : slprop
+  = exists* (s: S.slice t).
+      S.is_from_array a s **
+      S.subslice_rest w s p i j v **
+      pure (SZ.v (S.len w) == SZ.v j - SZ.v i)
+
+fn take_range (#t: Type0) (a: A.array t) (n: SZ.t) (i j: SZ.t) (#p: perm)
+              (#v: Ghost.erased (Seq.seq t) { SZ.v n == A.length a /\
+                                              SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v })
+  requires A.pts_to a #p v
+  returns  w : S.slice t
+  ensures  S.pts_to w #p (Seq.slice v (SZ.v i) (SZ.v j))
+  ensures  is_range_of a w p i j v
+{
+  let s = S.from_array a n;
+  let w = S.subslice s i j;
+  S.pts_to_len w;
+  fold (is_range_of a w p i j v);
+  w
+}
+
+ghost
+fn restore_range (#t: Type0) (w: S.slice t)
+                 (#a: A.array t) (#p: perm) (#i #j: SZ.t)
+                 (#v: Ghost.erased (Seq.seq t) { SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v })
+                 (#v': Ghost.erased (Seq.seq t))
+  requires S.pts_to w #p v'
+  requires is_range_of a w p i j v
+  ensures  A.pts_to a #p (splice v (SZ.v i) (SZ.v j) v')
+{
+  S.pts_to_len w;
+  unfold (is_range_of a w p i j v);
+  with s. assert (S.is_from_array a s);
+  give_back w;
+  S.to_array s;
+}
+
+/// The round trip, at the shape a translated C# method has: take a window out of an
+/// array parameter, write through it, give it back, and be left with a `pts_to` on
+/// the *array* strong enough for a postcondition about `a` to be stated.
+fn s9_round_trip (#t: Type0) (a: A.array t) (n: SZ.t) (i j: SZ.t) (x: t)
+    (#v: Ghost.erased (Seq.seq t) { SZ.v n == A.length a /\
+                                    SZ.v i < SZ.v j /\ SZ.v j <= Seq.length v })
+  requires A.pts_to a v
+  ensures  A.pts_to a (splice v (SZ.v i) (SZ.v j)
+                              (Seq.upd (Seq.slice v (SZ.v i) (SZ.v j)) 0 x))
+{
+  let w = take_range a n i j;
+  S.pts_to_len w;
+  S.op_Array_Assignment w 0sz x;
+  restore_range w;
+}
+
+/// And the read-only trip, which `splice_same` collapses to a no-op: a window taken
+/// and given back unwritten leaves the array *syntactically* as it was, so a caller
+/// that only reads through a span owes nothing.
+fn s9_read_only_trip (#t: Type0) (a: A.array t) (n: SZ.t) (i j: SZ.t) (#p: perm)
+    (#v: Ghost.erased (Seq.seq t) { SZ.v n == A.length a /\
+                                    SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v })
+  requires A.pts_to a #p v
+  ensures  A.pts_to a #p v
+{
+  let w = take_range a n i j;
+  splice_same (reveal v) (SZ.v i) (SZ.v j);
+  restore_range w;
+}

@@ -79,13 +79,21 @@ Pulse out — and the whole M1 acceptance suite passes.
       invariant loses an existential, and every hand-written cursor lemma takes its cursor
       once instead of twice ([`doc/translation.md`](doc/translation.md) R10.2,
       [`test/pulse_facts/NullFacts.fst`](test/pulse_facts/NullFacts.fst))
-- [ ] `Span<T>`, interfaces, constrained generics, `IEnumerable<T>` iterators — see
-      [`doc/translation.md`](doc/translation.md) §8, §15.5 and §16.5. `Span<T>` is probed
-      but not yet specified: `Pulse.Lib.Slice` is already the right shape, so the open
-      question is a *surface* one — a span is a struct that owns memory, and C# marks
-      neither the point where a slice borrows from its parent nor the point where it gives
-      it back ([`doc/translation.md`](doc/translation.md) §17,
+- [x] **`Span<T>` and `ReadOnlySpan<T>` as borrowed windows.** A span is a
+      `Pulse.Lib.Slice.slice` — a base, a length and a permission over memory somebody else
+      owns — so `a.AsSpan(1, 3)`, `s.Slice(i, n)` and `s[i..j]` all work, and a method
+      written once over a span applies to any window of any array. Creating one *borrows*:
+      the source loses its ownership until the author writes `Pal.Restore(w)`, a ghost
+      statement that gives it back, after which the source holds `Pal.Splice` of what it
+      lent out. There is no borrow checker and no flow analysis — ending a borrow is a
+      proof step, so the author writes it, and getting it wrong fails to verify rather than
+      verifying something false. `ReadOnlySpan<T>` picks up a fractional permission from its
+      C# type without an attribute
+      ([`test/array_view`](test/array_view), [`doc/translation.md`](doc/translation.md) §17,
+      [`pulse/Pulse.Lib.CSharp.Span.fsti`](pulse/Pulse.Lib.CSharp.Span.fsti),
       [`test/pulse_facts/SliceFacts.fst`](test/pulse_facts/SliceFacts.fst))
+- [ ] Interfaces, constrained generics, `IEnumerable<T>` iterators — see
+      [`doc/translation.md`](doc/translation.md) §15.5 and §16.5
 
 ## Quick start
 

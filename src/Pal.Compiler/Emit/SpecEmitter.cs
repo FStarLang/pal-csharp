@@ -448,6 +448,10 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.Slice => new Term(
             $"(Seq.slice {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)} {Math(s.Args[2], scope)})",
             TermKind.Seq),
+        SeqOpKind.Splice => new Term(
+            $"(CS.splice {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)} " +
+            $"{Math(s.Args[2], scope)} {Emit(s.Args[3], scope).Text})",
+            TermKind.Seq),
         SeqOpKind.Rotate => new Term(
             $"(CS.rotate {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)})",
             TermKind.Seq),
@@ -530,6 +534,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     {
         IrSeqType s => s.Element,
         IrArrayType a => a.Element,
+        IrSpanType a => a.Element,
         _ => null,
     };
 

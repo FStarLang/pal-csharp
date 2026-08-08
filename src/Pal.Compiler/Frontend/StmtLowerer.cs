@@ -287,6 +287,12 @@ public sealed class StmtLowerer(
                     return new IrGhostStmt(loc, GhostKind.Share, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Gather):
                     return new IrGhostStmt(loc, GhostKind.Gather, _spec.Lower(args[0].Expression), null);
+                // R17.6. The end of a borrow. Lowered the same way, and for the same
+                // reason: which of the three receipts is being redeemed depends on how the
+                // span was created, and that is recorded on its slot, which only the
+                // emitter has.
+                case nameof(PalLang.Pal.Restore):
+                    return new IrGhostStmt(loc, GhostKind.Restore, _spec.Lower(args[0].Expression), null);
                 // `Invariant`, `Decreases` and `Requires`/`Ensures` are consumed by the
                 // enclosing construct, not emitted here; see ExtractLoopSpecs.
                 case nameof(PalLang.Pal.Invariant):

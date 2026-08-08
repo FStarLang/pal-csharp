@@ -1115,7 +1115,73 @@ span, collected in `diagnostics.json` alongside the generated modules, and every
 writes `assert False` into `TranslationErrors.fst`, so a failed translation can never be
 mistaken for a passing proof.
 
-Currently outside the supported subset: `Span<T>` and `ReadOnlySpan<T>` (planned), `goto`,
+### `Span<T>` and `ReadOnlySpan<T>`
+
+A span is a **borrowed window** into somebody else's memory. Writing a method that takes
+one is no different from writing one over an array — `s.Length`, `s[i]`, `s[i] = x`, a
+counted loop and a `Contents(s)` contract all behave as you expect, and the bounds
+obligations are the same. `ReadOnlySpan<T>` is read-only, so it takes a fractional
+permission whether or not you write `[Frac]`; write `[Frac]` only when two parameters must
+share one array by name.
+
+```csharp
+[Requires("0 <= i && i < Contents(a).Length")]
+[Ensures("Result == Contents(a)[i]")]
+public static int Read(ReadOnlySpan<int> a, int i) => a[i];
+```
+
+**Creating a span borrows.** `a.AsSpan(from, count)`, `s.Slice(i, n)`, `s[i..j]` and the
+implicit `int[]` → `Span<int>` conversion all take ownership away from the source for as
+long as the window is out — so while `w` exists, `a` cannot be indexed.
+
+**`Pal.Restore(w)` gives it back**, and you write it, because C# has nowhere to put it:
+ending a borrow has no runtime content, so it is a proof step like any other. Afterwards
+the source holds `Pal.Splice(old, from, to, window)` — its old contents with the window's
+range replaced — which is what lets you say both what the window did and what it left
+alone:
+
+```csharp
+[Requires("0 <= from && 0 <= count && from + count <= Contents(a).Length")]
+[Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+[Ensures("Forall((int k) => Implies(from <= k && k < from + count, Contents(a)[k] == 0))")]
+[Ensures("Forall((int k) => Implies(0 <= k && k < Contents(a).Length && " +
+         "(k < from || from + count <= k), Contents(a)[k] == Old(Contents(a))[k]))")]
+public static void ClearRange(int[] a, int from, int count)
+{
+    Span<int> w = a.AsSpan(from, count);
+    Clear(w);            // written once, over a span; works on any window of any array
+    Pal.Restore(w);
+}
+```
+
+Forget the restore and the postcondition about `a` will not prove — the window still holds
+the memory. Write it too early and the next use of `w` will not prove. Windows nest, and
+are restored innermost first, which is not a rule anybody wrote down: the outer window's
+ownership is inside the inner one until you give it back.
+
+Refused with `PALCS0590`: `stackalloc` (an allocation, not a borrow); `a[1..3]` on an
+*array*, which in C# **copies** rather than windowing; `^k` in a range; the implicit
+`int[]` → `Span<int>` conversion anywhere but a local's initializer (name the borrow and
+pass the name); `Pal.Restore` of a span *parameter*, which somebody else borrowed; and
+assigning to a span local after its declaration — a second window gets a second name.
+
+And a **loop invariant** over a span cannot use `Pal.Forall` directly, because C# refuses a
+`ref struct` inside a lambda (CS9108). Contracts are fine — they are bound elsewhere — but
+inside a body, name the predicate:
+
+```csharp
+[Spec]
+public static bool ZeroBelow(Seq<int> s, SpecInt n) =>
+    Pal.Forall((int k) => Pal.Implies(0 <= k && k < n && k < s.Length, s[k] == 0));
+
+// ... in the loop:
+Pal.Invariant(ZeroBelow(Pal.Contents(a), i));
+```
+
+That moves `Pal.Contents(a)` out of the lambda and into an argument, which C# allows. See
+`test/array_view`.
+
+Currently outside the supported subset: `stackalloc`, a span-typed return, `goto`,
 `try`/`catch`/`throw`, constrained type parameters, generic type declarations, C#
 `interface` declarations, delegates, `async`,
 `string`, floating point, struct fields that are not values, user-written struct

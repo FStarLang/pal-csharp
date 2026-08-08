@@ -70,6 +70,26 @@ public sealed record IrSeqType(IrType Element) : IrType
     protected override string Describe() => $"Seq<{Element}>";
 }
 
+/// <summary>
+/// R17.1. <c>Span&lt;T&gt;</c> and <c>ReadOnlySpan&lt;T&gt;</c>, owned as a
+/// <c>Pulse.Lib.Slice.slice</c> plus its contents.
+/// </summary>
+/// <remarks>
+/// A span is a borrowed window on memory somebody else owns, and it is a distinct slot
+/// kind rather than an array because of what it can do that an array cannot: be taken out
+/// of a parent and given back. The two are otherwise indistinguishable — same contents
+/// model (a <c>Seq</c>), same length, same subscript, same <c>[Frac]</c> — which is why
+/// nearly every rule that mentions one mentions both.
+///
+/// Read-only-ness is not recorded here. <c>ReadOnlySpan&lt;T&gt;</c> differs only in
+/// carrying an implicit fraction (R17.2), which the frontend reads off the Roslyn symbol,
+/// and in rejecting writes, which C# itself does (R17.4).
+/// </remarks>
+public sealed record IrSpanType(IrType Element) : IrType
+{
+    protected override string Describe() => $"Span<{Element}>";
+}
+
 /// <summary>The spec-only ghost box <c>Ghost&lt;T&gt;</c>.</summary>
 public sealed record IrGhostType(IrType Inner) : IrType
 {
@@ -237,6 +257,29 @@ public sealed record IrElement(IrLoc Loc, IrExpr Array, IrExpr Index) : IrExpr(L
 /// <summary><c>a.Length</c> on a real array.</summary>
 public sealed record IrLength(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
+/// <summary>Where a borrowed span came from, and so which receipt it carries (R17.5).</summary>
+public enum SpanOrigin
+{
+    /// <summary><c>Span&lt;T&gt; s = a;</c> and <c>a.AsSpan()</c> — the whole array.</summary>
+    Array,
+    /// <summary><c>a.AsSpan(i)</c> and <c>a.AsSpan(i, n)</c> — a window of an array.</summary>
+    ArrayRange,
+    /// <summary><c>s.Slice(i)</c>, <c>s.Slice(i, n)</c>, <c>s[i..j]</c> — a window of a span.</summary>
+    SpanRange,
+}
+
+/// <summary>
+/// R17.5. Borrowing a span out of an array or another span.
+/// <see cref="Start"/> and <see cref="Length"/> are null exactly when
+/// <see cref="Origin"/> is <see cref="SpanOrigin.Array"/>.
+/// </summary>
+public sealed record IrSpanCreate(
+    IrLoc Loc,
+    SpanOrigin Origin,
+    IrExpr Source,
+    IrExpr? Start,
+    IrExpr? Length) : IrExpr(Loc);
+
 /// <summary><c>x.f</c> on a struct.</summary>
 public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc);
 
@@ -373,7 +416,7 @@ public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrEx
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
-public enum SeqOpKind { Length, Index, SetAt, Slice, Rotate, IsPermutation }
+public enum SeqOpKind { Length, Index, SetAt, Slice, Splice, Rotate, IsPermutation }
 
 /// <summary>An operation on ghost sequences.</summary>
 public sealed record IrSeqOp(IrLoc Loc, SeqOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
@@ -489,7 +532,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore }
 
 /// <summary><c>Pal.Assert</c> / <c>Pal.Assume</c> / <c>Pal.GhostStmt</c> / <c>Pal.Share</c> /
 /// <c>Pal.Gather</c> / a <c>[Lemma]</c> call.</summary>

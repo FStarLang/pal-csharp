@@ -49,6 +49,21 @@ public sealed class DiagnosticBag
                 ? $"{construct} is not supported by pal-csharp."
                 : $"{construct} is not supported by pal-csharp. {hint}");
 
+    /// <summary>
+    /// R17.5. A span that is not the whole of an array. This is its own id rather than
+    /// `PALCS0001` because it is not a gap in effort: R17.1 identifies a span with the
+    /// array it denotes, and everything named here would break the identification -- a
+    /// window has a length of its own (so R17.3 would be wrong), a base of its own (R17.4),
+    /// and an owner who owes it back (R4.9). Naming §17 in the message says which question
+    /// is open rather than implying the construct is unverifiable, which it is not.
+    /// </summary>
+    public void SpanWindow(IrLoc loc, string construct) =>
+        Error("PALCS0590", loc,
+            $"{construct} is not supported by pal-csharp: it makes a span that is not the " +
+            "whole of an array. A span is translated as the array it denotes (§17, R17.1), " +
+            "which holds only for a whole-array span. Pass the array and an index range as " +
+            "separate parameters, or index the array directly.");
+
     public string Render()
     {
         var sb = new StringBuilder();
