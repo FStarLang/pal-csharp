@@ -251,6 +251,36 @@ For how this reaches an editor, see §8: the analyzer reads `verification.txt` t
 Roslyn's `AdditionalFiles`, which is change-tracked, so re-running `make` updates the
 squiggles and nothing has to invalidate a cache by hand.
 
+**R2.4 (the output directory is the translation, not a log of translations).** The set of
+`.fst`/`.fsti` files in `-o` after a run is exactly the set R2.1 names for this program.
+A module the previous run wrote and this one does not is deleted.
+
+Write-if-changed, which R2.1's naming makes possible and which keeps F*'s checked-file
+cache warm, has a failure mode if it is the *only* rule: rename `Shape.Area` to
+`Shape.GetArea` and `Func_Shape_Area.fst` stays on disk forever, still listed by the
+directory's `Makefile` glob, still verified, still failing — and it fails against a C#
+declaration that no longer exists, so there is nothing to fix and no way to see why. The
+same thing happens whenever a rule *stops* emitting a module, which is how this was found:
+R9.20's collector briefly claimed R9.6's overrides, and the modules it wrote for them
+outlived the fix and were caught by the provenance lint, which asks precisely "did any C#
+ask for this?".
+
+The other half of the rule is that **the same input emits the same bytes**. That is not
+free: the emitter's slot table was an `ImmutableDictionary`, which enumerates in hash order,
+and .NET randomizes string hashing per process — so the order the locals were named in a
+`with va_5 vindex_6. assert (…)` line differed between runs of the same file, and
+write-if-changed rewrote and F* re-verified a module that had not changed, at random, in
+about one run in three. The fix is to enumerate in declaration order. The general form of
+the rule is worth stating because the same trap is available anywhere in the emitter: **a
+hash-ordered collection may be used for lookup and never for emission.**
+
+Pruning is unconditional, including when translation had errors. `TranslationErrors.fst`
+already makes an errored output fail, so there is no state worth preserving across a failed
+run, and a rule that pruned only on success would leave exactly the case that motivates the
+rule — a rename that also introduced an error — behaving as before. Only files matching
+R2.1's extensions are removed; `_cache/`, `diagnostics.json` and the two maps are the
+tool's own and are left alone.
+
 ---
 
 ## 3. Types
@@ -1035,9 +1065,43 @@ which the emitter builds from the member's *body* — inside the class, where pr
 are visible. That asymmetry is the point: the abstraction function sees the representation,
 and nothing else does.
 
-The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken. It is
-emitted unconditionally, for the same reason `struct_S__pred` is emitted even when trivial
-(§0 rule 2).
+The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken.
+
+**R4.10c — the bracket is opened if and only if the body names a field of the receiver,
+and a body that names one may not also call a method on it (`PALCS0597`).** The bracket
+used to be emitted unconditionally, on the §0 rule 2 argument that a uniform shape is
+better than a conditional one. That argument was wrong here, because the two things a body
+can do with its receiver want *opposite* states:
+
+| the body | wants the invariant |
+|---|---|
+| reads or writes a field | unfolded — the fields are behind it |
+| calls a method on `this` | folded — that is what the callee's contract requires |
+
+A body that only delegates (`int Again() => Get();`, or R9.20's `int Width() => Span;`)
+therefore had its receiver opened and then handed a representation to a function expecting
+an invariant. That is ill-typed Pulse, emitted with `0 error(s)`. Opening only when a field
+is named fixes it, and makes true what this section had always claimed: the bracket goes
+where the field accesses are.
+
+A refusal was retired by this rule, which is worth recording because the reasoning that
+justified it was correct and the conclusion was still wrong. `test/pulse_refusals` held a
+case in which `IncrementTwice` calls `Increment` twice on `this`, and its comment argued
+that the frontend should *not* rule on it: the frontend cannot see the prover's context,
+Pulse can, and a refusal invented by the checker is as bad as a proof step invented by the
+emitter (§0 rule 3, pointed the other way). All of that is true. But the premise underneath
+it — that the invariant is open there — was not a fact about separation logic, it was a fact
+about this emitter, and the emitter was wrong. The case verifies now, unchanged, and lives
+in `test/counter_class`. **When a refusal is justified by what the prover cannot do, check
+first that the prover was asked the right question.**
+
+The mixed case cannot be fixed the same way, and is refused rather than approximated.
+Closing the bracket around the call and reopening it after would be a proof step the
+emitter invented: R4.11a's `fold` must hold of the state at the fold point, and R3.10's
+`Shift` is the standing counterexample — its invariant is *false* between its two
+assignments, which is the whole reason the bracket exists. §0 rule 3 says the fix belongs
+in the annotations, and here it is a small one: read the field through the method, or
+inline the callee.
 
 **R4.11 (read-only method).** When a method assigns no field and passes `this` to no
 mutating method, R4.10's two clauses collapse to one:
@@ -2836,7 +2900,66 @@ perimeter bound belongs where the C# already puts it, as a precondition of `Peri
 That is a true statement about the program, and §0 rule 3 says the fix goes in the
 annotations, never in the emitter.
 
-### 9.9 Status
+### 9.9 Computed properties
+
+**R9.20 — A computed property is its accessor, translated as the method the accessor is.**
+C# has three property forms and §9 used to translate one of them. An *auto*-property is a
+field with a generated accessor pair, and R3.4 already reads it as a field. A `[Spec]`
+property is an observation of the model, and R3.9c already reads it as one. The third — a
+property with an accessor *body*, over the representation rather than over the model — was
+matched by neither, so R18.1 refused it. It is also the form most idiomatic C# uses to
+expose state.
+
+The rule is that the third form is not a new construct at all. A read-only property
+
+```csharp
+[Ensures("Result == @this.TheW + @this.TheW")]
+public int Doubled => w + w;
+```
+
+translates exactly as the method the user could have written instead:
+
+```csharp
+[Ensures("Result == @this.TheW + @this.TheW")]
+public int Doubled() { return w + w; }
+```
+
+One module `Func_C_Doubled`, `this` a `Box` of the representation opened by R9.7's frame,
+the contract read from the *property* declaration (which is where C# permits an attribute
+— an accessor may not carry one), and a body lowered by the ordinary rules. Nothing about
+§9 changes: the getter is a nullary instance method, and every rule that speaks about an
+instance method already speaks about it.
+
+**R9.20a — A read `o.P` is the call `o.P()`.** In an executable position, a property read
+lowers to R9.13's instance call with no arguments. The two spellings therefore produce
+identical Pulse, which is what §7.2's variant detector requires of a style choice: the
+variant of a class may write `Doubled()` where the original writes `Doubled`, and the
+emitter may not be able to tell.
+
+In a *specification* position `o.P` is unchanged: R3.9c reads a `[Spec]` member of the
+model and nothing else. A computed property is executable code over the representation, so
+a contract cannot mention it, exactly as a contract cannot mention an ordinary method.
+That is not a restriction R9.20 adds; it is R3.9c, which is why the example above states
+its postcondition over the `[Spec]` observation `TheW`.
+
+**R9.20b — A `set` accessor is refused (`PALCS0591`).** A setter is a method of one
+parameter that writes fields, so R9.20 would carry it over unchanged but for one thing:
+C# gives the parameter the contextual name `value`, and every rule that binds a parameter
+— R4.2's naming, R4.6's ghost arguments, the `@`-qualified spec vocabulary — assumes the
+name is one the user wrote and can mention in a contract. `value` is a keyword in exactly
+one position and an ordinary identifier everywhere else, and until §4 says which it is in
+a specification, a setter has no contract that can be written down. Write the assignment
+as a method.
+
+**R9.20c — A property is refused if it is not read-only, and its accessor is not counted
+twice.** A getter appears in `GetMembers()` both as the property and as `get_P`, an
+`IMethodSymbol` whose `AssociatedSymbol` is the property. The accessor is the thing with a
+body and the property is the thing with the attributes, so the two are collected as one
+declaration named for the property. R2.1's mangling therefore produces `Func_C_P`, not
+`Func_C_get_P`: C# forbids a property and a method of one name in one type, so the name
+stays injective.
+
+### 9.10 Status
 
 **Implemented and verified**, by `test/shape_hierarchy`: an `abstract Shape` with two
 virtual methods and an observed model, `sealed Square` and `sealed Circle` with unrelated
@@ -4665,10 +4788,11 @@ mistake:
 
 | Walk | The fallthrough that was a decision | Now |
 |---|---|---|
-| a translated class's members (§3.4, §4.5) | a member matching no category was skipped, so a computed property, an indexer, a `const` field, an operator or an explicit interface implementation vanished | **PALCS0591** names the member and its kind |
+| a translated class's members (§3.4, §4.5) | a member matching no category was skipped, so a computed property, an indexer, a `const` field, an operator or an explicit interface implementation vanished | **PALCS0591** names the member and its kind. The computed property has since been *translated* rather than refused — that is R9.20, and it is what R18.1 is for: the report is what turns a silent gap into a named one, and a named one into a feature |
 | a call's callee (R4.4) | `KindOf` accepted **any** static ordinary method, including one declared in the BCL, and emitted a call into a module that is never generated | **PALCS0592**: a callee must be declared in this compilation |
 | a binary operator's operand type (R6.4) | the module was chosen by the operand's primitive kind, defaulting to `Int32` when the operand was not primitive, so `a == b` on two objects emitted `I32.eq` applied to two boxes | **PALCS0593**: an operator whose operands are not primitive has no module |
 | a class's base list (R9.1) | only `BaseType` was inspected, and an interface is not a `BaseType` in Roslyn, so `class C : IFoo` silently forgot `IFoo` | **PALCS0594** until §9 has interfaces |
+| a method body's receiver bracket (R4.10) | the `unfold`/`fold` bracket was opened for every instance method, so a body that only called another method on `this` handed it a representation where its contract demands the invariant | **R4.10c**: open it only when a field is named, and **PALCS0597** when a body wants both |
 | a class's field declarations (R9.4) | only the declared type and name were read, so an initialiser -- an assignment R4.12 has no statement position for -- was dropped, and the field appeared to be built solely by the constructor | **PALCS0596** until §9 orders initialisers before the constructor body |
 
 **R18.2 — Every name the emitter writes is a name that resolves.** A generated module may
@@ -4706,11 +4830,13 @@ R18.1 turns a silent drop into a diagnostic; it does not by itself translate any
 Each of the following is now refused *and* named as a scheme gap, which is the state a
 feature has to reach before it can be designed.
 
-* **A property with an accessor body, and an indexer** (PALCS0591). An auto-property is
-  already a field (R3.4) and a `[Spec]` property is already an observation (R3.9c). What
-  is missing is the *computed* property, whose accessors are methods: `get` is a method of
-  no arguments returning the property's type, `set` is a method of one. Most idiomatic C#
-  exposes state this way, so this is the largest thing R18.1 uncovered.
+* **A property with a `set` accessor, and an indexer** (PALCS0591). The *getter* half of
+  this bullet is closed: R9.20 translates a computed property as the method its getter is,
+  which was the largest thing R18.1 uncovered and is now the smallest feature in §9,
+  because a getter *is* a method of no arguments and needed no new rule beyond finding it.
+  A setter is a method of one argument whose name C# chooses, so R9.20b keeps refusing it
+  until §4 has a reading of `value` in a specification. An indexer is a property with
+  parameters and waits on the same.
 * **A `const` field** (PALCS0591). It is a pure value and owns nothing, so it wants no
   invariant; what it wants is to be in scope in a body and in a contract, which is a
   question about §2's module layout rather than about ownership.
@@ -4734,6 +4860,10 @@ feature has to reach before it can be designed.
   interfaces are not simply R9.2 plus R9.3: what a C# interface adds is *multiple*
   implementation, and R9.8 pins the obstacle — a `dyn` is made at one witness type and
   `mkdyn` is not injective, so one value cannot be viewed at two unrelated roots.
+* **A body that both reads a field of its receiver and calls a method on it** (PALCS0597).
+  Not a dropped construct but the same mistake one level down: the bracket was emitted
+  unconditionally, so the ill-typed case was emitted too. R4.10c says why the two halves
+  cannot be reconciled without the emitter inventing a fold.
 * **A field initialiser** (PALCS0596). R4.12 builds the representation from the
   constructor's `this.f = e` assignments, and a field initialiser is an assignment C#
   runs before the constructor body. Reading it is a small rule and a real one; until it

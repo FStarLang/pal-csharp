@@ -558,7 +558,37 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
                 new IrField(loc, new IrVar(loc, Names.This), node.Identifier.ValueText),
+            // R9.20a. `Span` and `this.Span` are the same reference, so they lower to the
+            // same node -- writing the receiver out is a style choice, and §7.2 requires
+            // that style choices do not reach the emitter.
+            IPropertySymbol prop when ComputedRead(prop, loc, new IrVar(loc, Names.This)) is { } call
+                => call,
             _ => Unsupported(node, loc),
+        };
+    }
+
+    /// <summary>
+    /// R9.20a. A read of a computed property, in an executable position, is the call its
+    /// getter is: <c>g.Span</c> and <c>g.Span()</c> produce identical Pulse. In a
+    /// specification this returns <c>null</c>, because a contract reads the model and a
+    /// computed property is code over the representation, exactly as a method is.
+    /// </summary>
+    private IrCall? ComputedRead(IPropertySymbol prop, IrLoc loc, IrExpr receiver)
+    {
+        if (SpecPosition) return null;
+        if (prop.GetMethod is not { } getter) return null;
+        if (Declarations.Has(prop, known.SpecAttribute)) return null;
+        if (Declarations.Has(prop, known.ModelAttribute)) return null;
+        if (Declarations.KindOf(getter, known) is null) return null;
+
+        return new IrCall(loc, Naming.Of(getter), [receiver])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = known.MapType(prop.Type),
+            HasReceiver = true,
+            ParamTypes = Declarations.ParamTypes(getter, known, true),
+            TypeArguments = known.TypeArguments(getter),
+            MutatesReceiver = false,
         };
     }
 
@@ -681,6 +711,15 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             // is nothing to project.
             if (symbol is IFieldSymbol { IsStatic: false } && WellKnown.IsRecursive(owner))
                 return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
+
+            // R9.20a. In an executable position a computed property read *is* a call:
+            // `r.Doubled` and `r.Doubled()` produce the same Pulse, which is what §7.2
+            // requires of a style choice. In a specification it is not, and falls through
+            // to PALCS0523 below: a contract reads the model, and a computed property is
+            // code over the representation, exactly as an ordinary method is.
+            if (symbol is IPropertySymbol prop
+                && ComputedRead(prop, loc, Lower(node.Expression)) is { } call)
+                return call;
 
             diagnostics.Error("PALCS0523", loc,
                 $"`{node.Name.Identifier.ValueText}` is not a `[Spec]` member of `{owner.Name}`, so a " +

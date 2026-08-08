@@ -76,6 +76,26 @@ public sealed class Counter
     {
         return count;
     }
+
+    /// <summary>
+    /// Delegation: a method whose body calls another method on the same receiver and names
+    /// no field of it (R4.10c). This used to be a refusal — the <c>unfold</c>/<c>fold</c>
+    /// bracket was opened for every instance method, so <c>Increment</c> was handed a
+    /// representation where its contract asks for the folded invariant, and Pulse rejected
+    /// the call. It was even recorded as an intended refusal, on the argument that the
+    /// frontend cannot see the prover's context. The argument was sound and the conclusion
+    /// was wrong: nothing here needs the invariant open, so nothing should have opened it.
+    ///
+    /// R4.10c opens the bracket exactly where the field accesses are, which is what §4.10
+    /// had always claimed it did, and this composes for free.
+    /// </summary>
+    [Requires("@this.Value < 2147483646")]
+    [Ensures("@this.Value == Old(@this.Value) + 2")]
+    public void IncrementTwice()
+    {
+        Increment();
+        Increment();
+    }
 }
 
 /// <summary>

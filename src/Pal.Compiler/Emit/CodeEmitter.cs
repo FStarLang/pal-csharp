@@ -121,7 +121,9 @@ public sealed class CodeEmitter(
     public string EmitBody(IrMethod method, MethodPlan plan)
     {
         _plan = plan;
-        foreach (var (name, slot) in plan.Slots) _slots[name] = slot;
+        // In declaration order, not `plan.Slots`': see MethodPlan.SlotOrder. `_slots` is
+        // a plain Dictionary, so every later walk of it inherits the order set here.
+        foreach (var name in plan.SlotOrder) _slots[name] = plan.Slots[name];
 
         if (method is { IsConstructor: true, ReturnType: IrClassType built })
         {
@@ -146,6 +148,34 @@ public sealed class CodeEmitter(
                    self.Kind == SlotKind.Object
             ? [self]
             : [];
+
+        // R4.10c. Opened only if the body actually names a field, because a call on `this`
+        // needs the invariant *folded* -- that is what the callee's contract requires. A
+        // method that only delegates (`int Again() => Get();`, and every computed property
+        // that reads through another one, R9.20) touches no field, so opening the bracket
+        // around it would hand the callee a representation where it expects an invariant.
+        // The comment above has always said the bracket goes where the field accesses are;
+        // this is what makes it true.
+        if (!TouchesFields(method)) _objects = [];
+        else if (_objects.Length > 0 && SelfCall(method) is { } selfCall)
+        {
+            // R4.10c, the other half. The bracket has one shape, and the two demands are
+            // opposite: a field access needs the invariant *unfolded* and a call on `this`
+            // needs it *folded*, because that is what the callee's contract asks for.
+            // Closing the bracket around the call would be a proof step the emitter
+            // invented — R4.11a's fold has to hold of the state at the fold point, and a
+            // mutator's intermediate state is exactly where it does not (R3.10's `Shift`).
+            // So this is refused, not approximated; before it was emitted, ill-typed, with
+            // no diagnostic at all.
+            diagnostics.Error("PALCS0597", selfCall.Loc,
+                $"`{Unqualify(method.Name, method.DeclaringClass)}` reads a field of " +
+                $"`{method.DeclaringClass}` and also calls " +
+                $"`{Unqualify(selfCall.Callee, method.DeclaringClass)}` on the same object. " +
+                "The field access needs the invariant " +
+                "unfolded and the call needs it folded (doc/translation.md R4.10c), and one " +
+                "body cannot have it both ways. Read the field through the method, or inline " +
+                "the callee.");
+        }
 
         // The invariant is abstract to the caller, so the body cannot touch a field until
         // it is unfolded, and the matching `fold` on each exit path re-establishes it.
@@ -810,6 +840,39 @@ public sealed class CodeEmitter(
         for (var i = 0; i < _objectLocals.Count; i++)
             if (_objectLocals[i].Binder == obj.Binder) _objectLocals[i] = plain;
     }
+
+    /// <summary>
+    /// R4.10c. Whether a body names a field of its receiver, which is the only reason to
+    /// open the fold/unfold bracket.
+    /// </summary>
+    /// <remarks>
+    /// A constructor is excluded: it builds the representation rather than reading one,
+    /// and <see cref="Construct"/> handles it before this point is reached.
+    /// </remarks>
+    private static bool TouchesFields(IrMethod method) =>
+        method.Body is not null
+        && Check.Statements(method.Body)
+            .SelectMany(Check.Expressions)
+            .SelectMany(Check.Subexpressions)
+            .Any(e => e is IrField { Receiver: IrVar { Name: var n } } && n == Names.This);
+
+    /// <summary>R2.1's type qualifier removed, so a diagnostic names what the user wrote.</summary>
+    private static string Unqualify(string name, string? klass) =>
+        klass is not null && name.StartsWith(klass + "_", StringComparison.Ordinal)
+            ? name[(klass.Length + 1)..]
+            : name;
+
+    /// <summary>
+    /// R4.10c. A call on the receiver from inside one of its own methods, if there is one.
+    /// </summary>
+    private static IrCall? SelfCall(IrMethod method) =>
+        method.Body is null ? null
+        : Check.Statements(method.Body)
+            .SelectMany(Check.Expressions)
+            .SelectMany(Check.Subexpressions)
+            .OfType<IrCall>()
+            .FirstOrDefault(c => c is { HasReceiver: true, Args: [IrVar { Name: var n }, ..] }
+                                 && n == Names.This);
 
     private static string Unfold(Slot obj) =>
         $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel}";

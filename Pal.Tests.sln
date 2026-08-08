@@ -28,6 +28,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "circular_buffer", "test/cir
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "compare_elements", "test/compare_elements/compare_elements.csproj", "{1C3EF373-0439-BD89-3D44-5BF66B2A5355}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "computed_property", "test/computed_property/computed_property.csproj", "{8E74FF6D-F2AD-7115-EA91-EDB517392445}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "counter_class", "test/counter_class/counter_class.csproj", "{79D1E9E5-08EF-E4E6-8ABF-483DD370F633}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "counter_client", "test/counter_client/counter_client.csproj", "{187AAAC2-34B1-FF79-2028-F46B31D3462B}"
@@ -152,6 +154,10 @@ Global
 		{1C3EF373-0439-BD89-3D44-5BF66B2A5355}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1C3EF373-0439-BD89-3D44-5BF66B2A5355}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1C3EF373-0439-BD89-3D44-5BF66B2A5355}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8E74FF6D-F2AD-7115-EA91-EDB517392445}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8E74FF6D-F2AD-7115-EA91-EDB517392445}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8E74FF6D-F2AD-7115-EA91-EDB517392445}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8E74FF6D-F2AD-7115-EA91-EDB517392445}.Release|Any CPU.Build.0 = Release|Any CPU
 		{79D1E9E5-08EF-E4E6-8ABF-483DD370F633}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{79D1E9E5-08EF-E4E6-8ABF-483DD370F633}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{79D1E9E5-08EF-E4E6-8ABF-483DD370F633}.Release|Any CPU.ActiveCfg = Release|Any CPU

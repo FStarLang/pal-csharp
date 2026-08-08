@@ -10,10 +10,16 @@ namespace PalLang;
 // with SyntaxFactory.ParseExpression and binds it with Roslyn in the scope of
 // the annotated member, so parameters, locals, `[Spec]` functions, `Old`,
 // `Result` and `this` all resolve and are type-checked.
+//
+// A contract may also be written on a property. R9.20 translates a computed
+// property as the method its getter is, and C# does not permit an attribute on
+// an accessor, so the property declaration is the only place the contract of
+// that method can go.
 // ---------------------------------------------------------------------------
 
 /// <summary>A precondition. The predicate is a C# expression in the scope of the member.</summary>
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Constructor, AllowMultiple = true)]
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Constructor | AttributeTargets.Property,
+                AllowMultiple = true)]
 public sealed class RequiresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
@@ -23,21 +29,22 @@ public sealed class RequiresAttribute(string predicate) : Attribute
 /// A postcondition. May use <c>Old(e)</c> for the pre-state value of <c>e</c>
 /// and <c>Result</c> for the returned value.
 /// </summary>
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Constructor, AllowMultiple = true)]
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Constructor | AttributeTargets.Property,
+                AllowMultiple = true)]
 public sealed class EnsuresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
 }
 
 /// <summary>Shorthand for <c>[Requires(p)] [Ensures(p)]</c>.</summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property, AllowMultiple = true)]
 public sealed class PreservesAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
 }
 
 /// <summary>Shorthand for <c>[Ensures("x == Old(x)")]</c>.</summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property, AllowMultiple = true)]
 public sealed class PreservesValueAttribute(string expression) : Attribute
 {
     public string Expression { get; } = expression;

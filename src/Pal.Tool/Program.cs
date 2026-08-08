@@ -86,12 +86,19 @@ public static class Program
 
         Directory.CreateDirectory(output);
         var written = 0;
+        var current = new HashSet<string>(StringComparer.Ordinal);
         foreach (var module in modules)
         {
-            if (module.Interface is { } iface &&
-                WriteIfChanged(Path.Combine(output, module.InterfaceFileName), iface)) written++;
+            if (module.Interface is { } iface)
+            {
+                current.Add(module.InterfaceFileName);
+                if (WriteIfChanged(Path.Combine(output, module.InterfaceFileName), iface)) written++;
+            }
+            current.Add(module.FileName);
             if (WriteIfChanged(Path.Combine(output, module.FileName), module.Text)) written++;
         }
+        current.Add("TranslationErrors.fst");
+        Prune(output, current);
 
         // PAL's sentinel: a module that fails to verify whenever translation was
         // incomplete, so a broken translation can never look like a passing proof.
@@ -113,6 +120,20 @@ public static class Program
     {
         if (report) Console.Error.WriteLine($"palcs: {name} {watch.ElapsedMilliseconds} ms");
         watch.Restart();
+    }
+
+    /// <summary>
+    /// R2.4. A module the last run wrote and this one did not is deleted, so a renamed or
+    /// no-longer-emitted declaration cannot leave behind a module that is verified forever
+    /// against C# that no longer exists. Only R2.1's own extensions are touched; the cache
+    /// and the maps are left alone.
+    /// </summary>
+    private static void Prune(string output, HashSet<string> current)
+    {
+        foreach (var pattern in new[] { "*.fst", "*.fsti" })
+            foreach (var path in Directory.EnumerateFiles(output, pattern))
+                if (!current.Contains(Path.GetFileName(path)))
+                    File.Delete(path);
     }
 
     /// <summary>

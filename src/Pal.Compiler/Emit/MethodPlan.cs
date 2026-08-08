@@ -376,6 +376,7 @@ public sealed class MethodPlan
         PreScope = pre;
         PostScope = post;
         Slots = slots.ToImmutable();
+        SlotOrder = [.. method.Parameters.Select(p => p.Name).Where(slots.ContainsKey)];
 
         // R12.2. A contract clause whose type is `SlProp` is an *ownership* clause, so it
         // joins the resources rather than the `pure`. This is the whole of what §12 adds to
@@ -420,6 +421,15 @@ public sealed class MethodPlan
     public SpecScope PreScope { get; }
     public SpecScope PostScope { get; }
     public ImmutableDictionary<string, Slot> Slots { get; }
+
+    /// <summary>
+    /// The keys of <see cref="Slots"/> in the order the parameters were declared.
+    /// <see cref="ImmutableDictionary{K,V}"/> enumerates in hash order, and .NET randomizes
+    /// string hashing per process, so enumerating it directly makes the emitted order --
+    /// and therefore the emitted text -- differ between runs of the same input. That
+    /// defeats write-if-changed (R2.4) and re-verifies unchanged modules at random.
+    /// </summary>
+    public ImmutableArray<string> SlotOrder { get; }
 
     public static TermKind KindOf(IrType type) => type switch
     {

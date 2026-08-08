@@ -133,16 +133,26 @@ public static class FrontendPass
     // Collect
     // -----------------------------------------------------------------------
 
+    /// <remarks>
+    /// R9.20 widens <c>Syntax</c> from a method declaration to any declaration a
+    /// translated body can be written in, because a computed property is a body the user
+    /// wrote and C# does not spell it as a method. The property carries the attributes and
+    /// the accessor carries the body, so the two are one candidate: <c>Symbol</c> is the
+    /// accessor (its parameters and return type are the method's) and <c>Declaration</c>
+    /// is the property (its attributes are the contract, and its name is the module's).
+    /// </remarks>
     private sealed record Candidate(
-        BaseMethodDeclarationSyntax Syntax,
+        SyntaxNode Syntax,
         IMethodSymbol Symbol,
         CalleeKind Kind)
     {
-        /// <summary>The name token: a method's identifier, or a constructor's type name.</summary>
+        /// <summary>The name token: a method's identifier, a constructor's type name, or
+        /// a property's name — never the accessor's, which the user did not write.</summary>
         public SyntaxToken Identifier => Syntax switch
         {
             MethodDeclarationSyntax m => m.Identifier,
             ConstructorDeclarationSyntax c => c.Identifier,
+            PropertyDeclarationSyntax p => p.Identifier,
             _ => Syntax.GetFirstToken(),
         };
 
@@ -150,9 +160,20 @@ public static class FrontendPass
         {
             MethodDeclarationSyntax m => m.ExpressionBody,
             ConstructorDeclarationSyntax c => c.ExpressionBody,
+            // `T P => e;` and `T P { get => e; }` are the same declaration with the same
+            // body; the accessor form is where an attribute could never have gone.
+            PropertyDeclarationSyntax p => p.ExpressionBody ?? Getter(p)?.ExpressionBody,
             _ => null,
         };
 
+        /// <summary>The declaration the contract is read from: R9.20c's property, or the
+        /// method itself.</summary>
+        public ISymbol Declaration =>
+            Syntax is PropertyDeclarationSyntax && Symbol.AssociatedSymbol is { } p ? p : Symbol;
+
+        public static AccessorDeclarationSyntax? Getter(PropertyDeclarationSyntax p) =>
+            p.AccessorList?.Accessors.FirstOrDefault(
+                a => a.Kind() == SyntaxKind.GetAccessorDeclaration);
     }
 
     private static ImmutableArray<Candidate> Collect(CSharpCompilation compilation, WellKnown known)
@@ -165,10 +186,24 @@ public static class FrontendPass
             {
                 if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
                 // R11.1a. A specification type's members declare F* names; they are not
-                //程 code and have no bodies to translate.
+                // executable code and have no bodies to translate.
                 if (known.IsSpecTypeDeclaration(symbol.ContainingType)) continue;
                 if (Declarations.KindOf(symbol, known) is not { } kind) continue;
                 result.Add(new Candidate(method, symbol, kind));
+            }
+
+            // R9.20. A computed property is the method its getter is. It is collected here
+            // rather than beside the fields, because everything downstream of this point
+            // treats it as a method and nothing downstream needs to know it was written as
+            // a property.
+            foreach (var prop in tree.GetRoot().DescendantNodes().OfType<PropertyDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(prop) is not IPropertySymbol symbol) continue;
+                if (known.IsSpecTypeDeclaration(symbol.ContainingType)) continue;
+                if (!IsComputed(symbol, known)) continue;
+                if (symbol.GetMethod is not { } getter) continue;
+                if (Declarations.KindOf(getter, known) is not { } kind) continue;
+                result.Add(new Candidate(prop, getter, kind));
             }
         }
         return result.ToImmutable();
@@ -487,6 +522,23 @@ public static class FrontendPass
         }
         return result.ToImmutable();
     }
+
+    /// <summary>
+    /// R9.20: a property whose accessor has a body, over the representation. Not an
+    /// auto-property (R3.4 reads that as a field), not a <c>[Model]</c> or a <c>[Spec]</c>
+    /// observation (R3.9c reads those off the model), and read-only, per R9.20b.
+    /// </summary>
+    private static bool IsComputed(IPropertySymbol p, WellKnown known) =>
+        p is { IsStatic: false, IsIndexer: false, GetMethod: not null, SetMethod: null }
+        && !IsAuto(p)
+        && !Declarations.IsAnnotatedDeclaration(p, known)
+        // R9.6's forgetting function is written as `override SpecInt Area => ...`, and
+        // carries no attribute of its own: it inherits its meaning from the `[Model]` it
+        // overrides. It is a spec-level definition, not code over the representation, so
+        // reading it as a method would translate a specification as a program.
+        && !(p.IsOverride && OverriddenChainHasModel(p, known))
+        && p.ContainingType is { TypeKind: TypeKind.Class } owner
+        && known.HasModel(owner);
 
     private static bool IsAuto(IPropertySymbol p) =>
         p.ContainingType.GetMembers().OfType<IFieldSymbol>()
@@ -843,6 +895,8 @@ public static class FrontendPass
                 IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } => (null, null),
                 IFieldSymbol { IsStatic: true, IsConst: false } => (null, null),   // PALCS0522
                 IPropertySymbol { IsStatic: false, IsIndexer: false } p when IsAuto(p) => (null, null),
+                // R9.20: a read-only computed property is the method its getter is.
+                IPropertySymbol p when IsComputed(p, known) => (null, null),
                 IMethodSymbol { MethodKind: MethodKind.Constructor } => (null, null),
                 IMethodSymbol { MethodKind: MethodKind.Ordinary, IsOverride: true } m
                     when IsObjectMember(m) =>
@@ -856,12 +910,15 @@ public static class FrontendPass
                     ("an indexer. Indexing a translated object has no rule: `a[i]` is the array " +
                      "subscript of R6.5 and nothing else (doc/translation.md R18.2)",
                      $"{symbol.Name}.this[]"),
-                IPropertySymbol =>
-                    ("a property with an accessor body. An *auto*-property is a field (R3.4) and a " +
-                     "`[Spec]` property is an observation (R3.9c), but a computed property's " +
-                     "accessors are methods and no rule emits them yet (doc/translation.md R18.2). " +
-                     "Write the accessor as an ordinary method",
+                IPropertySymbol { SetMethod: not null } =>
+                    ("a property with a `set` accessor. R9.20 translates a computed property as the " +
+                     "method its getter is, but a setter's parameter is named `value` by C# rather " +
+                     "than by the author, and §4 has no reading of that name in a specification " +
+                     "(doc/translation.md R9.20b). Write the assignment as an ordinary method",
                      $"{symbol.Name}.{member.Name}"),
+                IPropertySymbol =>
+                    ("a property whose accessor pal-csharp cannot read as a method " +
+                     "(doc/translation.md R9.20)", $"{symbol.Name}.{member.Name}"),
                 IFieldSymbol { IsConst: true } =>
                     ("a `const` field. It owns nothing, so it needs no invariant, but nothing yet " +
                      "puts its value in scope in a body or a contract (doc/translation.md R18.2)",
@@ -1642,7 +1699,7 @@ public static class FrontendPass
         foreach (var candidate in candidates)
         {
             var usings = BuildUsings(candidate, helperTypes);
-            foreach (var (attribute, index, wantsResult) in SpecAttributes(candidate.Symbol, known))
+            foreach (var (attribute, index, wantsResult) in SpecAttributes(candidate.Declaration, known))
             {
                 var text = Declarations.StringArgument(attribute);
                 if (text is null) continue;
@@ -1697,8 +1754,13 @@ public static class FrontendPass
     }
 
     /// <summary>The spec-bearing attributes of a method, in declaration order.</summary>
+    /// <remarks>
+    /// R9.20: the declaration, not the symbol. For a computed property these differ —
+    /// the body is the accessor's and the attributes are the property's, because C# does
+    /// not permit an attribute on an accessor. For everything else they are the same.
+    /// </remarks>
     private static IEnumerable<(AttributeData Attribute, int Index, bool WantsResult)> SpecAttributes(
-        IMethodSymbol symbol, WellKnown known)
+        ISymbol symbol, WellKnown known)
     {
         var index = 0;
         foreach (var a in symbol.GetAttributes())
@@ -1868,7 +1930,9 @@ public static class FrontendPass
         // machinery of its own. A constructor has no receiver in its contract: the object
         // does not exist until it returns, and R4.12 constrains the *initial model*
         // through `Result` instead.
-        if (symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary or MethodKind.Constructor })
+        if (symbol is { IsStatic: false,
+                        MethodKind: MethodKind.Ordinary or MethodKind.Constructor
+                                    or MethodKind.PropertyGet })
             result.Add(new SpecParam(Names.This, symbol.ContainingType));
 
         foreach (var p in symbol.Parameters)
@@ -1896,9 +1960,11 @@ public static class FrontendPass
         var symbol = candidate.Symbol;
         var loc = Locations.From(candidate.Identifier);
 
-        var specs = ReadSpecs(symbol, known, bound, diagnostics);
+        var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, known, diagnostics);
-        if (symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary, ContainingType: { } self } &&
+        if (symbol is { IsStatic: false,
+                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet,
+                        ContainingType: { } self } &&
             known.HasModel(self))
         {
             // R15.3. The receiver of a method of `Node<T>` is a `Node<T>`, not a `Node`.
@@ -1999,7 +2065,7 @@ public static class FrontendPass
         }
 
         var bodyExpression = candidate.ExpressionBody?.Expression
-            ?? candidate.Syntax.Body?.Statements
+            ?? BlockOf(candidate.Syntax)?.Statements
                 .OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression;
 
         if (bodyExpression is null)
@@ -2022,10 +2088,29 @@ public static class FrontendPass
         };
     }
 
-    private static IrStmt? LowerBody(BaseMethodDeclarationSyntax syntax, StmtLowerer lowerer)
+    /// <summary>
+    /// The statement block a declaration's body is written in, if it has one. R9.20 makes
+    /// this a question with three answers rather than two: a method's, a constructor's,
+    /// and — for a computed property — its getter's.
+    /// </summary>
+    private static BlockSyntax? BlockOf(SyntaxNode syntax) => syntax switch
     {
-        if (syntax.Body is { } block) return lowerer.Lower(block);
-        if (syntax.ExpressionBody is { } arrow)
+        BaseMethodDeclarationSyntax m => m.Body,
+        PropertyDeclarationSyntax p => Candidate.Getter(p)?.Body,
+        _ => null,
+    };
+
+    private static ArrowExpressionClauseSyntax? ArrowOf(SyntaxNode syntax) => syntax switch
+    {
+        BaseMethodDeclarationSyntax m => m.ExpressionBody,
+        PropertyDeclarationSyntax p => p.ExpressionBody ?? Candidate.Getter(p)?.ExpressionBody,
+        _ => null,
+    };
+
+    private static IrStmt? LowerBody(SyntaxNode syntax, StmtLowerer lowerer)
+    {
+        if (BlockOf(syntax) is { } block) return lowerer.Lower(block);
+        if (ArrowOf(syntax) is { } arrow)
             return new IrReturn(Locations.From(arrow), lowerer.LowerSpec(arrow.Expression));
         return null;
     }
@@ -2037,7 +2122,7 @@ public static class FrontendPass
         IrExpr? Decreases);
 
     private static Specs ReadSpecs(
-        IMethodSymbol symbol, WellKnown known,
+        IMethodSymbol symbol, ISymbol declaration, WellKnown known,
         ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics)
     {
         var requires = ImmutableArray.CreateBuilder<IrExpr>();
@@ -2045,7 +2130,7 @@ public static class FrontendPass
         var preserves = ImmutableArray.CreateBuilder<IrExpr>();
         IrExpr? decreases = null;
 
-        foreach (var (attribute, index, _) in SpecAttributes(symbol, known))
+        foreach (var (attribute, index, _) in SpecAttributes(declaration, known))
         {
             var key = $"{Naming.Of(symbol)}_{index}";
             if (!bound.TryGetValue(key, out var spec)) continue;
@@ -2110,9 +2195,9 @@ public static class FrontendPass
     /// </summary>
     private static (ImmutableArray<IrExpr> Requires, ImmutableArray<IrExpr> Ensures, IrStmt? Body)
         ExtractBodyContracts(
-            BaseMethodDeclarationSyntax syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer)
+            SyntaxNode syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer)
     {
-        if (syntax.Body is not { } block)
+        if (BlockOf(syntax) is not { } block)
             return ([], [], null);
 
         var requires = ImmutableArray.CreateBuilder<IrExpr>();

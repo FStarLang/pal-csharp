@@ -66,8 +66,12 @@ public static class Declarations
         if (method is { IsStatic: true, MethodKind: MethodKind.Ordinary }) return CalleeKind.Method;
 
         // §4.5. An instance method or constructor of a translated class: it carries the
-        // object's invariant, which is what makes it translatable at all.
-        return method is { IsStatic: false, MethodKind: MethodKind.Ordinary or MethodKind.Constructor }
+        // object's invariant, which is what makes it translatable at all. R9.20 adds the
+        // getter of a computed property, which is a nullary instance method that C# spells
+        // differently; every rule downstream of here already speaks about it.
+        return method is { IsStatic: false,
+                           MethodKind: MethodKind.Ordinary or MethodKind.Constructor
+                                       or MethodKind.PropertyGet }
                && method.ContainingType is { TypeKind: TypeKind.Class } owner
                && known.HasModel(owner)
             ? CalleeKind.Method
@@ -197,6 +201,19 @@ public static class Declarations
     public static bool IsAnnotated(ISymbol symbol, WellKnown known) =>
         symbol.GetAttributes().Any(a =>
             a.AttributeClass is { ContainingNamespace.Name: WellKnown.Namespace });
+
+    /// <summary>
+    /// R9.20: whether a declaration carries an annotation that <em>classifies</em> it —
+    /// <c>[Model]</c>, <c>[Spec]</c>, <c>[Lemma]</c>, <c>[Plain]</c> — as opposed to one
+    /// that merely specifies it, like <c>[Requires]</c>. A computed property may carry a
+    /// contract and still be a computed property; one that is a `[Spec]` observation is a
+    /// different construct entirely.
+    /// </summary>
+    public static bool IsAnnotatedDeclaration(ISymbol symbol, WellKnown known) =>
+        Has(symbol, known.ModelAttribute)
+        || Has(symbol, known.SpecAttribute)
+        || Has(symbol, known.LemmaAttribute)
+        || Has(symbol, known.PlainAttribute);
 
     /// <summary>
     /// The syntactic location an attribute's argument occupies, so that a diagnostic

@@ -1188,11 +1188,17 @@ as are generic classes), C# `interface` declarations, delegates, `async`, `forea
 user-written struct constructors, static mutable fields, a class that is neither `sealed`
 nor `abstract`, a `return` that is not in tail position **inside a loop**, an increment or
 decrement written in a specification, a `switch` label that is a pattern or carries a
-`when` guard, and a `break` that leaves a `switch` before the end of its section.
+`when` guard, and a `break` that leaves a `switch` before the end of its section, and a method body that both
+reads a field of its receiver and calls a method on that same receiver (R4.10c).
 
-Also outside it, and until §18 each of these was *silently dropped* rather than reported:
-a property with an accessor body (a computed property, as opposed to an auto-property or a
-`[Spec]` property), an indexer, a `const` field, a field initialiser, an explicit interface
+A computed property — a property whose getter has a body, as opposed to an auto-property or
+a `[Spec]` property — **is** inside the subset: R9.20 translates it as the method its getter
+is, and it emits the same Pulse a method with the same body emits. A `set` accessor is not,
+because C# names its parameter `value` rather than the author naming it, and no
+specification can be written over a name the author did not choose.
+
+Also outside the subset, and until §18 each of these was *silently dropped* rather than
+reported: a property with a `set` accessor, an indexer, a `const` field, a field initialiser, an explicit interface
 implementation, a user-defined operator or conversion, an event, a finalizer, an `override`
 of a member of `object` (`Equals`, `GetHashCode`, `ToString`), a second constructor of one
 class, an `implements` clause, a call to a method not declared in this compilation
