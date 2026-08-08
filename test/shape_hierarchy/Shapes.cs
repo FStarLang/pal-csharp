@@ -111,6 +111,34 @@ public static class Shapes
     }
 
     /// <summary>
+    /// R9.15e. The same conversion, for a leaf whose model <em>is</em> the base's. The
+    /// call is what makes the case bite: <c>SumAreas</c>'s precondition is written at
+    /// <c>Shape</c>'s model, so the reference this cast produces has to be one the base's
+    /// observations still apply to. Where the forgetting is arithmetic — every other leaf
+    /// here — that holds for free.
+    /// </summary>
+    [Ensures("Result == 16")]
+    public static int SumTiles()
+    {
+        Shape a = new Tile(9);
+        Shape b = new Tile(7);
+        return SumAreas(a, b);
+    }
+
+    /// <summary>
+    /// R9.15e, through a mutating dispatch. <c>Grow</c>'s contract is <c>Shape</c>'s, and
+    /// both halves of it — the precondition discharged here and the postcondition read
+    /// back — are stated at a model reached by the identity forgetting.
+    /// </summary>
+    [Ensures("Result == 24")]
+    public static int GrowTile()
+    {
+        Shape s = new Tile(6);
+        Grow(s);
+        return s.GetArea();
+    }
+
+    /// <summary>
     /// R9.16. A checked downcast, and what it costs. The reference is grown through the
     /// base — a virtual call — and then cast back to reach a <c>Square</c>-only member.
     ///

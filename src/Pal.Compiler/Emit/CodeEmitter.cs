@@ -724,8 +724,18 @@ public sealed class CodeEmitter(
         // R9.6 needs, not a proof step.
         var own = FreshValue(name);
         Line($"with {own}. assert ({mod}.{Names.ClassInv(derived)} {impl} {own});");
-        Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} " +
-             $"({mod}.{Names.ClassForget(derived)} {own}));");
+
+        // R9.15e. The forgotten model is bound to a name *of the base's model type* before
+        // the fold, rather than left as an application of `forget` inside it. Every class
+        // has its own `__model` refinement (R9.5), so a term only known at the derived
+        // class's refinement is one the base's spec functions cannot be unfolded on. The
+        // reference this cast produces is owned at whatever names its model, and that name
+        // is what a later caller's implicit is instantiated with; binding it here is what
+        // keeps the base's own vocabulary applicable to it afterwards.
+        var basis = FreshValue(target.Name);
+        Line($"let {basis} : erased ({Names.ClassModule(target.Name)}.{Names.ClassModel(target.Name)}) = " +
+             $"hide ({mod}.{Names.ClassForget(derived)} {own});");
+        Line($"fold ({mod}.{Names.ClassAsBase(derived, target.Name)} {impl} (reveal {basis}));");
         Line($"let {binder} = {Names.VtblModule(derived)}." +
              $"{Names.UpcastToAt(derived, target.Name)} {impl};");
 

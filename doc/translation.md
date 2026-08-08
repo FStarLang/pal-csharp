@@ -2784,7 +2784,8 @@ reference, returning it, so the conversion is one operation:
 ```
 let t0 = func_Square__ctor 5l;
 with vs_0. assert (class_Square__inv t0 vs_0);
-fold (class_Square__as_Shape t0 (class_Square__forget vs_0));
+let vShape_1 : erased (class_Shape__model) = hide (class_Square__forget vs_0);
+fold (class_Square__as_Shape t0 (reveal vShape_1));
 let var_s = Vtbl_Square.class_Square__to_Shape_at t0;
 ```
 
@@ -2829,6 +2830,35 @@ only under that reading, and a reference is a thing no specification can say any
 
 A base-typed array is therefore heterogeneous with no extra machinery (`shape_slot` in
 both studies), and `total_area` traverses one at a fraction.
+
+**R9.15e — The forgotten model is bound to a name of the *base's* model type before the
+fold.** R9.15a's `with` names the model the value is held at; that name has the *derived*
+class's model type, and R9.5 gives every class its own `__model` refinement even where the
+forgetting between two of them is `fun m -> m`. So `fold (… (class_C__forget vc_0))`
+leaves the base reference owned at a term whose only known type is `class_C__model`, and
+the base's observations — which are functions of a `class_P__model` — cannot be unfolded
+on it. The fix is to say what type the forgotten model has, once, where it is produced:
+
+```
+let vP_1 : erased (class_P__model) = hide (class_C__forget vc_0);
+fold (class_C__as_P c (reveal vP_1));
+```
+
+This is not a proof step and not a hint. The reference the cast produces is owned at
+whatever names its model, and that name is what a caller's implicit is later instantiated
+with; binding it at the base's type is the difference between handing back a `P` and
+handing back a `C` that happens to be spelled like one.
+
+*Why it was invisible for so long.* Where the forgetting does arithmetic — `Side * Side`,
+`Radius * Radius * 3`, a projection out of a struct — the application is at the base's type
+by construction and nothing is lost. It bites only when the forgetting is the **identity
+on a bare model**, because then the term is literally the derived model and there is no
+operator to retype it. `test/shape_hierarchy`'s `Tile`, whose model *is* its area, is that
+case; before this rule, `SumTiles` failed to discharge `SumAreas`'s precondition — a
+precondition written entirely at `Shape`, about a `Shape`, on a line where nothing about a
+`Tile` is in scope. §18's reading applies: the empty cell in the shape matrix was "a leaf
+that adds no information to its base", which is the *simplest* leaf there is and so the
+one no test had.
 
 ### 9.7 Downcast
 

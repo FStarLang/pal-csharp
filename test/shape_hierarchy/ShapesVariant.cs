@@ -84,4 +84,26 @@ public static class ShapesVariant
         int side = sq.GetSide();
         return 2 * side;
     }
+
+    /// <summary>
+    /// R9.15e, written differently: the conversions happen at the argument rather than
+    /// through named base-typed locals, and one operand is a leaf whose forgetting is
+    /// arithmetic while the other's is the identity.
+    /// </summary>
+    [Ensures("Result == 13")]
+    public static int SumTiles()
+    {
+        Tile t = new Tile(4);
+        return SumAreas(new Square(3), t);
+    }
+
+    /// <summary>R9.15e, with the mutation done through a directly created base local.</summary>
+    [Ensures("Result == 24")]
+    public static int GrowTile()
+    {
+        Shape s = new Tile(6);
+        s.Double();
+        int a = s.GetArea();
+        return a;
+    }
 }
