@@ -2575,8 +2575,16 @@ public sealed class CodeEmitter(
         var mod = Names.ClassModule(k.Name);
         var own = FreshValue(k.Name);
         Line($"with {own}. assert ({mod}.{Names.ClassInv(k.Name)} {recv.Binder} {recv.PermArg}{own});");
+
+        // R9.15e, on a receiver that is never cast. The contract this call is checked
+        // against is the base's (R9.7), so the same naming the cast needs is needed here:
+        // a model left as an application of `forget` is only known at the derived class's
+        // refinement (R9.5), and the base's own observations cannot be unfolded on it.
+        var basis = FreshValue(b);
+        Line($"let {basis} : erased ({Names.ClassModule(b)}.{Names.ClassModel(b)}) = " +
+             $"hide ({mod}.{Names.ClassForget(k.Name)} {own});");
         Line($"fold ({mod}.{Names.ClassAsBase(k.Name, b)} {recv.Binder} " +
-             $"{recv.PermArg}({mod}.{Names.ClassForget(k.Name)} {own}));");
+             $"{recv.PermArg}(reveal {basis}));");
         return (recv, k.Name, b);
     }
 

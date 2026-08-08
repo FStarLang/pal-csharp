@@ -2860,6 +2860,20 @@ precondition written entirely at `Shape`, about a `Shape`, on a line where nothi
 that adds no information to its base", which is the *simplest* leaf there is and so the
 one no test had.
 
+*A receiver that is never cast.* R9.7's bracket presents a direct call's receiver at the
+model its `override`'s contract is written at, and that is the same naming, so it takes the
+same binder:
+
+```
+with vT_0. assert (class_Tile__inv var_t p vT_0);
+let vShape_1 : erased (class_Shape__model) = hide (class_Tile__forget vT_0);
+fold (class_Tile__as_Shape var_t p (reveal vShape_1));
+```
+
+No conversion has happened here — `t` is a `Tile` before the call and after it. It is the
+*contract* that lives at the base, which is enough: the callee's precondition is stated in
+`Shape`'s vocabulary and has to be discharged in it. `Shapes.DirectTile` is the case.
+
 *The edge out of an abstract class.* R9.18's classes have no representation to view, so the
 cast is one generated ghost function and there is nothing to fold: the base model cannot be
 named before it is produced. It is named after, and the resource is moved onto the name:

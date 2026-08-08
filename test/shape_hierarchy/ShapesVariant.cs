@@ -106,4 +106,19 @@ public static class ShapesVariant
         int a = s.GetArea();
         return a;
     }
+
+    /// <summary>
+    /// R9.15e's bracket, written differently: the two calls are made on separate
+    /// receivers, so each opens and closes its own view, and the observation is read
+    /// before the mutation rather than after.
+    /// </summary>
+    [Ensures("Result == 21")]
+    public static int DirectTile()
+    {
+        Tile t = new Tile(5);
+        int before = t.GetArea();
+        Tile u = new Tile(4);
+        u.Double();
+        return before + u.GetArea();
+    }
 }

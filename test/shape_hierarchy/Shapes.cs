@@ -155,4 +155,18 @@ public static class Shapes
         Square sq = (Square)s;
         return sq.GetSide();
     }
+
+    /// <summary>
+    /// R9.7's bracket, on a leaf whose forgetting is the identity. The receiver is never
+    /// upcast — it stays a <c>Tile</c> throughout — but the contract each call is checked
+    /// against is <c>Shape</c>'s, so the bracket has to present the model at the base just
+    /// as R9.15e's cast does, and for the same reason.
+    /// </summary>
+    [Ensures("Result == 24")]
+    public static int DirectTile()
+    {
+        Tile t = new Tile(6);
+        t.Double();
+        return t.GetArea();
+    }
 }
