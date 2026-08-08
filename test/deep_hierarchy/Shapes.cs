@@ -58,6 +58,19 @@ public static class Shapes
     }
 
     /// <summary>
+    /// R9.18f. A virtual declared in the <em>root</em>, dispatched over a receiver whose static
+    /// type is the intermediate class. R9.18 builds a forwarder on every class for every
+    /// method it inherits, and this is the call that needs one.
+    /// </summary>
+    [Frac("p")]
+    [Requires("q.TheWidth * q.TheHeight <= 2147483647")]
+    [Ensures("Result == q.TheWidth * q.TheHeight")]
+    public static int AreaAtMiddle(Quadrilateral q)
+    {
+        return q.GetArea();
+    }
+
+    /// <summary>
     /// Dispatch under a loop, at the intermediate class. R5.12's re-quantification is
     /// indifferent to depth.
     /// </summary>

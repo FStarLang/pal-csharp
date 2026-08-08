@@ -88,4 +88,21 @@ public abstract class Quadrilateral : Shape
     {
         return Perimeter() / 2;
     }
+
+    /// <summary>
+    /// R9.18f. The same shape, but calling a virtual method declared in the class's own
+    /// <em>base</em> rather than in itself. The call has to reach <c>Shape</c>'s
+    /// dispatcher, so the receiver — a <c>Quadrilateral</c> here — has to be presented as
+    /// a <c>Shape</c> first. Nothing in the source says so: C# writes the same bare
+    /// <c>GetArea()</c> either way, and which class declared the member is a fact about the
+    /// hierarchy, not about the call.
+    /// </summary>
+    [Frac("p")]
+    [Requires("2 * (@this.TheWidth * @this.TheHeight) <= 2147483647")]
+    [Ensures("Result == 2 * (@this.TheWidth * @this.TheHeight)")]
+    public int TwiceArea()
+    {
+        int a = GetArea();
+        return 2 * a;
+    }
 }

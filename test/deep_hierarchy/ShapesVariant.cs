@@ -142,4 +142,23 @@ public static class ShapesVariant
         int r = q.Weighted(4, 5);
         return r;
     }
+
+    /// <summary>R9.18f, at an explicit receiver rather than through an intermediate local.</summary>
+    [Frac("p")]
+    [Requires("shape.TheWidth * shape.TheHeight <= 2147483647")]
+    [Ensures("Result == shape.TheWidth * shape.TheHeight")]
+    public static int AreaAtMiddle(Quadrilateral shape)
+    {
+        int r = shape.GetArea();
+        return r;
+    }
+
+    /// <summary>R9.18f, reaching the intermediate class's own inherited-method body.</summary>
+    [Ensures("Result == 32")]
+    public static int TwiceAreaOfSquare()
+    {
+        Square sq = new Square(4);
+        Quadrilateral q = sq;
+        return q.TwiceArea();
+    }
 }

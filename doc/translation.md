@@ -3089,8 +3089,28 @@ view at `class_L__forget own` before the call, `unfold` it after. It is the same
 steps R9.15 emits, for the same reason, and it is the rendering of "this reference is being
 used as a `B`", not a proof step.
 
-**R9.19 — An inherited observation is re-read by composing the forgetting functions along
-the chain.** `[Ensures("Result == @this.TheArea")]` is written once, on `Shape.GetArea`. At
+**R9.18f — Which forwarder a call goes to is read off the receiver's static type, not off
+the class that declared the member.** R9.18 gives every class a wrapper for every method it
+inherits, so a `Quadrilateral` has a `class_Quadrilateral_GetArea` even though `GetArea`
+was declared on `Shape`. Choosing by the declaring class instead would hand a
+`class_Quadrilateral` to a wrapper expecting a `class_Shape` — a reference of the wrong
+type, in a file that translated without a single diagnostic.
+
+The receiver's static type is exactly what C# resolves the call against, so the rule is
+"translate the receiver, not the declaration". It bites only through a *synthesised*
+receiver: `q.GetArea()` on a `Quadrilateral`-typed local already carries the type, but the
+bare `GetArea()` inside one of `Quadrilateral`'s own non-virtual bodies has no receiver
+expression to read a type from, and the enclosing class has to be supplied for it.
+`Quadrilateral.TwiceArea` in `test/deep_hierarchy` is that call.
+
+*Why the shape matrix had the cell empty.* A non-virtual method of an intermediate class
+calling a virtual is already tested — `SemiPerimeter` calls `Perimeter()` — but `Perimeter`
+is declared on `Quadrilateral` itself, so the declaring class and the receiver's static
+type coincide and the wrong rule gives the right answer. The distinguishing case needs the
+virtual to be declared *strictly above* the class whose body calls it, which is a
+three-level hierarchy with a shared body in the middle.
+
+**R9.19 — An inherited observation is re-read by composing the forgetting functions along `[Ensures("Result == @this.TheArea")]` is written once, on `Shape.GetArea`. At
 `Quadrilateral` it means `spec_Shape_TheArea (class_Quadrilateral__forget m)`; at `Square`,
 one more `class_Square__forget`. The spec emitter walks the base chain from the class the
 model belongs to up to the class the observation was declared on, and composes. This is

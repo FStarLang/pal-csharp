@@ -977,11 +977,19 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         // object, so the receiver is lowered as the first argument. A method called with
         // no receiver at all is called on `this`, which is the same node the frontend
         // synthesised as the enclosing method's first parameter.
+        //
+        // R9.18f. That node carries the *enclosing* class as its type, and for a virtual
+        // method the type is the whole content of the call: R9.18 gives every class a
+        // forwarder for every method it inherits, and which forwarder to call is read off
+        // the receiver's static type, never off the class that declared the member. An
+        // untyped `this` falls back to the declaring class, and a call one level up then
+        // hands a derived reference to a wrapper expecting a base one. C# writes the same
+        // bare `GetArea()` either way, so nothing in the source marks the difference.
         var receiver = method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
                        known.HasModel(method.ContainingType)
             ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
                 ? Lower(m.Expression)
-                : new IrVar(loc, Names.This)
+                : new IrVar(loc, Names.This) { Type = Enclosing(node) }
             : null;
 
         return new IrCall(loc, Naming.Of(method),
@@ -997,6 +1005,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };
     }
+
+    /// <summary>
+    /// R9.18f. The class whose method is being lowered, as the type of a synthesised
+    /// <c>this</c>. Read from the position rather than from the callee, because the callee
+    /// may have been declared several levels up.
+    /// </summary>
+    private IrType? Enclosing(SyntaxNode node) =>
+        model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { } self && known.HasModel(self)
+            ? known.MapType(self) ?? new IrClassType(self.Name)
+            : null;
 
     private IrExpr LowerIntrinsic(
         IMethodSymbol method, InvocationExpressionSyntax node,
