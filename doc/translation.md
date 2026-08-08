@@ -2860,6 +2860,32 @@ precondition written entirely at `Shape`, about a `Shape`, on a line where nothi
 that adds no information to its base", which is the *simplest* leaf there is and so the
 one no test had.
 
+*The edge out of an abstract class.* R9.18's classes have no representation to view, so the
+cast is one generated ghost function and there is nothing to fold: the base model cannot be
+named before it is produced. It is named after, and the resource is moved onto the name:
+
+```
+let t2 = class_C__to_P_at c o;
+let vP_2 : erased (class_P__model) = hide (class_C__forget (reveal vC_1));
+rewrite each (class_C__forget (reveal vC_1)) as (reveal vP_2);
+```
+
+The move is the whole of it. Where the forgetting is the identity, Pulse reduces
+`class_C__forget m` back to `m` and instantiates a later caller's implicit with *that*; a
+binder has no further reduct, so the rewrite is what stops it. The `each` form mentions
+neither the index nor the permission, so it is one step whatever the reference is held at.
+
+*A chain is walked in pieces.* `Rect r = new Rect__impl(6);` followed by `AtMiddle(r)` is
+two conversions over one value, so the name an earlier edge bound the model under travels
+on the slot, exactly as R9.15b's index does. An edge whose predecessor bound no name — the
+first edge out of an abstract class, whose own model was never named — binds none either
+and has nothing to forget.
+
+`test/open_class` is the case written out: a four-level chain in which the two lowest edges
+both forget by the identity. It is also the hand-written desugaring of an *open* concrete
+class (§9.1's `sealed` restriction), which is what makes those two edges identities — they
+were not class boundaries in the program the user wrote.
+
 ### 9.7 Downcast
 
 **R9.16 — A cast to a derived type requires the ghost index naming the object.** It is

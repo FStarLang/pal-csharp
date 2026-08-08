@@ -653,6 +653,10 @@ public sealed class CodeEmitter(
 
         string impl;
         string? from = null;
+        // R9.15e. A chain may be walked in pieces — `Rect r = new Rect__impl(6);` then
+        // `AtMiddle(r)` is two conversions over one value — so the name the earlier piece
+        // bound the model under is picked up from the slot, exactly as the index is.
+        string? held = null;
         if (operand is IrVar v && Lookup(v.Name) is { Kind: SlotKind.Object } src)
         {
             // R9.15. The conversion *moves* the invariant onto the base reference, and a
@@ -673,6 +677,7 @@ public sealed class CodeEmitter(
 
             impl = src.Binder;
             from = src.Index;
+            held = src.PreModel;
             _slots[v.Name] = src with { Kind = SlotKind.Value, Index = null, Cast = target.Name };
             _objectLocals.RemoveAll(l => l.Binder == src.Binder);
         }
@@ -685,17 +690,24 @@ public sealed class CodeEmitter(
         {
             var last = i == chain.Length - 1;
             var step = last ? binder : Fresh();
-            slot = UpcastStep(current, impl, from, new IrClassType(chain[i]), last ? name : step, step);
+            slot = UpcastStep(current, impl, from, new IrClassType(chain[i]), last ? name : step, step, held);
             impl = step;
             from = slot.Index;
+            held = slot.PreModel;
             current = chain[i];
         }
         return slot;
     }
 
     /// <summary>R9.15, one edge: from <paramref name="derived"/> to its immediate base.</summary>
+    /// <param name="held">
+    /// R9.15e. The name the previous edge bound this value's model under, when there was
+    /// one. A chain of edges has to carry it: each edge names the model it produces, and
+    /// the next edge forgets *that* name rather than re-deriving the expression.
+    /// </param>
     private Slot UpcastStep(
-        string derived, string impl, string? from, IrClassType target, string name, string binder)
+        string derived, string impl, string? from, IrClassType target, string name, string binder,
+        string? held = null)
     {
         var mod = Names.ClassModule(derived);
 
@@ -715,6 +727,7 @@ public sealed class CodeEmitter(
             {
                 Index = $"(hide ({mod}.{Names.ClassView(derived)} (reveal {from})))",
                 Sub = from,
+                PreModel = Rebase(mod, derived, target, held),
             };
         }
 
@@ -744,7 +757,35 @@ public sealed class CodeEmitter(
         // invariant is wanted instead, `Forget` drops it — one ghost step, at the point
         // that wants it, and nothing recovers it afterwards.
         var index = $"(hide ({Names.VtblModule(derived)}.{Names.ClassObjOf(derived)} {impl}))";
-        return new Slot(name, target, SlotKind.Object, binder) { Index = index };
+        return new Slot(name, target, SlotKind.Object, binder) { Index = index, PreModel = basis };
+    }
+
+    /// <summary>
+    /// R9.15e, for an edge out of an *abstract* class. There is nothing to fold here — the
+    /// cast is one generated ghost function (R9.18) whose <c>ensures</c> is written at
+    /// <c>class_D__forget m</c> — so the base model cannot be named before it is produced.
+    /// It is named after, and the resource moved onto the name.
+    ///
+    /// <para>The move is what matters. Where the forgetting is the identity, Pulse reduces
+    /// <c>class_D__forget m</c> back to <c>m</c> and instantiates a later caller's implicit
+    /// with that, which is a term at <em>D</em>'s model refinement and not the base's; the
+    /// <c>rewrite each</c> is what stops it, because a binder has no further reduct. It
+    /// mentions neither the index nor the permission, so it is the same one step whatever
+    /// the reference is held at.</para>
+    ///
+    /// <para>Returns null when the previous edge bound no name — a first edge out of an
+    /// abstract class, where the value's own model was never given one and there is
+    /// nothing to forget.</para>
+    /// </summary>
+    private string? Rebase(string mod, string derived, IrClassType target, string? held)
+    {
+        if (held is null) return null;
+        var basis = FreshValue(target.Name);
+        var forgotten = $"({mod}.{Names.ClassForget(derived)} (reveal {held}))";
+        Line($"let {basis} : erased ({Names.ClassModule(target.Name)}.{Names.ClassModel(target.Name)}) = " +
+             $"hide {forgotten};");
+        Line($"rewrite each {forgotten} as (reveal {basis});");
+        return basis;
     }
 
     /// <summary>
