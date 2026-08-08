@@ -295,7 +295,11 @@ public sealed class CodeEmitter(
     {
         if (classes is null || !classes.TryGetValue(built.Name, out var decl))
         {
-            diagnostics.Unsupported(method.Loc, $"A constructor of `{built.Name}`");
+            // The class is missing because the frontend refused it, and that refusal is the
+            // diagnostic the user needs. Reporting the constructor too names a symptom of a
+            // cause already reported, and sends the reader to the wrong line.
+            if (!diagnostics.HasErrors)
+                diagnostics.Unsupported(method.Loc, $"A constructor of `{built.Name}`");
             return;
         }
 
@@ -2477,6 +2481,25 @@ public sealed class CodeEmitter(
 
         var l = Expr(b.Left);
         var r = Expr(b.Right);
+
+        // R18.1. R6.4 reads an operator's implementation off its operand type, and this
+        // defaulted to `Int32` for an operand that was not primitive at all. `a == b` on
+        // two objects then emitted `I32.eq` applied to two boxes: not a translation, and
+        // not caught until F* refused to typecheck a file the user never asked to read.
+        if (b.Left.Type is not IrPrim && b.Left.Type is not null)
+        {
+            diagnostics.Error("PALCS0593", b.Loc,
+                $"`{b.Op}` is applied to operands of type `{b.Left.Type}`, and R6.4 gives an " +
+                "operator a meaning only at a primitive type (doc/translation.md R18.1). " +
+                (b.Left.Type is IrClassType
+                    ? "Comparing two references is object identity, which the scheme has no story " +
+                      "for: `Box` has a decidable equality, but nothing relates it to the ownership " +
+                      "discipline, and two equal references are not interchangeable in a context " +
+                      "that owns one of them. Compare the objects' models instead."
+                    : "Compare values the rules give an operator for."));
+            return "()";
+        }
+
         var module = Types.Module((b.Left.Type as IrPrim)?.Kind ?? PrimKind.Int);
 
         // R13.5. C# takes a shift distance as an `int` whatever the operand's width, but

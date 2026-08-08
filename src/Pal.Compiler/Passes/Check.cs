@@ -83,10 +83,18 @@ public static class Check
         {
             var key = $"{decl.GetType().Name}:{decl.Name}";
             if (seen.TryGetValue(key, out var first))
+                // R2.1 gives a constructor the name `_ctor` regardless of its signature, so
+                // two constructors of one class collide and "rename one" is advice C# does
+                // not allow anyone to take. Naming the real remedy is the difference
+                // between a diagnostic and a riddle.
                 diagnostics.Error("PALCS0501", decl.Loc,
                     $"`{decl.Name}` would be emitted twice into the same module; " +
                     $"the other declaration is at {first.Loc}. " +
-                    "Rename one, or move it to a differently named class.");
+                    (decl.Name.EndsWith("__ctor", StringComparison.Ordinal)
+                        ? "A constructor's generated name does not carry its signature " +
+                          "(doc/translation.md R2.1, R18.3), so a class may declare only one. " +
+                          "Declare a single constructor taking every field's value."
+                        : "Rename one, or move it to a differently named class."));
             else
                 seen[key] = decl;
         }

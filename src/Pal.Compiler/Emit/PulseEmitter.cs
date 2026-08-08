@@ -232,13 +232,15 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     public ImmutableArray<EmittedModule> Emit(IrProgram program)
     {
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
-        _classes = program.Declarations.OfType<IrClass>().ToDictionary(c => c.Name);
+        _classes = program.Declarations.OfType<IrClass>()
+            .GroupBy(c => c.Name).ToDictionary(g => g.Key, g => g.First());
         // R9.19. Both spec emitters need the base chain, to compose R9.6's forgetting when
         // an observation is read off a model further down the hierarchy than it was
         // declared. There is one hierarchy per program, so it is computed once.
         var bases = _classes.Values
             .Where(c => c.BaseClass is not null)
-            .ToDictionary(c => c.Name, c => c.BaseClass!);
+            .GroupBy(c => c.Name)
+            .ToDictionary(g => g.Key, g => g.First().BaseClass!);
         _spec.Bases = bases;
         _hierarchy.Bases = bases;
         _virtuals = program.Declarations.OfType<IrMethod>()
@@ -246,18 +248,26 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .ToLookup(m => m.DeclaringClass!);
         _slots = [.. program.Declarations.OfType<IrMethod>()
             .Where(m => m.IsAbstract).Select(m => m.Name)];
+        // R18.3. Two declarations may not compete for one name, and the frontend refuses
+        // the way that happens today (two constructors, PALCS0501). These lookups are keyed
+        // by name, so a collision that slipped through would abort the process inside
+        // `ToDictionary` — no diagnostic, no output, a stack trace naming a dictionary.
+        // Grouping instead means a frontend refusal is what the user sees.
         _overrides = program.Declarations.OfType<IrMethod>()
             .Where(m => m.Overrides is not null)
-            .ToDictionary(m => m.Name, m => m.Overrides!);
+            .GroupBy(m => m.Name)
+            .ToDictionary(g => g.Key, g => g.First().Overrides!);
         // R4.9c, R4.12b, on the calling side. Which of a callee's parameters take their
         // argument's invariant with them, by position, so that a call site can stop owning
         // what it handed over. Computed from the same predicate the callee's own contract
         // is built from, once, because it is a property of the program and not of a call.
-        _consumed = program.Declarations.OfType<IrMethod>().ToDictionary(
-            m => m.Name,
-            m => Enumerable.Range(0, m.Parameters.Length)
-                .Where(i => MethodPlan.Consumed(m, m.Parameters[i]))
-                .ToImmutableHashSet());
+        _consumed = program.Declarations.OfType<IrMethod>()
+            .GroupBy(m => m.Name)
+            .ToDictionary(
+                g => g.Key,
+                g => Enumerable.Range(0, g.First().Parameters.Length)
+                    .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i]))
+                    .ToImmutableHashSet());
         foreach (var decl in program.Declarations)
         {
             var module = decl switch

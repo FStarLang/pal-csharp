@@ -5,7 +5,7 @@ TESTS := $(shell find . -mindepth 1 -maxdepth 1 -type d \
 
 all: $(TESTS) lint
 
-# The §7.2 mechanical detectors of emitter contortion. They run after the tests because
+# The §7.2 mechanical detectors, and R18.2's of emitter contortion. They run after the tests because
 # the provenance lint reads what the emitter actually produced. `fst-configs.sh --check`
 # is here for a different reason, which `cs-projects.sh --check` shares: an IDE config
 # that disagrees with the build about what a directory contains is worse than no config at
@@ -21,6 +21,7 @@ lint: $(TESTS)
 	@bash no-example-names.sh
 	@bash diagnostic-ids.sh
 	@bash provenance-lint.sh
+	@bash module-refs.sh
 	@bash fst-configs.sh --check
 	@bash cs-projects.sh --check
 	@bash ide-build.sh

@@ -22,8 +22,9 @@ public static class FrontendPass
         ValidateSpecTypes(compilation, known, diagnostics);
         var candidates = Collect(compilation, known);
         var structs = CollectStructs(compilation, known, diagnostics);
-        var classes = CollectClasses(compilation, known, diagnostics);
-        ReportUncollected(compilation, known, classes, diagnostics);
+        var attempted = ImmutableHashSet.CreateBuilder<ISymbol>(SymbolEqualityComparer.Default);
+        var classes = CollectClasses(compilation, known, diagnostics, attempted);
+        ReportUncollected(compilation, known, classes, attempted.ToImmutable(), diagnostics);
         var sites = BuildSpecSites(compilation, known, candidates)
             .AddRange(BuildStructSpecSites(structs))
             .AddRange(BuildClassSpecSites(classes));
@@ -186,11 +187,13 @@ public static class FrontendPass
     /// </remarks>
     private static void ReportUncollected(
         CSharpCompilation compilation, WellKnown known,
-        ImmutableArray<ClassCandidate> classes, DiagnosticBag diagnostics)
+        ImmutableArray<ClassCandidate> classes, ImmutableHashSet<ISymbol> attempted,
+        DiagnosticBag diagnostics)
     {
         var translated = classes
             .Select(c => (ISymbol)c.Symbol)
-            .ToImmutableHashSet(SymbolEqualityComparer.Default);
+            .ToImmutableHashSet(SymbolEqualityComparer.Default)
+            .Union(attempted);
 
         foreach (var tree in compilation.SyntaxTrees)
         {
@@ -217,7 +220,7 @@ public static class FrontendPass
                 var isClassMember =
                     symbol is INamedTypeSymbol { TypeKind: TypeKind.Class }
                         ? Declarations.IsAnnotated(symbol, known)
-                        : symbol is { IsStatic: false, ContainingType.TypeKind: TypeKind.Class }
+                        : symbol is { IsStatic: false, ContainingType.TypeKind: TypeKind.Class or TypeKind.Interface }
                           && Declarations.IsAnnotated(symbol, known);
                 if (!isClassMember) continue;
 
@@ -239,10 +242,11 @@ public static class FrontendPass
                         ClassDeclarationSyntax t => t.Identifier.GetLocation(),
                         _ => syntax.GetLocation(),
                     }),
-                    $"`{symbol.Name}` is an annotated class member, and pal-csharp does not translate " +
-                    "classes yet. The scheme is specified in doc/translation.md §3.4 and §4.5. " +
-                    "Until it is implemented, move the state into a struct passed by `ref`, with any " +
-                    "array it describes passed alongside it rather than held inside it.");
+                    $"`{symbol.Name}` carries a pal-csharp annotation, but the type declaring it is " +
+                    "not one the translator collected. A translated class is a `class` declaration " +
+                    "with a `[Model]` member (doc/translation.md §3.4); a `record`, a `struct` " +
+                    "member reached this way, or a class whose declaration the collector never saw " +
+                    "is none of those, so the annotation would be silently dropped (R18.1).");
             }
         }
     }
@@ -628,7 +632,8 @@ public static class FrontendPass
     /// would collapse to memory safety.
     /// </summary>
     private static ImmutableArray<ClassCandidate> CollectClasses(
-        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics,
+        ImmutableHashSet<ISymbol>.Builder attempted)
     {
         var result = ImmutableArray.CreateBuilder<ClassCandidate>();
         foreach (var tree in compilation.SyntaxTrees)
@@ -639,6 +644,14 @@ public static class FrontendPass
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (symbol.IsStatic) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
+
+                // R18.1. Every class the collector *looks at* is one it has spoken about:
+                // if it rejects the class, the rejection is the diagnostic, and the
+                // members must not then draw PALCS0530 as well. Recording the attempt is
+                // what keeps one cause from producing a second, contradictory report.
+                if (Declarations.Has(symbol, known.PlainAttribute) ||
+                    symbol.GetMembers().Any(m => Declarations.Has(m, known.ModelAttribute)))
+                    attempted.Add(symbol);
 
                 var modelMembers = symbol.GetMembers()
                     .Where(m => Declarations.Has(m, known.ModelAttribute))
@@ -780,6 +793,122 @@ public static class FrontendPass
         return ok ? fields.ToImmutable() : null;
     }
 
+    /// <summary>
+    /// R18.1. Every member of a translated class is accounted for, or refused by name.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TryCollectClass"/> and <see cref="Collect"/> both match positively: a
+    /// field, an auto-property, the <c>[Model]</c>, a <c>[Spec]</c> observation, an
+    /// ordinary method, a constructor. Whatever matched none of those used to fall out of
+    /// the loop, and the class was translated as though the member had not been written.
+    /// A computed property, an indexer, a <c>const</c>, an operator and an
+    /// <c>override</c> of an <c>object</c> member all took that exit — silently, with
+    /// `palcs` reporting success, which is the one outcome the whole diagnostics
+    /// philosophy (R2.3) exists to prevent.
+    ///
+    /// The categories below are the accepting ones and nothing else is, so a construct C#
+    /// grows tomorrow is refused by default rather than dropped by default. That is the
+    /// entire content of the rule: the walk is total.
+    /// </remarks>
+    private static bool ReportUnaccountedMembers(
+        INamedTypeSymbol symbol, ISymbol modelSymbol, WellKnown known, DiagnosticBag diagnostics)
+    {
+        var ok = true;
+        foreach (var member in symbol.GetMembers())
+        {
+            // Roslyn synthesises a backing field, an implicit constructor and the accessor
+            // pair of every property. None was written by the user, so none is a construct
+            // to refuse; each is accounted for by the member it belongs to.
+            if (member.IsImplicitlyDeclared) continue;
+            if (SymbolEqualityComparer.Default.Equals(member, modelSymbol)) continue;
+            if (Declarations.IsAnnotated(member, known)) continue;
+            if (member.IsOverride && OverriddenChainHasModel(member, known)) continue;
+
+            // An accessor is reported through the property it belongs to, once. Reporting
+            // it again under its own name (`get_Doubled`) would name a symbol the user
+            // never wrote and would say the same thing twice.
+            if (member is IMethodSymbol { AssociatedSymbol: { } owner })
+            {
+                if (SymbolEqualityComparer.Default.Equals(owner, modelSymbol)) continue;
+                if (Declarations.IsAnnotated(owner, known)) continue;
+                if (owner.IsOverride && OverriddenChainHasModel(owner, known)) continue;
+                continue;
+            }
+
+            var (why, what) = member switch
+            {
+                // Accounted for: a field (R3.4/R3.10), an auto-property standing for one,
+                // an ordinary method or constructor (§4.5), an accessor of a property that
+                // is itself accounted for.
+                IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } => (null, null),
+                IFieldSymbol { IsStatic: true, IsConst: false } => (null, null),   // PALCS0522
+                IPropertySymbol { IsStatic: false, IsIndexer: false } p when IsAuto(p) => (null, null),
+                IMethodSymbol { MethodKind: MethodKind.Constructor } => (null, null),
+                IMethodSymbol { MethodKind: MethodKind.Ordinary, IsOverride: true } m
+                    when IsObjectMember(m) =>
+                    ("an `override` of a member of `object`. R9.6 reads an `override` as the " +
+                     "forgetting function of a translated base, and `System.Object` has no model " +
+                     "(doc/translation.md R18.2), so this override has no other reading",
+                     $"{symbol.Name}.{member.Name}"),
+                IMethodSymbol { MethodKind: MethodKind.Ordinary } => (null, null),
+
+                IPropertySymbol { IsIndexer: true } =>
+                    ("an indexer. Indexing a translated object has no rule: `a[i]` is the array " +
+                     "subscript of R6.5 and nothing else (doc/translation.md R18.2)",
+                     $"{symbol.Name}.this[]"),
+                IPropertySymbol =>
+                    ("a property with an accessor body. An *auto*-property is a field (R3.4) and a " +
+                     "`[Spec]` property is an observation (R3.9c), but a computed property's " +
+                     "accessors are methods and no rule emits them yet (doc/translation.md R18.2). " +
+                     "Write the accessor as an ordinary method",
+                     $"{symbol.Name}.{member.Name}"),
+                IFieldSymbol { IsConst: true } =>
+                    ("a `const` field. It owns nothing, so it needs no invariant, but nothing yet " +
+                     "puts its value in scope in a body or a contract (doc/translation.md R18.2)",
+                     $"{symbol.Name}.{member.Name}"),
+                IMethodSymbol { MethodKind: MethodKind.ExplicitInterfaceImplementation } =>
+                    ("an explicit interface implementation, and §9 has no interfaces " +
+                     "(doc/translation.md R18.2)", $"{symbol.Name}.{member.Name}"),
+                IMethodSymbol { MethodKind: MethodKind.UserDefinedOperator or MethodKind.Conversion } =>
+                    ("a user-defined operator. R6.4 reads an operator from its operand type, and an " +
+                     "operator declaration would have to add a case to that rule " +
+                     "(doc/translation.md R18.2)", $"{symbol.Name}.{member.Name}"),
+                IMethodSymbol { MethodKind: MethodKind.Destructor } =>
+                    ("a finalizer. Object lifecycle wants a state-indexed invariant and §3.4 has " +
+                     "only `class_C__inv this m` (doc/translation.md §8.5)",
+                     $"{symbol.Name}.~{symbol.Name}"),
+                IEventSymbol =>
+                    ("an event. A delegate is outside the supported subset " +
+                     "(doc/translation.md §8.5)", $"{symbol.Name}.{member.Name}"),
+                INamedTypeSymbol => (null, null),   // a nested type is walked on its own
+
+                _ => ($"a {member.Kind} member with no rule (doc/translation.md R18.1)",
+                      $"{symbol.Name}.{member.Name}"),
+            };
+
+            if (why is null) continue;
+            diagnostics.Error("PALCS0591",
+                Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
+                $"`{what}` is {why}. It is a member of a translated class, so leaving it out of the " +
+                "translation would prove a theorem about a different program; it is refused instead.");
+            ok = false;
+        }
+        return ok;
+    }
+
+    /// <summary>
+    /// Whether an <c>override</c> targets a member `object` declares. Every C# class
+    /// derives from `System.Object` implicitly, so `BaseType.Name` is `"Object"` for a
+    /// class with no user base — which is how `override int GetHashCode()` came to emit a
+    /// reference to a `Class_Object` module that is never generated (R18.2).
+    /// </summary>
+    private static bool IsObjectMember(IMethodSymbol method)
+    {
+        for (var m = method; m is not null; m = m.OverriddenMethod)
+            if (m.ContainingType?.SpecialType == SpecialType.System_Object) return true;
+        return false;
+    }
+
     private static bool TryCollectClass(
         ClassDeclarationSyntax syntax,
         INamedTypeSymbol symbol,
@@ -880,6 +1009,29 @@ public static class FrontendPass
             fields.Add(new StructField(member, name, type, mapped));
         }
 
+        // R18.1. The loop above matches positively, so every member it did not recognise
+        // fell through the `continue` and left the translation without a word. Saying so
+        // is the rule; the categories it accepts are exactly the ones the loop collects.
+        if (!ReportUnaccountedMembers(symbol, modelSymbol, known, diagnostics)) ok = false;
+
+        // R18.1. A field initialiser runs before the constructor body, and R4.12 builds the
+        // representation from the constructor's assignments alone. Ignoring the initialiser
+        // and then reporting the field uninitialised named the wrong cause.
+        foreach (var member in symbol.GetMembers().OfType<IFieldSymbol>())
+        {
+            if (member is { IsStatic: false, IsConst: false, AssociatedSymbol: null } &&
+                member.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                    is VariableDeclaratorSyntax { Initializer: { } init })
+            {
+                diagnostics.Error("PALCS0596", Locations.From(init.GetLocation()),
+                    $"`{symbol.Name}.{member.Name}` has a field initialiser. The representation is " +
+                    "built by the constructor (doc/translation.md R4.12), which is the one place the " +
+                    "invariant is established, and an initialiser assigns before it runs with no rule " +
+                    $"to say so (R18.1). Move the value into the constructor: `this.{member.Name} = …;`.");
+                ok = false;
+            }
+        }
+
         // R9.2. An abstract class has no representation: the fields are entirely the
         // leaf's. A base field would make a leaf's representation an extension of the
         // base's and force a constructor chain, which neither design study probed.
@@ -891,6 +1043,23 @@ public static class FrontendPass
                 "class in the scheme owns a vtable and no representation (doc/translation.md R9.2), " +
                 "so there is nothing for this field to live in. Move it to each subclass, or make " +
                 "it an `abstract` member of the model.");
+            ok = false;
+        }
+
+        // R18.1. Roslyn does not put an interface in `BaseType`, so a base-list scan that
+        // reads only `BaseType` forgets `class C : IFoo` entirely — the class translated
+        // as though the clause were not written, and nothing checked that its members
+        // implement anything. §9 has no interfaces (§8.6 says what they wait on), so the
+        // clause is refused rather than dropped.
+        foreach (var iface in symbol.Interfaces)
+        {
+            diagnostics.Error("PALCS0594", Locations.From(syntax.Identifier),
+                $"`{symbol.Name}` implements `{iface.Name}`, and pal-csharp has no interfaces " +
+                "(doc/translation.md R18.2). An interface is nearly R9.2 plus R9.3 — a base with " +
+                "no fields whose methods are all abstract — but what a C# interface adds is " +
+                "*multiple* implementation, and R9.8 pins the obstacle: a reference is a `dyn` made " +
+                "at one witness type, so one value cannot be viewed at two unrelated roots. Use an " +
+                "`abstract` base class.");
             ok = false;
         }
 

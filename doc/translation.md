@@ -4631,3 +4631,130 @@ entry is on it for a reason of its own, not because a rule ran out:
   as a window and is a surface question only; `examples/adler32` still spells its segment out
   as three parameters and no longer has to.
 * **The refused forms of R17.7**, each for its own stated reason.
+
+---
+
+## 18. Totality: nothing is dropped, nothing is guessed
+
+Every rule up to here says what some C# construct *becomes*. This section says what
+happens to a construct no rule mentions, and it exists because the honest answer, for a
+long time, was "nothing, quietly".
+
+The frontend collects by **positive match**. It walks a class's members looking for a
+field, an auto-property, a `[Model]`, a `[Spec]` observation, a method; it walks a call
+looking for a callee it can name; it walks a binary operator looking for the module that
+implements it. Each of those walks ended in a fallthrough — `continue`, or a default — and
+a fallthrough is a decision. It decides that a construct the rules do not cover should be
+translated as though it were not there.
+
+That is the worst of the three possible answers. A refusal tells the author what the tool
+cannot do. A wrong translation is caught by F\*. But a *silent* drop reports
+`0 error(s)`, emits a module that looks right, and verifies — proving a theorem about a
+program the author did not write. §0 rule 3 forbids inventing a refusal; it does not
+license inventing an omission.
+
+### 18.1 The two rules
+
+**R18.1 — A construct the frontend does not recognise is refused, not skipped.** Every
+positive-match walk is **total**: each case either matches a category the rules name, or
+raises a diagnostic that says which construct was not translated and why. There is no
+fallthrough that means "ignore this".
+
+This is one rule with five sites, and it is stated once because the five are the same
+mistake:
+
+| Walk | The fallthrough that was a decision | Now |
+|---|---|---|
+| a translated class's members (§3.4, §4.5) | a member matching no category was skipped, so a computed property, an indexer, a `const` field, an operator or an explicit interface implementation vanished | **PALCS0591** names the member and its kind |
+| a call's callee (R4.4) | `KindOf` accepted **any** static ordinary method, including one declared in the BCL, and emitted a call into a module that is never generated | **PALCS0592**: a callee must be declared in this compilation |
+| a binary operator's operand type (R6.4) | the module was chosen by the operand's primitive kind, defaulting to `Int32` when the operand was not primitive, so `a == b` on two objects emitted `I32.eq` applied to two boxes | **PALCS0593**: an operator whose operands are not primitive has no module |
+| a class's base list (R9.1) | only `BaseType` was inspected, and an interface is not a `BaseType` in Roslyn, so `class C : IFoo` silently forgot `IFoo` | **PALCS0594** until §9 has interfaces |
+| a class's field declarations (R9.4) | only the declared type and name were read, so an initialiser -- an assignment R4.12 has no statement position for -- was dropped, and the field appeared to be built solely by the constructor | **PALCS0596** until §9 orders initialisers before the constructor body |
+
+**R18.2 — Every name the emitter writes is a name that resolves.** A generated module may
+refer to another generated module, to a module of `Pulse.Lib.CSharp.*` or the F\* standard
+library, or to a Pulse file the user supplied (§12); to nothing else. This is not a rule
+the emitter can be trusted to keep by inspection, so it is **mechanically checked**:
+`test/module-refs.sh` reads every qualified reference in every generated file and requires
+it to resolve. It is the third detector, beside §7.2's two, and it is the one that catches
+a *dangling* emission rather than an invented or an ill-provenanced one.
+
+Two live defects were what earned it. `override int GetHashCode()` on a class with no user
+base emitted `Class_Object.class_Object__model`, because the override's base was read off
+`BaseType.Name` and every C# class's implicit base is `System.Object`; and
+`ReferenceEquals(a, b)` emitted `Func_Object_ReferenceEquals.func_Object_ReferenceEquals`.
+Neither module has ever existed. Both programs translated with `0 error(s)`.
+
+**R18.3 — A name is emitted for at most one declaration.** R2.1's qualification by
+declaring type keeps method names injective, but a constructor's name is `_ctor`
+regardless of its signature, so two constructors of one class collide. Two declarations
+competing for one module is not a translation, and until constructors have a
+signature-bearing name, a class with more than one constructor is **PALCS0501**, the
+existing module-name collision, reported with constructor-specific advice — C# does not
+permit "rename one".
+
+R18.3 was already implemented and already firing; the program still crashed with an
+unhandled `ArgumentException`, because the emitter runs *despite* errors (§2 poisons the
+output through `TranslationErrors.fst`) and diagnostics are printed only after it. The
+throw pre-empted every message. So the fix was to make the emitter's dictionaries
+collision-proof, not to add a rule: **a diagnostic that a crash outruns is not a
+diagnostic**, and any pass that runs after an error must be total in the presence of one.
+
+### 18.2 What is refused, and what each refusal is waiting for
+
+R18.1 turns a silent drop into a diagnostic; it does not by itself translate anything new.
+Each of the following is now refused *and* named as a scheme gap, which is the state a
+feature has to reach before it can be designed.
+
+* **A property with an accessor body, and an indexer** (PALCS0591). An auto-property is
+  already a field (R3.4) and a `[Spec]` property is already an observation (R3.9c). What
+  is missing is the *computed* property, whose accessors are methods: `get` is a method of
+  no arguments returning the property's type, `set` is a method of one. Most idiomatic C#
+  exposes state this way, so this is the largest thing R18.1 uncovered.
+* **A `const` field** (PALCS0591). It is a pure value and owns nothing, so it wants no
+  invariant; what it wants is to be in scope in a body and in a contract, which is a
+  question about §2's module layout rather than about ownership.
+* **An explicit interface implementation, an operator, a conversion, an event, a
+  finalizer** (PALCS0591). None has a rule, and the first two wait on §9's interfaces.
+* **An `override` of a member of `object`** — `GetHashCode`, `Equals`, `ToString`
+  (PALCS0591). R9.6 reads an override as the forgetting function of a *translated* base.
+  `System.Object` is not translated and has no model, so an override of one of its members
+  is not a forgetting function and has no other reading.
+* **A call to a method not declared in this compilation** (PALCS0592). This is what makes
+  `ReferenceEquals` a diagnostic. It also states, for the first time, the rule the whole
+  scheme has assumed: pal-csharp translates a *whole program*, and a method whose body it
+  cannot see has no contract it can trust.
+* **`==`, `!=` and `ReferenceEquals` on class-typed operands** (PALCS0593, and
+  PALCS0592 for `ReferenceEquals`, which is also not declared here).
+  Object identity has no story: `Box` has a decidable equality, but nothing relates it to
+  the ownership discipline, and two references that are equal are not thereby
+  interchangeable in a context that owns one of them.
+* **A second constructor** (PALCS0501), per R18.3.
+* **An `interface` declaration, and an implements clause** (PALCS0594). §8.6 records why
+  interfaces are not simply R9.2 plus R9.3: what a C# interface adds is *multiple*
+  implementation, and R9.8 pins the obstacle — a `dyn` is made at one witness type and
+  `mkdyn` is not injective, so one value cannot be viewed at two unrelated roots.
+* **A field initialiser** (PALCS0596). R4.12 builds the representation from the
+  constructor's `this.f = e` assignments, and a field initialiser is an assignment C#
+  runs before the constructor body. Reading it is a small rule and a real one; until it
+  exists, the previous behaviour was to ignore the initialiser and then report the field
+  *uninitialised*, which named the wrong cause.
+* **A `record`** (PALCS0530). A record's primary constructor, its generated `Equals`,
+  `GetHashCode`, `ToString` and `Deconstruct`, and its `with` expression are five features
+  at once. An *annotated* record now says so; an unannotated one is ignored, like any
+  unannotated type — R18.1 governs what the translator was asked to translate, not every
+  declaration in the compilation. PALCS0530 previously read "does not translate classes
+  yet", a message left over from before §3.4 was built and untrue as stated.
+
+### 18.3 Why this is a section and not a bug list
+
+Everything above could have been fixed one `if` at a time. It is written down as a rule
+because the four sites are one mistake made four times, and because the mistake is
+*structural*: a compiler assembled from positive matches drops what it does not match, and
+will do so again at the fifth site unless the rule is that a walk must be total.
+
+That also fixes what the refusals mean. §0 rule 3 says the frontend refuses what it cannot
+*translate*, never what it predicts will not *prove*. Every diagnostic in §18 is the first
+kind, and each names a construct with no image under any rule in this document — which is
+also why each is listed in §18.2 with the rule that would have to exist for it to be
+accepted.

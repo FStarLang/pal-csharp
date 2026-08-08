@@ -1190,6 +1190,15 @@ nor `abstract`, a `return` that is not in tail position **inside a loop**, an in
 decrement written in a specification, a `switch` label that is a pattern or carries a
 `when` guard, and a `break` that leaves a `switch` before the end of its section.
 
+Also outside it, and until §18 each of these was *silently dropped* rather than reported:
+a property with an accessor body (a computed property, as opposed to an auto-property or a
+`[Spec]` property), an indexer, a `const` field, a field initialiser, an explicit interface
+implementation, a user-defined operator or conversion, an event, a finalizer, an `override`
+of a member of `object` (`Equals`, `GetHashCode`, `ToString`), a second constructor of one
+class, an `implements` clause, a call to a method not declared in this compilation
+(including any BCL method), `==`/`!=` on class-typed operands, and an annotated `record`.
+`doc/translation.md` §18.2 says what each is waiting for.
+
 `switch` itself is supported: R5.14 desugars it to an if/else chain, evaluating the
 governing expression once and moving `default` to the end. What it does not cover is
 everything about `switch` that is not a comparison against a constant. `goto case` and

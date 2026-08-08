@@ -889,6 +889,21 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var kind = Declarations.KindOf(method, known);
         if (kind is null)
         {
+            // R18.1. A method the compilation does not declare has no module and never
+            // will, so this is not "not yet supported" — it is outside what a whole-program
+            // translator can see, and saying which of the two is the difference between a
+            // gap the user can wait for and one they must design around.
+            if (method.DeclaringSyntaxReferences.IsEmpty)
+            {
+                diagnostics.Error("PALCS0592", loc,
+                    $"`{method.ContainingType?.Name}.{method.Name}` is declared outside this " +
+                    "compilation. pal-csharp translates a whole program: a method emits a module " +
+                    "and a call emits an `open` of it (doc/translation.md R2.1, R18.1), so a method " +
+                    "whose body it cannot see has no module to call and no contract to trust. " +
+                    "Only `Pal.*`, a `[Spec]`/`[Lemma]`, and methods declared in this program " +
+                    "can be called.");
+                return new IrLiteral(loc, null);
+            }
             diagnostics.Unsupported(loc,
                 $"A call to `{method.Name}`",
                 "Only pal-csharp methods, [Spec] functions and [Lemma]s can be called.");

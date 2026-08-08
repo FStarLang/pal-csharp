@@ -54,6 +54,15 @@ public static class Declarations
     {
         if (Has(method, known.SpecAttribute)) return CalleeKind.Spec;
         if (Has(method, known.LemmaAttribute)) return CalleeKind.Lemma;
+
+        // R18.1. pal-csharp translates a whole program: a method emits a module, and a
+        // call emits an `open` of it. A method the compilation does not *declare* — one
+        // from the BCL or any referenced assembly — has no module and never will, so
+        // accepting it here emitted a call into a file that is never generated.
+        // `ReferenceEquals(a, b)` was the live case: `Func_Object_ReferenceEquals` has
+        // never existed, and the program translated with no diagnostic at all.
+        if (method.DeclaringSyntaxReferences.IsEmpty) return null;
+
         if (method is { IsStatic: true, MethodKind: MethodKind.Ordinary }) return CalleeKind.Method;
 
         // §4.5. An instance method or constructor of a translated class: it carries the

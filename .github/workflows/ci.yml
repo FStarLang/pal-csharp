@@ -96,7 +96,7 @@ jobs:
 
       # The whole gate: both acceptance trees (`test/` and `examples/`), each of which
       # compiles its C# with the stock compiler and verifies the Pulse that `palcs`
-      # generates from it, followed by the six lints. This is the root target rather
+      # generates from it, followed by the seven lints. This is the root target rather
       # than `make -C test`, so the lints also see what the emitter produced for the
       # examples.
       - name: Test
@@ -111,7 +111,13 @@ jobs:
       - name: Every generated construct must trace to C#
         run: bash test/provenance-lint.sh
 
-  # `make test` already runs this, as the sixth lint. It is repeated here as its own job
+      # The third detector (R18.2). Named separately for the same reason: a reference to
+      # a module that was never generated is a translator bug, not a failed proof, and it
+      # is the one failure mode that can otherwise reach CI reporting `0 error(s)`.
+      - name: Every emitted module reference must resolve
+        run: bash test/module-refs.sh
+
+  # `make test` already runs this, as the seventh lint. It is repeated here as its own job
   # because it needs no F* at all: an analyzer regression is reported in about three
   # minutes instead of waiting out a verification run. The gate remains the authority --
   # this job only makes it fail sooner.
