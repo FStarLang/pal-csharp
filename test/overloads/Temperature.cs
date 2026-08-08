@@ -92,10 +92,42 @@ public sealed class Temperature
     {
     }
 
+    /// <summary>
+    /// An *instance*-method overload set. R2.1a is the same rule here, but the members are
+    /// not: each opens R4.10's receiver bracket, so the suffix has to survive being
+    /// threaded through the frame as well as through the module name.
+    /// </summary>
     [Ensures("Result == @this.Degrees")]
     public int Get()
     {
         return degrees;
+    }
+
+    [Requires("-1000000 <= k && k <= 1000000")]
+    [Requires("-1000000 <= @this.Degrees && @this.Degrees <= 1000000")]
+    [Ensures("Result == @this.Degrees + k")]
+    public int Get(int k)
+    {
+        return degrees + k;
+    }
+
+    /// <summary>
+    /// Two overloads that differ only in the *width* of a scalar. C# distinguishes them,
+    /// and so must the suffix: `long` and `int` are different tokens because they are
+    /// different words in the source, which is all R2.1a claims to read.
+    /// </summary>
+    [Requires("-1000000 <= @this.Degrees && @this.Degrees <= 1000000")]
+    [Ensures("Result == @this.Degrees")]
+    public long Scaled(long factor)
+    {
+        return (long)degrees;
+    }
+
+    [Requires("-1000000 <= @this.Degrees && @this.Degrees <= 1000000")]
+    [Ensures("Result == @this.Degrees")]
+    public long Scaled(int factor)
+    {
+        return (long)degrees;
     }
 }
 

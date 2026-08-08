@@ -523,19 +523,20 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         body.AppendLine($"  with {own}. assert (qp.inv x {perm} {own});");
         // F31: a stored Pulse computation must be let-bound before it is applied.
         body.AppendLine($"  let f = qp.{Names.VtblSlot(Member(v))};");
+        // R9.12b, the same rule at the other dispatch site: bound when there is a value,
+        // returned after the fold, in both branches.
         var call = $"f x{args}{(moves ? "" : $" #{Perm}")} #{own};";
+        body.AppendLine(isVoid ? $"  {call}" : $"  let {Ret}0 = {call}");
         if (moves)
         {
-            body.AppendLine($"  {call}");
             body.AppendLine($"  with {postOwn}. assert (qp.inv x {perm} {postOwn});");
             body.AppendLine($"  fold ({asBase} qp x {perm} ({Names.ClassForget(c.Name)} {postOwn}));");
         }
         else
         {
-            body.AppendLine(isVoid ? $"  {call}" : $"  let {Ret}0 = {call}");
             body.AppendLine($"  fold ({asBase} qp x {perm} {Model});");
-            if (!isVoid) body.AppendLine($"  {Ret}0");
         }
+        if (!isVoid) body.AppendLine($"  {Ret}0");
         body.Append("}");
         parts.Private(sig + "\n" + body);
     }
@@ -682,10 +683,17 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         body.AppendLine($"  unfold ({at} ob {perm} {Model});");
         // F31: a stored Pulse computation must be let-bound before it is applied.
         body.AppendLine($"  let f = ob.pkg.{Names.VtblSlot(Member(v))};");
+        // R9.12b. The slot's result is bound exactly when the slot has one, and returned
+        // after the invariant is folded back, in both branches. It used to be bound only in
+        // the read-only branch, so a virtual method that *both* mutated and returned a
+        // value emitted a wrapper declaring `returns ret: I32.t` whose body ended in the
+        // unit from a `fold` -- ill-typed F* with `0 error(s)`, and reachable from the
+        // subset §9 already shipped.
+        var returnsValue = v.ReturnType is not IrPrim { Kind: PrimKind.Void };
         var call = $"f ob.rep{args}{(moves ? "" : $" #{Perm}")} #{Model};";
+        body.AppendLine(returnsValue ? $"  let v = {call}" : $"  {call}");
         if (moves)
         {
-            body.AppendLine($"  {call}");
             body.AppendLine($"  with {PostModel}. assert (ob.pkg.inv ob.rep {perm} {PostModel});");
             body.AppendLine($"  fold ({at} ob {perm} {PostModel});");
             body.AppendLine($"  rewrite ({at} ob {perm} {PostModel}) as ({at} {Obj} {perm} {PostModel});");
@@ -693,12 +701,11 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         }
         else
         {
-            body.AppendLine($"  let v = {call}");
             body.AppendLine($"  fold ({at} ob {perm} {Model});");
             body.AppendLine($"  rewrite ({at} ob {perm} {Model}) as ({at} {Obj} {perm} {Model});");
             body.AppendLine($"  fold ({invAt} s {Obj} {perm} {Model});");
-            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) body.AppendLine("  v");
         }
+        if (returnsValue) body.AppendLine("  v");
         body.Append("}");
         parts.Code(sb.ToString(), "\n" + body);
 
@@ -720,18 +727,19 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         body2.AppendLine($"  fold ({invAt} s (hide {Obj}) {perm} {Model});");
         var inner = $"{Names.DispatchAt(c.Name, Member(v))} s{args} #(hide {Obj})" +
                     $"{(moves ? "" : $" #{Perm}")} #{Model};";
+        // R9.12b once more: forgetting is ghost and returns unit, so a value the indexed
+        // form produced has to be carried across it in both branches.
+        body2.AppendLine(returnsValue ? $"  let v = {inner}" : $"  {inner}");
         if (moves)
         {
-            body2.AppendLine($"  {inner}");
             body2.AppendLine($"  with {PostModel}. assert ({invAt} s (hide {Obj}) {perm} {PostModel});");
             body2.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{PostModel};");
         }
         else
         {
-            body2.AppendLine($"  let v = {inner}");
             body2.AppendLine($"  {Names.ClassForgetImpl(c.Name)} s (hide {Obj}) #{perm} #{Model};");
-            if (v.ReturnType is not IrPrim { Kind: PrimKind.Void }) body2.AppendLine("  v");
         }
+        if (returnsValue) body2.AppendLine("  v");
         body2.Append("}");
         parts.Code(sb2.ToString(), "\n" + body2);
     }

@@ -157,4 +157,27 @@ public static class Shapes
         Square sq = (Square)back;
         return sq.Perimeter();
     }
+
+    /// <summary>
+    /// R9.12b through the whole chain: a virtual method that mutates <em>and</em> returns,
+    /// dispatched at the <em>root</em> static type over a leaf of the <em>intermediate</em>
+    /// class. That routes through all three wrappers the encoding emits — the indexed form
+    /// on <c>Shape</c>, the plain form that composes it with forgetting, and
+    /// <c>Quadrilateral</c>'s forwarder packaging its own vtable into <c>Shape</c>'s — and
+    /// each of the three had to bind the slot's result for this to typecheck at all.
+    /// </summary>
+    [Ensures("Result == 25")]
+    public static int ReportThenGrow()
+    {
+        Shape s = new Square(5);
+        return s.DoubleAndReport();
+    }
+
+    /// <summary>The same, at a leaf of the root, so the forwarder is <em>not</em> in the path.</summary>
+    [Ensures("Result == 12")]
+    public static int ReportThenGrowCircle()
+    {
+        Shape s = new Circle(2);
+        return s.DoubleAndReport();
+    }
 }

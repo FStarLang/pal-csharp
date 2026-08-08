@@ -84,6 +84,48 @@ public sealed class Pressure
     {
         return this.amount;
     }
+
+    /// <summary>
+    /// The variant's instance overload set is three deep rather than two, and the
+    /// no-argument member is *not* the one written first — a scheme that had let the
+    /// declaration order or the arity of the first member reach the suffix would build
+    /// different names here than for <c>Temperature.Get</c>.
+    /// </summary>
+    [Requires("-1000000 <= k && k <= 1000000")]
+    [Requires("-1000000 <= @this.Level && @this.Level <= 1000000")]
+    [Ensures("Result == @this.Level + k")]
+    public int Read(int k)
+    {
+        return this.amount + k;
+    }
+
+    [Ensures("Result == @this.Level")]
+    public int Read()
+    {
+        return this.amount;
+    }
+
+    [Requires("-1000000 <= @this.Level && @this.Level <= 1000000")]
+    [Ensures("Result == @this.Level")]
+    public int Read(Pressure other)
+    {
+        return this.amount;
+    }
+
+    /// <summary>Width-only overloads, with the wider member second here.</summary>
+    [Requires("-1000000 <= @this.Level && @this.Level <= 1000000")]
+    [Ensures("Result == @this.Level")]
+    public long Widened(int factor)
+    {
+        return (long)this.amount;
+    }
+
+    [Requires("-1000000 <= @this.Level && @this.Level <= 1000000")]
+    [Ensures("Result == @this.Level")]
+    public long Widened(long factor)
+    {
+        return (long)this.amount;
+    }
 }
 
 public static class Gauges

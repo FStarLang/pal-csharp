@@ -43,4 +43,11 @@ public sealed class Circle : Shape
     {
         radius = 2 * radius;
     }
+
+    public override int DoubleAndReport()
+    {
+        int was = 3 * radius * radius;
+        radius = 2 * radius;
+        return was;
+    }
 }

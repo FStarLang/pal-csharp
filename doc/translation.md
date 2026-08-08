@@ -2638,6 +2638,48 @@ At depth *k* the wrapper recovers the root object and then follows `sub` once pe
 The CLR does the whole thing with one header check; the gap is the price of erasing the
 dynamic type into `dyn`, and it is paid in casts, not in memory.
 
+**R9.12b — A dispatching wrapper binds the slot's result exactly when the slot has one,
+and returns it after the invariant is folded back.** Stated this baldly the rule sounds
+like it needs no stating, and for two years it was left implicit. It was implemented only
+on the read-only path.
+
+The two paths differ, and the difference is why: a read-only wrapper ends in
+`fold (…__inv_at s o p m)` with the *same* model it started with, whereas a mutating one
+must first name the post-model the callee produced —
+
+```
+let f = ob.pkg.fld_M;
+let v = f ob.rep …;                                  // R9.12b: bound because M returns a value
+with post_this. assert (ob.pkg.inv ob.rep p post_this);
+fold (class_C__at ob p post_this);
+… ;
+v                                                    // R9.12b: after the fold, not before
+```
+
+— and the extra `with`/`assert` between the call and the fold made the mutating path look
+like a *statement* sequence, so the value was dropped on the floor. `fold` returns `unit`,
+so the wrapper declared `returns ret: I32.t` and its body ended in `()`.
+
+That combination — a virtual method that **both** mutates its receiver and returns a value
+— is unremarkable C# (`int Bump() { int was = k; k = k + 1; return was; }`) and was inside
+the shipped subset the whole time. Nothing rejected it. `palcs` reported `0 error(s)` and
+wrote ill-typed Pulse, which is the failure §18 exists to prevent: the emitter must either
+translate a construct or refuse it, and *silently mistranslating* is worse than either.
+
+Three wrappers are subject to the rule and all three had the defect, which is itself the
+lesson — R9.10 emits two (the indexed form that dispatches and the plain form that composes
+it with forgetting, where the intervening `__forget_impl` is ghost and returns `unit`), and
+R9.18 emits a third for each intermediate class (the forwarder that packages that class's
+vtable into its parent's, where the intervening step is a `fold` again). Each was written
+at a different time and each independently grew a `moves ? … : …` split around the call,
+and in all three the value-binding — which has nothing to do with whether the receiver
+moves — got captured by that split. **A conditional in the emitter attracts unrelated code
+into its branches**; when the same two-armed test appears at three sites, what is common to
+the arms deserves to be lifted out of the test rather than duplicated into it.
+
+The regression test is `test/deep_hierarchy`'s `DoubleAndReport`, dispatched at the root
+over a leaf of the intermediate class so that all three wrappers are on the path at once.
+
 **R9.13 — `recover` is the one assumption.** `Pulse.Lib.CSharp.Assumptions.recover` says
 the CLR object header faithfully records the dynamic type. It is unprovable because
 `FStar.Dyn.undyn` returns in `Dv`, and it is stated in `stt` rather than `stt_div` because
@@ -4860,6 +4902,24 @@ cannot do. A wrong translation is caught by F\*. But a *silent* drop reports
 `0 error(s)`, emits a module that looks right, and verifies — proving a theorem about a
 program the author did not write. §0 rule 3 forbids inventing a refusal; it does not
 license inventing an omission.
+
+A *silent mistranslation* is the same failure one step further along. R9.12b is the
+example: a virtual method that both mutates its receiver and returns a value emitted a
+dispatching wrapper that declared a return type and dropped the value, so `palcs` reported
+`0 error(s)` and wrote Pulse that does not typecheck. It is less dangerous than a silent
+drop — F\* rejects it, so no false theorem is proved — but it fails in the wrong place and
+in the wrong language. The author asked about C# and is shown an F\* type error inside a
+wrapper they did not write and cannot read, at a line number that means nothing to them.
+
+The two have a common cause worth naming, because it is the thing to look for rather than
+the thing to fix. Both arise where the emitter *branches*, and both were introduced by
+adding code inside a branch that had no business being there. A `moves ? … : …` split
+exists to decide how the receiver's invariant is threaded; whether a call produces a value
+is an independent question, and R9.12b's defect is that the value-binding was written into
+one arm of that split at three separate sites, by three separate people-shaped events, none
+of which noticed. **When the same two-armed test recurs, whatever is common to the arms
+should be lifted out of it rather than duplicated into it** — not for tidiness, but because
+duplicating it is how one copy comes to differ from another.
 
 ### 18.1 The two rules
 

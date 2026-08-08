@@ -48,4 +48,20 @@ public abstract class Shape
     [Requires("4 * @this.TheArea <= 2147483647")]
     [Ensures("@this.TheArea == 4 * Old(@this.TheArea)")]
     public abstract void Double();
+
+    /// <summary>
+    /// A virtual method that <em>both</em> mutates the receiver and returns a value —
+    /// <c>GetArea</c> and <c>Double</c> at once. It looks like nothing new, and that is the
+    /// point: R9.12b is the rule that a dispatching wrapper binds the slot's result exactly
+    /// when the slot has one, and it applies on the mutating path just as on the read-only
+    /// one. Before it was stated, the three wrappers R9.10 and R9.18 emit bound the result
+    /// only on the read-only path, so this combination emitted a wrapper that declared a
+    /// return type and ended in the unit from a <c>fold</c>. That is ill-typed Pulse
+    /// produced with no diagnostic (§18), which is why the combination is tested here
+    /// rather than left to be discovered.
+    /// </summary>
+    [Requires("4 * @this.TheArea <= 2147483647")]
+    [Ensures("@this.TheArea == 4 * Old(@this.TheArea)")]
+    [Ensures("Result == Old(@this.TheArea)")]
+    public abstract int DoubleAndReport();
 }

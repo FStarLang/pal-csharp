@@ -62,6 +62,14 @@ public sealed class Rectangle : Quadrilateral
         h = 2 * h;
     }
 
+    public override int DoubleAndReport()
+    {
+        int was = w * h;
+        w = 2 * w;
+        h = 2 * h;
+        return was;
+    }
+
     public override int Perimeter()
     {
         return 2 * (w + h);

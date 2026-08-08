@@ -101,4 +101,25 @@ public static class ShapesVariant
         int p = sq.Perimeter();
         return p;
     }
+
+    /// <summary>The §7.2 variant of <c>ReportThenGrow</c>: the receiver is a
+    /// <c>Rectangle</c> reached at the root type, the result goes through a local, and the
+    /// growth is observed afterwards rather than being taken on trust.</summary>
+    [Ensures("Result == 6")]
+    public static int ReportThenGrow()
+    {
+        Rectangle r = new Rectangle(2, 3);
+        Shape s = r;
+        int was = s.DoubleAndReport();
+        return was;
+    }
+
+    [Ensures("Result == 24")]
+    public static int ReportThenMeasure()
+    {
+        Shape s = new Rectangle(2, 3);
+        int was = s.DoubleAndReport();
+        int now = s.GetArea();
+        return now;
+    }
 }
