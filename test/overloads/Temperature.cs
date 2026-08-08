@@ -18,22 +18,40 @@ public struct Reading
 {
     public SpecInt Degrees;
     public SpecInt Origin;
+    public SpecInt Scale;
 }
 
 [Invariant("origin <= degrees")]
 public sealed class Temperature
 {
     private int degrees;
-    private int origin;
+
+    /// <summary>
+    /// R4.12d. A field initialiser is the assignment `this.origin = 0;` at the head of
+    /// every constructor that does not chain -- here, only `Temperature(int, int)`, whose
+    /// body then overwrites it. Assignments are sequential and the second wins, which is
+    /// C#'s answer and needs no rule of its own.
+    /// </summary>
+    private int origin = 0;
+
+    /// <summary>
+    /// A field *no* constructor assigns. Its initialiser is the only thing that gives it a
+    /// value, in all three constructors -- which is what makes R4.12d a rule rather than a
+    /// convenience, since without it R4.12 would report this field uninitialised.
+    /// </summary>
+    private int scale = 1;
 
     [Model]
-    private Reading Model => new Reading { Degrees = degrees, Origin = origin };
+    private Reading Model => new Reading { Degrees = degrees, Origin = origin, Scale = scale };
 
     [Spec]
     public SpecInt Degrees => Model.Degrees;
 
     [Spec]
     public SpecInt Origin => Model.Origin;
+
+    [Spec]
+    public SpecInt Scale => Model.Scale;
 
     /// <summary>
     /// The general constructor. Its module is `Func_Temperature__ctor_int_int` -- the
@@ -42,6 +60,7 @@ public sealed class Temperature
     [Requires("o <= d")]
     [Ensures("@this.Degrees == d")]
     [Ensures("@this.Origin == o")]
+    [Ensures("@this.Scale == 1")]
     public Temperature(int d, int o)
     {
         this.degrees = d;
@@ -56,6 +75,7 @@ public sealed class Temperature
     [Requires("0 <= d")]
     [Ensures("@this.Degrees == d")]
     [Ensures("@this.Origin == 0")]
+    [Ensures("@this.Scale == 1")]
     public Temperature(int d) : this(d, 0)
     {
     }
@@ -67,6 +87,7 @@ public sealed class Temperature
     /// </summary>
     [Ensures("@this.Degrees == 0")]
     [Ensures("@this.Origin == 0")]
+    [Ensures("@this.Scale == 1")]
     public Temperature() : this(0)
     {
     }

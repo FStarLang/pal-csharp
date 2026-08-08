@@ -1075,23 +1075,6 @@ public static class FrontendPass
         // is the rule; the categories it accepts are exactly the ones the loop collects.
         if (!ReportUnaccountedMembers(symbol, modelSymbol, known, diagnostics)) ok = false;
 
-        // R18.1. A field initialiser runs before the constructor body, and R4.12 builds the
-        // representation from the constructor's assignments alone. Ignoring the initialiser
-        // and then reporting the field uninitialised named the wrong cause.
-        foreach (var member in symbol.GetMembers().OfType<IFieldSymbol>())
-        {
-            if (member is { IsStatic: false, IsConst: false, AssociatedSymbol: null } &&
-                member.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
-                    is VariableDeclaratorSyntax { Initializer: { } init })
-            {
-                diagnostics.Error("PALCS0596", Locations.From(init.GetLocation()),
-                    $"`{symbol.Name}.{member.Name}` has a field initialiser. The representation is " +
-                    "built by the constructor (doc/translation.md R4.12), which is the one place the " +
-                    "invariant is established, and an initialiser assigns before it runs with no rule " +
-                    $"to say so (R18.1). Move the value into the constructor: `this.{member.Name} = …;`.");
-                ok = false;
-            }
-        }
 
         // R9.2. An abstract class has no representation: the fields are entirely the
         // leaf's. A base field would make a leaf's representation an extension of the
@@ -2119,21 +2102,55 @@ public static class FrontendPass
         // which is R18.1's failure exactly: the diagnostic named a symptom of a construct
         // nobody had looked at. It is lowered here, ahead of the body, because that is
         // where C# runs it.
-        if (syntax is ConstructorDeclarationSyntax { Initializer: { } chained } ctor)
+        if (syntax is ConstructorDeclarationSyntax c)
         {
-            var call = lowerer.Expressions.LowerConstructorInitializer(chained);
-            var rest = ctor.Body is { } body ? lowerer.Lower(body) : null;
             var stmts = ImmutableArray.CreateBuilder<IrStmt>();
-            stmts.Add(new IrExprStmt(Locations.From(chained), call));
+            if (c.Initializer is { } chained)
+                stmts.Add(new IrExprStmt(Locations.From(chained),
+                    lowerer.Expressions.LowerConstructorInitializer(chained)));
+            else
+                // R4.12d. A field initialiser is the assignment C# would run here, and it
+                // runs in *this* constructor precisely when this constructor does not chain
+                // to another of its own class -- which is C#'s own rule, not a choice.
+                stmts.AddRange(FieldInitialisers(c, lowerer));
+
+            var rest = c.Body is { } body ? lowerer.Lower(body) : null;
             if (rest is IrBlock inner) stmts.AddRange(inner.Statements);
             else if (rest is not null) stmts.Add(rest);
-            return new IrBlock(Locations.From(ctor), stmts.ToImmutable());
+            return new IrBlock(Locations.From(c), stmts.ToImmutable());
         }
 
         if (BlockOf(syntax) is { } block) return lowerer.Lower(block);
         if (ArrowOf(syntax) is { } arrow)
             return new IrReturn(Locations.From(arrow), lowerer.LowerSpec(arrow.Expression));
         return null;
+    }
+
+    /// <summary>
+    /// R4.12d. The declared field initialisers of the constructor's own class, in
+    /// declaration order, each as the assignment `this.f = e` it stands for. C# runs them
+    /// ahead of the constructor body and pal-csharp emits them there, so the constructor
+    /// R4.12 reads is the one C# actually runs.
+    /// </summary>
+    private static IEnumerable<IrStmt> FieldInitialisers(
+        ConstructorDeclarationSyntax ctor, StmtLowerer lowerer)
+    {
+        if (ctor.Parent is not TypeDeclarationSyntax type) yield break;
+
+        foreach (var field in type.Members.OfType<FieldDeclarationSyntax>())
+        {
+            if (field.Modifiers.Any(m => m.IsKind(SyntaxKind.StaticKeyword)
+                                      || m.IsKind(SyntaxKind.ConstKeyword))) continue;
+
+            foreach (var v in field.Declaration.Variables)
+            {
+                if (v.Initializer is not { } init) continue;
+                var loc = Locations.From(init);
+                yield return new IrAssign(loc,
+                    new IrField(loc, new IrVar(loc, Names.This), v.Identifier.ValueText),
+                    lowerer.Expressions.Lower(init.Value));
+            }
+        }
     }
 
     private sealed record Specs(

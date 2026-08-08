@@ -1299,6 +1299,18 @@ work, or assign every field here.
 `: base(...)` is a separate question and waits on a base class that has fields at all
 (§8.6, and R9.2 is why).
 
+**R4.12d (field initialisers).** `private int x = 7;` **is** the assignment `this.x = 7;`
+placed at the head of the constructor, ahead of its body. That is where C# runs it, so
+R4.12 continues to read one list of assignments and needs no case of its own; a field the
+initialiser sets and the body sets again is set twice in that order, and the second wins,
+because assignments are sequential and nothing here made them otherwise.
+
+It runs in exactly the constructors C# runs it in — those that do **not** chain with
+`: this(...)`. That is not a choice either: a chaining constructor's initialisers ran in
+the constructor it chained to, and running them again would build a representation twice.
+R4.12c's shape already says so, since a chaining constructor's body is a call and has no
+allocation in it at all.
+
 **R4.12b (a constructor consumes its object parameters).** A constructor body may only
 initialise fields (R4.12), so an object it is *given* has nowhere to go except into the
 representation it is building. Ownership therefore moves, whether or not the author wrote
@@ -4866,7 +4878,7 @@ mistake:
 | a binary operator's operand type (R6.4) | the module was chosen by the operand's primitive kind, defaulting to `Int32` when the operand was not primitive, so `a == b` on two objects emitted `I32.eq` applied to two boxes | **PALCS0593**: an operator whose operands are not primitive has no module |
 | a class's base list (R9.1) | only `BaseType` was inspected, and an interface is not a `BaseType` in Roslyn, so `class C : IFoo` silently forgot `IFoo` | **PALCS0594** until §9 has interfaces |
 | a method body's receiver bracket (R4.10) | the `unfold`/`fold` bracket was opened for every instance method, so a body that only called another method on `this` handed it a representation where its contract demands the invariant | **R4.10c**: open it only when a field is named, and **PALCS0597** when a body wants both |
-| a class's field declarations (R9.4) | only the declared type and name were read, so an initialiser -- an assignment R4.12 has no statement position for -- was dropped, and the field appeared to be built solely by the constructor | **PALCS0596** until §9 orders initialisers before the constructor body |
+| a class's field declarations (R9.4) | only the declared type and name were read, so an initialiser -- an assignment R4.12 had no statement position for -- was dropped, and the field appeared to be built solely by the constructor | **PALCS0596**, and then R4.12d, which supplied the missing statement position -- the head of every constructor that does not chain -- at which point the diagnostic had nothing left to report and was retired |
 
 **R18.2 — Every name the emitter writes is a name that resolves.** A generated module may
 refer to another generated module, to a module of `Pulse.Lib.CSharp.*` or the F\* standard
@@ -4941,11 +4953,6 @@ feature has to reach before it can be designed.
   Not a dropped construct but the same mistake one level down: the bracket was emitted
   unconditionally, so the ill-typed case was emitted too. R4.10c says why the two halves
   cannot be reconciled without the emitter inventing a fold.
-* **A field initialiser** (PALCS0596). R4.12 builds the representation from the
-  constructor's `this.f = e` assignments, and a field initialiser is an assignment C#
-  runs before the constructor body. Reading it is a small rule and a real one; until it
-  exists, the previous behaviour was to ignore the initialiser and then report the field
-  *uninitialised*, which named the wrong cause.
 * **A `record`** (PALCS0530). A record's primary constructor, its generated `Equals`,
   `GetHashCode`, `ToString` and `Deconstruct`, and its `with` expression are five features
   at once. An *annotated* record now says so; an unannotated one is ignored, like any

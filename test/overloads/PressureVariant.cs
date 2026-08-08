@@ -15,6 +15,7 @@ namespace Instruments;
 [Spec]
 public struct Sample
 {
+    public SpecInt Unit;
     public SpecInt Level;
     public SpecInt Floor;
 }
@@ -22,11 +23,25 @@ public struct Sample
 [Invariant("least <= amount")]
 public sealed class Pressure
 {
-    private int amount;
+    /// <summary>
+    /// The variant puts the initialiser on the *first* field and gives it a value the
+    /// general constructor does not overwrite with a constant, so a scheme that quietly
+    /// ordered initialisers after the body, or ran them in the chaining constructors too,
+    /// would build the wrong representation rather than the same one twice.
+    /// </summary>
+    private int amount = 0;
+
+    /// <summary>
+    /// The initialiser-only field, declared *last* here and with a different value, so a
+    /// scheme that had quietly fixed the position or the value in the emitter rather than
+    /// reading it from the declaration would show up.
+    /// </summary>
     private int least;
 
+    private int unit = 2;
+
     [Model]
-    private Sample Model => new Sample { Level = this.amount, Floor = this.least };
+    private Sample Model => new Sample { Unit = this.unit, Level = this.amount, Floor = this.least };
 
     [Spec]
     public SpecInt Level => Model.Level;
@@ -34,9 +49,13 @@ public sealed class Pressure
     [Spec]
     public SpecInt Floor => Model.Floor;
 
+    [Spec]
+    public SpecInt Unit => Model.Unit;
+
     /// <summary>Declared first here, and chained to from below.</summary>
     [Ensures("@this.Level == 0")]
     [Ensures("@this.Floor == 0")]
+    [Ensures("@this.Unit == 2")]
     public Pressure() : this(0)
     {
     }
@@ -44,6 +63,7 @@ public sealed class Pressure
     [Requires("0 <= n")]
     [Ensures("@this.Level == n")]
     [Ensures("@this.Floor == 0")]
+    [Ensures("@this.Unit == 2")]
     public Pressure(int n) : this(n, 0)
     {
     }
@@ -52,6 +72,7 @@ public sealed class Pressure
     [Requires("f <= n")]
     [Ensures("@this.Level == n")]
     [Ensures("@this.Floor == f")]
+    [Ensures("@this.Unit == 2")]
     public Pressure(int n, int f)
     {
         this.amount = n;

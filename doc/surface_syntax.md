@@ -1212,7 +1212,7 @@ because C# names its parameter `value` rather than the author naming it, and no
 specification can be written over a name the author did not choose.
 
 Also outside the subset, and until §18 each of these was *silently dropped* rather than
-reported: a property with a `set` accessor, an indexer, a `const` field, a field initialiser, an explicit interface
+reported: a property with a `set` accessor, an indexer, a `const` field, an explicit interface
 implementation, a user-defined operator or conversion, an event, a finalizer, an `override`
 of a member of `object` (`Equals`, `GetHashCode`, `ToString`), two members of one program
 whose generated module names collide (R2.1a resolves an overload set; two same-named types
