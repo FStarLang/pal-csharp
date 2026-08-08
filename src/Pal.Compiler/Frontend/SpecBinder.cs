@@ -116,10 +116,14 @@ public static class SpecBinder
                 diagnostics.Error(code, MapBack(d.Location, map, groupSites), message);
             }
 
+            // R18.3: keyed by a name R2.1a intends to be unique, and grouped rather than
+            // added so that a name it failed to make unique is PALCS0501's to report and
+            // not a stack trace out of a pass that runs before any check.
             var byName = tree.GetRoot()
                 .DescendantNodes()
                 .OfType<MethodDeclarationSyntax>()
-                .ToDictionary(m => m.Identifier.ValueText);
+                .GroupBy(m => m.Identifier.ValueText)
+                .ToDictionary(g => g.Key, g => g.First());
 
             foreach (var site in groupSites)
             {

@@ -23,6 +23,12 @@ public sealed class StmtLowerer(
     private readonly ExprLowerer _spec =
         new(model, known, diagnostics, specPosition: true) { ObjectFields = objectFields ?? [] };
 
+    /// <summary>
+    /// R4.12c. A constructor initializer is an expression that is not inside any statement,
+    /// so the one caller that needs it reaches the expression lowerer directly.
+    /// </summary>
+    public ExprLowerer Expressions => _code;
+
     public IrStmt Lower(StatementSyntax node)
     {
         var loc = Locations.From(node);

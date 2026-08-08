@@ -201,6 +201,30 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// a user-written constructor has a body, and running that body at every
     /// construction site is method translation, not expression translation.
     /// </summary>
+    /// <summary>
+    /// R4.12c. `C(...) : this(args)` is the call `ctor_C_sig(args)`, exactly as `new
+    /// C(args)` is: the chained constructor is the one that builds the object, and the
+    /// chaining one is a function returning what it returned.
+    /// </summary>
+    public IrExpr LowerConstructorInitializer(ConstructorInitializerSyntax node)
+    {
+        var loc = Locations.From(node);
+        if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol ctor ||
+            ctor.ContainingType is not { } klass || !known.HasModel(klass))
+        {
+            diagnostics.Unsupported(loc, $"The constructor initializer `{node.ThisOrBaseKeyword}(…)`");
+            return new IrLiteral(loc, null);
+        }
+
+        return new IrCall(loc, Naming.Of(ctor),
+            [.. node.ArgumentList.Arguments.Select(LowerArgument)])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = known.MapType(klass) ?? new IrClassType(klass.Name),
+            TypeArguments = known.TypeArguments(ctor),
+        };
+    }
+
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
         // R4.12. `new C(args)` is a call to the constructor's own emitted function. Unlike

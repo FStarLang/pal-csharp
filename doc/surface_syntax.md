@@ -456,6 +456,20 @@ implementations are still rejected, as are generic class and struct *declaration
 operate on it. A static mutable field is rejected too
 (`PALCS0522`): it is global state that no per-object invariant covers.
 
+**Overloads and several constructors work.** A class may declare `Temperature(int, int)`,
+`Temperature(int)` and `Temperature()`, and a convenience constructor may chain to the
+general one with `: this(...)`; its postcondition is then discharged from the chained
+constructor's contract rather than re-proved from the fields. Methods overload too. The
+only shape refused is a constructor that chains *and then does more work*
+(`PALCS0598`) — the chained constructor hands the object back with its invariant already
+established, so a later assignment would have to reopen it. Chain to a constructor that
+does the work, or assign every field directly. `: base(...)` waits on a base class that
+may have fields at all.
+
+The generated module name grows a suffix only where it must: `Func_Temperature_Get` when
+`Get` is alone, `Func_Temperature__ctor_int_int` and `Func_Temperature__ctor_unit` when
+there is an overload set to separate.
+
 Two things a class gets for free, and neither costs an annotation. A freshly constructed
 object is automatically distinct from every object that already existed. And nothing is
 ever freed — the CLR's garbage collector means pal-csharp inherits none of PAL's
@@ -1200,8 +1214,9 @@ specification can be written over a name the author did not choose.
 Also outside the subset, and until §18 each of these was *silently dropped* rather than
 reported: a property with a `set` accessor, an indexer, a `const` field, a field initialiser, an explicit interface
 implementation, a user-defined operator or conversion, an event, a finalizer, an `override`
-of a member of `object` (`Equals`, `GetHashCode`, `ToString`), a second constructor of one
-class, an `implements` clause, a call to a method not declared in this compilation
+of a member of `object` (`Equals`, `GetHashCode`, `ToString`), two members of one program
+whose generated module names collide (R2.1a resolves an overload set; two same-named types
+in different namespaces it does not), a constructor that chains and then does more work, an `implements` clause, a call to a method not declared in this compilation
 (including any BCL method), `==`/`!=` on class-typed operands, and an annotated `record`.
 `doc/translation.md` §18.2 says what each is waiting for.
 

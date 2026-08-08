@@ -93,6 +93,7 @@ public static class Catalog
         ("PALCS0594", Severity.Error),
         ("PALCS0596", Severity.Error),
         ("PALCS0597", Severity.Error),
+        ("PALCS0598", Severity.Error),
         ("PALCS0600", Severity.Error),
         ("PALCS0601", Severity.Warning),
         ("PALCS0531", Severity.Error),

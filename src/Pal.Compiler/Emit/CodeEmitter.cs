@@ -333,8 +333,35 @@ public sealed class CodeEmitter(
             return;
         }
 
+        // R4.12c. `C(…) : this(args)` with nothing after it *is* the chained constructor's
+        // result, so it emits that call and returns it. The object comes back with its
+        // invariant folded, which is what this function's own postcondition asks for, so
+        // there is nothing between the call and the return -- R9.15d, and the same shape
+        // any method returning a class has.
+        var statements = method.Body is IrBlock b ? b.Statements : [method.Body!];
+        if (statements is [IrExprStmt { Expr: IrCall chained }, ..])
+        {
+            if (statements.Length > 1)
+            {
+                // Not R4.10c's mixed case but its twin: the chained constructor hands back
+                // a folded object, and an assignment after it needs the fields, so the
+                // remaining body would have to reopen an invariant this function never
+                // established. Refusing beats choosing an unfold point for the user.
+                diagnostics.Error("PALCS0598", statements[1].Loc,
+                    $"`{built.Name}` chains to another constructor and then does more work. " +
+                    "The chained constructor returns the object with its invariant already " +
+                    "established (doc/translation.md R4.12c), so a later assignment would have " +
+                    "to reopen it, and this constructor is not the one that closed it. Move the " +
+                    "work into the constructor being chained to, or assign every field here " +
+                    "instead of chaining.");
+                return;
+            }
+            Line($"{Expr(chained)}");
+            return;
+        }
+
         var initialisers = new Dictionary<string, string>();
-        foreach (var stmt in method.Body is IrBlock b ? b.Statements : [method.Body!])
+        foreach (var stmt in statements)
         {
             if (stmt is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This } } f } a)
             {

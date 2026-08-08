@@ -65,9 +65,12 @@ public static class FrontendPass
     private static void InheritContracts(
         ImmutableArray<IrDecl>.Builder declarations, DiagnosticBag diagnostics)
     {
+        // Grouped, not added: see SpecBinder. A duplicate here is R2.1a's to prevent and
+        // PALCS0501's to report, and neither is served by throwing.
         var byName = declarations.OfType<IrMethod>()
             .Where(m => m.IsAbstract && m.DeclaringClass is not null)
-            .ToDictionary(m => m.Name);
+            .GroupBy(m => m.Name)
+            .ToDictionary(g => g.Key, g => g.First());
         // R9.18. `Overrides` names the *immediate* base, because that is the class whose
         // model the override's vtable slot is typed at. It is not necessarily the class
         // that *declared* the method: at depth three `Square.GetArea` overrides through
@@ -76,7 +79,8 @@ public static class FrontendPass
         // are answered separately, which is what they always were.
         var bases = declarations.OfType<IrClass>()
             .Where(c => c.BaseClass is not null)
-            .ToDictionary(c => c.Name, c => c.BaseClass!);
+            .GroupBy(c => c.Name)
+            .ToDictionary(g => g.Key, g => g.First().BaseClass!);
 
         for (var i = 0; i < declarations.Count; i++)
         {
@@ -2109,6 +2113,23 @@ public static class FrontendPass
 
     private static IrStmt? LowerBody(SyntaxNode syntax, StmtLowerer lowerer)
     {
+        // R4.12c. A constructor initializer is not part of the body in Roslyn's tree, and
+        // reading only the body is how `: this(…)` used to vanish -- leaving a constructor
+        // that appeared to assign nothing and was reported for leaving its fields unset,
+        // which is R18.1's failure exactly: the diagnostic named a symptom of a construct
+        // nobody had looked at. It is lowered here, ahead of the body, because that is
+        // where C# runs it.
+        if (syntax is ConstructorDeclarationSyntax { Initializer: { } chained } ctor)
+        {
+            var call = lowerer.Expressions.LowerConstructorInitializer(chained);
+            var rest = ctor.Body is { } body ? lowerer.Lower(body) : null;
+            var stmts = ImmutableArray.CreateBuilder<IrStmt>();
+            stmts.Add(new IrExprStmt(Locations.From(chained), call));
+            if (rest is IrBlock inner) stmts.AddRange(inner.Statements);
+            else if (rest is not null) stmts.Add(rest);
+            return new IrBlock(Locations.From(ctor), stmts.ToImmutable());
+        }
+
         if (BlockOf(syntax) is { } block) return lowerer.Lower(block);
         if (ArrowOf(syntax) is { } arrow)
             return new IrReturn(Locations.From(arrow), lowerer.LowerSpec(arrow.Expression));

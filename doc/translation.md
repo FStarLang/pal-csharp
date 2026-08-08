@@ -197,6 +197,48 @@ namespace. C# does not — two classes in one program may each declare `Abs` —
 declaring type is always part of the name. Always, not only on collision: a program's
 generated module names must not change when an unrelated class is added.
 
+**R2.1a (overloads).** C# also lets *one* type declare `Abs` twice. Where the type
+qualifier is added always, the signature is added **only to an overload set** — a member
+whose `⟦name⟧` is shared by another member of the same type takes a suffix built from its
+parameter types, `_`-joined, an empty list rendering `_unit`:
+
+| C# | module |
+|---|---|
+| `class Over { int Id(int a); }` | `Func_Over_Id` |
+| `class Over { int Id(int); int Id(int,int); }` | `Func_Over_Id_int`, `Func_Over_Id_int_int` |
+| `class Box { Box(int); Box(); }` | `Func_Box__ctor_int`, `Func_Box__ctor_unit` |
+
+The two halves of the rule are asymmetric on purpose, and the asymmetry follows from what
+each protects against. The type qualifier guards against a collision an author cannot see —
+`Abs` in another class, written by someone else — so it must not depend on whether that
+other class exists. A signature suffix guards against a collision the author is looking
+directly at, in one type, and the edit that introduces it is an edit to that very
+declaration. Suffixing always would pay for that with `Func_Counter_Get_unit` throughout
+every program that has no overload at all, and readable generated Pulse is the property
+§2 exists to protect.
+
+Constructors are why the rule is needed rather than merely nice. A method can be renamed
+by its author; `.ctor` cannot, so without R2.1a a class may declare exactly one
+constructor. That was the state before this rule, and it was not enforced — it *crashed*,
+in `SpecBinder`, before any check ran. Which is R18.3 again: **the first pass that reduces
+two declarations to one name must be the one that reports it.** Both places that key a
+dictionary by this name now tolerate a duplicate and let `PALCS0501` report it, so a
+sanitisation that happens to collide (`A.B` and `A_B` reach the same token) is a
+diagnostic rather than a stack trace.
+
+The set is computed over *definitions*. A call to `Exchange<int>` presents Roslyn a
+constructed symbol which is not equal to the `Exchange<T>` in the type's members, so a
+generic method compared naively is an overload of itself — and R15.1 says a generic method
+emits one module for all its instantiations, so the suffix would name a module nothing
+generates. The suffix is likewise built from the definition's parameter types, which is
+what makes `Exchange<int>` and `Exchange<byte>` agree on it.
+
+A parameter type becomes a token by taking its C# spelling and replacing everything that
+is not an identifier character with `_`: `int` is `int`, `Span<int>` is `Span_int_`,
+`int[]` is `int__`. The tokens are not meant to be pretty, only stable, injective in
+practice, and derived from what the author wrote — R2.1's "a pure function of the source
+name" applies to the suffix too.
+
 **R2.2 (provenance).** Every emitted construct records the Roslyn `Location` it came from,
 written to `source_range_info.json` as
 `{module, file, construct, source: {file, range}}`. A module whose whole text is the
@@ -1225,6 +1267,37 @@ other method's.
 Freshness is free and needs no emitter work: the frame rule gives every caller
 `frame ** class_C__inv x m₀`, so a newly constructed object is automatically separate from
 everything that already existed.
+
+**R4.12c (chaining).** `C(…) : this(args)` **is** the call `ctor_C_sig(args)`, and the
+chaining constructor's whole body is that call:
+
+```
+fn func_Box__ctor_unit ()
+  requires emp
+  returns  x : class_Box
+  ensures  exists* m. class_Box__inv x m ** pure ⟦Q⟧
+{
+  let t0 = func_Box__ctor_int 0l;
+  t0
+}
+```
+
+There is no new rule here, which is the point: R9.15d already says a method returning a
+class owns the returned object at an existential model, and a chaining constructor is such
+a method whose body is one call. The chaining constructor's own `[Ensures]` is then
+discharged from the chained one's, by Pulse, from the contract alone — so a convenience
+overload is checked against the general constructor rather than re-proved.
+
+**Only when nothing follows the call (`PALCS0598`).** `C() : this(0) { extra = 1; }` is
+refused. The chained constructor returns the object with its invariant already established,
+so an assignment after it needs the representation back, and R4.10c's argument applies
+unchanged: this constructor is not the one that closed the bracket, and reopening an
+invariant it never established would be the emitter choosing an unfold point on the user's
+behalf. The fix is in the source and it is small — chain to a constructor that does the
+work, or assign every field here.
+
+`: base(...)` is a separate question and waits on a base class that has fields at all
+(§8.6, and R9.2 is why).
 
 **R4.12b (a constructor consumes its object parameters).** A constructor body may only
 initialise fields (R4.12), so an object it is *given* has nowhere to go except into the
@@ -4855,7 +4928,11 @@ feature has to reach before it can be designed.
   Object identity has no story: `Box` has a decidable equality, but nothing relates it to
   the ownership discipline, and two references that are equal are not thereby
   interchangeable in a context that owns one of them.
-* **A second constructor** (PALCS0501), per R18.3.
+* **Two members of one program that mangle to one module name** (PALCS0501), per R18.3.
+  R2.1a closed the case that motivated this bullet -- a second constructor -- by giving an
+  overload set a signature suffix. What is left is a collision R2.1 admits it does not
+  resolve: `Alpha.Meter.Read` and `Beta.Meter.Read` are not an overload set, because they
+  are not members of one type, and the module name carries no namespace.
 * **An `interface` declaration, and an implements clause** (PALCS0594). §8.6 records why
   interfaces are not simply R9.2 plus R9.3: what a C# interface adds is *multiple*
   implementation, and R9.8 pins the obstacle — a `dyn` is made at one witness type and
