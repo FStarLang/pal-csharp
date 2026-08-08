@@ -1182,13 +1182,13 @@ That moves `Pal.Contents(a)` out of the lambda and into an argument, which C# al
 `test/array_view`.
 
 Currently outside the supported subset: `stackalloc`, a span-typed return, `goto`,
-`try`/`catch`/`throw`, constrained type parameters, generic type declarations, C#
-`interface` declarations, delegates, `async`,
-`string`, floating point, struct fields that are not values, user-written struct
-constructors, static mutable fields, a class that is neither `sealed` nor `abstract`, a
-`return` that is not in tail position **inside a loop**, an increment or decrement
-written in a specification, a `switch` label that is a pattern or carries a `when` guard,
-and a `break` that leaves a `switch` before the end of its section.
+`try`/`catch`/`throw`, **constrained** type parameters (unconstrained ones are supported,
+as are generic classes), C# `interface` declarations, delegates, `async`, `foreach` and
+`IEnumerable<T>`, `string`, floating point, struct fields that are not values,
+user-written struct constructors, static mutable fields, a class that is neither `sealed`
+nor `abstract`, a `return` that is not in tail position **inside a loop**, an increment or
+decrement written in a specification, a `switch` label that is a pattern or carries a
+`when` guard, and a `break` that leaves a `switch` before the end of its section.
 
 `switch` itself is supported: R5.14 desugars it to an if/else chain, evaluating the
 governing expression once and moving `default` to the end. What it does not cover is

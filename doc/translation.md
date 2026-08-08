@@ -7,6 +7,12 @@ and anything the emitter does that is not justified by a rule here is a bug.
 Every rule is **compositional**: it is defined by the shape of a C# construct alone,
 independently of any example and of its surrounding context.
 
+Rule ids (`R<section>.<n>`) are cited from `Pal.Compiler`, from the Pulse library and from
+`test/`, so they are stable: a section may be reorganised, but a rule is never renumbered.
+The numbering is therefore not contiguous where a rule was withdrawn. Facts (`F<n>`) are
+Pulse behaviours probed and pinned in `test/pulse_facts/` before the rule that relies on
+them was written; §1 lists them all.
+
 ---
 
 ## 0. The anti-contortion discipline
@@ -50,10 +56,8 @@ where programs that translate faithfully and fail honestly are kept.
 **Rule 4 — No example is nameable from inside the compiler.** `Pal.Compiler` contains no
 identifier drawn from the test suite. Enforced by `test/no-example-names.sh`.
 
-Two mechanical detectors back these up: **variant tests** (every acceptance test ships an
-equivalent but differently-written C# variant that must verify with no emitter change) and
-the **provenance lint** (every emitted top-level construct must trace to a C# source span
-via `source_range_info.json`).
+Two mechanical detectors back these up — **variant tests** and the **provenance lint** —
+stated in §7.2.
 
 ---
 
@@ -70,9 +74,9 @@ The rules below depend on the following, each **verified against the pinned tool
 | F4 | Pulse source requires the `#lang-pulse` pragma after the module header and `open`s. | `pal/pulse/Pulse.Lib.C.Array.fst:9`; local `Smoke.fst`, verified. |
 | F5 | The F* binary release bundles Pulse; no separate install is needed. | `tools/fstar/lib/fstar/pulse/` present after `make tools`. |
 | F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the insertion-sort probe (`test/probe_insertion_sort`): both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Array_Access` and PAL's `array_read_all` do the same. |
+| F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
 | F8 | A **stateful block may appear in term position**, as the scrutinee of a `let`: `let t = if (c) { <stateful block> } else { e };` is well-formed Pulse. This is what makes the short-circuit rule R6.3 compositional — the same lowering serves a loop guard, an `if` condition and an assignment right-hand side, with no context-dependent special case. | `test/pulse_facts/PulseFacts.fst:short_circuit_in_term_position`, verified; relied on by every generated short-circuit. |
 | F9 | A `decreases` measure may dereference a mutable local, but **not underneath an `if`**. `decreases (if !b then 0 else I32.v !r)` is rejected with "Expected type `FStar.Int32.t` but `!r` has type `fn …`", because the `!` sugar is elaborated only outside the branches. A conditional measure must keep its dereferences out of the branches. | `test/pulse_facts/PulseFacts.fst:decreases_conditional_without_deref`, verified; the failing form was reproduced while writing `test/binary_search`. |
-| F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
 | F10 | F\* resolves **module-qualified record syntax** in all three positions — projection `e.M.f`, update `{ e with M.f = v }`, and literal `{ M.f = a; g = b }` — without the defining module being `open`ed. So a generated struct module needs no `open` anywhere, and two structs may share a field name with no ambiguity. | `test/pulse_facts/PulseFacts.fst` + `test/pulse_facts/StructFacts.fst`, verified. |
 | F11 | A record **update's source must be a pure term**: `{ !r with M.f = v }` is rejected ("Ill-typed term … got expression of type `fn … returns …`"), because `!r` is a stateful operation and the update is a term former, not a statement. The deref must be let-bound first. This does not contradict F8: F8 is about a stateful block as the *scrutinee of a `let`*, which is precisely the form that fixes this. | `test/pulse_facts/StructFacts.fst:struct_field_write`, verified; the failing form was reproduced while writing R3.4. |
 | F12 | A Pulse `fn` **must have at least one binder**. A parameterless one fails in the elaborator, not the solver: "Tactic failed — main: FnDefn does not have binders". So a C# method with no parameters takes `()`. | `test/pulse_facts/StructFacts.fst:no_parameters`, verified; the failing form was reproduced by `test/point_struct`'s `Origin()`. |
@@ -80,17 +84,24 @@ The rules below depend on the following, each **verified against the pinned tool
 | F14 | `Pulse.Lib.Box` is the **sound** heap cell and the right model of a CLR object. `Pulse.Lib.Reference.alloc` is marked `[@@deprecated "…is unsound; only use for model implementations"]` and may not appear in generated code; `Box.alloc` carries no such marker. `Box` additionally supplies `null`, a *pure* `is_null`, and `pts_to_not_null`, so a nullable object reference needs no new machinery. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Reference.fsti:87` and `Pulse.Lib.Box.fsti:31-53,90-110`; `test/pulse_facts/ObjectFacts.fst:ownership_implies_non_null`, verified. Relied on by R3.8 and R3.11. |
 | F15 | Pulse slprops are **affine**: `Box.free` exists but nothing compels a caller to reach it, and a leftover resource is discharged by `drop_`. So modelling a garbage-collected heap needs **no axiom at all** — allocate, never free. | `test/pulse_facts/ObjectFacts.fst:alloc_without_free`, verified: it allocates an array and a box, returns, and frees neither. Relied on by R3.12. |
 | F16 | An object resource is linear, so passing the same object to two owned parameters is **unprovable**, reported as a bare `Error 228: Cannot prove: class_C__inv a _`. Aliasing is thus safe but incomprehensible, which is why R3.13 requires the emitter to diagnose it first. | `test/pulse_facts/ObjectFacts.fst:aliasing_is_unprovable` documents the rejected call; the failure was reproduced against the pinned toolchain. |
+| F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
 | F18 | F15's affinity is a **permission to discard, not an automatic discard**. A method that allocates an object and does not return it still holds the invariant when it ends: `Error 228: Leftover resources: class_C__inv x _`. Writing the discard needs a name for the model the context holds — an existential witness the emitter never chose — which `with m. assert p;` binds. | `test/pulse_facts/ObjectFacts.fst:allocate_and_discard`, verified; the failure was reproduced by `test/counter_client`'s `FreshIsZero` before R4.14 existed. Relied on by R4.14. |
+| F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
 | F20 | An object's invariant may **contain** another's, and nesting needs no new device: the outer invariant existentially quantifies the sub-object's *model* exactly as R3.10a quantifies an array's *contents*. Inside the outer `unfold` window the sub-object stays **folded**, so calling its methods is an ordinary call. The closing `fold` must re-name the sub-models where it happens, because a call may have moved one. A bound on a sub-model reaches a call site only as a **refinement on the model type** — F17 again, and not optional: as a `pure` conjunct inside the sub-invariant it is behind a folded slprop and does not reach. | `test/pulse_facts/ObjectFacts.fst:ranked_mk`, `ranked_bump_left`, verified. Relied on by R3.10b. |
 | F21 | An slprop `let` may take a **meta-argument-defaulted** permission binder, as `Box.pts_to` does: `let inv (this: C) (#[T.exact (`1.0R)] p: perm) (m: M) : slprop`. `inv x m` then *means* `inv x #1.0R m`. So indexing every class invariant by a permission changes no existing emission — full ownership stays what you get by not asking. | `test/pulse_facts/ObjectFacts.fst:frac__inv`, `frac_default_is_full`, verified. Relied on by R3.10c. |
 | F22 | A per-class `share` is provable from `Box.share`, `Array.share` and each sub-object's own `share`. Each closing `fold` **must** be preceded by an `assert` naming the resources it consumes: the invariant's existentials are solved by matching against the context, and after a share the context holds two candidates for every one of them. | `test/pulse_facts/ObjectFacts.fst:frac__inv_share`, `frac_outer__inv_share`, verified. Relied on by R3.10d. |
 | F23 | A per-class `gather` proves the two models **equal**. Not an extra hypothesis and not a choice: R3.9's invariant pins `m` to the abstraction function of the representation, `Box.gather` proves the two representations equal, and a function of equal arguments is equal. Two read-only aliases of one object therefore necessarily agree about it. It composes only if the two permissions are **explicit** parameters and the second view is renamed onto the first with `pts_to_injective_eq` *before* either is gathered — both matching problems, invisible at one level of nesting. | `test/pulse_facts/ObjectFacts.fst:frac__inv_gather_gen` and `frac_outer__inv_gather_gen` (a class owning a class, the smallest configuration that catches it), verified. Relied on by R3.10d. |
 | F24 | Pulse normalises `p /. 2.0R +. p /. 2.0R` to `p` for `pts_to`, which has prover support, but **not** for a user-defined slprop, which is matched syntactically. | `test/pulse_facts/ObjectFacts.fst:frac__inv_gather` needs the arithmetic discharged by an explicit `rewrite`; `PermProbe`-style `Box.share; Box.gather` round-trips without one. Relied on by R3.10d, which states `gather` as `share`'s exact inverse so the arithmetic is discharged once. |
 | F25 | Pulse does **not** split a permission at a call site. `f s s`, where `f` takes two independently-fractional parameters, fails with `Cannot prove: …__inv s _` against a context holding exactly that resource — for an object *and* for an array. Splitting is a proof step, and Pulse does not guess it. | `test/pulse_facts/ObjectFacts.fst:frac_alias`, `frac_alias_array`, verified with the `share` and failing without it. Relied on by R5.13. |
-| F27 | **Two** views of one object may be in scope at once; **three** may not. Matching an slprop against the context is a search for a *unique* candidate, so after a second `share` there are three resources with the same head and the same name and the next call is refused. Two is what read-only aliasing needs, and more is reached by nesting share/use/gather. The permission itself splits without bound — it is simultaneity that is limited. | `test/pulse_facts/ObjectFacts.fst:frac_two_views` (verified), `frac_three_views` (`expect_failure`), `frac_split_thrice` (verified). Relied on by R3.10e. |
 | F26 | Generalising a **read-only** method over the permission is a *pure* generalisation: a caller holding full ownership calls it unchanged, because Pulse instantiates the binder at `1.0R`. It is also **necessary for composition** — R3.10c propagates the outer fraction into a sub-object's invariant, so an owner's reader can only call its parts' readers if those are generalised too. | `test/pulse_facts/ObjectFacts.fst:frac_peek`, `frac_full_owner_reads`, `frac_outer_peek`, verified. Relied on by R4.11b. |
-| F19 | F18's idiom works only where the postcondition is **known**. Inside a block in statement position Pulse is still solving for that block's post, and unifying the object's model existential against a uvar fails: `Error 339: Cannot find witness for …; Cannot check relation with uvars`. Binding the witness at the allocation, discarding `exists* m. inv x m` directly, and annotating the branch `ensures emp` all fail (the last one succeeds only for a branch that touches nothing else). | `test/pulse_facts/ObjectFacts.fst:allocate_in_a_returning_branch`, verified; the failing shape is `test/diagnostics/cases/ObjectInNestedBlock.cs`. Relied on by R4.14a. |
-| F17 | A fact about the **model alone** is visible to a caller only if it lives in the model type as a *refinement*. Placed instead inside the object invariant it is unreachable: a caller holding `class_C__inv this m` cannot derive it without unfolding, and F* reports `Error 19` at the postcondition. | `test/pulse_facts/ObjectFacts.fst:client_sees_model_invariant`, verified; weakening `model_StackModel__pred` to `True` reproduces the `Error 19`. Relied on by R3.9d. |
+| F27 | **Two** views of one object may be in scope at once; **three** may not. Matching an slprop against the context is a search for a *unique* candidate, so after a second `share` there are three resources with the same head and the same name and the next call is refused. Two is what read-only aliasing needs, and more is reached by nesting share/use/gather. The permission itself splits without bound — it is simultaneity that is limited. | `test/pulse_facts/ObjectFacts.fst:frac_two_views` (verified), `frac_three_views` (`expect_failure`), `frac_split_thrice` (verified). Relied on by R3.10e. |
+| F28 | **A vtable cannot be a `Box` payload.** `slprop : Type u#4`, so a record with an invariant field lives far above `Type0` — and `Box` needs a `Type0`. So an object reference cannot simply be a box of its vtable, which is what forces F29's `dyn`. (F28b: the restriction is `Box`'s, not Pulse's — a *plain* record is unaffected.) | `test/pulse_facts/InheritanceFacts.fst:49-82`, verified. Relied on by R9.8. |
+| F29 | **`FStar.Dyn.dyn : Type0`, and `mkdyn` is universe-polymorphic.** Lowering a vtable-carrying object into `dyn` puts it back in `Type0`, so a reference into a hierarchy is boxable, arrayable and legal as a field. `mkdyn` is *not* injective (it cannot be, on pain of Cantor), which is the source of every remaining difficulty. | `test/pulse_facts/InheritanceFacts.fst:84-96`, verified. Relied on by R9.8, R9.11. |
+| F30 | **`FStar.Dyn.undyn` cannot be called from Pulse.** It is in `Dv`, and `Dv` results cannot be equated in specifications, so recovering the object needs an axiom (`recover`) rather than a definition. It must be stated in `stt`, not `stt_div`: `stt_div a emp post` is inhabited for *every* `post` (F30b, verified by a hang), so an `stt_div` axiom would be free and worthless. (F30c: `stt` itself is a `Type0`.) | `test/pulse_facts/InheritanceFacts.fst:113-201`, verified. Relied on by R9.9, §8.4's one assumption. |
+| F31 | **A stored Pulse computation must be let-bound before it is applied.** `ob.pkg.area x` does not run; `let f = ob.pkg.area in f x` does. Pulse runs an `stt`-valued term only as the head of an application. | `test/pulse_facts/InheritanceFacts.fst:203-256`, both polarities verified. Relied on by R9.12. |
+| F32 | **The model may not be fixed per hierarchy.** A vtable fixes one model type, but a subclass needs its own; the base invariant existentially quantifies the subclass model and relates it by a pure forgetting function. This is R3.9's abstraction function one level up. | `test/pulse_facts/InheritanceFacts.fst:257-316`, verified. Relied on by R9.5, R9.6. |
+| F33 | **A pack site must eta-expand every vtable slot.** F21 gives every class invariant a meta-argument-defaulted permission binder, which does not match a vtable field type until the slot is eta-expanded. | `test/pulse_facts/InheritanceFacts.fst:317-340`, verified. Relied on by R9.13. |
+| F34 | **An upcast moves no memory.** `Shape s = c;` is a pure re-reading of the same reference, so it is a `ghost fn` and free at runtime — which is what C# requires of a reference conversion. | `test/pulse_facts/InheritanceFacts.fst:341+`, verified. Relied on by R9.14. |
 | F35 | A `type … and …` group may **mix a record definition with a type abbreviation**, so a recursive class's representation, its reference type and its nullable form come out as one mutually recursive group and nothing new is needed to tie the knot. | `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.LinkedList.fst:14-16`; `test/pulse_facts/RecursiveFacts.fst:class_Node__raw`, verified. Relied on by R10.1. |
 | F36 | An inductive ownership predicate must recurse on the **model**, not on the reference. By cases on the reference there is no measure F\* can see, because the sub-model is related to the model by a `pure` equation rather than by a pattern; by cases on the model the sub-model *is* a sub-term and `decreases m` is discharged with nothing written by the user. | `test/pulse_facts/RecursiveFacts.fst:class_Node__inv_opt`, verified. This is the fact that fixes §10's whole shape, and the reason R10.5 asks for the model as a function of the fields. |
 | F37 | The five case lemmas of R10.4 are provable from the definition alone, and are placed by the **null test the C# already writes**. R4.10 opens a window around a field access; R10.6 opens the same window around the `else` branch of a null test. | `test/pulse_facts/RecursiveFacts.fst:class_Node__nil_case`, `elim_nil`, `intro_nil`, `elim_cons`, `intro_cons`, `cases`, all verified. Relied on by R10.4 and R10.6. |
@@ -98,9 +109,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F39 | The ordinary field-write idiom (R3.12's `B.op_Colon_Equals var ({ t with … })`) composes with R10.4 unchanged: the window opened by a null test is exactly the window a field write needs. This is what makes a **destructive** traversal — `Append`, an in-place BST insert — verifiable. | `test/pulse_facts/RecursiveFacts.fst:func_Lists_Append`, `func_Trees_Insert`, verified. Relied on by R10.6b. |
 | F40 | R3.10d's `share`/`gather` survive the induction: a `ghost fn rec` recursing on the model proves both, using the class's own case lemmas rather than `unfold`. | `test/pulse_facts/RecursiveFacts.fst:class_Node__inv_opt_share`, `class_Node__inv_opt_gather`, verified. Relied on by R10.7. |
 | F41 | R3.10b — "a field of class type contributes that class's invariant at an existentially bound model" — applies **verbatim** when the field's type is nullable and recursive; only the predicate's name changes. So an ordinary M2 handle class over a recursive one needs no new rule. | `test/pulse_facts/RecursiveFacts.fst:class_LinkedList__inv`, `func_LinkedList_Push`, `func_LinkedList_Count`, verified. Relied on by R10.8. |
-| F42 | Two recursive occurrences are no harder than one: the two sub-invariants sit side by side under `**`, which is what makes the two subtrees separately owned and hence what makes an in-place tree insert verifiable. | `test/pulse_facts/RecursiveFacts.fst:class_TreeNode__inv_opt`, `func_Trees_Insert`, verified. Relied on by R10.9. |
+| F42 | Two recursive occurrences are no harder than one: the two sub-invariants sit side by side under `**`, which is what makes the two subtrees separately owned and hence what makes an in-place tree insert verifiable. | `test/pulse_facts/RecursiveFacts.fst:class_TreeNode__inv_opt`, `func_Trees_Insert`, verified. Relied on by R10.3. |
 | F43 | A **back pointer** is expressible with no new device: the predecessor becomes an extra *index* of the predicate, the back pointer is constrained (`pure (r.fld_prev == left)`) rather than owned, and the recursive call passes the current reference as the new index. Reading the index *off the field* in `intro_cons` is what makes a write to `prev` a legal proof step. | `test/pulse_facts/RecursiveFacts.fst:class_DNode__inv_opt`, `func_DLists_Length`, `func_DLists_PushFront`, verified. Relied on by R10.10. |
-
 | F44 | `[]` and `::` are *notation* for the ordinary prefix constructors `Nil` and `Cons`, which work in every position the notation does — as a term, as a **pattern**, and under the discriminator `Cons?`. So a scheme phrased over "the empty constructor" and "the non-empty constructor" covers `list` with no special case, and the emitter needs only a constructor *name* and an arity. | `test/pulse_facts/UserSpecFacts.fst:nil_is_prefix`, `cons_is_prefix`, `length_prefix`, `cons_test`, verified. Relied on by R11.5. |
 | F45 | §10's whole encoding — the inductive invariant, all eight lemmas, the window, a recursive traversal and a destructive one — works verbatim over an inductive the **compiler has never heard of**, at a constructor arity that is neither a list's nor a tree's (two pure arguments and one recursive). Nothing in the template depends on which model type it is instantiated at. | `test/pulse_facts/UserSpecFacts.fst:class_Pair__inv_opt`, `class_Pair__elim_cons`, `func_Pairs_Count`, `func_Pairs_Set`, verified. Relied on by R11.6. |
 | F46 | `FStar.Int.Cast` supplies a total function for every machine-integer width pair pal-csharp maps, and each is *modular*, not partial: it carries no precondition and truncates. So an explicit C# cast has a translation with no side condition attached — which matters, because C#'s default `unchecked` context defines the same truncation. | `test/pulse_facts/ConversionFacts.fst:cast_is_total`, `cast_truncates`, verified. Relied on by R13.1. |
@@ -132,6 +142,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F72 | **A branching cursor needs no more loop machinery than a linear one.** A *search* path is determined by the tree and the key, both fixed for the loop, so a one-hole context is as much a function of the counter as a prefix is. The context lemmas recurse on the **tree** (`decreases t`), which keeps the counter an unrefined `int`. | `test/pulse_facts/TreeCursorFacts.fst:dsub`, `dctx`, `path_append`, `path_close`. |
 | F73 | **An `exists*` binder that appears only inside `pure` can never be solved.** Pulse's matcher recovers a binder from the `pts_to`s it unifies; folding a predicate whose existential has no resource to be recovered from fails with "Cannot check relation with uvars". This is what decides whether a predicate may hide a machine value (R16.3). | Reproduced while writing `TreeCursorFacts.knot_open`; resolved by the explicit-field-plus-wrapper shape now in `KnotPath.fst`. |
 | F74 | **Pulse cannot disambiguate two conjuncts of one predicate whose only difference is a pointer just read from the heap.** The fix is definitional, not a lemma: make each conjunct's model half a total projection (`subl`/`subr`) of a model the invariant already names (R16.2). | Reproduced in `TreeCursorFacts.knot_open`; the projections are in `KnotPath.fst`. |
+| F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 | F76 | **A Pulse `box` is already a nullable pointer.** `Pulse.Lib.Box` exports `null`, `is_null (r: box a) : b:bool{b <==> r == null}` and `pts_to_not_null`. So `option (box …)` is a *second* nullability layer over one that already exists, and its entire content is the two coercions R10.2b/R10.2c used to describe. Replacing it with a refinement (`class_C = b: class_C__opt { not (B.is_null b) }`) makes both coercions the identity text, deletes a `pure`-trapped existential from every recursive invariant (cf. F73), and lets each user-written cursor lemma take its cursor once instead of twice. | `test/pulse_facts/NullFacts.fst` N1–N7, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Box.fsti:33,35,108`. Relied on by R10.2, R10.2b, R10.2c, R10.2d. |
 | F77 | **Pulse does not see through an ordinary `let` when matching resources.** `class_C__inv this p m` and `class_C__inv_opt this p m` are the same term after delta, but a goal stated with one is not found in a context holding the other; an explicit `rewrite … as …` is required. This is why R10.2b being the identity *conversion* still leaves `class_C__as_opt` and `class_C__intro` in place as one-line rewrite lemmas rather than deleting them. | Reproduced in `test/pulse_facts/NullFacts.fst` while writing `inv_share`/`inv_gather_gen`. |
 | F78 | **`Pulse.Lib.Slice` is the `Span<T>` shape, and the whole of what is missing is on the C# side.** A `slice t` is a first-class value with a non-ghost `len`, a `pts_to` over its contents, `split`/`join`, `subslice` with a `subslice_rest` residue, `share`/`gather`, `copy`, and an `is_from_array` provenance token. Returning a subslice is *derivable* from the two `is_split`s `subslice_rest` is defined over — no library request is needed. What is not derivable is knowing *where in a C# program* the split and the join happen. | `test/pulse_facts/SliceFacts.fst` S1–S6, verified; `tools/fstar/lib/fstar/pulse/pulse/lib/Pulse.Lib.Slice.fsti`. Relied on by R17.1 and R17.5. |
@@ -140,11 +151,10 @@ The rules below depend on the following, each **verified against the pinned tool
 | F81 | **A receipt may not be indexed by `SZ.t` if its bounds are `exists*`-bound.** `Pulse.Lib.Slice.subslice_rest` carries the refinement `SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v`, which cannot be discharged for bounds bound by an existential — the receipt fails to typecheck. Putting the refinement in a `pure` *inside* the `exists*` does not help: it is not available where `subslice_rest` is typed. The fix is to inline `subslice_rest` into a predicate indexed by `nat`, moving the refinement onto that predicate's own binder. | `pulse/Pulse.Lib.CSharp.Span.fst`'s internal `rest`; found while writing `is_range_of`. Relied on by R17.5. |
 | F82 | **A `fold` does not normalise its indices.** `fold (rest s w p (I32.v i) …)` fails against a context holding `rest s w p (SZ.v lo) …` even where `SZ.v lo == I32.v i` is known to SMT; an explicit `rewrite … as …` first is required. F77 in a second guise, and the reason the library's borrow operations are written with a `rewrite` before each `fold`. | `pulse/Pulse.Lib.CSharp.Span.fst`, `intro_rest`. |
 | F83 | **A pure lemma must be called before the resource step it supports, not after.** `splice_same v i j; restore_range w;` verifies; the reverse order does not — the resource match happens first and has already failed by the time the lemma runs. Erased arguments must be passed `(reveal v)` explicitly. | `test/pulse_facts/SliceFacts.fst:s9_read_only_trip`. |
-| F75 | **A Pulse `let mut` needs a postcondition at the end of its scope.** A field read inside the non-null branch of a test binds a cell, so the same branch is typable as a method's tail and untypable one statement short of it — which is why a loop body's last statement must be emitted in tail position (R5.8d). | Diagnosed by hand-editing `test/tree_cursor/out/Func_Search_Find.fst`: removing the *outer* trailing `()` was the change that mattered. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
-(§5.3). F6 and F7 are constraints on the *library*, not on the emitter, and are the reason
+(R5.9). F6 and F7 are constraints on the *library*, not on the emitter, and are the reason
 `Pulse.Lib.CSharp.Array` is not a thin `include` of `Pulse.Lib.Array`.
 
 Two further points of Pulse syntax, learned the hard way and pinned by the same test:
@@ -248,7 +258,7 @@ squiggles and nothing has to invalidate a cache by hand.
 **R3.1 (scalars).** `bool→bool`, `int→Int32.t`, `uint→UInt32.t`, `long→Int64.t`,
 `ulong→UInt64.t`, `byte→UInt8.t`, `sbyte→Int8.t`, `short→Int16.t`, `ushort→UInt16.t`,
 `char→UInt16.t`, `nint→PtrdiffT.t`, `nuint→SizeT.t`. `SpecInt→int`, `SpecNat→nat`,
-`Seq<T>→Seq.seq ⟦T⟧`, `SlProp→slprop`. `float`/`double` are rejected in M1.
+`Seq<T>→Seq.seq ⟦T⟧`, `SlProp→slprop`. `float`/`double` are rejected (§8.5).
 
 **R3.2 (ownership from the C# type system).** C# already encodes what PAL needs explicit
 macros for. No attribute is required for any of these:
@@ -324,7 +334,7 @@ and `⟦S⟧ = Struct_S.struct_S`. Notes, each of which is a decision rather tha
   translated structs qualify. A reference-typed field — an array, or a class — does not,
   because it would make the struct own a resource, and a value carrying a resource needs
   the separation-logic predicate and fold/unfold discipline this rule exists to avoid.
-  Rejected as PALCS0511; see §8.
+  Rejected as PALCS0511; see §8.5.
 
 **R3.5 (struct expressions).** Three forms, all structure-preserving:
 
@@ -842,7 +852,7 @@ illegal outside a postcondition.
 
 **R4.4 (`Result`).** In an `ensures`, `Result` denotes the `returns` binder `var_result`.
 
-**R4.6 (`[Spec]` methods).** A `[Spec]` method is pure, ghost, and — in M1 —
+**R4.6 (`[Spec]` methods).** A `[Spec]` method is pure, ghost, and
 usable *only* in specification position. Consequently its C# parameter types are
 translated with the **spec** reading rather than the code reading:
 
@@ -949,8 +959,6 @@ The consequences are R4.9's, one word changed, and one of them is new.
   contracts, and the contracts are already in front of the prover.
 
 ### 4.5 Instance methods
-
-**Status: specified, not yet implemented**, alongside §3.4.
 
 **R4.10 (instance method).** An instance method of `sealed class C` translates exactly as
 R4.1 does, with three additions. The receiver becomes a leading explicit binder `this`, the
@@ -1735,16 +1743,16 @@ which is exactly what makes insertion sort's `j >= 0 && a[j] > key` unremarkable
 
 **R6.4 (arithmetic and proof obligations).** `e₁ op e₂` ⟶ the corresponding
 `Pulse.Lib.CSharp.Int32` operation, which carries the obligation. C# semantics differ from
-C's, so M1 fixes:
+C's, so the scheme fixes:
 
-| Construct | C# runtime behaviour | M1 obligation |
+| Construct | C# runtime behaviour | Obligation |
 |---|---|---|
 | `x + y`, `x * y`, … | wraps (`unchecked`, default) | **no overflow** |
 | `a[i]` | throws `IndexOutOfRangeException` | `0 <= i < a.Length` |
 | `x / y`, `x % y` | throws `DivideByZeroException` | `y != 0` |
 | `o.f` | throws `NullReferenceException` | `o != null` |
 
-M1 therefore proves **exception freedom**; `try`/`catch`/`throw` are rejected. The
+A verified program therefore **throws no exception**; `try`/`catch`/`throw` are rejected. The
 no-overflow choice matches PAL and is revisited if it proves onerous; `[Unchecked]` would
 opt into a wrapping model.
 
@@ -1824,10 +1832,12 @@ no C# statement corresponds to, with nowhere to attach a specification between t
 
 ---
 
-## 7. Worked derivation
+## 7. Worked derivation, and the detectors
 
-The inner loop of insertion sort, derived rule by rule. Note that nothing below is a
-choice: each line cites the rule that produced it.
+### 7.1 A loop, derived rule by rule
+
+The inner loop of insertion sort. Note that nothing below is a choice: each line cites the
+rule that produced it.
 
 ```csharp
 while (j >= 0 && a[j] > key) {      // R5.6
@@ -1851,377 +1861,147 @@ not what a Pulse programmer would write. If it fails to verify, Rule 3 says the 
 stronger annotation in the `.cs` file or a stronger general lemma in `Pulse.Lib.CSharp.*` —
 never a change here that special-cases this loop.
 
+### 7.2 The two mechanical detectors
+
+A derivation like §7.1 is a claim about one program. Two checks, run by `make`, are what
+stop the scheme from quietly becoming a collection of per-example accommodations.
+
+**The variant test.** Every acceptance directory ships a *second, independently worded*
+implementation of the same contract, and it must verify **with no translator change**. The
+variant is written to differ in every way that should not matter: `for` against `while`,
+inverted branches, renamed and reordered members, `++` against `x = x + 1`, an index
+computed rather than carried, a list or tree written at the *opposite null-test polarity*.
+It is deliberately not a paraphrase — a variant that merely renames locals detects nothing.
+This is the single most effective detector of example-fitted output, and it earns its keep
+in both directions: several rules exist only because a variant found them missing (R4.14b,
+F57, F58), and several apparent translator bugs turned out on inspection to be real defects
+in the hand-written variant, caught by an obligation the scheme already emitted.
+
+**The provenance lint.** `provenance-lint.sh` (R2.2) requires every top-level construct in
+every generated module to trace back to a C# source span through
+`source_range_info.json`. A construct with no provenance was invented by the emitter, and
+under Rule 3 an invented construct must either be justified as a scheme rule or removed.
+
+The other four lints (§8.2) check the tree rather than the scheme.
+
 ---
 
-## 8. Status
+## 8. What is delivered
 
-Rules are recorded here as they are validated.
+The rules above are the scheme. This section says which of them are implemented, what the
+test suite asserts about them, and what is not done — in that order. It is not a changelog:
+where a finding is already stated as a rule it is not restated here, and where a decision
+was later reversed the reversal is recorded at the rule, not here.
 
-* §1 facts **F1–F18** are verified against the pinned toolchain and
-  regression-pinned in `test/pulse_facts`. F13–F16 were established by probing
-  Pulse *before* §3.4 and §4.5 were written, which is the order §0 requires.
-* **`test/objects_probe` is the scheme-adequacy probe for §3.4 and §4.5**, and stands to
-  the class emitter as `test/probe_insertion_sort` stood to the M1 emitter. Its
-  `Class_Counter.fst`, `Func_Counter__ctor.fst`, `Func_Counter_Increment.fst` and
-  `Func_Counter_Get.fst` were produced by hand-executing R3.7–R3.13 and R4.10–R4.12 on
-  `Counter.cs`, before any class-emitting code existed, and all four verify. The probe
-  forced exactly one addition — **R4.11a**, the fold witness: refolding a read-only method's
-  invariant at a *recomputed* model fails with `Error 228: Cannot prove: class_C__inv this
-  m`, so the read-only branch must refold at the pre-state binder `m`. It also settled two
-  spellings the emitter must use: box access is written `B.op_Bang` / `B.op_Colon_Equals`
-  rather than `!` / `:=`, so that a method holding both a box receiver and `let mut` locals
-  has no operator ambiguity; and a field of another module's record is projected and updated
-  qualified (`t.Class_C.fld_x`, `{ t with Class_C.fld_x = … }`), as F10 already required for
-  structs.
-* **`test/probe_insertion_sort` was the first end-to-end validation of §2–§6.** Its
-  `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing the rules
-  above on `InsertionSort.cs` — before any emitter code existed — and verify against
-  `Pulse.Lib.CSharp.*`, proving length preservation and permutation. Every deviation the
-  probe forced was recorded here (F6, F7, R3.3, R4.6, R5.8b, R5.9 case 2) or fixed in the
-  library (`Pulse.Lib.CSharp.Seq.upd_shift_is_permutation`, `upd_same`); **none was fixed
-  by special-casing the example**, and the probe's one *annotation* failure — the invariant
-  `1 <= i && i <= a.Length`, false for an empty array — was fixed in the `.cs` file, which
-  is exactly where §0 rule 3 says it belongs.
-* **A class owns its array** (R3.10a, R3.9a, R6.11). `test/stack_class` is the test M1
-  could not have written: a `Stack` whose `int[]` lives *inside* its invariant, so the
-  storage is unreachable to a client and cannot be aliased. It needed three rules and no
-  special cases. R3.9a makes `[Spec]` on a `struct` declare a spec-only type, which R3.9
-  forces — a bounded container's model is a product of contents and capacity, and every
-  built-in ghost type is atomic. R3.10a puts the array's `A.pts_to` in the invariant and
-  binds the field name to its *contents* in every specification, so a class-level clause
-  reads exactly as an array parameter's contract does. R6.11 translates `new T[n]`.
+### 8.1 The milestone map
 
-  The specifications are functional, not structural: `Push` and `Pop` each fix the new
-  contents element by element and relate them to the old, and the model refinement
-  `Elems.Length <= Capacity` is what makes "there is room" statable by a caller who cannot
-  see inside. Sixteen modules verify, including a client that allocates a stack, uses it
-  and drops it, and `PileVariant.cs` — the same class with its members in the opposite
-  order, different field names, `this.` written out and `++`/`--` in place of assignment —
-  whose output is identical modulo those names and the declaration order they induce.
-* **The class emitter implements R3.7–R3.13 and R4.10–R4.14, and reproduces
-  `test/objects_probe` from source.** `test/counter_class` translates `Counter.cs` — the
-  probe's own source — and all five generated modules verify: the class module, the
-  constructor, the mutator, the read-only method and the client that observes F17. The
-  emitted output agrees with the hand-derived probe construct for construct.
-  `test/counter_client` covers the other half — using an object from outside it, where
-  the invariant is never unfolded and everything the caller knows comes from a `[Spec]`
-  member applied to the model. It forced two rules. **R4.11's caller side**: a call to a
-  mutator makes the receiver's post-state model an existential, so read-only-ness is
-  computed for *callees* too, from the same syntactic test that decides it for the method
-  in hand. **R4.14**, the garbage collector: an object that is allocated and not returned
-  must be explicitly dropped, which F18 pins.
+Each milestone delivered a section of this document, an acceptance directory, and an
+independently written variant of it (§7.2). None required a change to an earlier rule
+except where noted at that rule.
 
-  Two emitter constraints fell out of the same test, both consequences of Pulse matching
-  resources syntactically. An object local is initialised *into its own binder* rather
-  than aliasing a temporary, and only the *receiver* of a class's own methods is unfolded
-  — an object that merely passes through must stay folded, because every function taking
-  it expects its invariant and not its representation.
+| | Delivered | Section | Acceptance |
+|---|---|---|---|
+| M1 | Methods, contracts, statements, expressions, arrays, structs | §2–§7 | `swap` … `circular_buffer`, `insertion_sort_sorted` |
+| M2 | `sealed` classes: a model, an invariant, instance methods, ownership of arrays and of other objects | §3.4, §4.5 | `counter_class`, `stack_class`, `ring_class`, `nested_class`, `deep_class`, `account_class`, `bag_class`, `interval_class` |
+| M3 | Inheritance: abstract classes, virtual dispatch, upcast, checked downcast, depth *n* | §9 | `shape_hierarchy`, `deep_hierarchy` |
+| M4 | Recursive data structures: linked lists, binary trees, back pointers | §10 | `linked_list`, `binary_tree` |
+| M5 | User-defined specification types | §11 | `user_spec_type` |
+| M6 | User-defined ownership predicates (`[Plain]`, `SlProp`) | §12 | `dll_segment` |
+| M7 | Numeric conversions, side effects, and a production case study | §13 | `examples/adler32` |
+| M8 | Unconstrained generics | §14 | `type_param` |
+| M9 | Generic types, and generic list and tree libraries | §15 | `generic_list`, `generic_tree` |
+| M10 | Separate Pulse files and typed ghost lemmas for user predicates | §12.5 | `dll_segment` |
+| M11 | Cursors: iterative traversal of a linked structure | §16 | `list_cursor`, `tree_cursor` |
+| M12 | `null` as a pointer rather than a wrapper | §10.2 | `linked_list`, `binary_tree` |
+| M13 | `Span<T>` as a borrowed window | §17 | `array_view` |
 
-  `TallyVariant.cs` is the §7.2 variant detector for objects: the same class with the
-  field renamed, `this.` written out, `++` in place of `x = x + 1`, an expression-bodied
-  reader and the members declared in reverse order. It produces output **byte-identical**
-  to `Counter.cs`'s modulo the names, with no emitter change — the strongest evidence
-  available that the class rules are compositional rather than fitted to one example.
-* **`test/circular_buffer` has been done again, properly** (`test/ring_class`). M1's
-  version is a struct beside an array the caller carries, with every specification written
-  against `head`, `count` and raw indices, because a struct can hide nothing. The class
-  version owns the array (R3.10a), and its model is a queue of `Elems` with room for
-  `Capacity` — the wrap-around appears once, in the abstraction function
-  `Slice(Rotate(Contents(buf), head), 0, count)`, and nowhere else. A client proves FIFO
-  order, and proves that filling, draining and refilling a capacity-two buffer is
-  unobservable, without naming a field. The proof needed three general sequence facts —
-  `rotate`'s characteristic equation and two modular ones — and they went into
-  `Pulse.Lib.CSharp.Seq` over arbitrary sequences, which is §0 rule 3 working as designed:
-  every module verified on the first attempt once the library had them. §7.2's variant
-  detector was run on it — `QueueVariant.cs`, the same class with members in the opposite
-  order, renamed fields, `this.` written out, compound assignment and expression bodies —
-  and the output is identical modulo names and declaration order. Wrap-around is
-  translated as arithmetic, not recognised as a shape.
-* **An object may own other objects** (R3.10b, `test/nested_class`). The outer invariant
-  quantifies each sub-object's *model* and holds each sub-object's own invariant, which is
-  R3.10a's rule for arrays with one word changed — and, like it, needed no new annotation.
-  `Range` owns two `Counter`s and states `low.N <= high.N`, a fact neither `Counter` could
-  express; that is what composition is for. Inside R4.10's window a sub-object stays
-  **folded**, so `low.Bump()` is an ordinary call and the question the old refusal could
-  not answer — when may the outer object open the inner one? — turns out not to arise, as
-  it never opens it. A client of `Range` names no field at any depth, and separation gives
-  it that advancing one `Range` leaves another alone *through two levels of ownership*.
-  `test/deep_class` takes it further: three levels, and one class owning an array *and* an
-  object, with an invariant tying them together. It also found the one cost of depth — a
-  `[Refine]` belongs to the class model type, so an owner's composite model, built from
-  spec structs, does not inherit it and each level must republish what its owners need.
+`switch` (R5.14) arrived between M7 and M8 and has its own directory, `switch_stmt`.
 
-  `AdvanceBy` puts a loop over a sub-object, which is R5.12 and R3.10b at once: `low` is
-  written so its model is quantified, `high` is not so its model is named before the loop.
+### 8.2 What the suite asserts
 
-  Two pre-existing defects surfaced. R4.2's prologue was never emitted for a **constructor**
-  — unreachable until a constructor first handed a parameter to a call, which is what
-  `new Counter(from)` does. And R4.11's read-only test counted *any* instance call as a
-  write, which would have made every composite reader a mutator and its result unusable to
-  a caller; it now follows the call, treating a cycle as a write.
-* **`switch` is supported** (R5.14, `test/switch_stmt`). It is a notation for an if/else
-  chain and nothing more, so it costs nothing to prove: the two tiers hold for a `switch`
-  exactly as they do for the chain a user would otherwise write. The rule's own content is
-  three details — the scrutinee is bound so it is evaluated once, `default` moves to the
-  end, and a `break` that is not a section's last statement is refused (PALCS0577) because
-  after the rewrite there is no switch left for it to leave. The two bugs the variant found
-  (F57, F58) were both in rules that already existed, which is the outcome the discipline
-  is meant to produce.
-* **A loop inside an instance method works** (R5.12, `test/bag_class`). This was refused
-  until the sub-scheme was written, and writing it turned out to need one idea: inside
-  R4.10's window a loop carries the *representation*, and which half of it is
-  existentially quantified is read off what the body writes — a field assignment unsettles
-  the record, an element write unsettles only that array's contents, and anything the loop
-  leaves alone is named *before* the loop instead. That last part is not an optimisation:
-  `Bag.Max` is read-only, so R4.11a re-folds at the model it was handed, which an
-  existentially quantified record could never satisfy. `Bag.Fill` is the other side — it
-  writes elements, and needs the contents to move while the record does not.
-  Implementing it also found a real unsoundness in R4.11's read-only test: it asked
-  whether the body assigned a *field*, and `items[i] = v` assigns none, so a method that
-  demonstrably moves its model was being given `preserves`. R3.10a says the contents are
-  part of the model, so writing one is a mutation, and the test now peels an assignment
-  target down to its root. `BagVariant.cs` writes both loops as `for` loops and gets,
-  modulo names, the same Pulse.
-* **The transiently broken invariant is exercised.** `test/interval_class`'s `Shift`
-  writes `lo` and then `hi`; between the two the object is a well-formed
-  `class_Interval__raw` whose `lo <= hi` is false. R3.10's choice of a `pure` conjunct over
-  a refinement is what admits it — a refinement would have to hold of that intermediate
-  record, and R3.6 writes a whole record per assignment, so there is no way to write both
-  fields at once and dodge the question. The intermediate state is visible in the output as
-  two `B.op_Colon_Equals` with no `fold` between them.
-* **R4.10a and R4.10b are enforced** (`PALCS0526`, `PALCS0525`). Roslyn reports both as
-  errors about a static method in a namespace the user has never heard of, because that is
-  what the shim is; the remapping states them in terms of the annotation surface instead —
-  "write `@this`", and "a contract may name only what a client could name". Every other
-  binding error is still passed through verbatim, because Roslyn words it better than we
-  would.
-* **R3.13 is Pulse's** (no diagnostic). A call passing one object — or one non-`[Frac]`
-  array — to two owned parameters is translated faithfully and refused by the prover, which
-  is the only thing that can tell an alias from a coincidence. `Bank.Transfer` in
-  `test/account_class` is the shape it protects; `test/pulse_refusals` is the misuse, and
-  checks that the refusal arrives on the calling line.
-* **Conservation across two objects verifies.** `test/account_class` proves
-  `from.Balance + to.Balance` is unchanged by a transfer. Nothing asserts that the two
-  accounts are distinct or that the second call left the first alone; separation supplies
-  both, and the property is statable at all only because each object carries its own model
-  binder (R3.10).
-* **R3.9d is mechanically enforced.** `PALCS0527` refuses an `[Invariant]` clause that
-  mentions no field. Such a clause is a fact about the model alone, and F17 shows it is
-  unreachable from inside the invariant: it verifies where it is written and fails much
-  later, in an unrelated client file. `test/diagnostics/cases/ModelFactInInvariant.cs`
-  pins it. `PALCS0524` likewise refuses a class that carries contracts but declares no
-  `[Model]`, rather than letting its members fall through to the generic `PALCS0530`.
-* **The emitter implements R2–R6 and reproduces the probe from source.** The whole M1
-  acceptance suite translates and verifies from annotated C#: `swap`, `abs_max`,
-  `out_param`, `spec_let`, `sum_array`, `array_reverse`, `insertion_sort`, `insertion_sort_sorted`,
-  `binary_search`, `lemma_call`, `ghost_arg`, `pulse_interop`, `break_continue`,
-  `compare_elements`, `point_struct` and `circular_buffer`.
-* **Ill-formed C# stops at the C# level.** `Passes/Check.cs` is the standalone
-  well-formedness validator PAL runs twice: it walks the whole IR after Normalize, reports
-  and never rewrites, and covers the cross-node conditions no single lowering site can see
-  (`PALCS05xx`, plus `PALCS09xx` warnings for `[Admit]` and `Pal.Assume`).
-  `test/diagnostics` is its counterpart to the verification tests — forty-six cases, each
-  headed by the diagnostic it must produce, each required to exit non-zero, poison
-  `TranslationErrors.fst`, and carry a span in the user's own file.
-* **Insertion sort is fully verified** (plan tiers 7.1a *and* 7.1b, in a single method).
-  `test/insertion_sort_sorted` proves, of the ordinary two-nested-loop C# insertion sort:
+Verification tests are the smaller half. Each of the following asserts something a
+verification test cannot.
 
-  ```
-  Contents(a).Length == Old(Contents(a)).Length
-  Sorted(Contents(a), 0, Contents(a).Length)
-  IsPermutation(Contents(a), Old(Contents(a)))
-  ```
+* **The variant tests (§7.2)** are the contortion detector, and every acceptance directory
+  ships one.
+* **`test/diagnostics`** is the negative suite: 54 cases, each headed by the diagnostic it
+  must produce, each required to exit non-zero, poison `TranslationErrors.fst`, and carry a
+  span in the user's own file rather than in generated Pulse.
+* **`test/pulse_refusals`** is the suite that became possible once refusing was *not* the
+  answer (R3.13): programs that translate cleanly, fail in F\*, and must fail for the
+  stated reason on the marked line. Aliasing, a self-call with the invariant unfolded, and
+  ownership transfer into a field — the last two had been documented here for milestones
+  without ever being executed, because there was nowhere to put a test whose expected
+  outcome was a proof failure.
+* **Six lints** run in the same `make`: `no-example-names.sh` forbids any acceptance
+  directory or method name from appearing in `Pal.Compiler`; `provenance-lint.sh` (R2.2)
+  requires every top-level construct in every generated module to trace to a C# span;
+  `diagnostic-ids.sh` keeps the analyzer's declared ids in step with the passes that raise
+  them; `fst-configs.sh` and `cs-projects.sh` keep the editor's view of the tree in step
+  with the build's; `ide-build.sh` requires every test project to compile clean *with the
+  analyzer loaded*.
+* **Every test directory compiles as stock C#.** `test/build-cs.sh` synthesises a plain
+  project — deliberately not one that loads pal-csharp's analyzer, since a project that did
+  would no longer be checking the thing that matters. This is the core invariant asserted
+  against the C# compiler rather than against a document.
 
-  which is the full functional-correctness statement for a sort — the output is ordered
-  *and* it is the input rearranged. Two techniques were needed, and both are recorded here
-  because they generalise:
+### 8.3 Findings that are not rules
 
-  1. **Spec predicates used in loop invariants must be total.** A `[Spec]` predicate
-     carrying a `[Requires]` becomes a refinement on its last binder (R4.6), and that
-     refinement must then be discharged wherever the predicate appears — including at
-     invariant *establishment*, where the loop counter is often out of range (`i = 1` on an
-     empty array). `Sorted`, `AllAbove` and `Dominated` therefore take no `[Requires]`; the
-     index bounds are folded into the quantifier's antecedent, from which well-typedness of
-     `s[i]` follows.
-  2. **The proof is carried entirely by annotations in the `.cs` file** — four invariants
-     naming the two intact runs either side of the hole, and four `Pal.Assert` steps
-     restating them at the narrowed hole after the shift — plus one general library lemma
-     (`Pulse.Lib.CSharp.Seq.upd_shift_is_permutation`) reached through a `[Lemma]` method.
-     That is precisely the split §0 rule 3 mandates: **no emitter change was made for this
-     proof.**
-* **The contortion detector is running.** `abs_max`, `sum_array`, `array_reverse` and
-  `insertion_sort` each ship a *variant*: the same contract and algorithm written
-  differently — `for` against `while`, inverted branches, renamed and reordered locals,
-  an exchanged guard, an index computed rather than carried, an inferred measure against a
-  given one. All four verify with **no change to the translator**. `test/no-example-names.sh`
-  additionally forbids any acceptance-test directory or method name from appearing anywhere
-  in `Pal.Compiler`, and `test/provenance-lint.sh` (R2.2) requires every top-level
-  construct in every generated module to trace to a C# span. `break_continue` and
-  `compare_elements` ship variants too, and §10's `linked_list` and `binary_tree` each ship
-  one written at the *opposite null-test polarity* — the detector that matters most there,
-  since a rule recognising only `== null` would be a rule about how the acceptance test
-  happens to be phrased. Eight variant directories in all, none of which required a
-  translator change.
-* Every fix demanded by these tests landed where §0 rule 3 requires. `binary_search` needed
-  three `Pal.Assert` steps and a measure that decreases on the iteration that finds the key
-  — all in the `.cs` file. `sum_array` needed the `SumsFit` precondition and the
-  `SumUpToStep` unfolding lemma — again in the `.cs` file. The only emitter changes were
-  new *rules*: R4.7, R4.8 and R2.1's type qualification.
+Recorded here because they generalise and have nowhere else to live.
 
-* **Structs closed the suite, and cost four rules rather than four special cases.**
-  `test/circular_buffer` was the last acceptance test, and every failure it produced was
-  either a missing *rule* or a missing *annotation* — never an example-shaped patch:
-  R6.7's `Old`-under-a-binder scope, R6.8's receiver parenthesisation, R6.9's mathematical
-  `[Spec]` results and R6.10's by-reference arguments are all stated context-free above and
-  apply to every program. Everything else went into the `.cs` file: the pure `At` model the
-  executable `Wrap` is tied to (a specification may only call `[Spec]`/`[Lemma]` methods,
-  never executable ones), the `capacity <= 2^30 - 1` bound that makes `Head + Count`
-  provably non-overflowing, and the explicit `a.Length == Old(a.Length)` a quantified
-  frame condition needs.
+* **A `[Spec]` predicate used in a loop invariant must be total.** A `[Requires]` on a
+  `[Spec]` predicate becomes a refinement on its last binder (R4.6), and that refinement
+  must then be discharged wherever the predicate appears — including at invariant
+  *establishment*, where the counter is often out of range (`i = 1` on an empty array). So
+  `Sorted`, `AllAbove` and `Dominated` take no `[Requires]`; the index bounds go into the
+  quantifier's antecedent, from which well-typedness of `s[i]` follows. This is the single
+  most common cause of a failed invariant that looks like a prover problem and is not.
+* **Pulse matches resources syntactically, which constrains the emitter twice.** A local
+  that owns something is initialised *into its own binder* rather than aliasing a temporary
+  (F77; R12.4 for allocation, R17.5 for a span borrow). And only the *receiver* of a
+  class's own methods is unfolded — an object that merely passes through stays folded,
+  because every function taking it expects its invariant and not its representation.
+* **An analyzer must run the emitter too.** Stopping at the checker looks right, since an
+  editor has no business writing files, but eight of the diagnostics — R5.3's unbridgeable
+  type, F3's measure over an existential, an unsupported specification term — are only
+  discovered while emitting. An analyzer reporting the rest would be worse than none: it
+  would tell a user who had cleared every squiggle that the program was ready, and the
+  build would disagree. Parity is cheap, because emission is string building over an IR
+  already in hand; the output is thrown away.
 
-* **The diagnostics are in the editor** (`src/Pal.Analyzers`, `test/analyzer`). The
-  analyzer states no rule of its own: it runs the compiler's own passes over the
-  compilation the IDE already has, and turns each `PalDiagnostic` into a Roslyn one.
-  Everything `palcs` refuses, the editor underlines, in the same words and at the same
-  span — including a span *inside* a specification string, which is why `IrLoc` has
-  carried an end position since M1. There is no second copy of the subset, so there is
-  nothing to drift.
+  The gap was found by wiring, not by `test/analyzer`, which is the more useful lesson: a
+  hand-picked case set is exactly what fails to notice a whole pass going unrun. The test
+  now requires every directory of `Pal.Compiler` that raises an id to be represented among
+  its cases.
+* **What Pulse said must arrive, not be recomputed.** An analyzer cannot run a prover, but
+  it can read the last answer, and Roslyn has a sanctioned way to depend on a file:
+  `AdditionalFiles`, which it tracks and re-runs analysis over. `palcs report` writes
+  `verification.txt` (R2.3) and the analyzer reports each message at its mapped C# span. An
+  analyzer that opened the file itself would read something Roslyn does not know it depends
+  on, so the result would cache against a key that omits it and the squiggles would go
+  quietly stale — the one failure mode worse than having none.
+* **Two views of one resource are the limit** (F27): a third makes Pulse's matcher
+  ambiguous, so more observers are reached by nesting share/use/gather. Relatedly, Pulse
+  does not split a permission at a call site (F25), for objects or for arrays — which is
+  why R4.9's claim since M1 that "the same array may be passed to two parameters at once"
+  was unreachable until R5.13's `Pal.Share`/`Pal.Gather` existed.
+* **A model-level fact is unreachable from inside an invariant** (F17), and fails much
+  later, in an unrelated client file. `PALCS0527` refuses an `[Invariant]` clause that
+  mentions no field for this reason — a diagnostic whose whole value is moving a failure to
+  where it can be understood.
 
-  *Its own passes* includes the emitter, whose output is then thrown away. This was not
-  the first design and the correction is worth recording: stopping at the checker looks
-  right, since an editor has no business writing files, but eight of the forty-six
-  diagnostics — R5.3's unbridgeable type, F3's measure over an existential, an unsupported
-  specification term — are only discovered while emitting. An analyzer that reported the
-  other twenty-eight would be worse than none: it would tell a user who had cleared every
-  squiggle that the program was ready, and the build would then disagree. The parity is
-  cheap, because emission is string building over an IR already in hand. What the analyzer
-  still does not do is write anything or run F\*: verification is a separate, slow,
-  deliberate act, and what an editor can give for free is the answer to "is this program
-  inside the language at all".
+### 8.4 The inheritance studies: the probe record for §9
 
-  The gap was found by the wiring in §8's editor note rather than by `test/analyzer`,
-  which is the more useful lesson: the acceptance test picked its cases by hand, and a
-  hand-picked set is exactly what fails to notice a whole pass going unrun. It now checks
-  that every directory of `Pal.Compiler` that raises an id is represented among its cases,
-  so a pass added later, or one the analyzer stops running, fails the build.
-
-  It bails out twice before doing any work: on a project that does not reference
-  `PalLang`, and on a compilation C# itself has already rejected — the second for the same
-  reason `palcs` does it, that reporting a binding error a second time in worse terms
-  helps nobody.
-
-  What Pulse said arrives rather than being computed. An analyzer cannot run a prover — it
-  is asked to answer between keystrokes — but it can read the last answer, and Roslyn has
-  a sanctioned way to depend on a file: `AdditionalFiles`, which it tracks for changes and
-  re-runs analysis over. So `palcs report` writes `verification.txt` when the proof runs
-  (R2.3), `test/pal-tests.props` lists it, and the analyzer reports each message at the
-  C# span it was mapped to, as `PALCS0600`. Run `make`, watch the squiggles change. The
-  alternative — an analyzer opening the file itself — reads something Roslyn does not know
-  it depends on, so the result gets cached against a key that does not include it and the
-  squiggles go quietly stale, which is the one failure mode worse than having none.
-
-  Two things had to be arranged, and neither is a translation concern. A Roslyn analyzer
-  is loaded into whatever process is compiling, which may be .NET Framework, so it must be
-  `netstandard2.0`; `Pal.Compiler` was `net10.0` for no better reason than that it was the
-  default when the only consumer was a command-line tool. It uses no API newer than
-  netstandard2.0, so multi-targeting it cost one `#if`'d shim file — `Index`, `Range`,
-  `IsExternalInit`, and four BCL overloads — and changed no real code. And an analyzer must
-  declare its diagnostic ids before it has seen a program, which is a list, and a list
-  drifts: `Diagnostics/Catalog.cs` holds the ids and *only* the ids, with the message still
-  written where the rule is checked, and `test/diagnostic-ids.sh` greps the passes for
-  `"PALCSnnnn"` literals and fails the build if the two sets or the two severities disagree.
-
-  `test/analyzer` builds real projects with the analyzer loaded, using
-  `test/diagnostics`'s own cases so that the expectation is shared rather than restated. It
-  checks the half a negative test cannot state as well: a program that is inside the
-  language builds clean, with no pal-csharp diagnostic of any severity — and *builds*,
-  which asserts the project's core invariant against the C# compiler rather than against a
-  document.
-
-  Using it is a matter of the editor loading a project that has it. The test directories
-  deliberately carry no `.csproj` for the build — `test/build-cs.sh` synthesises a *stock*
-  one, because the obligation it checks is that annotated C# is ordinary C#, which a
-  project loading pal-csharp's own analyzer would no longer be checking. So the editor
-  gets its own, generated by `test/cs-projects.sh`: one project per directory (the tests
-  reuse type names across directories on purpose, so a single project would not compile),
-  each four lines deferring to `test/pal-tests.props`, plus a `Pal.Tests.sln` listing them
-  and a `.vscode/settings.json` pointing at it. `Pal.slnx` stays the product-only solution
-  that `make` and CI build. `cs-projects.sh --check` runs in the lint beside
-  `fst-configs.sh --check`, and for the same reason: an editor that disagrees with the
-  build about what a directory contains is worse than an editor that knows nothing about
-  it.
-
-  The lint goes one step further and *builds* those projects (`test/ide-build.sh`),
-  requiring a clean compile. Two obligations look alike here but are converse to each
-  other: the stock build asserts that annotated C# needs nothing of ours to compile, and
-  this one asserts that the analyzer, given the same code, has nothing to say about it. A
-  spurious diagnostic passes the first and every proof in the suite, and is still the
-  first thing a contributor sees. `test/diagnostics/cases` is excluded by name — it is the
-  one project whose purpose is to not compile — and that exclusion is the script's only
-  piece of knowledge about the tree; everything else it builds comes from `Pal.Tests.sln`,
-  which `cs-projects.sh` generates and the lint above keeps honest.
-
-* **A refusal that was in the wrong place is gone** (`test/pulse_refusals`). `PALCS0520`
-  detected an aliased call and refused it, so that F* would not have to explain itself in
-  Pulse names. R3.13 records why that was a mistake in full; the short version is that a
-  syntactic check for `f(a, a)` is not the rule it was standing in for, and that the case
-  it guarded had been hiding a second bug for as long as it existed. The rule is now
-  Pulse's, and what was really wanted — the message on the right C# line — is R2.3.
-
-  `test/pulse_refusals` is the suite that became possible once refusing was not the
-  answer: three programs that translate cleanly, fail in F*, and must fail *for the stated
-  reason* and *on the marked line*. Aliasing, a self-call with the invariant unfolded, and
-  ownership transfer into a field — the last two had been documented in this file for
-  milestones without ever being executed, because there was nowhere to put a test whose
-  expected outcome was a proof failure. Its check that each case still compiles as ordinary
-  C# is the same core invariant every other test directory asserts.
-
-  The third case is worth singling out. Its message lands on the *constructor*, not on the
-  assignment inside it, because what cannot be discharged is the constructor's exit — where
-  it owes both `this`'s invariant and the parameter's back. The line map got that right
-  without being told, which is the evidence that R2.3's containment rule is the right one
-  and not a rounding.
-
-* **Object invariants are indexed by a permission** (R3.10c–R3.10e, R4.9a, R4.11b, R5.13),
-  so an object can be *observed* rather than owned, and two names can observe one object at
-  once. `test/frac_alias` is the acceptance test: two `[Frac]` object parameters called on
-  one object, an owner observed through a fraction whose two parts are read through the
-  same fraction, the array case that closes `test/compare_elements`'s standing gap, and a
-  variant that reaches the alias through a local.
-
-  The feature is textually additive, and F21 is why: the permission binder is
-  *meta-argument-defaulted*, exactly as `Box.pts_to`'s is, so `class_C__inv x m` still means
-  full ownership and every rule that existed before this one emits what it emitted before.
-  Every class test verified unchanged.
-
-  Four things the probes forced, none of them anticipated. **F23's composition**: a nested
-  `gather` needs its permissions as *explicit* parameters and needs the second view renamed
-  onto the first with `pts_to_injective_eq` *before* either is gathered — both are matching
-  problems, both are invisible at one level of nesting, and a class owning a class is the
-  smallest thing that catches them. **F25**: Pulse does not split a permission at a call
-  site, for objects or for arrays, which means R4.9's claim since M1 that "the same array
-  may be passed to two parameters at once" was never actually reachable; R5.13's
-  `Pal.Share`/`Pal.Gather` is what makes it so. **F26**: generalising read-only methods over
-  the permission is not an optimisation but the thing that makes R3.10c compose, because a
-  fractional owner reads its own parts at its own permission. **F27**: two simultaneous
-  views are the limit — a third makes the matcher ambiguous — so more observers are reached
-  by nesting share/use/gather, and R3.10e says so rather than claiming otherwise.
-
-  One rule was found by the variant test rather than by design. **R4.14b**: `C x = y;` binds
-  a second name to one object, so it emits nothing and shares the slot. Before that, R4.14
-  discarded the alias's invariant at the end of the method — taking the resource the method
-  had to hand back. The §7.2 detector doing exactly what it is for.
-
-### Inheritance: a design study, not yet a scheme
-
-M2 translates `sealed` classes only (R4.13). Before proposing a C# surface for
-`abstract`/`virtual`/`override`, the encoding was worked out **directly in Pulse** and
-verified end to end: `test/pulse_facts/ShapeHierarchy.fst` is a complete
+§9 is the scheme; this is what it was derived from. Before any C# surface for
+`abstract`/`virtual`/`override` was proposed, the encoding was worked out **directly in
+Pulse** and verified end to end: `test/pulse_facts/ShapeHierarchy.fst` is a complete
 `Shape`/`Circle`/`Square` hierarchy with a heterogeneous `Shape[]`, and
 `test/pulse_facts/InheritanceFacts.fst` pins the facts (F28–F34) it rests on. Every
-construct in the study carries the C# it stands for in a comment. **No rule below is
-approved; this section records what the target must be, so that §0's "facts first" is
-satisfied before any emitter work.**
+construct carries the C# it stands for in a comment.
+
+It is kept because §9's restrictions are only intelligible against it: each of R9.2, R9.3
+and R9.4 is a refusal to translate something the studies did not probe, and this is the
+record of what they did.
 
 The encoding, in one line: a class is a **vtable record** carrying its representation
 type, its invariant and its methods, and an object is that record paired with its
@@ -2250,7 +2030,7 @@ Five findings that the study settled, each of which would otherwise have been gu
 2. **`share`/`gather` are not derivable from `inv`** — how a permission distributes over
    an object's parts is the implementation's business — so any hierarchy that supports
    read-only aliasing must carry them in the vtable. They can be `stt_ghost`, and a
-   `ghost fn` can project the ghost package and run them, so §3.10e's aliasing story
+   `ghost fn` can project the ghost package and run them, so R3.10e's aliasing story
    survives inheritance at zero runtime cost. This was the main open question and it
    resolved favourably.
 3. **`gather` forces a ghost index.** Two views of one `Shape` unfold to two *separate*
@@ -2291,14 +2071,19 @@ every emitted `while` to carry `decreases` precisely to stay in `stt`. It does *
 imply injectivity of `mkdyn`, because each `recover` is a separate computation — which is
 why finding 3 above is a genuine constraint and not a consequence.
 
-**Consequences for a future scheme.** A class will need *both* faces — a concrete
-invariant for its own methods (R4.10) and a package for its clients — and the choice must
-be **pay-as-you-go**: a `sealed` class must keep today's translation verbatim, or M2's
-"textually additive" property is lost. The cheaper alternative, which needs no axiom at
-all, is a **closed-world sum of representations** for a hierarchy whose subclasses are all
-in the compilation; it does not support separate compilation or open extension. The
-standing recommendation is still to do **interfaces first**, where there is no
-representation to inherit and no `base` call to model.
+**Consequences, and what §9 did with them.** A class needs *both* faces — a concrete
+invariant for its own methods (R4.10) and a package for its clients — and the choice had
+to be **pay-as-you-go**, since a `sealed` class must keep M2's translation verbatim or the
+"textually additive" property is lost. §9 is that choice, and R9.1 is where it is drawn.
+The cheaper alternative was a **closed-world sum of representations** over a hierarchy
+whose subclasses are all in the compilation, needing no axiom at all; it was rejected
+because it supports neither separate compilation nor open extension.
+
+The study's closing recommendation — do **interfaces first**, where there is no
+representation to inherit and no `base` call to model — was not followed, and §8.6 records
+why: an interface adds *multiple* implementation, which R9.8 pins as hard, and the
+motivating example needs ownership in a virtual method's signature (R9.9a), which is a
+separate problem again.
 
 #### Depth three: `test/pulse_facts/DeepHierarchy.fst`
 
@@ -2377,7 +2162,7 @@ by `d == mkdyn x`. `quad__inv_at` carries that refinement at each hop, so the ca
 cannot fail; but it cannot fail because the encoding only lets you *write* the casts
 whose test is redundant. A cast that might fail is not one this study proves safe, it is
 one this study cannot express. That is the right stance for a verifier — a verified cast
-is one that cannot throw, consistent with M1's exception-freedom (§5.2) — but it is a
+is one that cannot throw, consistent with exception-freedom (§6) — but it is a
 restriction on the source language, not a theorem about C#.
 
 Nor is the cast free at *runtime*: depth `k` costs `k` recoveries where the CLR does one
@@ -2424,131 +2209,117 @@ header check. What is free is the **proof**, and the details are:
   real choice to make — reject `as` and failing casts outright, or admit them and pay
   for the stronger axiom.
 
-Not probed, and to be probed before any rule is written: `base.M()`; `protected`; a
-class that overrides some methods and inherits others (every class in the study supplies
-a full vtable, which is correct but says nothing about building one from a partial
-`override` list); an `abstract` class with fields, and hence a constructor chain; a
-class holding a `Shape` *field* (boxable per F29, but nested-invariant composition à la
-R3.10b is untested); and a cast that may fail.
+Still not probed, and still to be probed before any rule admits them — these are exactly
+the restrictions R9.2, R9.3 and R9.4 impose: `base.M()`; `protected`; a class that
+overrides some methods and inherits others (every class in the studies supplies a *full*
+vtable, which is correct but says nothing about building one from a partial `override`
+list); an `abstract` class with fields, and hence a constructor chain; a class holding a
+`Shape` *field* (boxable per F29, but nested-invariant composition à la R3.10b is
+untested); and a cast that may fail.
 
-### Not yet done
+### 8.5 Not yet done
 
-* **Packaging the analyzer as a NuGet package.** It is wired into `test/analyzer` as
-  `Analyzer` items, which is enough to run it and enough to test it, but a user still has
-  to point at the built assemblies. A package also has to carry `System.Text.Json` and
-  `System.Memory` for a .NET Framework host, where they are not in the shared framework;
-  under `dotnet build` they resolve today.
-* **Live squiggles are per-compilation work.** The analysis is whole-program — a call needs
-  its callee's contract — so it runs once per compilation and is then reported per file.
-  On the programs in `test/` that is milliseconds; nothing has been measured at a scale
-  where it would not be.
-* `Span<T>` and `ReadOnlySpan<T>`. **Done since, for a whole-array span** (§17): both map
-  to the array slot R4.9 already had, so `.Length`, indexing, bounds obligations, `[Frac]`
-  and loop invariants are the array's rules unchanged, and the implicit `T[]` conversion
-  emits nothing. A span that is a *window* — `Slice`, `s[i..j]`, `stackalloc` — is refused
-  as `PALCS0590`, because the open question there is a surface one and not a proof one
-  (§17.5).
-* A struct field must be a value — a scalar or another translated struct. An array or
-  class field is **PALCS0511**, and that is the model rather than a shortcut: a struct
-  copy would duplicate ownership of the same memory. Storage therefore travels alongside
-  the state it describes, as in `test/circular_buffer`. A *class* has no such restriction
-  (R3.10a), so `test/stack_class` is what `test/circular_buffer` wanted to be.
-* Generics, interfaces, `string`, and `float`/`double` remain unspecified as well as
-  unimplemented. §3.4 itself is now complete for the field kinds it admits: a class field
-  may be a value, an array (R3.10a) or another annotated object (R3.10b). What is refused
-  is a spec-only field type (PALCS0531) and a class with no `[Model]` (PALCS0500), and
-  neither is a gap — there is no resource to own in the first case and no model in the
-  second.
-* **Object abstraction is deliberately deferred.** `class_C__inv` is specified as a
-  *concrete* definition in the class's own module. Hiding it behind an `.fsti`
-  (`val class_C : Type0`, `val class_C__inv : class_C -> model_M -> slprop`) works
-  and needs no F\* `friend`, but it requires a module shape the emitter does not have
-  today, and C# `private` already hides the representation at the source level. The step is
-  available when proof performance or genuine information hiding demands it.
+**Language constructs outside the subset.** `string` and `float`/`double`; `interface`
+declarations; *constrained* type parameters (§14 delivers unconstrained ones, and §14.4
+says why a constraint is a typeclass obligation rather than a syntactic one);
+`IEnumerable<T>` and `foreach`; delegates and lambdas in executable position; `async`;
+`goto`; `try`/`catch`/`throw`; `Memory<T>` and `ArraySegment<T>` (§17.5); `stackalloc`
+(R17.7); a non-tail `return` **inside a loop** (R5.5b reaches every other position); and a
+`switch` label that is a pattern or carries a `when` guard.
+
+**Gaps in the scheme, each with its reason.**
+
+* **A struct field must be a value** — a scalar or another translated struct. An array or
+  class field is `PALCS0511`, and that is the model rather than a shortcut: a struct copy
+  would duplicate ownership of the same memory. Storage travels alongside the state it
+  describes. A *class* has no such restriction (R3.10a, R3.10b), which is why
+  `test/stack_class` is what `test/circular_buffer` wanted to be.
+* **Object abstraction is deliberately deferred.** `class_C__inv` is a *concrete*
+  definition in the class's own module. Hiding it behind an `.fsti` works and needs no F\*
+  `friend`, but requires a module shape the emitter does not have, and C# `private` already
+  hides the representation at the source level. Available when proof performance or genuine
+  information hiding demands it.
 * **An object may not be allocated in a block that closes around it** (R4.14a,
   `PALCS0001`). F19 is a limitation of Pulse's inference, not of the scheme, and the
   workaround — allocate in the method's block, or in a branch that returns — is usually
-  what the code wanted anyway. `test/ring_class/RingScope.cs` covers what does work,
-  including two buffers on two arms of one `if`.
-* **A field is not yet nameable in a spec position outside a loop or a ghost statement.**
-  R5.11a and R5.12 bind `this.f` where the emitter has just named the representation; a
-  `[Requires]` or `[Ensures]` still reads against the model (R3.9c), which is right, but
-  there is no third context in which a field is in scope. Nothing so far has wanted one.
+  what the code wanted. `test/ring_class/RingScope.cs` covers what does work.
 * **Object lifecycle is unspecified.** A class with two-phase initialisation or `Dispose`
-  wants a *state*-indexed invariant — `class_C__inv this st m` — and nothing in M2 has one.
-  R4.13's `sealed`-only restriction keeps it out of scope for now.
-
-  Note that **calling an instance method on `this` is not on this list**. It is settled, by
-  design: R4.10 translates it faithfully, its precondition asks for a folded invariant, the
-  window it runs in has an unfolded one, and Pulse reports the mismatch. There is nothing
-  for the emitter to add.
+  wants a *state*-indexed invariant, `class_C__inv this st m`, and nothing has one.
 * **Reference identity** — `ReferenceEquals`, and `==` on a class — has no story. `Box`
   supports equality, but nothing relates it to the ownership discipline.
-* A non-tail `return` **inside a loop** is rejected rather than mistranslated; R5.5b's
-  rewrite reaches every other position. (Numeric conversions between machine-integer
-  widths were on this list until §13; they are now R13.1 and R13.4.)
-* `out` is modelled exactly as `ref`, not as `pts_to_uninit` strengthening to `pts_to`, so
-  a caller must initialise an `out` argument before the call.
-* A ghost argument determined only by the pure part of a contract cannot be passed at a
-  call site (R4.5), because ghost arguments are resolved by unification and there is no
-  zero-cost C# surface for explicit implicit application.
+* **A field is not nameable in a spec position outside a loop or a ghost statement.**
+  R5.11a and R5.12 bind `this.f` where the emitter has just named the representation; a
+  `[Requires]` or `[Ensures]` reads against the model (R3.9c), which is right. There is no
+  third context, and nothing has wanted one.
 * **A postcondition cannot say why a loop stopped.** R5.10's break flag is internal to the
-  translation, so an invariant cannot mention it, and a contract that needs "the loop ran
-  to completion" is unstatable — see the note in `test/compare_elements`, whose `Equal`
-  carries its exit condition in the guard for this reason. PAL's answer is a per-`break`
-  `_ensures`, which is the intended fix; the C# surface for it would be a `Pal.Ensures(Q)`
-  leading a `break`.
-* `out` parameters are modelled exactly like `ref` — `pts_to` in both pre- and
-  post-condition — rather than `pts_to_uninit` in the precondition. This is sound but
-  demands more of the caller than C# does.
+  translation, so an invariant cannot mention it, and a contract needing "the loop ran to
+  completion" is unstatable — see `test/compare_elements`, whose `Equal` carries its exit
+  condition in the guard for this reason. PAL's answer is a per-`break` `_ensures`, and the
+  C# surface would be a `Pal.Ensures(Q)` leading a `break`.
+* **`out` is modelled exactly as `ref`** — `pts_to` at both ends, not `pts_to_uninit`
+  strengthening to `pts_to` — so a caller must initialise an `out` argument before the
+  call. Sound, but it demands more than C# does.
+* **A ghost argument determined only by the pure part of a contract cannot be passed at a
+  call site** (R4.5): ghost arguments are resolved by unification, and there is no
+  zero-cost C# surface for explicit implicit application.
+* **Heterogeneous arrays** — an array whose element type is a base class — need §6's array
+  rules to carry an object invariant per element, which the studies do in Pulse
+  (`Pulse.Lib.ForEvery.Range`) but §6 has not probed.
+* **A recursive user-declared spec type** whose constructor takes the type being declared
+  is refused (§11); the induction is not the difficulty, the `[Model]` binding is.
 
-### What is next (M8), and why it is generics
+**Tooling.**
 
-Three constructs are the obvious candidates, and the choice between them was made by
-probing rather than by ranking them for importance. All three are on §10's rejection list;
-all three appear in the upstream code `examples/adler32` was ported from, whose
-`Adler32 : IChecksum` needs an interface, a generic struct (`ArraySegment<byte>`) and a
-property at once.
+* **The analyzer is not a NuGet package.** It is wired into `test/analyzer` as `Analyzer`
+  items, which is enough to run and to test it, but a user must point at the built
+  assemblies. A package must also carry `System.Text.Json` and `System.Memory` for a .NET
+  Framework host, where they are not in the shared framework.
+* **Live squiggles are per-compilation work.** The analysis is whole-program — a call needs
+  its callee's contract — so it runs once per compilation and is reported per file. On the
+  programs in `test/` that is milliseconds; nothing has been measured at a scale where it
+  would not be.
 
-**Generics, first.** F62–F64 measure the cost and it is almost entirely in the frontend.
-`Pulse.Lib.CSharp.Array` is already `(#t: Type0)`, so a generic method over `T[]` needs no
-new library; a generic struct is an ordinary parameterised record, which is the
-`ArraySegment<T>` / `Span<T>` shape; and instantiation composes, so no monomorphising pass
-is needed and §2's module-per-method structure survives. The frontend is also further along
-than it looks: `IrUserSpecType` already carries type *arguments* (R11.1), so generic
-specification types work today — what is missing is a `MapType` case for a type
-*parameter*. This is also the milestone that unblocks the other two, since the interfaces
-worth having (`IComparable<T>`, `IEnumerable<T>`) are generic, and it is the prerequisite
-for `Span<T>`/`ReadOnlySpan<T>`, which §10 has called planned since M1.
+### 8.6 What is next
 
-The honest limit: C# generics are usually *constrained*, and a constraint is a typeclass
-obligation this milestone does not attempt. What is unblocked without constraints is
-exactly the element-agnostic part of the language — segments, spans, copies, swaps,
-containers — which is what the case study wanted.
+Three candidates, in the order the evidence puts them. All three are on §14.4's rejection
+list, and all three appear in the upstream code `examples/adler32` was ported from, whose
+`Adler32 : IChecksum` needs an interface, a generic struct and a property at once.
 
-**Strings, later, and cheaply.** F65 records that the encoding is nearly free: a string is
+**Constrained generics.** §14 delivers the element-agnostic part of the language —
+segments, spans, copies, swaps, containers — which is what the case study wanted, and §15
+delivers generic types. What is left is the *constraint*: `where T : IComparable<T>` is a
+typeclass obligation, and a generic sort or an ordered container cannot be written without
+it. This is the smallest of the three and unblocks the most library code.
+
+**Interfaces.** An interface is very nearly what §9 already has: R9.2 requires an abstract
+class to have no fields and R9.3 requires its virtual methods to be abstract, which is the
+definition of an interface. What a C# `interface` adds is *multiple* implementation, and
+R9.8 pins why that is hard — a `dyn` is made at one witness type and `mkdyn` is not
+injective, so one value cannot be viewed at two unrelated roots. But the blocker for the
+motivating example is elsewhere and is worth naming: `IChecksum.Update(byte[] buffer)`
+takes an array, and **R9.9a restricts a virtual method to plain values**. Interfaces would
+therefore deliver the declaration without delivering `IChecksum`; the real prerequisite is
+ownership in a virtual method's signature, which is its own design problem.
+
+**`IEnumerable<T>` and `foreach`.** §16's cursors are the manual form of this, and they
+verify; what is missing is the surface. A `foreach` over a cursor is a loop whose invariant
+mentions a position the user did not write, so the interesting question is whether R5.8's
+invariants can be stated about an iterator without the user naming its state — which is
+§16.5's open question, now with §17's answer available as a precedent: where a proof step
+has no C# spelling, give the author one rather than inferring it.
+
+**Strings, cheaply, whenever.** F65 records that the encoding is nearly free: a string is
 immutable, so there is nothing to own, and it is a pure value under `requires emp` where an
 array parameter costs a `pts_to` at both ends. Strings are not deferred because they are
 hard but because the cost is not in the model at all — it is the library surface
 (`Substring`, `IndexOf`, `Split`, concatenation, formatting), each item of which is an
 obligation with a specification to get right.
 
-**Interfaces, last, and not for the reason one expects.** An interface is very nearly a
-construct §9 already has: R9.2 requires an abstract class to have no fields and R9.3
-requires its virtual methods to be abstract, which is the definition of an interface. What
-a C# `interface` adds is *multiple* implementation, and R9.8 already pins why that is hard
-— a `dyn` is made at one witness type and `mkdyn` is not injective, so one value cannot be
-viewed at two unrelated roots. But the blocker for the motivating example is elsewhere and
-is worth naming: `IChecksum.Update(byte[] buffer)` takes an array, and **R9.9a restricts a
-virtual method to plain values**. Interfaces would therefore deliver the declaration
-without delivering `IChecksum`; the real prerequisite is ownership in a virtual method's
-signature, which is its own design problem.
-
 ---
 
-## 9. Inheritance (M3)
+## 9. Inheritance
 
-§8 records two design studies — `test/pulse_facts/ShapeHierarchy.fst` (depth two) and
+§8.4 records two design studies — `test/pulse_facts/ShapeHierarchy.fst` (depth two) and
 `test/pulse_facts/DeepHierarchy.fst` (depth three) — in which the encoding below was
 probed before any of it was written down. This section turns those studies into rules.
 Every construct named here appears in one of the two studies; nothing is invented.
@@ -2571,7 +2342,7 @@ refusal to *translate*, not a prediction that a proof will fail (§0 rule 3):
 * **R9.2 — An abstract class has no fields.** The studies give `Shape` and
   `Quadrilateral` no representation of their own; the representation is entirely the
   leaf's. A base field would make the leaf's representation an extension of the base's
-  and force a constructor chain, which is on §8's not-probed list.
+  and force a constructor chain, which is on §8.4's not-probed list.
 * **R9.3 — Every virtual method is `abstract`.** In both studies each leaf supplies a
   *full* vtable. A `virtual` method with a body would have to be inherited by a subclass
   that does not override it, and a base method body can only run against a
@@ -2871,8 +2642,8 @@ header and maybe fail" but "given a proof the header matches, hand back the valu
 cast cannot fail — not because anything proves a runtime test succeeds, but because the
 encoding only lets a user *write* the casts whose test is redundant. A cast that might
 fail is not one this scheme proves safe, it is one this scheme cannot express, and `as`,
-`is` returning `false`, and a throwing cast are all refused. That is consistent with M1's
-exception-freedom (§5.2): a verified cast is one that cannot throw.
+`is` returning `false`, and a throwing cast are all refused. That is consistent with
+exception-freedom (§6): a verified cast is one that cannot throw.
 
 **R9.17 — The encoding is an implementation detail, and F* is what enforces that.**
 Everything above is a *scheme*, and a scheme's choices are its own business. R9.3 makes a
@@ -2965,7 +2736,7 @@ declaration that asks for it, never a prediction about a proof:
 | converting one of this method's own object parameters, the receiver included | PALCS0549, R9.15c |
 | `as`, `is`, a cast that may fail; `Pal.Is<T>` in a contract | R9.16 |
 
-### 9.10 Depth
+### 9.8 Depth
 
 Everything above is stated for a hierarchy of two levels: an `abstract` root and its
 `sealed` leaves. C# hierarchies are deeper, and the class in the middle — `abstract class
@@ -3141,7 +2912,7 @@ three primitives and, if it has a parent, a derived vtable and two casts — but
 
 ---
 
-## 10. Recursive data structures (M4)
+## 10. Recursive data structures
 
 A `Counter` owns a number. A `Stack` owns an array. A `Range` owns two `Counter`s. In every
 one of those, R3.10's invariant is a *flat* `exists*` over one record, and it is flat
@@ -3200,15 +2971,11 @@ The null test is then `B.is_null x`, whose boolean is *definitionally* the equat
 B.null)` on one side, `[]` on the other, and `class_C__cases` (R10.4) bridging them — the
 same shape as before, with the constructor replaced by a decidable equality.
 
-> *Earlier revisions of this rule made `C?` be `option class_C` and **rejected**
-> `B.null`/`B.is_null` on the grounds that "the type would not record that a non-null
-> reference had been established, so every field access would carry a `pure` side condition
-> rather than being ruled out by typing". **Since revised.** The premise was wrong: a
-> refinement type *does* record it, and records it more usably. Under `option` the fact
-> available was `Some? x`, a fact about the *encoding*; under the refinement it is
-> `not (B.is_null x)`, which is exactly the annotation the C# programmer wrote. The option
-> layer turned out to be a second nullability layer over one that already existed, and its
-> entire content was the two coercions R10.2b/R10.2c used to describe.*
+> *Why not `option class_C`? Because `Box` already has a null, and wrapping it gives two
+> nullability layers rather than one. The fact a field access then has in hand is `Some? x`
+> — a fact about the *encoding*. Under the refinement it is `not (B.is_null x)`, which is
+> exactly the annotation the C# programmer wrote. The whole content of the `option` layer
+> was the two coercions R10.2b/R10.2c now describe, and those are the identity.*
 
 **R10.2a.** A nullable reference is *owned through the nullable type*: the resource for a
 slot of type `C?` is `class_C__inv_opt x #p m`, not `class_C__inv`. R10.3a defines the
@@ -3231,12 +2998,11 @@ translate identically (R10.5 makes `!` transparent), and neither needs the emitt
 flow analysis — the SMT context already has what the branch put there.
 
 R10.2b and R10.2c therefore have **no emitter component at all**, in code or in
-specification position. That is the whole of what M12 removed: `SpecEmitter.Argument`'s
-nullable arms, the `(Some …)`/`(Some?.v …)` wrappers, the widening at an equality, the
-`Slot.NonNull` distinction, and the `class_C__as_opt` lemma's reason to exist. It also
-retires a wrinkle: specification strings are bound by a shim compiled with `#nullable
-disable`, so a type recovered from the shim's symbols could never distinguish `C` from `C?`
-— which no longer matters, because there is nothing to distinguish them *for*.
+specification position: no coercion wrappers, no widening at an equality, no non-null/
+nullable distinction to carry through the IR. This also disposes of a standing wrinkle.
+Specification strings are bound by a shim compiled with `#nullable disable` (§4), so a type
+recovered from the shim's symbols cannot distinguish `C` from `C?` — which is harmless,
+because there is nothing to distinguish them *for*.
 
 **R10.2d.** Allocation is where the refinement is *established*. `B.alloc` returns
 `class_C__opt`; a constructor returns `class_C`. The bridging step is `B.pts_to_not_null`,
@@ -3350,8 +3116,8 @@ arguments are `aᵢ = fᵢ.M` and the pure ones are `aⱼ = eⱼ`:
                           (**ᵢ class_C__inv_opt r.fld_fᵢ p bᵢ)
 ```
 
-`SpecTree.Branch(left.Contents, value, right.Contents)` gives the binary-tree predicate of
-R10.9 by the same rule, with two recursive conjuncts instead of one (F42).
+`SpecTree.Branch(left.Contents, value, right.Contents)` gives the binary-tree predicate by
+the same rule, with two recursive conjuncts instead of one (F42).
 
 **R10.5a (refusals).** Anything the derivation does not cover is refused with a diagnostic,
 never approximated:
@@ -3395,7 +3161,7 @@ Two more are derived from `intro_cons`, and R10.2 has reduced both to a single `
 
 | Lemma | Meaning |
 |---|---|
-| `class_C__intro x` | R10.4c. `intro_cons` at the **non-null** form: a constructor's result is a `C`, and its postcondition owes `class_C__inv`. Since R10.3a defines `class_C__inv this` as `class_C__inv_opt this`, this is now `intro_cons` plus one rewrite through that definition. |
+| `class_C__intro x` | `intro_cons` at the **non-null** form: a constructor's result is a `C`, and its postcondition owes `class_C__inv`. Since R10.3a defines `class_C__inv this` as `class_C__inv_opt this`, this is now `intro_cons` plus one rewrite through that definition. |
 | `class_C__as_opt x` | R10.2b used to be an injection; it is now the identity, so this lemma survives only because `class_C__inv` is an ordinary `let` that Pulse's matcher does not see through (F77). It is one `rewrite`. |
 
 `nil_case` and `elim_nil` differ only in whether the invariant survives. Which one the
@@ -3577,16 +3343,16 @@ BST `Insert`, and §7.2's `TreesVariant`). Both variants verify with no emitter 
 is what says R10.7's window is a rule about a null test rather than about how the acceptance
 test happens to be phrased.
 
-Not covered, and refused rather than approximated: back pointers (PALCS0566), recursion
-crossing a hierarchy (PALCS0565), a recursive class that also owns an array (PALCS0563),
-*iterative* traversal — which needs a magic wand to give the tail back, and has not been
-probed — and mutual recursion between two classes.
+Not covered by the **derived** invariant, and refused rather than approximated: back
+pointers (PALCS0566), recursion crossing a hierarchy (PALCS0565), a recursive class that
+also owns an array (PALCS0563), *iterative* traversal, and mutual recursion between two
+classes.
 
-*Since revised.* §12 answers the back-pointer refusal by handing the predicate to the user,
-and §16 answers the iterative one: a segment predicate **is** the magic wand that was
-wanted, and a traversal written against it needs no rule §5 does not already have. Both
-refusals stand for a **derived** invariant, which still has only R10.7's window; neither
-stands for the language.
+Two of those refusals are about §10's derivation, not about the language. §12 answers the
+back-pointer one by handing the predicate to the user, and §16 answers the iterative one: a
+segment predicate **is** the magic wand a traversal needs to give the tail back, and a
+traversal written against one needs no rule §5 does not already have. What still has only
+R10.7's window is the invariant §10 derives for you.
 
 ---
 
@@ -3949,7 +3715,7 @@ wrong produces failures that look like unrelated problems:
   a `rewrite each v as (Some?.v from)`, plus a separate preserving lemma to establish
   `Some? from` in the first place — all three are gone.)
 
-### 12.5 The C# face of a user predicate (M10)
+### 12.5 The C# face of a user predicate
 
 §12.4 as first delivered had two blemishes. The predicate and its lemmas were a ~190-line
 string literal inside an attribute argument, so no editor gave them syntax highlighting,
@@ -3958,12 +3724,12 @@ type checking, or a jump-to-definition; and every proof step in a body was a raw
 `with`s in a language the C# compiler cannot see. Both are fixed by giving the predicate a
 C# *face*, and the fix is a style rule as much as it is two translation rules.
 
-**R12.6.** `[assembly: IncludePulseFile("path")]` is `[assembly: IncludePulse]` (R12.0) with
+**R12.6.** `[assembly: IncludePulseFile("path")]` is `[assembly: IncludePulse]` (§2) with
 the text read from a file beside the annotated source rather than written inline. The path is
 resolved relative to the file carrying the attribute; the module name is the file's base
 name, and a `module` header inside the file that disagrees with it is an error (PALCS0584),
 as is a file that cannot be read (PALCS0583). The emitted module is byte-for-byte the file's
-contents, exactly as R12.0 emits the literal's. Nothing else changes: a `.fst` in the source
+contents, exactly as `IncludePulse` emits the literal's. Nothing else changes: a `.fst` in the source
 tree is an ordinary F* file, so `fstar.fst.config.json`, IDE mode and `--cache_checked_modules`
 all work on it with no special arrangement.
 
@@ -4014,16 +3780,14 @@ the emitter's field reads (R10.4) ask for. Note that the tail segment's `prev` i
 which is what lets the recursive call `Length(from.next, from, last)` match with no
 `rewrite` at the call site.
 
-> *Earlier revisions of this rule resolved the same obstacle by having the predicate **name
-> the head node twice** — once nullable, once not, tied by `pure (from == Some v)` — because
-> a binder `(from: class_DNode__opt { Some? from })` is a refinement C# cannot declare, and
-> every call site then read `Open(from, from!, …)`. **Since revised.** R10.2 removed the two
-> types, so it removed the need for the two names: every lemma in `DllSeg.fst`,
-> `CellSeg.fst` and `KnotPath.fst` now takes its cursor once, and every call site in
-> `DllOps.cs`, `Walks.cs` and `Search.cs` lost its `x, x!` pair. The residual observation
-> still stands, and is why the predicates keep their other doubled parameters: a value the
-> body learns by **reading the heap** — a `next` field, a payload — must be named explicitly
-> if a later step is to take it back as an ordinary argument (F73).*
+> *A cursor is named **once**, which is worth saying because it was not always possible.
+> While `C?` was `option class_C`, a non-null cursor needed a binder
+> `(from: class_DNode__opt { Some? from })` — a refinement C# cannot declare — so predicates
+> named the head twice and every call site read `Open(from, from!, …)`. R10.2 removed the
+> two types and with them the two names. The doubling that remains is a different thing and
+> is not removable: a value the body learns by **reading the heap** — a `next` field, a
+> payload — must be named explicitly if a later step is to take it back as an ordinary
+> argument (F73).*
 
 One convention has to be observed on the F* side. R4.13 sends a C# `int` into a
 specification as its mathematical value, so a predicate parameter a C# `[SpecOp]` passes an
@@ -4078,7 +3842,7 @@ rather than in a special case in the emitter. The cheap path remains §10, and �
 
 ---
 
-## 13. Conversions, side effects, and a production case study (M7)
+## 13. Conversions, side effects, and a production case study
 
 §§1–12 were exercised on programs written to be verified. §13 is the first section driven
 by code that was not: SharpZipLib's `Adler32` (MIT), verified in `examples/adler32`.
@@ -4142,7 +3906,7 @@ Every gap was closed at the layer §0 rule 3 names, and none in the emitter:
 | Gap | Fixed in |
 |---|---|
 | `Seq.length` unbounded, so `offset + 1` might overflow | `Pulse.Lib.CSharp.Array.arr_length_bound` — **library** |
-| nothing tied `A.length buf` to `Seq.length` | `Pal.GhostStmt("Pulse.Lib.Array.pts_to_len $&(buf)")` — **user annotation** (and it forced `$&(…)`, documented in §4.6 since M1, to actually be implemented) |
+| nothing tied `A.length buf` to `Seq.length` | `Pal.GhostStmt("Pulse.Lib.Array.pts_to_len $&(buf)")` — **user annotation** (and it forced `$&(…)`, documented in `doc/surface_syntax.md` since M1, to actually be implemented) |
 | `(uint)(b & 0xff) <= 255` | `Pulse.Lib.CSharp.Casts.byte_mask_ff_bound`, with an SMTPat **on the idiom** (F53) — **library**, and so free of annotation |
 | `(s2 << 16) | s1` denotes `s2 * 65536 + s1` | `Pulse.Lib.CSharp.Casts.logor_shift_disjoint`, likewise patterned on the idiom — **library** |
 | the loop maintains congruence, not equality | `ModAdd`/`ModIdem`/`Step` as `[Lemma]`s in the user's own file — **user annotation** |
@@ -4220,7 +3984,7 @@ instance field is passed and returned rather than mutated.
 
 ---
 
-## 14. Unconstrained generics (M8)
+## 14. Unconstrained generics
 
 F62–F64 measured the cost of a C# type parameter before this section was written, and the
 measurement is what fixes its shape: `Pulse.Lib.CSharp.Array` is already `(#t: Type0)`, a
@@ -4339,7 +4103,7 @@ here: C# itself rejects it, so it cannot reach the translation.
 
 ---
 
-## 15. Generic types (M9)
+## 15. Generic types
 
 M8 refused a generic class or struct declaration (PALCS0581) on a stated ground: the record
 is representable (F63), but "the invariant and the ownership predicate of a type
@@ -4451,7 +4215,7 @@ type — a map is `SpecTree<SpecKv<T>>` — render correctly.
   refused.
 * **Non-uniform recursion (PALCS0582).** R15.4.
 * **A generic `struct` (PALCS0581).** A struct is a *value* here: copied at every
-  assignment, stored inline in whatever holds it, and represented by §8's record rather
+  assignment, stored inline in whatever holds it, and represented by R3.4's record rather
   than by a reference with an invariant. Parameterising a record is a different problem
   from parameterising a class and has not been designed.
 * **A generic class in a hierarchy (PALCS0581).** §9's vtable is a record whose field types
@@ -4492,10 +4256,10 @@ collected language, and the one C# programmers expect.
 
 ---
 
-## 16. Cursors: iterative traversal (M11)
+## 16. Cursors: iterative traversal
 
 §10.7 refused iterative traversal and gave a reason — *"needs a magic wand to give the tail
-back, and has not been probed"*. §12.8 then answered the first half without noticing: a
+back, and has not been probed"*. §12 then answered the first half without noticing: a
 **segment** predicate is what a magic wand was wanted for, and `test/dll_segment` already
 had one. §16 probes the rest. The refusal is discharged, and it is discharged the way §0
 asks — a probe first, then rules, then two acceptance directories and their variants.
@@ -4634,137 +4398,61 @@ which is what §0 rule 3 asks for and is the whole claim of §16.
 
 ## 17. `Span<T>`: a borrowed window
 
-§8's *Not yet done* has listed `Span<T>` and `ReadOnlySpan<T>` since M1, and §14 named
-generics as their prerequisite, which M8 delivered. The facts were probed and pinned first
-(`test/pulse_facts/SliceFacts.fst`, F78 and F79); §17.1 to §17.3 are what that probe
-concluded, and §17.4 is the scheme it led to.
+The facts were probed and pinned first (`test/pulse_facts/SliceFacts.fst`, F78–F83), as §0
+requires. This section is the scheme they led to.
 
-The conclusion is that `Span<T>` splits cleanly in two at a line C# does not draw but the
-encoding does: a span that denotes **the whole of an array** and a span that denotes a
-**window into one**. The first is not a new slot kind at all — it is the array — and §17.4
-translates it. The second is where every difficulty lives, and §17.5 refuses it, because the
-question it raises is a *surface-language* question and not a translation one.
+A `Span<T>` is a **borrowed window** into memory somebody else owns. That is what the C#
+type means and it is what `Pulse.Lib.Slice.slice` is, so the two are put together: §17.2
+gives the rules, §17.3 the borrow, §17.4 what is refused.
 
-> ***Since revised, and the split abandoned.*** The identification of a whole-array span
-> with its array was the wrong economy. It bought three rules that cost nothing to write
-> and could not be extended, and it paid for them by refusing the operation `Span<T>`
-> exists for. The question that looked open — where does a borrow end, and how would the
-> translator know — was answered by observing that it does not have to know: *taking* a
-> window is already an ordinary C# expression and needs no new syntax, and *giving it back*
-> is invisible in C# precisely because it is a proof step, which is what a ghost statement
-> is for. So the author writes `Pal.Restore(w)`, exactly as they write every other proof
-> step, and no flow analysis is consulted. §17.4 and §17.5 below are the rules as
-> delivered; the paragraphs marked *Since revised* record what they replaced and why. The
-> original text is kept because the boundary it drew was real: everything §17.5 used to
-> refuse was genuinely outside the identification, and the way out was to drop the
-> identification, not to widen it.
+### 17.1 What the probes settled
 
-### 17.1 Why the promised table row is not enough
+**A span is a struct that owns memory, so it cannot be a translated struct (F79).** §3.4
+rejects a struct field of reference type as `PALCS0511`, because copying the struct would
+duplicate ownership of the same memory — and a `Span<T>` is exactly such a struct. Applying
+that rule to spans would be correct and useless. A span must therefore be a **slot kind**,
+primitive like `T[]`: no field projections, no struct copying, its own row in R4.9's table.
+R17.1 makes it one.
 
-R4.9's parameter table has said since M1 that
+**The library is already the right shape (F78).** A `slice t` has a non-ghost `len`, a
+`pts_to` over its contents, `split`/`join`, `subslice` with a `subslice_rest` residue,
+`share`/`gather`, and an `is_from_array` provenance token. Taking a window and giving it
+back are both *derivable* — `SliceFacts` S2 does it — so nothing had to be asked of the
+Pulse library. What was missing was only the C# side.
 
-| C# parameter | Pulse binder | `requires` | `ensures` |
-|---|---|---|---|
-| `T[] a`, `Span<T> a` | `var_a: array ⟦T⟧` | `array_pts_to_full var_a 1.0R s` | `array_pts_to_full var_a 1.0R s'` |
+**And the C# side is smaller than it looks.** The question that made this section hard to
+write was: C# marks neither the point where a window borrows nor the point where it
+returns, and recovering either from flow analysis is a borrow checker, which R10.2b refuses
+on principle. Both halves of that turn out to be wrong.
 
-and `SliceFacts` S1 confirms it — *for a span that is never sliced*. Indexing, writing and
-`.Length` all behave exactly as an array's do, with `Slice.pts_to` in place of
-`array_pts_to_full` and `Slice.len` a non-ghost function, so a counted `for` over a span has
-a pure guard exactly as one over an array does.
+*Borrowing is marked.* `a.AsSpan(1, 3)` is where the author put it, and Roslyn hands it
+over as an ordinary expression. No new syntax is needed to take a window because C# already
+has the syntax.
 
-The sentence to stop at is "a span that is only passed and indexed is an array with a
-different spelling". It is not a simile. Such a span **is** the array — same address, same
-length, same contents, same owner — and the C# conversion that produced it is implicit and
-carries no runtime work. So the encoding should not merely *resemble* the array's; it should
-**be** the array's, which is what R17.1 says and what the rest of §17.4 follows from.
+*Returning is unmarked because there is nothing to mark.* Ending a borrow has no runtime
+content — it is purely a proof step — and a proof step the author writes is a **ghost
+statement**, which §12 has supported since M10. So `Pal.Restore(w)` (R17.6), and the borrow
+checker never comes up: to choose which restore to emit the translator reads the
+*initializer* of the window's local, which is syntax, and reads nothing else.
 
-Four things looked like obstacles when this section was first written. Two of them dissolve
-under R17.1, one is small, and the fourth is real and is §17.5's.
+> ***An earlier draft of this section took a different route,*** and it is recorded because
+> the mistake is instructive. Observing that a span which is only passed and indexed *is*
+> the array — same address, same length, same contents, same owner — it identified the two,
+> translating `Span<T>` to the array slot and refusing every span that was not a whole
+> array. That bought three rules which cost nothing to write, and paid for them by refusing
+> the operation `Span<T>` exists for: `numbers.AsSpan(1, 3)`, the first thing anyone writes
+> with a span, was outside the subset. No further work *inside* the identification could
+> have admitted it, because the identification is precisely the assertion that such a span
+> does not exist — a boundary correctly drawn around the wrong region. The refusal was
+> honest about being a scheme limit rather than a proof failure, which is what §0 rule 3
+> asks; what §0 does not ask is that the limit be in a useful place.
 
-### 17.2 The four obstacles
+**Two mechanical points that survive unchanged.** `s.Length` is an `int` where `Slice.len`
+is an `SZ.t`, which is R3.3's bridge again and genuinely free. And Roslyn models `s[i]` as
+a call to a `ref T`-returning `get_Item` rather than as an element access, so *recognising*
+an element write is frontend work that arrays did not need.
 
-**A span is a struct that owns memory (F79).** §3.4 rejects a struct field of reference type
-as `PALCS0511`, on the ground that copying the struct would duplicate ownership of the same
-memory — and a `Span<T>` is exactly such a struct. Rejecting it under that rule would be
-correct and useless. So a span cannot be a *translated struct*; it must be a **slot kind**,
-primitive like `T[]`, with its own row in R4.9's table, no field projections, and no struct
-copying.
-
-> *Written before R17.1 was. **Since revised**, in the direction the last sentence was
-> already pointing: the slot kind a span must be is not merely **like** `T[]`, it **is**
-> `T[]`. So there is no new row, no new binder type and no new classification — §3.4's
-> struct rules are simply never reached, because `MapType` never produces a struct for a
-> span in the first place. F79's conclusion is satisfied by identification rather than by
-> imitation, which is the cheaper of the two ways to satisfy it and the only one that does
-> not duplicate the array slot's code.*
-
-**Slicing has no syntax.** `var w = s.Slice(i, n);` is an ordinary method call. Its result
-aliases `s`, and `s` stays in scope, assignable and indexable, with the C# compiler content.
-`SliceFacts.s2_take` shows what the encoding must do instead: `subslice` *consumes* the
-parent's `pts_to` and leaves an opaque `subslice_rest`, and `s2_give_back` shows the join is
-derivable. Both endpoints are therefore available; what is missing is the information about
-*where in the C# text they go*. Recovering it from Roslyn's flow analysis is a borrow
-checker, and R10.2b refuses on principle to read flow analysis — the same refusal that made
-`f(x)` and `f(x!)` translate identically. So the split and the join must be **written**, as
-PAL writes its ghost steps: a scoped `Pal.Span(s, i, n, w => { … })`, or an explicit
-`Pal.Split`/`Pal.Join` pair, or a `[Lemma]`-shaped pair over a `[Plain]` span predicate the
-way §12 does everything else. Choosing between those is the milestone's design work, and
-§12's machinery is very likely enough to express whichever wins.
-
-> ***Since resolved,*** and by something smaller than any of the three options offered. The
-> paragraph asks for syntax marking *both* endpoints, and only one of them is missing. The
-> split is `s.Slice(i, n)`: it is written, it is where the author put it, and Roslyn hands
-> it over as an ordinary expression. Only the join has no C# spelling, because C# has
-> nothing to spell — the borrow ends where the author decides it ends, and that decision
-> has no runtime content. R17.6 gives it the ordinary ghost-statement treatment,
-> `Pal.Restore(w)`, and the borrow checker this paragraph rightly refuses never comes up:
-> to know which join to emit the translator reads the *initializer* of the window's local,
-> which is syntax, and reads nothing else.
-
-**A span slot may carry a token.** `Span<T> s = arr;` is an implicit conversion in C#. In
-the encoding it is `Slice.from_array`, which consumes `A.pts_to a` and yields
-`Slice.pts_to s` **plus `is_from_array a s`** — a receipt the array cannot be indexed again
-without redeeming (`SliceFacts.s3_lend_and_redeem`). So a span slot is a resource *and*,
-where it came from an array the caller still names, a token; and a `stackalloc` span is a
-third provenance again. R4.9's table has one column per slot and no column for a token, and
-this is where the milestone's real work is.
-
-> ***Since revised.*** This obstacle is entirely an artefact of choosing `Pulse.Lib.Slice`
-> as the image. A token records *where a span came from* so that the source can be
-> reconstituted; under R17.1 the span and its source are the same term, so there is nothing
-> to record and nothing to redeem, and the conversion emits no code at all. The probe's
-> `s3_lend_and_redeem` remains the right answer for the case where the two are genuinely
-> different terms — a window — which is §17.5's.
-
-**The mechanics are not free either.** `s[i]` on a span is a call to a `ref T`-returning
-`get_Item`, not an `ElementAccessExpression` over an array — pal-csharp has no `ref` returns,
-so *recognising* an element write is new frontend work. `stackalloc` adds a scoped lifetime,
-which interacts with F75's rule about `let mut` and tail position. And `Slice.len` is a
-`SizeT.t` where C#'s `Length` is an `int`, which is R3.3's bridge again — that one genuinely
-is free, and should be built the way `Pulse.Lib.CSharp.Array` builds it: an `.fsti` of
-modeling axioms over the Pulse library (`SliceFacts` S6), not a new theory.
-
-### 17.3 The order to do it in
-
-`ReadOnlySpan<T>` first. A fractional view is duplicable — `SliceFacts.s4_share_gather` is
-`Slice.share`/`gather` and nothing else — so the aliasing that makes `Span<T>` hard is
-already expressible with `[Frac]` (R4.9) and needs no new surface syntax at all. A
-read-only, never-sliced `ReadOnlySpan<T>` parameter is the table row above and is close to
-free; `examples/adler32`, which had to spell `ArraySegment<byte>` out as three parameters,
-is the acceptance test that already exists.
-
-Then non-sliced `Span<T>`, which is the same row at full permission plus the F79
-classification. Then slicing, which is where the surface-syntax question has to be answered
-and where §12 is the toolbox. Then `stackalloc`, or never.
-
-> ***Since revised**, and collapsed.* Under R17.1 the first two steps are one step and are
-> the same step, because `Span<T>` and `ReadOnlySpan<T>` differ only in which row of R4.9's
-> table they land on — full permission or fractional — and that distinction already exists
-> for `T[]`. §17.4 does both. The order that survives is the split between §17.4 and §17.5,
-> which is not an order of work but a boundary: a whole-array span is translated, a window
-> is refused with a diagnostic that says which section will answer it.
-
-### 17.4 The rules
+### 17.2 The rules
 
 **R17.1 — `Span<T>` and `ReadOnlySpan<T>` are `Pulse.Lib.Slice.slice`.** `MapType` sends
 both, at a mappable element type, to `IrSpanType`, which `Names` renders `S.slice ⟦T⟧`.
@@ -4774,33 +4462,14 @@ F79's requirement that a span be primitive rather than a translated struct by ma
 primitive, which is what F79 asked for.
 
 This is what a span *is*: a base, a length and a permission, describing memory somebody
-else allocated. Everything the identification had to buy back now comes free. A window has
-a length of its own (R17.3 reads it off the slice), a base of its own (R17.4 subscripts the
-slice), and an owner who is owed it back (R17.6) — the three properties the original R17.5
-listed as reasons a window could not be admitted are exactly the three things `slice` has
-and `array` has not.
+else allocated. A window has a length of its own (R17.3), a base of its own (R17.4) and an
+owner who is owed it back (R17.6), and `slice` has all three where `array` has none of
+them.
 
 The C#-facing operations live in `Pulse.Lib.CSharp.Span`, an `.fsti` of modeling axioms and
-derived operations over the Pulse library in the style `Pulse.Lib.CSharp.Array` established
-— not a new theory. §3.4's struct rules are still never reached, because `MapType` still
+derived operations over the Pulse library, in the style `Pulse.Lib.CSharp.Array`
+established — not a new theory. §3.4's struct rules are never reached, because `MapType`
 never produces a struct for a span.
-
-> ***Since revised.*** What follows was R17.1, and is kept because the original R17.5's
-> refusal is unintelligible without it.
->
-> > `MapType` sends both, at a mappable element type, to the same `array ⟦T⟧` that `T[]`
-> > maps to; there is no span type in the IR. This is an *identification*, licensed by what
-> > the C# subset §17.5 admits: within it, every span denotes the whole of exactly one
-> > array, at that array's length, owned by whoever owns the array. §3.4's struct rules are
-> > then never reached, R4.9's table needs no new row and no new column, and every existing
-> > array rule applies unchanged — R3.3's index bridge, R6.4's bounds obligations, R4.9's
-> > `[Frac]`, R5.8's loop invariants over `Seq.length`. The cost of the identification is
-> > stated, not hidden: it is exactly what R17.5 refuses, and it is why R17.5 refuses it.
->
-> The cost was the feature. `numbers.AsSpan(1, 3)` — the first thing anyone writes with a
-> span — was refused, and no further work *inside* the identification could have admitted
-> it, because the identification is precisely the assertion that such a span does not
-> exist. That is a boundary correctly drawn around the wrong region.
 
 **R17.2 — a `ReadOnlySpan<T>` parameter is fractional.** It takes a permission variable and
 its post-state model is its pre-state model, which is R4.9's `[Frac]` row. The permission is
@@ -4830,43 +4499,28 @@ returns `ref readonly T` and the C# compiler rejects the assignment. This is the
 invariant paying for itself — the annotated program is an ordinary C# program, so an
 ordinary C# rule is available to enforce a separation-logic one.
 
-**R17.6 — `Pal.Restore(w)` ends a borrow.** It is a `[Conditional("PAL")]` ghost statement
-(§12), so it is erased by the C# compiler and costs nothing at runtime, and it takes **one**
-argument: the window. Which of the three operations R17.5 lists is emitted comes from the
-`SpanOrigin` recorded on the local's slot **when the local was declared** — a syntactic
-property of its initializer, read once, never a flow analysis. After the restore the slot
-leaves scope, so a later use of `w` is "not in scope" rather than an unprovable goal.
-
-One argument suffices because the receipt in context determines everything else. `give_back
-w` recovers the parent, the permission, the bounds and both contents by unification
-(F80) — so the surface asks the author only for the thing C# cannot tell the translator,
-which is *where*.
-
-Getting it wrong fails, and fails locally. Omit the restore and the parent's `pts_to` is
-missing where the postcondition needs it. Write it too early and the window's own `pts_to`
-is gone at its next use. Both land in the author's annotations, which §0 rule 3 says is
-where a proof is fixed. Neither can make a false postcondition provable: the restore is a
-library operation with its own precondition, not a translator assumption.
-
 **R17.6a — a span parameter reaches the specification shim as an array.** §4's shim (the
 generated compilation unit that binds spec strings, `SpecBinder`) declares a span parameter
-with the array type R17.1 says it is. This is forced rather than chosen. `Span<T>` is a
+as `T[]` rather than as the span type the method wrote. This is the one place the abandoned
+identification survives, and it is forced rather than chosen. `Span<T>` is a
 `ref struct`, and C# refuses a `ref struct` inside a lambda — *"cannot use parameter that
 has ref-like type inside an anonymous method, lambda expression, query expression, or local
 function"*, CS9108 — so a shim that kept the span type would reject every quantified
 contract, `Forall((int k) => … Contents(a)[k] …)` being the shape almost every array
 contract in `test/` has. With the array type the restriction never arises, and no spec term
-changes meaning, because `Pal.Contents` has the same `Seq<T>` for both.
+changes meaning, because `Pal.Contents` has the same `Seq<T>` for both — the shim binds
+names and types for a spec string, and never sees a resource at all, so nothing about
+ownership rides on the choice.
 
 The restriction does bite in **statement** position, where there is no shim: a
 `Pal.Invariant(Pal.Forall(…))` that mentions a span is a real lambda over a real
 `ref struct` and C# rejects it. The idiom is to name the predicate — a `[Spec]` method over
 `Seq<T>`, which moves `Pal.Contents(a)` out of the lambda and into an ordinary argument
 position — and `test/array_view` uses it for exactly this reason. This is a genuine narrowing of
-the surface for spans relative to arrays; it is C#'s and not the scheme's, and §17.7 records
+the surface for spans relative to arrays; it is C#'s and not the scheme's, and §17.5 records
 it rather than hiding it.
 
-### 17.5 Creation is a borrow
+### 17.3 Creation is a borrow
 
 **R17.5 — every span comes from somewhere, and taking it consumes the source.** There is no
 way to make a span out of nothing (R17.7 refuses the one C# offers), so every span
@@ -4892,21 +4546,23 @@ Consuming the source is what makes the accounting work, and it is visible in the
 system rather than enforced by the translator: while the window is out, the source has no
 `pts_to`, so an index of it does not verify. The author gets it back with R17.6.
 
-> ***Since revised.*** R17.5 was the refusal of every span that is not a whole array —
-> `Slice`, `s[i..j]`, `stackalloc`, `ToArray`, `CopyTo`, `Fill`, `string`'s implicit
-> `ReadOnlySpan<char>`, and every member besides `Length` and the indexer — on the ground
-> that R17.1 identified a span with an array and *"the identification holds only where the
-> span denotes the whole of one"*. That reasoning was sound and the refusal was honest: it
-> stated a scheme limit rather than papering over a proof, and it said in as many words
-> that windows are not hard to verify, only that *"C# marks neither the point where a
-> window borrows nor the point where it returns"*.
->
-> It was right about the diagnosis and wrong about the remedy. C# does mark the point where
-> a window borrows — that is what `a.AsSpan(1, 3)` is — and the point where it returns is
-> not marked because there is nothing in C# to mark it *with*, the return being pure proof.
-> A proof step the author writes is a ghost statement, which §12 has supported since M9.
-> What survives of the old R17.5 is R17.7, which refuses the forms that are genuinely not
-> borrows.
+**R17.6 — `Pal.Restore(w)` ends a borrow.** It is a `[Conditional("PAL")]` ghost statement
+(§12), so it is erased by the C# compiler and costs nothing at runtime, and it takes **one**
+argument: the window. Which of the three operations R17.5 lists is emitted comes from the
+`SpanOrigin` recorded on the local's slot **when the local was declared** — a syntactic
+property of its initializer, read once, never a flow analysis. After the restore the slot
+leaves scope, so a later use of `w` is "not in scope" rather than an unprovable goal.
+
+One argument suffices because the receipt in context determines everything else. `give_back
+w` recovers the parent, the permission, the bounds and both contents by unification
+(F80) — so the surface asks the author only for the thing C# cannot tell the translator,
+which is *where*.
+
+Getting it wrong fails, and fails locally. Omit the restore and the parent's `pts_to` is
+missing where the postcondition needs it. Write it too early and the window's own `pts_to`
+is gone at its next use. Both land in the author's annotations, which §0 rule 3 says is
+where a proof is fixed. Neither can make a false postcondition provable: the restore is a
+library operation with its own precondition, not a translator assumption.
 
 **R17.8 — what the parent holds afterwards is `Pal.Splice`.** After a window over
 `[from, to)` is restored, the parent's contents are its old contents with that range
@@ -4921,7 +4577,7 @@ A read-only window restored unwritten gives the parent back exactly what it had,
 `splice_same`. So a read-only borrow costs its user nothing beyond the bounds — see
 `ReadAt` in `test/array_view`, whose `Contents(a) == Old(Contents(a))` needs no help.
 
-### 17.6 What is refused
+### 17.4 What is refused
 
 **R17.7 — the forms that are not borrows (`PALCS0590`).** The list is short now and every
 entry is on it for a reason of its own, not because a rule ran out:
@@ -4956,7 +4612,7 @@ entry is on it for a reason of its own, not because a rule ran out:
   operations with no rule yet; `Span.copy_to` exists in the library for the first of them
   and only the surface is missing.
 
-### 17.7 What §17 does not reach
+### 17.5 What §17 does not reach
 
 * **An inline quantified invariant over a span**, per R17.6a: C# forbids a `ref struct`
   inside a lambda (CS9108), so a *statement-position* `Pal.Forall` that mentions a span

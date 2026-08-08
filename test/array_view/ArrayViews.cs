@@ -24,7 +24,7 @@ public static class ViewSpec
     /// refuses a `ref struct` inside one (CS9108). Naming the predicate moves
     /// `Contents(a)` out of the lambda and into an ordinary argument position, where it is
     /// legal, and the quantifier lives over the `Seq&lt;int&gt;` instead of over the span.
-    /// §17.7.
+    /// R17.6a.
     /// </summary>
     [Spec]
     public static bool ZeroBelow(Seq<int> s, SpecInt n) =>
