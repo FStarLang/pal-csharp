@@ -1242,6 +1242,32 @@ R4.9a is annotation.
   that may move its model needs full ownership and a method that cannot does not, and those
   are the same question asked once. Two analyses could drift apart; one cannot.
 
+That last claim held only for as long as the write set was the *only* way to say
+"read-only". R9.7 added a second — `[Frac]` on a method — because an `abstract` method has
+no body to analyse, and the two promptly drifted. R4.11c is what stops them.
+
+**R4.11c — a `[Frac]` receiver may not be written, and this is refused where it is
+written.** `[Frac("p")]` says the caller keeps a share and is handed the object back *at the
+model it arrived at*; a body that assigns a field says the model moves. Both cannot be
+true. That is a program whose specification cannot hold rather than a proof the emitter is
+failing to find, so §0 rule 3 puts the refusal on the declaration (**PALCS0551**) rather
+than leaving it for Pulse.
+
+It has to be a refusal, because left to run it does not fail honestly. `[Frac]` *overrides*
+the write-set analysis, so on a single class the annotation is silently ignored — the
+emitted signature is the mutating one and the user's `[Frac]` means nothing at all. In a
+hierarchy it is worse: the class-level declaration and the vtable slot are built read-only
+from the annotation while the body's signature is built mutating from the write set, and
+the read-only one carries the user's postcondition with the post-model collapsed onto the
+pre-model — `TheBalance == TheBalance + 7`, which is `False`. Nothing catches that but an
+incidental arity mismatch in the generated vtable. Had the arities agreed, a caller would
+have had `False` in scope.
+
+An `override` is held to the same rule and refused the same way, because what a caller
+dispatches through is the *slot's* contract, and the slot is the one that said `[Frac]`.
+There, F* does reject the build — but with `Too many arguments` inside a generated vtable,
+which names nothing the user wrote.
+
 What this rule does **not** do is decide anything about a *call*. Whether a caller has
 enough permission for the method it is calling is a separation-logic question, and R3.13's
 lesson applies: it is asked and answered by Pulse, against the contracts, and the answer

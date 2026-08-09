@@ -34,9 +34,13 @@ public class Gold : Premium
 
     public override int Fee() { return 10; }
 
-    /// <summary>A method the deepest class adds for itself, with an exact contract.</summary>
+    /// <summary>
+    /// A method the deepest class adds for itself, with an exact contract. It only
+    /// <em>reads</em> the inherited field — it reports what the balance would be with the
+    /// bonus applied, and stores nothing — which is why R4.11c admits the `[Frac("p")]`.
+    /// </summary>
     [Frac("p")]
     [Requires("@this.TheBalance <= 2147483000")]
     [Ensures("Result == @this.TheBalance + 7")]
-    public int Bonus() { return balance + 7; }
+    public int WithBonus() { return balance + 7; }
 }

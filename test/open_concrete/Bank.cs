@@ -64,6 +64,6 @@ public static class Bank
     public static int GoldBonus()
     {
         Gold g = new Gold(20);
-        return g.Bonus();
+        return g.WithBonus();
     }
 }

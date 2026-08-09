@@ -1276,6 +1276,55 @@ public static class FrontendPass
     /// observation is a statement about the model and the model is inherited whole, so
     /// restating it on the subclass would emit a second name for one function.
     /// </summary>
+    /// <summary>
+    /// R4.11c. A receiver held at a fraction may not be written. <c>[Frac("p")]</c> says
+    /// the caller keeps a share and is handed the object back <em>at the same model</em>;
+    /// a body that assigns a field says the model moves. Both cannot be true, so this is a
+    /// program whose specification cannot hold rather than a proof the emitter is failing
+    /// to find, and §0 rule 3 puts the refusal where it is written.
+    ///
+    /// <para>Left to run, it does not fail honestly. On a single class the annotation is
+    /// silently ignored — the emitted signature is the mutating one, and the user's
+    /// <c>[Frac]</c> means nothing. In a hierarchy the class-level declaration and the
+    /// vtable slot are built read-only while the body's is built mutating, and the
+    /// read-only one carries the user's postcondition with the post-model collapsed onto
+    /// the pre-model: <c>TheBalance == TheBalance + 7</c>, which is <c>False</c>. Nothing
+    /// catches that but an incidental arity mismatch in the vtable.</para>
+    ///
+    /// <para>An <c>override</c> is held to the same rule, because what a caller dispatches
+    /// through is the slot's contract and the slot is the one that said <c>[Frac]</c>.</para>
+    /// </summary>
+    private static void ReadOnlyIsHonest(
+        IMethodSymbol symbol, SyntaxNode syntax, string? declaringClass,
+        SemanticModel model, WellKnown known, DiagnosticBag diagnostics)
+    {
+        if (declaringClass is null || symbol.IsAbstract ||
+            symbol.MethodKind == MethodKind.Constructor) return;
+        if (!Declarations.Mutates(syntax, model)) return;
+
+        var loc = Locations.From(symbol.Locations.FirstOrDefault() ?? Location.None);
+        if (Declarations.Has(symbol, known.FracAttribute))
+        {
+            diagnostics.Error("PALCS0551", loc,
+                $"`{symbol.Name}` is declared `[Frac]`, but its body writes a field. A " +
+                "fractional receiver is handed back at the model it arrived at (R4.11c), " +
+                "so a method that moves the model cannot have one. Drop the `[Frac]`.");
+            return;
+        }
+
+        for (var up = symbol.OverriddenMethod; up is not null; up = up.OverriddenMethod)
+        {
+            if (!Declarations.Has(up, known.FracAttribute)) continue;
+            diagnostics.Error("PALCS0551", loc,
+                $"`{symbol.Name}` writes a field, but the `{up.ContainingType.Name}." +
+                $"{up.Name}` it overrides is declared `[Frac]`. A caller dispatches " +
+                "through that declaration and is promised its receiver back unchanged " +
+                "(R4.11c), so no override may move the model. Drop the `[Frac]` on " +
+                $"`{up.ContainingType.Name}.{up.Name}`, or do not write here.");
+            return;
+        }
+    }
+
     private static IEnumerable<ISymbol> Inherited(INamedTypeSymbol symbol)
     {
         var chain = new List<INamedTypeSymbol>();
@@ -2087,6 +2136,8 @@ public static class FrontendPass
             return null;
         }
 
+        ReadOnlyIsHonest(symbol, candidate.Syntax, declaringClass, model, known, diagnostics);
+
         return new IrMethod(
             loc, Naming.Of(symbol), parameters, returnType,
             [.. specs.Requires, .. bodyRequires],
@@ -2102,7 +2153,9 @@ public static class FrontendPass
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
             // R4.11b derives this from the write set. R9.7: an abstract method has no
             // write set, so [Frac] on the method says it instead — the same statement
-            // R4.9a makes about a parameter, made about the receiver.
+            // R4.9a makes about a parameter, made about the receiver. R4.11c is why the
+            // two can only *agree*: where there is a body, the write set is the truth and
+            // a `[Frac]` that contradicts it has already been refused.
             IsReadOnly = declaringClass is not null &&
                 symbol.MethodKind != MethodKind.Constructor &&
                 (Declarations.Has(symbol, known.FracAttribute) ||
