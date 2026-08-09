@@ -46,6 +46,13 @@ public sealed class MethodPlan
         var mutatedObjects = new HashSet<string>();
         if (method.DeclaringClass is not null && !method.IsReadOnly) mutatedObjects.Add(Names.This);
         Normalize.Mutated(method.Body, mutatedObjects);
+        // R4.11c. `IsReadOnly` is the *only* answer about the receiver. `Normalize.Mutated`
+        // re-derives one from the body, and where the two disagreed the body's silently
+        // won — so a `[Frac]` method that writes a field got a mutating signature here and
+        // a read-only one everywhere else, and no one was told. Which of them is *right* is
+        // a separation-logic question and F* answers it: a body emitted read-only cannot
+        // write at a fraction, and Pulse says so against the method the user wrote.
+        if (method.IsReadOnly) mutatedObjects.Remove(Names.This);
 
         var binders = ImmutableArray.CreateBuilder<string>();
         var ghostBinders = ImmutableArray.CreateBuilder<string>();

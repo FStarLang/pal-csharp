@@ -53,6 +53,24 @@ everything behind it — a program refused in the frontend is never emitted, so 
 wrong with it is ever discovered. R3.13 is the worked example; `test/pulse_refusals` is
 where programs that translate faithfully and fail honestly are kept.
 
+**Rule 3a — one question, one answer.** A refusal is *incompleteness*: it can only reject
+programs that might have gone through, and rule 3 is the argument for keeping few of them.
+A **duplicated analysis** is a different and worse thing, because it can be *unsound*. Where
+two passes answer the same question separately and each drives part of the emission, a
+disagreement is not caught anywhere: each half is internally consistent, and what comes out
+is a proof of something nobody asked for. R4.11c is the case that motivated the rule —
+`[Frac]` and the write set both answered "does this method own its receiver", and the vtable
+slot got a postcondition equivalent to `False` — and R9.6a is the same shape with a cheaper
+symptom, one syntax node lowered against two different scopes. So: whenever a fact is needed
+in two places, it is *computed* in one and *read* in the other.
+
+The audit that followed R4.11c checked the rest of the pairs. `Declarations.IsReadOnly`
+(call sites) and `IrMethod.IsReadOnly` (declarations) can differ in exactly one direction —
+a concrete `[Frac]` method whose body writes — and that program is refused by Pulse anyway
+(`test/pulse_refusals/cases/FracMutates.cs`). A non-mutating `override` filling a mutating
+slot does translate, and verifies: the wrapper is checked against the slot's type by F\*,
+which is the whole point. Where the two analyses differ, the verifier is what settles it.
+
 **Rule 4 — No example is nameable from inside the compiler.** `Pal.Compiler` contains no
 identifier drawn from the test suite. Enforced by `test/no-example-names.sh`.
 
@@ -1246,27 +1264,36 @@ That last claim held only for as long as the write set was the *only* way to say
 "read-only". R9.7 added a second — `[Frac]` on a method — because an `abstract` method has
 no body to analyse, and the two promptly drifted. R4.11c is what stops them.
 
-**R4.11c — a `[Frac]` receiver may not be written, and this is refused where it is
-written.** `[Frac("p")]` says the caller keeps a share and is handed the object back *at the
-model it arrived at*; a body that assigns a field says the model moves. Both cannot be
-true. That is a program whose specification cannot hold rather than a proof the emitter is
-failing to find, so §0 rule 3 puts the refusal on the declaration (**PALCS0551**) rather
-than leaving it for Pulse.
+**R4.11c — one answer about the receiver, and F\* judges it.** `IsReadOnly` *is* the
+answer to "does this method own its receiver": `[Frac]` where it is written, the write set
+otherwise. Nothing downstream may ask the question a second time. `MethodPlan` did — it
+seeded the mutated set from `IsReadOnly` and then let `Normalize.Mutated` re-derive the
+receiver from the body — and that is the whole of the defect this rule exists to prevent.
 
-It has to be a refusal, because left to run it does not fail honestly. `[Frac]` *overrides*
-the write-set analysis, so on a single class the annotation is silently ignored — the
-emitted signature is the mutating one and the user's `[Frac]` means nothing at all. In a
-hierarchy it is worse: the class-level declaration and the vtable slot are built read-only
-from the annotation while the body's signature is built mutating from the write set, and
-the read-only one carries the user's postcondition with the post-model collapsed onto the
-pre-model — `TheBalance == TheBalance + 7`, which is `False`. Nothing catches that but an
-incidental arity mismatch in the generated vtable. Had the arities agreed, a caller would
-have had `False` in scope.
+The drift was not visible as a disagreement; it was visible as a *wrong proof*. `[Frac]`
+overrides the write set, so on a single class the emitted signature was built mutating from
+the body and the annotation meant nothing at all. In a hierarchy it was worse: the
+class-level declaration and the vtable slot were built read-only from the annotation while
+the body's signature was built mutating from the write set, and the read-only one carried
+the user's postcondition with the post-model collapsed onto the pre-model —
+`TheBalance == TheBalance + 7`, which is `False`. Nothing caught it but an incidental arity
+mismatch in the generated vtable. Had the arities agreed, a caller would have had `False`
+in scope. **A duplicated analysis is how an unsound emission gets made; a missing check is
+not.**
 
-An `override` is held to the same rule and refused the same way, because what a caller
-dispatches through is the *slot's* contract, and the slot is the one that said `[Frac]`.
-There, F* does reject the build — but with `Too many arguments` inside a generated vtable,
-which names nothing the user wrote.
+Once emission is consistent the remaining question — *may a body that writes a field be
+verified against a receiver held at a fraction?* — is a separation-logic question, and
+Pulse answers it against the body the user wrote: the assignment cannot be proved at
+`B.pts_to var_this #p _`. An `override` of a `[Frac]` slot is the same question at the
+slot's contract, and fails the same way. `test/pulse_refusals/cases/FracMutates.cs` and
+`FracSlotOverride.cs` are the evidence, and they are tests *because* the emission is
+consistent: a frontend refusal here would have made the verifier's answer untestable.
+
+This was briefly such a refusal, **PALCS0551**, and it was a regression against a principle
+this repository had already written down — see `test/pulse_refusals/run.sh`, and
+`cases/AliasedObjects.cs` for **PALCS0520**, removed for the same reason and uncovering a
+bug it had been hiding. §0 rule 3 reads both directions: the emitter never invents a proof
+step, and the checker never invents a refusal.
 
 What this rule does **not** do is decide anything about a *call*. Whether a caller has
 enough permission for the method it is calling is a separation-logic question, and R3.13's
@@ -2587,6 +2614,22 @@ Emitted as `class_Square__forget (m: class_Square__model) : class_Shape__model`.
 total function of the derived model, which is what makes a subclass a *refinement* of its
 parent: the parent's model is recoverable from the child's, and never the reverse.
 
+**R9.6a — The abstraction function and the forgetting function are two members.** R9.5's
+reads the *fields*; R9.6's reads this class's *model*. They have different domains, so one
+member cannot be both, and marking the `override` itself `[Model]` asks it to be. That is
+refused on the declaration (**PALCS0543**) — not a claim about what Pulse could prove, but
+a statement that the translator has no rule for a single expression read against two
+different scopes.
+
+It is worth recording what it looked like before the refusal existed, because it is a
+pattern to watch for elsewhere: the request was *accepted*, and the same syntax node was
+lowered twice — once against the fields, which succeeded, and once against the model, which
+did not. What the reader saw was `PALCS0001: the expression 'side' is not supported`,
+pointing at a field that is perfectly supported. One node serving two roles is the same
+shape of defect as R4.11c's one question answered twice; here it produced a useless message
+rather than a false postcondition, but the cause is the same and so is the fix.
+`test/diagnostics/cases/ModelIsForget.cs` is the case.
+
 **R9.7 — A virtual method's contract is written once, on the `abstract` declaration, at
 the declaring class's model.** An `override` carries no contract of its own; restating it
 would be either a repetition or a Liskov violation, and C# gives it nowhere to go. So the
@@ -2846,8 +2889,18 @@ and sever the link to the constructor's post-state, which is F34/R4.11a again.
 **R9.15c — The conversion consumes the derived reference.** C# leaves both names usable;
 the encoding cannot, because the derived object's invariant *becomes* the base's. The old
 name is marked cast and its next use is **PALCS0548**. Converting a name the method does
-not own outright — its own receiver, or an object parameter — would give away the invariant
-R4.10 promises to return, and is **PALCS0549** at the conversion. What is left is
+*not* own outright — its own receiver, or an object parameter — gives away an invariant
+R4.10's epilogue owes back, and that is left to Pulse: the epilogue simply cannot be
+proved, and R2.3 puts the refusal on the `return`, where the promise comes due
+(`test/pulse_refusals/cases/UpcastParameter.cs`). It was briefly **PALCS0549** here, on the
+reasoning that such a method's specification "cannot hold, whatever the emitter does". That
+is false, and the check was hiding why: a conversion is not one-way, and R9.16's downcast on
+a leaf proves reference identity outright (`class_C__from_B` ensures `r == reveal c`), so
+`B s = d; …; D back = (D)s;` really does return the resource to the reference the parameter
+names. What it does not return is the *model* — an intermediate `__from_B` promises only
+`m == forget own`, and forgetting is not injective as far as F\* is concerned — so the
+roundtrip fails today for a specific and fixable reason that no program could reach while
+the refusal stood. What is left is
 **PALCS0546**, a conversion between two classes the hierarchy does not relate at all
 (R9.18c makes several levels at once ordinary). A cast *down* in expression
 position stays **PALCS0547**, because unlike the upcast it also binds the model equation
@@ -3076,7 +3129,6 @@ declaration that asks for it, never a prediction about a proof:
 | `interface`, multiple bases, generics | not probed |
 | a cast *down* in expression position | PALCS0547, R9.15c |
 | a use of a reference after it has been converted | PALCS0548, R9.15c |
-| converting one of this method's own object parameters, the receiver included | PALCS0549, R9.15c |
 | `as`, `is`, a cast that may fail; `Pal.Is<T>` in a contract | R9.16 |
 
 ### 9.8 Depth
@@ -3419,8 +3471,8 @@ static type was not opening R9.14's view (R9.18e); and a concrete method of an a
 class was being taken for a vtable slot because the test was the name and not the
 `abstract` declaration (R9.12a). A fourth was a refusal that had been stated only for the
 receiver: converting *any* object parameter gives away an invariant the method's own
-postcondition owes back, so PALCS0549 now covers all of them, with
-`test/diagnostics/cases/UpcastParameter.cs` as the case.
+postcondition owes back. That was PALCS0549, and it is gone — R9.15c says why, and
+`test/pulse_refusals/cases/UpcastParameter.cs` is the case.
 
 Depth four and beyond is supported by construction — every abstract class emits `sub`, the
 three primitives and, if it has a parent, a derived vtable and two casts — but is untested.

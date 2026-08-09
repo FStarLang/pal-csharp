@@ -1189,6 +1189,28 @@ public static class FrontendPass
         {
             var forget = symbol.GetMembers()
                 .FirstOrDefault(m => m.IsOverride && OverriddenChainHasModel(m, known));
+
+            // R9.5 and R9.6 are two functions, and they read different things: the
+            // abstraction function is written over the *fields*, the forgetting function
+            // over this class's own *model*. One member cannot be both, and a member
+            // marked `[Model]` that is also the override of the base's is asking it to be.
+            // Left alone this surfaces as PALCS0001 on a field name -- the forgetting
+            // lowering sees the abstraction's body and reports the field as unknown, which
+            // is true of that lowering and useless to the reader.
+            if (forget is not null && SymbolEqualityComparer.Default.Equals(forget, modelSymbol))
+            {
+                diagnostics.Error("PALCS0543",
+                    Locations.From(forget.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{symbol.Name}.{forget.Name}` is marked `[Model]` and also overrides " +
+                    $"`{baseSymbol.Name}`'s `[Model]` member, so it is being asked to be both this " +
+                    "class's abstraction function and its forgetting function. Those read different " +
+                    "things -- the abstraction function reads the fields, the forgetting function " +
+                    "reads this class's model (doc/translation.md R9.5, R9.6) -- so they are two " +
+                    $"members: keep `[Model]` on a new member of `{symbol.Name}`'s own, and leave the " +
+                    "override to say what the base's model is in terms of it.");
+                return false;
+            }
+
             if (forget is null)
             {
                 diagnostics.Error("PALCS0543", Locations.From(syntax.Identifier),
@@ -1276,55 +1298,6 @@ public static class FrontendPass
     /// observation is a statement about the model and the model is inherited whole, so
     /// restating it on the subclass would emit a second name for one function.
     /// </summary>
-    /// <summary>
-    /// R4.11c. A receiver held at a fraction may not be written. <c>[Frac("p")]</c> says
-    /// the caller keeps a share and is handed the object back <em>at the same model</em>;
-    /// a body that assigns a field says the model moves. Both cannot be true, so this is a
-    /// program whose specification cannot hold rather than a proof the emitter is failing
-    /// to find, and §0 rule 3 puts the refusal where it is written.
-    ///
-    /// <para>Left to run, it does not fail honestly. On a single class the annotation is
-    /// silently ignored — the emitted signature is the mutating one, and the user's
-    /// <c>[Frac]</c> means nothing. In a hierarchy the class-level declaration and the
-    /// vtable slot are built read-only while the body's is built mutating, and the
-    /// read-only one carries the user's postcondition with the post-model collapsed onto
-    /// the pre-model: <c>TheBalance == TheBalance + 7</c>, which is <c>False</c>. Nothing
-    /// catches that but an incidental arity mismatch in the vtable.</para>
-    ///
-    /// <para>An <c>override</c> is held to the same rule, because what a caller dispatches
-    /// through is the slot's contract and the slot is the one that said <c>[Frac]</c>.</para>
-    /// </summary>
-    private static void ReadOnlyIsHonest(
-        IMethodSymbol symbol, SyntaxNode syntax, string? declaringClass,
-        SemanticModel model, WellKnown known, DiagnosticBag diagnostics)
-    {
-        if (declaringClass is null || symbol.IsAbstract ||
-            symbol.MethodKind == MethodKind.Constructor) return;
-        if (!Declarations.Mutates(syntax, model)) return;
-
-        var loc = Locations.From(symbol.Locations.FirstOrDefault() ?? Location.None);
-        if (Declarations.Has(symbol, known.FracAttribute))
-        {
-            diagnostics.Error("PALCS0551", loc,
-                $"`{symbol.Name}` is declared `[Frac]`, but its body writes a field. A " +
-                "fractional receiver is handed back at the model it arrived at (R4.11c), " +
-                "so a method that moves the model cannot have one. Drop the `[Frac]`.");
-            return;
-        }
-
-        for (var up = symbol.OverriddenMethod; up is not null; up = up.OverriddenMethod)
-        {
-            if (!Declarations.Has(up, known.FracAttribute)) continue;
-            diagnostics.Error("PALCS0551", loc,
-                $"`{symbol.Name}` writes a field, but the `{up.ContainingType.Name}." +
-                $"{up.Name}` it overrides is declared `[Frac]`. A caller dispatches " +
-                "through that declaration and is promised its receiver back unchanged " +
-                "(R4.11c), so no override may move the model. Drop the `[Frac]` on " +
-                $"`{up.ContainingType.Name}.{up.Name}`, or do not write here.");
-            return;
-        }
-    }
-
     private static IEnumerable<ISymbol> Inherited(INamedTypeSymbol symbol)
     {
         var chain = new List<INamedTypeSymbol>();
@@ -2135,8 +2108,6 @@ public static class FrontendPass
                 "the concrete type you need.");
             return null;
         }
-
-        ReadOnlyIsHonest(symbol, candidate.Syntax, declaringClass, model, known, diagnostics);
 
         return new IrMethod(
             loc, Naming.Of(symbol), parameters, returnType,

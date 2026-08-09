@@ -693,21 +693,13 @@ public sealed class CodeEmitter(
         string? held = null;
         if (operand is IrVar v && Lookup(v.Name) is { Kind: SlotKind.Object } src)
         {
-            // R9.15. The conversion *moves* the invariant onto the base reference, and a
-            // parameter's invariant — the receiver's included — is owed back to the caller
-            // by this method's own postcondition. So converting one is not a proof this
-            // emitter is failing to find; it is a program whose specification cannot hold,
-            // and it is refused where it is written rather than left for Pulse to fail on
-            // an epilogue the reader never wrote.
-            if (_params.TryGetValue(v.Name, out var param) && param.Binder == src.Binder)
-            {
-                diagnostics.Error("PALCS0549", loc,
-                    $"`{v.Name}` is a parameter of this method, and converting it to " +
-                    $"`{target.Name}` would give away the invariant its specification " +
-                    "promises to return (R4.10). Take a `" + target.Name + "` parameter, " +
-                    "or convert a reference this method owns outright.");
-                return null;
-            }
+            // R9.15c. The conversion *moves* the invariant onto the base reference, so a
+            // method that converts one of its own parameters no longer owns what R4.10's
+            // epilogue owes back — unless it takes it back with a cast down (R9.16).
+            // Which of the two it is, is a separation-logic question about what is owned
+            // where, and Pulse is the one that answers it: the epilogue simply cannot be
+            // proved. This was briefly PALCS0549 here; see
+            // `test/pulse_refusals/cases/UpcastParameter.cs` for why it is not any more.
 
             impl = src.Binder;
             from = src.Index;
