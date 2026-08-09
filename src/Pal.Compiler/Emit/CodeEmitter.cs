@@ -323,7 +323,17 @@ public sealed class CodeEmitter(
     /// </summary>
     private void Construct(IrMethod method, IrClassType built)
     {
-        if (classes is null || !classes.TryGetValue(built.Name, out var decl))
+        // R9.21a. An open class's constructor keeps the return type the user declared, so
+        // every `new C(…)` is untouched, and allocates the generated leaf. The two are
+        // reconciled once, here, by the ordinary upcast (R9.15) -- the same step the reader
+        // would get from `C c = new C__impl(…)` written out.
+        var allocated = method.ConstructsLeaf is { } leafName ? new IrClassType(leafName) : built;
+        Construct(method, built, allocated);
+    }
+
+    private void Construct(IrMethod method, IrClassType built, IrClassType alloc)
+    {
+        if (classes is null || !classes.TryGetValue(alloc.Name, out var decl))
         {
             // The class is missing because the frontend refused it, and that refusal is the
             // diagnostic the user needs. Reporting the constructor too names a symptom of a
@@ -368,6 +378,17 @@ public sealed class CodeEmitter(
                 initialisers[f.Field] = Expr(a.Value);
                 continue;
             }
+            // R9.21c. `D(…) : base(args)` is inlined by binding the base constructor's
+            // parameters to the arguments and then running its assignments, so a leading
+            // `let` is part of a constructor body. Nothing else is: an assignment still
+            // may not run before the invariant holds.
+            if (stmt is IrLocalDecl { Init: not null } d && initialisers.Count == 0)
+            {
+                var bound = Names.Local(d.Name);
+                Line($"let {bound} = {Inject(d.Type, d.Init, Expr(d.Init))};");
+                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, bound);
+                continue;
+            }
             if (stmt is IrBlock { Statements.IsEmpty: true }) continue;
             diagnostics.Unsupported(stmt.Loc, "A constructor statement that is not a field initialisation",
                 "A constructor may only assign its own fields: the object's invariant does " +
@@ -410,12 +431,25 @@ public sealed class CodeEmitter(
             return;
         }
 
-        var slot = new Slot(Names.This, built, SlotKind.Object, Names.Result)
+        var slot = new Slot(Names.This, alloc, SlotKind.Object, Names.Result)
         {
             PreModel = null,
             PostModel = "post_" + Names.This,
         };
-        Line($"fold {Inv(built)} {Names.Result} {ModelWitness(decl, slot)};");
+        Line($"fold {Inv(alloc)} {Names.Result} {ModelWitness(decl, slot)};");
+        if (alloc.Name != built.Name)
+        {
+            var up = Fresh();
+            // R9.16. The conversion keeps the index, and a *returned* reference wants the
+            // plain invariant -- which is what this constructor's own postcondition, and
+            // every `new C(…)` in the program, is written against.
+            if (UpcastChain(alloc.Name, Names.Result, null, null, built, Names.This, up)
+                is { Index: not null } ix)
+                Line($"{Names.ClassModule(built.Name)}.{Names.ClassForgetImpl(built.Name)} " +
+                     $"{up} {ix.Index};");
+            Line(up);
+            return;
+        }
         Line(Names.Result);
     }
 
@@ -684,8 +718,21 @@ public sealed class CodeEmitter(
         else if (operand is IrCall { Kind: CalleeKind.Method } call) { impl = Fresh(); Call(call, impl); }
         else { impl = Fresh(); Line($"let {impl} = {Expr(operand)};"); }
 
+        return UpcastChain(derived!, impl, from, held, target, name, binder);
+    }
+
+    /// <summary>
+    /// R9.18. One edge per class boundary, in order. Split out of <see cref="Upcast"/> so
+    /// that R9.21a's constructor, which has a binder rather than an expression to convert,
+    /// walks the very same chain.
+    /// </summary>
+    private Slot? UpcastChain(
+        string derived, string impl, string? from, string? held,
+        IrClassType target, string name, string binder)
+    {
+        if (Ancestors(derived, target.Name) is not { } chain) return null;
         Slot? slot = null;
-        var current = derived!;
+        var current = derived;
         for (var i = 0; i < chain.Length; i++)
         {
             var last = i == chain.Length - 1;
@@ -717,10 +764,22 @@ public sealed class CodeEmitter(
         // the class, and the only choice here is whether the object record is known.
         if (classes is not null && classes[derived].IsAbstract)
         {
+            // R9.15e. `Rebase` rewrites `forget` applied to a *name*, so when nothing has
+            // named this value's model yet — it came from a call, not from a slot — the
+            // name is asked for here. Naming a model the invariant already existentially
+            // quantifies is R9.6's `with`, not a proof step.
+            if (held is null)
+            {
+                held = FreshValue(name);
+                Line($"with {held}. assert ({mod}.{Names.ClassInv(derived)} {impl} {held});");
+            }
             if (from is null)
             {
                 Line($"let {binder} = {mod}.{Names.UpcastTo(derived, target.Name)} {impl};");
-                return new Slot(name, target, SlotKind.Object, binder);
+                return new Slot(name, target, SlotKind.Object, binder)
+                {
+                    PreModel = Rebase(mod, derived, target, held),
+                };
             }
             Line($"let {binder} = {mod}.{Names.UpcastToAt(derived, target.Name)} {impl} {from};");
             return new Slot(name, target, SlotKind.Object, binder)
@@ -773,9 +832,7 @@ public sealed class CodeEmitter(
     /// mentions neither the index nor the permission, so it is the same one step whatever
     /// the reference is held at.</para>
     ///
-    /// <para>Returns null when the previous edge bound no name — a first edge out of an
-    /// abstract class, where the value's own model was never given one and there is
-    /// nothing to forget.</para>
+    /// <para>Returns null only when no name was available at all.</para>
     /// </summary>
     private string? Rebase(string mod, string derived, IrClassType target, string? held)
     {

@@ -448,9 +448,18 @@ example. Checked downcasts (`is`/`as`) are supported and are *free* — with a p
 strong enough to prove the cast succeeds, `x as Square` cannot fail, so it costs nothing to
 prove and nothing to run.
 
-Every class must be **`sealed` or `abstract`** (`PALCS0521`). A leaf owns a representation
-and an abstract base owns a vtable; a class that were both would have to be its own
-subclass's vtable type and one of that type's values at once. C# `interface`
+**An ordinary open class works too.** A class may be concrete *and* extensible — with
+fields, a constructor, a non-virtual method, and `virtual` methods with bodies — and
+another ordinary class may derive from it and override some of them. R9.21 desugars it
+into the shape above: an abstract half carrying the contracts and a generated leaf carrying
+the representation and the bodies. `new C(…)` is unaffected and `: base(args)` is inlined.
+Two things follow, both of them C#'s doing rather than the scheme's: a `virtual` method's
+contract is the one every override must satisfy, so a caller learns only that (a
+non-virtual method keeps its contract exactly); and a subclass may not widen the model,
+because C# will not let it `override` the concrete `[Model]` member of an instantiable
+class. `test/open_concrete` is the example.
+
+C# `interface`
 implementations are still rejected, as are generic class and struct *declarations*
 (`PALCS0581`) — a class is polymorphic in pal-csharp only through the methods that
 operate on it. A static mutable field is rejected too

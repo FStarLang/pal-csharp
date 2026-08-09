@@ -1405,10 +1405,11 @@ and the receiver is a representation rather than an object. Two rules follow fro
 both live in §5 because they are rules about statements: R5.11a for a ghost statement and
 **R5.12** for a loop.
 
-**R4.13 (rejections).** M2 supports `sealed` classes only. `virtual`, `abstract`,
-`override`, and interface implementations are **PALCS0521**: a per-class `class_C__inv`
-cannot express behavioural subtyping without existential packages, and admitting them
-without one would silently produce unsound or unprovable specs. A **static mutable field**
+**R4.13 (rejections).** M2 is the single-class encoding: a `sealed` class with no base
+list, whose per-class `class_C__inv` cannot express behavioural subtyping. `virtual`,
+`abstract` and `override` are not rejected — §9 encodes them, and R9.21 admits an open
+concrete class by desugaring — but interface implementations still are (**PALCS0546**).
+A **static mutable field**
 is **PALCS0522** — it is unowned global mutable state, which no per-object invariant
 covers. A `[Spec]` member that reads a field directly is **PALCS0523** (R3.9c), and a class
 with no `[Model]` member is **PALCS0524**: without one there is no model, and without a
@@ -2511,19 +2512,25 @@ translated class.** A `sealed class` with no base list is M2 and its emission do
 change by one character. This is a genuine fork, and it is drawn by the C# declaration
 rather than inferred, so a user always knows which encoding they are getting.
 
-Three restrictions, each traceable to something the studies did *not* probe. Each is a
-refusal to *translate*, not a prediction that a proof will fail (§0 rule 3):
+Three restrictions on the *encoding* — none of them, any longer, a restriction on the
+input. §9.11's desugaring puts an arbitrary hierarchy into this shape, so what follows
+describes what the emitter is handed rather than what a user may write:
 
 * **R9.2 — An abstract class has no fields.** The studies give `Shape` and
   `Quadrilateral` no representation of their own; the representation is entirely the
-  leaf's. A base field would make the leaf's representation an extension of the base's
-  and force a constructor chain, which is on §8.4's not-probed list.
-* **R9.3 — Every virtual method is `abstract`.** In both studies each leaf supplies a
-  *full* vtable. A `virtual` method with a body would have to be inherited by a subclass
-  that does not override it, and a base method body can only run against a
-  representation the base does not have. `base.M()` is refused for the same reason.
-* **R9.4 — A leaf is `sealed`.** A non-sealed concrete class is both a vtable *value* and
-  a vtable *type*, which the studies never build.
+  leaf's. A base field would make the leaf's representation an extension of the base's and
+  force a constructor chain. R9.21 supplies neither: it gives the fields to a generated
+  leaf and replicates them into each subclass's leaf, so no representation is ever an
+  extension of another.
+* **R9.3 — Every virtual method on an abstract class is `abstract`.** In both studies each
+  leaf supplies a *full* vtable. A `virtual` method with a body would have to be inherited
+  by a subclass that does not override it, and a base method body can only run against a
+  representation the base does not have. R9.21 supplies the missing representation — the
+  body moves to the leaf that has one — and R9.21b replicates it into each subclass's
+  leaf. `base.M()` remains refused: it names a *particular* body rather than a slot, and
+  after the split the body it names is on a sibling leaf, not a base.
+* **R9.4 — A concrete class in a hierarchy is `sealed`.** A non-sealed concrete class is
+  both a vtable *value* and a vtable *type*. R9.21 splits it into one of each.
 
 A non-`abstract` method on an abstract class is *not* refused: it is an ordinary method
 over the class's invariant, dispatching through its own receiver like any other client
@@ -3225,7 +3232,100 @@ declaration named for the property. R2.1's mangling therefore produces `Func_C_P
 `Func_C_get_P`: C# forbids a property and a method of one name in one type, so the name
 stays injective.
 
-### 9.10 Status
+### 9.11 Open concrete classes
+
+Everything above is stated of a hierarchy in the shape §9 encodes: an `abstract` root and
+`sealed` leaves. Ordinary C# is not written that way. A class is concrete *and*
+extensible, it has fields and a constructor, its virtual methods have bodies, and a
+subclass inherits the ones it does not override.
+
+The gap was, for four rounds of this work, described as a proof-shape risk: an encoding §9
+would need and does not have. That description was wrong, and a probe settled it. The
+hand-written desugaring of a genuinely-extended concrete base — a base with a field, a
+non-virtual body reading it, two virtuals with bodies, and a subclass overriding one — is
+*structurally identical* to `test/shape_hierarchy`, and verifies with no emitter change at
+all. There was never a missing Pulse shape. There was only unwritten frontend code.
+
+**R9.21 — A concrete class that is not `sealed` is split into an abstract half and a
+generated leaf.** `class C` becomes:
+
+* an **abstract `C`** carrying the model *type* and its `[Refine]`, the observations, and
+  every method C declares — as an `abstract` declaration bearing the contract R9.7 says
+  belongs there. No fields, no invariant, no abstraction function, so R9.2 holds of it.
+* a **generated `sealed C__impl : C`** carrying the fields, the invariant, the abstraction
+  function, the constructor, and every method body as an `override` with its contract
+  stripped (R9.7 again: the contract is on the declaration the override fills).
+
+R9.6's forgetting function on this edge is the identity: the leaf adds nothing its own
+abstract half does not already know. R9.15e is what makes an identity forgetting
+survivable, and it is load-bearing here — every `new C(…)` crosses this edge.
+
+The rewrite is at the **IR level**, not the syntax level. Every IR node carries the
+`IrLoc` of the syntax it came from, so a body replicated into a second leaf reports at the
+one place the user wrote it. A `CSharpSyntaxRewriter` would have had to invent a position
+in a file that does not exist.
+
+**R9.21a — A constructor keeps its name and its declared return type; `ConstructsLeaf`
+says what it allocates.** `new C(…)` in the user's program is untouched and really does
+yield a `C`. The emitted function allocates and folds at `C__impl`, then walks R9.15's
+chain once to `C` before returning. The upcast produces R9.16's *indexed* reference, and
+the postcondition wants the plain invariant, so the index is dropped with one
+`class_C__forget_impl` step.
+
+**R9.21b — A subclass of an open class inherits its representation, its invariant, its
+model, and every body it does not override.** R9.2 gives the abstract half no fields, so
+"inherits" has to be made true by replication: what C# resolves by walking a base chain at
+run time, the scheme resolves by giving each leaf the whole of what it is. Three
+consequences, each forced:
+
+* The fields are inherited at **collection** time and the invariant at **IR** time. The
+  inherited abstraction function is the base's *syntax*, and it can only be lowered where
+  the names it reads resolve — which is before the IR exists. The invariant is already
+  lowered and refers to fields by name, so it merges safely afterwards. A semantic model
+  does not span syntax trees, so an inherited model or observation body is bound against
+  the model of the tree it was written in, not the subclass's.
+* Flattening runs **before** splitting, base-first by depth. Inherited fields belong to the
+  subclass's *leaf*, and after the split the leaf is not the class the base list names.
+* **The forgetting function is the identity, and a subclass may not widen the model.** This
+  is C#'s doing, not the scheme's: the `[Model]` member of an *instantiable* class is a
+  concrete member, and C# will not let a subclass `override` one. R9.6's forgetting
+  function is therefore unwritable by the subclass, so the model is inherited whole.
+  (Declaring the `[Model]` member `virtual` should let R9.6's existing machinery apply
+  unchanged; that has not been probed and is not claimed.)
+
+A moved or replicated method's receiver is retyped to the leaf, because R4.10 opens it
+against its own invariant and the abstract half has none. Its `Overrides` is set to the
+leaf's **immediate base** — its own abstract half — because R9.14 reads `Overrides` as the
+view the receiver arrives under, not as the class that first declared the slot. An
+`override` *moves*: §9.9 never re-declares an inherited abstract method, and doing so here
+gives the class a second vtable slot of the same name.
+
+**R9.21c — `D(…) : base(args)` is inlined.** There is one object here, not two, and the
+base's constructor builds the base's *leaf*, which `D` is not. So R4.12c's reading of
+`: this(args)` — that the chained constructor is the result — is exactly what does not hold
+of `base`. Instead the base's constructor parameters are bound to the arguments and its
+field assignments are prepended to `D`'s own. The binding is a **renaming**, not a
+substitution: nothing traverses the expressions, so nothing can get one wrong, and a
+capture is harmless because `let var_b = var_b;` binds the outer `var_b`'s value. R4.12's
+"a constructor body is field assignments" therefore admits a leading run of `let`s, and
+nothing else.
+
+**What this costs, and why the cost is right.** A `virtual` method's contract lives on the
+abstract half, so a caller learns only that contract even when it can see the `new`. That
+is not a weakness of the translation: an overridable method may be overridden in another
+assembly, and C# gives a caller no more. The loss is confined to `virtual`; a non-virtual
+method keeps its contract exactly, which is why `Bank.Basic` proves an equality while
+`Bank.Fees` proves only a bound.
+
+**Implemented and verified**, by `test/open_concrete`: a three-level open hierarchy
+`Account → Premium → Gold` written as ordinary C#, with a field, a non-virtual body, two
+virtuals with bodies, an override at each level, a method added at the deepest level, and
+`: base(…)` chaining at two levels. `CellVariant.cs` is §7.2's detector — an independently
+written open hierarchy whose constructors take two arguments, pass an *expression* to
+`base`, and chain through the middle level — and it passes with no emitter change.
+
+### 9.12 Status
+
 
 **Implemented and verified**, by `test/shape_hierarchy`: an `abstract Shape` with two
 virtual methods and an observed model, `sealed Square` and `sealed Circle` with unrelated

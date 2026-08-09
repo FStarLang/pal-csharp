@@ -166,8 +166,23 @@ public sealed class WellKnown
 
     /// <summary>The C# scalar-to-Pulse mapping of <c>doc/translation.md</c> §3 (R3.1).</summary>
     /// <summary>Whether a class declares the <c>[Model]</c> member R3.9 requires.</summary>
-    public bool HasModel(INamedTypeSymbol type) =>
-        type.GetMembers().Any(m => Declarations.Has(m, ModelAttribute));
+    /// <summary>
+    /// R9.21b. A class is translated exactly when it has an abstraction function — its
+    /// own, or the one it inherits with the representation of an open base. The walk stops
+    /// at an `abstract` or `sealed` base: an abstract class's model is abstract, so R9.6
+    /// makes every subclass supply its own, and a sealed one cannot be derived from.
+    /// </summary>
+    public bool HasModel(INamedTypeSymbol type)
+    {
+        for (var t = type; t is not null; t = t.BaseType)
+        {
+            if (t.GetMembers().Any(m => Declarations.Has(m, ModelAttribute))) return true;
+            if (!SymbolEqualityComparer.Default.Equals(t, type) && (t.IsAbstract || t.IsSealed))
+                return false;
+            if (t.BaseType is not { IsAbstract: false, IsSealed: false }) return false;
+        }
+        return false;
+    }
 
     /// <summary>
     /// R10.8. A class that holds a nullable reference of its own type. Recognising it here

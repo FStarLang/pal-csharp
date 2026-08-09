@@ -51,9 +51,12 @@ public static class FrontendPass
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
             declarations.Add(include);
 
+        // R9.21. The split runs before contracts are inherited, so the `abstract`
+        // declaration it creates is the one `InheritContracts` reads the contract from —
+        // exactly as if the user had written the two halves out.
+        OpenClasses.Desugar(declarations);
         InheritContracts(declarations, diagnostics);
-        return new IrProgram(declarations.ToImmutable());
-    }
+        return new IrProgram(declarations.ToImmutable());    }
 
     /// <summary>
     /// R9.7. A virtual method's contract is written once, on the <c>abstract</c>
@@ -679,6 +682,9 @@ public static class FrontendPass
         /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
         public ExpressionSyntax? ForgetBody { get; init; }
 
+        /// <summary>R9.21. Concrete and not `sealed`: split by <see cref="OpenClasses"/>.</summary>
+        public bool IsOpen { get; init; }
+
     }
 
     /// <summary>
@@ -712,6 +718,18 @@ public static class FrontendPass
                 var modelMembers = symbol.GetMembers()
                     .Where(m => Declarations.Has(m, known.ModelAttribute))
                     .ToImmutableArray();
+
+                // R9.21b. A subclass of an open class inherits its base's representation,
+                // and with it the abstraction function over that representation. C# gives
+                // it no way to write one of its own: the base's `[Model]` member is a
+                // concrete property over fields the subclass did not declare, and an
+                // `override` of it would have nothing else to be written in terms of. So
+                // the base's is the model it has, and R9.6's forgetting is the identity.
+                if (modelMembers.Length == 0 && InheritedModel(symbol, known) is { } up)
+                {
+                    modelMembers = [up];
+                    attempted.Add(symbol);
+                }
 
                 // R12.1. A `[Plain]` class is collected for its *representation* alone. It
                 // has no model, so none of the checks below apply to it: they all ask
@@ -784,17 +802,9 @@ public static class FrontendPass
                 }
 
                 // R9.1/R9.4. A class is either a leaf — `sealed`, with a representation —
-                // or `abstract`, with a vtable and none. Anything else is a vtable value
-                // and a vtable type at once, which neither design study builds.
-                if (!symbol.IsSealed && !symbol.IsAbstract)
-                {
-                    diagnostics.Error("PALCS0521", Locations.From(syntax.Identifier),
-                        $"`{symbol.Name}` is neither `sealed` nor `abstract`. A translated class is " +
-                        "either a leaf, which owns a representation, or an abstract base, which owns a " +
-                        "vtable (doc/translation.md R9.4). A class that is both would have to be its " +
-                        "own subclass's vtable type and one of its values at the same time.");
-                    continue;
-                }
+                // or `abstract`, with a vtable and none. R9.21 admits the third case by
+                // desugaring rather than by encoding it: a concrete class that is not
+                // `sealed` is both at once, so it is split into one of each.
 
                 if (!TryCollectClass(syntax, symbol, modelMembers[0], known, diagnostics, out var candidate))
                     continue;
@@ -979,12 +989,20 @@ public static class FrontendPass
         out ClassCandidate candidate)
     {
         candidate = null!;
+        // R9.21b. The `[Model]` member is the base's, not this class's: the representation
+        // it abstracts is one this class inherits rather than declares.
+        var inheritedModel =
+            !SymbolEqualityComparer.Default.Equals(modelSymbol.ContainingType, symbol);
         var ok = true;
 
         var fields = ImmutableArray.CreateBuilder<StructField>();
         var observations = ImmutableArray.CreateBuilder<ObservationMember>();
 
-        foreach (var member in symbol.GetMembers())
+        // R9.21b. A subclass of an open class inherits its representation. The inherited
+        // fields are collected *here*, ahead of the class's own, rather than merged into
+        // the IR later: the abstraction function inherited with them is the base's
+        // expression, and it has to be lowered somewhere those names resolve.
+        foreach (var member in Inherited(symbol))
         {
             // R4.13: global mutable state is covered by no per-object invariant.
             if (member is IFieldSymbol { IsStatic: true, IsConst: false } stat)
@@ -1120,12 +1138,15 @@ public static class FrontendPass
                     "(doc/translation.md R9.5); one with no model has neither.");
                 ok = false;
             }
-            else if (!b.IsAbstract)
+            // R9.21. A `sealed` base really is a vtable value and nothing else, so there
+            // is no type to derive from. An *open* one is both, and the split gives it an
+            // abstract half — which is the vtable type this derivation names.
+            else if (!b.IsAbstract && b.IsSealed)
             {
                 diagnostics.Error("PALCS0540", Locations.From(syntax.Identifier),
-                    $"`{symbol.Name}` derives from `{b.Name}`, which is not `abstract`. A base class " +
-                    "supplies a vtable *type*, and a concrete class supplies a vtable *value*; " +
-                    "doc/translation.md R9.4 keeps those apart.");
+                    $"`{symbol.Name}` derives from `{b.Name}`, which is `sealed`. A base class " +
+                    "supplies a vtable *type*, and a sealed class supplies only a vtable *value*; " +
+                    "doc/translation.md R9.4 keeps those apart. Drop the `sealed`.");
                 ok = false;
             }
             else baseSymbol = b;
@@ -1136,10 +1157,14 @@ public static class FrontendPass
         // only run against a representation the base does not have. The abstract ones are
         // not collected here: they are ordinary method candidates with no body, so their
         // contracts are bound by the machinery every other method's contract uses.
+        //
+        // R9.21 admits the body on an *open* class, where it is not a claim about an
+        // abstract class at all: the split puts the body on a leaf that does have a
+        // representation, and gives every other leaf a copy.
         foreach (var m in symbol.GetMembers().OfType<IMethodSymbol>()
                      .Where(m => m.MethodKind == MethodKind.Ordinary))
         {
-            if (m.IsVirtual && !m.IsAbstract)
+            if (m.IsVirtual && !m.IsAbstract && symbol.IsAbstract)
             {
                 diagnostics.Error("PALCS0542",
                     Locations.From(m.Locations.FirstOrDefault() ?? Location.None),
@@ -1154,8 +1179,13 @@ public static class FrontendPass
         // R9.6. A derived class supplies its parent's model by overriding the parent's
         // [Model] member with an expression over its own. That override *is* the
         // forgetting function, and without it the two models are unrelated.
+        //
+        // R9.21b. Not when the base is open and the model was inherited from it: the two
+        // models are then the *same* model, so the forgetting function is the identity and
+        // there is nothing for the subclass to say. Demanding an override here would be
+        // demanding one C# does not allow, since the member being inherited is concrete.
         ExpressionSyntax? forgetBody = null;
-        if (baseSymbol is not null)
+        if (baseSymbol is not null && !inheritedModel)
         {
             var forget = symbol.GetMembers()
                 .FirstOrDefault(m => m.IsOverride && OverriddenChainHasModel(m, known));
@@ -1230,9 +1260,50 @@ public static class FrontendPass
         {
             BaseSymbol = baseSymbol,
             IsAbstract = symbol.IsAbstract,
+            IsOpen = !symbol.IsAbstract && !symbol.IsSealed,
             ForgetBody = forgetBody,
         };
         return true;
+    }
+
+    /// <summary>The semantic model for a node's own tree, which may not be the class's.</summary>
+    private static SemanticModel In(SemanticModel model, SyntaxNode node) =>
+        node.SyntaxTree == model.SyntaxTree ? model : model.Compilation.GetSemanticModel(node.SyntaxTree);
+
+    /// <summary>
+    /// R9.21b. The class's own members, preceded by the representation it inherits from
+    /// every open base, base-most first. Only the representation is inherited: an
+    /// observation is a statement about the model and the model is inherited whole, so
+    /// restating it on the subclass would emit a second name for one function.
+    /// </summary>
+    private static IEnumerable<ISymbol> Inherited(INamedTypeSymbol symbol)
+    {
+        var chain = new List<INamedTypeSymbol>();
+        for (var b = symbol.BaseType; b is { IsAbstract: false, IsSealed: false }; b = b.BaseType)
+            chain.Insert(0, b);
+        foreach (var b in chain)
+            foreach (var m in b.GetMembers())
+                if (m is IFieldSymbol { IsStatic: false, IsConst: false, AssociatedSymbol: null } or
+                         IPropertySymbol { IsStatic: false, IsIndexer: false })
+                    yield return m;
+        foreach (var m in symbol.GetMembers()) yield return m;
+    }
+
+    /// <summary>
+    /// R9.21b. The <c>[Model]</c> member a class inherits from the nearest open base that
+    /// declares one. Only an <em>open</em> base: a sealed class cannot be derived from, and
+    /// an abstract one declares its model abstract, which R9.6 already makes every subclass
+    /// supply for itself.
+    /// </summary>
+    private static ISymbol? InheritedModel(INamedTypeSymbol symbol, WellKnown known)
+    {
+        for (var b = symbol.BaseType; b is not null; b = b.BaseType)
+        {
+            if (b.IsAbstract || b.IsSealed) return null;
+            if (b.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute))
+                is { } model) return model;
+        }
+        return null;
     }
 
     /// <summary>
@@ -1396,9 +1467,13 @@ public static class FrontendPass
 
         // R9.2. An abstract class has no abstraction function: there are no fields to
         // abstract from, and each leaf supplies the model instead.
+        // R9.21b. An inherited abstraction function is a syntax node in the *base's* file,
+        // and a semantic model does not span trees. It is the model body's own tree that
+        // has to be asked about it, which for every class that declares its own is the
+        // same tree as before.
         var modelBody = c.ModelBody is null
             ? null
-            : new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+            : new ExprLowerer(In(classModel, c.ModelBody), known, diagnostics, specPosition: true)
               { ClassMembers = fieldNames }.Lower(c.ModelBody);
 
         // R9.6. The forgetting function reads *this* class's model, exactly as an
@@ -1445,7 +1520,7 @@ public static class FrontendPass
                 Locations.From(o.Symbol.Locations.FirstOrDefault() ?? Location.None),
                 o.Name,
                 o.ReturnType,
-                new ExprLowerer(classModel, known, diagnostics, specPosition: true)
+                new ExprLowerer(In(classModel, o.Body), known, diagnostics, specPosition: true)
                 { ClassMembers = modelName }.Lower(o.Body)))
             .ToImmutableArray();
 
@@ -1456,6 +1531,7 @@ public static class FrontendPass
         {
             BaseClass = c.BaseSymbol?.Name,
             IsAbstract = c.IsAbstract,
+            IsOpen = c.IsOpen,
             ForgetBody = forgetBody,
             Recursion = Recursion(c, fields, modelBody, known, diagnostics),
             TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
@@ -1978,7 +2054,9 @@ public static class FrontendPass
 
         var objectFields = symbol.ContainingType is not { } holder || !known.HasModel(holder)
             ? ImmutableHashSet<string>.Empty
-            : holder.GetMembers().OfType<IFieldSymbol>()
+            // R9.21b. A body inherits the representation of every open base, so a field
+            // the class did not declare is still one of its own to read.
+            : Inherited(holder).OfType<IFieldSymbol>()
                 .Where(f => !f.IsStatic && !f.IsImplicitlyDeclared)
                 .Select(f => f.Name)
                 .ToImmutableHashSet();

@@ -595,6 +595,14 @@ public sealed record IrMethod(
     public bool IsConstructor { get; init; }
 
     /// <summary>
+    /// R9.21a. The generated leaf a constructor of an open class actually allocates. Its
+    /// <see cref="ReturnType"/> stays the class the user named, so every <c>new C(…)</c> in
+    /// the program is untouched and correctly typed; this says what the allocation builds,
+    /// and the emitter upcasts once before returning.
+    /// </summary>
+    public string? ConstructsLeaf { get; init; }
+
+    /// <summary>
     /// R9.9. An <c>abstract</c> method of an abstract class: a vtable slot rather than a
     /// module. It is an ordinary <see cref="IrMethod"/> with no <see cref="Body"/>, so its
     /// contract is bound and lowered by exactly the machinery every other method uses —
@@ -763,6 +771,14 @@ public sealed record IrClass(
     /// <see cref="ModelBody"/>, and a vtable rather than a record.
     /// </summary>
     public bool IsAbstract { get; init; }
+
+    /// <summary>
+    /// R9.21. The class is concrete but not <c>sealed</c>: it is both a vtable value and a
+    /// vtable type, and <see cref="OpenClasses"/> splits it into the two halves §9 already
+    /// translates before anything downstream sees it. No <see cref="IrClass"/> reaching the
+    /// emitter has this set.
+    /// </summary>
+    public bool IsOpen { get; init; }
 
     /// <summary>
     /// R9.6. The <c>override</c> of the base's <c>[Model]</c> member: the base's model
