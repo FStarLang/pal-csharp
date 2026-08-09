@@ -66,6 +66,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "open_class", "test/open_cla
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "open_concrete", "test/open_concrete/open_concrete.csproj", "{82F6B65A-67F5-08F2-F3CA-5B10D3E68F7F}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "open_model", "test/open_model/open_model.csproj", "{13209FDC-C18D-EB47-30A7-D3A75AF9CDB7}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "out_param", "test/out_param/out_param.csproj", "{A9621145-CD1A-241F-2C5A-064C43DD4B3A}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "overloads", "test/overloads/overloads.csproj", "{433093C7-7E26-728B-06F0-1E90CAB09B24}"
@@ -236,6 +238,10 @@ Global
 		{82F6B65A-67F5-08F2-F3CA-5B10D3E68F7F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{82F6B65A-67F5-08F2-F3CA-5B10D3E68F7F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{82F6B65A-67F5-08F2-F3CA-5B10D3E68F7F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{13209FDC-C18D-EB47-30A7-D3A75AF9CDB7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{13209FDC-C18D-EB47-30A7-D3A75AF9CDB7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{13209FDC-C18D-EB47-30A7-D3A75AF9CDB7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{13209FDC-C18D-EB47-30A7-D3A75AF9CDB7}.Release|Any CPU.Build.0 = Release|Any CPU
 		{A9621145-CD1A-241F-2C5A-064C43DD4B3A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{A9621145-CD1A-241F-2C5A-064C43DD4B3A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A9621145-CD1A-241F-2C5A-064C43DD4B3A}.Release|Any CPU.ActiveCfg = Release|Any CPU

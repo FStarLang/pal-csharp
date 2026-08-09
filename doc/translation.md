@@ -3364,12 +3364,11 @@ consequences, each forced:
   the model of the tree it was written in, not the subclass's.
 * Flattening runs **before** splitting, base-first by depth. Inherited fields belong to the
   subclass's *leaf*, and after the split the leaf is not the class the base list names.
-* **The forgetting function is the identity, and a subclass may not widen the model.** This
-  is C#'s doing, not the scheme's: the `[Model]` member of an *instantiable* class is a
-  concrete member, and C# will not let a subclass `override` one. R9.6's forgetting
-  function is therefore unwritable by the subclass, so the model is inherited whole.
-  (Declaring the `[Model]` member `virtual` should let R9.6's existing machinery apply
-  unchanged; that has not been probed and is not claimed.)
+* **A subclass that says nothing inherits the model whole, and its forgetting function is
+  the identity.** A `[Model]` member declared plainly is not overridable, so R9.6 has
+  nowhere to go and there is nothing for the subclass to write. This is the default, and it
+  is the right one: most subclasses add representation, not *model*. R9.21d is what happens
+  when a subclass wants more.
 
 A moved or replicated method's receiver is retyped to the leaf, because R4.10 opens it
 against its own invariant and the abstract half has none. Its `Overrides` is set to the
@@ -3387,6 +3386,38 @@ substitution: nothing traverses the expressions, so nothing can get one wrong, a
 capture is harmless because `let var_b = var_b;` binds the outer `var_b`'s value. R4.12's
 "a constructor body is field assignments" therefore admits a leading run of `let`s, and
 nothing else.
+
+**R9.21d — A `virtual` `[Model]` member lets a subclass extend the model, and R9.6 is
+already the rule for it.** `virtual` is the C# for "a subclass may replace this". Write it
+on the `[Model]` member of an open class and everything R9.6 says of an abstract base
+applies unchanged: the subclass declares a `[Model]` of its own over the fields it now has,
+and overrides the base's to say what the base's model *is* in terms of it. The forgetting
+function is then a **projection** rather than the identity, which is what makes the subclass
+a proper refinement rather than a renaming — `Rewards` knows a balance and a points count,
+`Acct` knows a balance, and no function of an `Acct`'s model recovers the points.
+
+No rule changed to allow this; one had to be stated, about **observations**. An observation
+is written against the model member of the class that declares it (`TheBalance => Bal`), so
+replicating it into a subclass is correct exactly while the model is that same member. Once
+a class supplies a model of its own, `Bal` there is the *forgetting function*, not the
+model, and copying the body down reads a member that is no longer what it was. So an
+observation is inherited only when the observation and the model are declared by the same
+class; otherwise it belongs to the earlier model and is reached through R9.6's forgetting,
+exactly as it is from an abstract base.
+
+The comparison is against the **model's** declaring class and not the subclass's, and the
+variant is what forced that: `Pallet : Crate : Box` inherits `Crate`'s extended model whole,
+so it must take `Crate`'s observations with it and leave `Box`'s behind. A guard written
+against the subclass gets the two-level case right and that one wrong.
+
+**Implemented and verified**, by `test/open_model`: `Acct → Rewards`, where `Rewards`'s
+model is a user spec type (§11) carrying a component `Acct`'s cannot name, and clients prove
+both halves of the claim — the extended model is exact at the type that declares it, and a
+base-typed reference sees the projection, unchanged by a method that moved only the extra
+component. `CrateVariant.cs` is §7.2's detector: three levels, the extension at the
+*middle* one, a base model that is a computed expression rather than a field, and a third
+level that adds no model of its own so that R9.21b's identity sits directly on top of
+R9.6's projection.
 
 **What this costs, and why the cost is right.** A `virtual` method's contract lives on the
 abstract half, so a caller learns only that contract even when it can see the `new`. That

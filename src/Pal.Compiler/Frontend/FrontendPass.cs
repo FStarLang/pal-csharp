@@ -1019,6 +1019,22 @@ public static class FrontendPass
                 Body(member) is { } observationBody &&
                 ReturnTypeOf(member) is { } observationType)
             {
+                // R9.21d. An observation is written against the model member of the class
+                // that declares it, so it may be inherited exactly while the model is that
+                // same member -- R9.21b's inherited-whole case, where the forgetting is the
+                // identity. Once a class between here and there supplies a model of its
+                // own, the earlier observation belongs to the earlier model and is reached
+                // through R9.6's forgetting, as it is from an abstract base; copying its
+                // body down would read a model member that is no longer the model.
+                //
+                // The comparison is against the *model's* declaring class and not this one,
+                // because a class may inherit its model from a base that itself extended
+                // one: `Pallet : Crate : Box` inherits `Crate`'s model whole and must take
+                // `Crate`'s observations with it, but not `Box`'s.
+                if (!SymbolEqualityComparer.Default.Equals(
+                        member.ContainingType, modelSymbol.ContainingType))
+                    continue;
+
                 var mappedReturn = known.MapType(observationType);
                 if (mappedReturn is null)
                 {

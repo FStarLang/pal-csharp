@@ -453,11 +453,17 @@ fields, a constructor, a non-virtual method, and `virtual` methods with bodies �
 another ordinary class may derive from it and override some of them. R9.21 desugars it
 into the shape above: an abstract half carrying the contracts and a generated leaf carrying
 the representation and the bodies. `new C(…)` is unaffected and `: base(args)` is inlined.
-Two things follow, both of them C#'s doing rather than the scheme's: a `virtual` method's
+One thing follows, and it is C#'s doing rather than the scheme's: a `virtual` method's
 contract is the one every override must satisfy, so a caller learns only that (a
-non-virtual method keeps its contract exactly); and a subclass may not widen the model,
-because C# will not let it `override` the concrete `[Model]` member of an instantiable
-class. `test/open_concrete` is the example.
+non-virtual method keeps its contract exactly). `test/open_concrete` is the example.
+
+**A subclass may extend the model.** By default it does not: a plain `[Model]` member is
+not overridable, so a subclass inherits the model whole and the forgetting function is the
+identity. Mark the `[Model]` member `virtual` and the subclass may declare a `[Model]` of
+its own and override the base's to say what the base's model is in terms of it — the same
+two members R9.6 has always wanted, and the forgetting function becomes a projection. An
+observation follows its own model: one declared alongside the base's model is reached
+through the projection rather than copied down. `test/open_model` is the example.
 
 C# `interface`
 implementations are still rejected, as are generic class and struct *declarations*
