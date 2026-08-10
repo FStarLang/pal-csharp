@@ -2001,6 +2001,33 @@ A verified program therefore **throws no exception**; `try`/`catch`/`throw` are 
 no-overflow choice matches PAL and is revisited if it proves onerous; `[Unchecked]` would
 opt into a wrapping model.
 
+**R6.4a (what `/` and `%` mean in a specification).** C#'s `/` and `%` round toward zero;
+F*'s `Prims.op_Division` and `op_Modulus` round toward minus infinity. On a negative
+operand the two disagree — `-7 / 2` is `-3` in C# and `-4` in F*, and `-7 % 2` is `-1` and
+`1` — so the choice is not a matter of taste. A specification is read by someone reading
+C#, and where it quotes a C# expression it has to *mean* the C#; otherwise the reader and
+the prover agree on the string and disagree on the claim, and they disagree only about a
+sign the reader was not thinking about.
+
+In spec position, therefore, `e₁ / e₂` ⟶ `CS.cdiv ⟦e₁⟧ ⟦e₂⟧` and `e₁ % e₂` ⟶
+`CS.crem ⟦e₁⟧ ⟦e₂⟧` **when both operands are machine integers and at least one is
+signed** — the only configuration in which the divergence is reachable. `CS.cdiv` is
+`FStar.Int.op_Slash_Subtraction`, the truncating division, and `CS.crem a b` is
+`a - (cdiv a b) * b`. Otherwise the operators are F*'s own:
+
+- over a spec-only numeric (`SpecInt`, `SpecNat`) there is no C# operator to disagree
+  with — the expression is mathematics, and `/` is the floor division it looks like;
+- over unsigned machine integers both operands are non-negative, where the two roundings
+  coincide exactly, so F*'s operators already *are* C#'s.
+
+`CS.cdiv_nonneg` and `CS.crem_nonneg` are `SMTPat` lemmas identifying the two on
+non-negative operands, which is where most specifications live; `CS.cdiv_crem` gives the
+division identity. In code position nothing changes: `I32.div` was always
+`FStar.Int.op_Slash_Subtraction`, so the *program* side was faithful throughout. It was
+the specification side that read C# syntax with F*'s meaning, and a method computing
+floor division could carry `[Ensures("Result == x / 2")]` and be believed
+(`test/pulse_refusals/cases/FloorDivContract.cs`; `test/spec_division` pins both sides).
+
 **R6.5 (array access).** `a[i]` ⟶ `array_read var_a (Idx ⟦i⟧)` in code, and
 `Seq.index s (Int32.v ⟦i⟧)` in spec position, where `s` is the array's contents
 existential. `a.Length` ⟶ R3.3.

@@ -221,3 +221,43 @@ let splice_all (#t: Type0) (v: Seq.seq t) (w: Seq.seq t)
   : Lemma (requires Seq.length w == Seq.length v)
           (ensures  splice v 0 (Seq.length v) w == w)
   = Seq.lemma_eq_intro (splice v 0 (Seq.length v) w) w
+
+// ---------------------------------------------------------------------------
+// C#'s `/` and `%`, at the mathematical values a specification speaks.
+//
+// R6.4 makes a specification's arithmetic mathematical, which for `+`, `-` and `*` is
+// exactly C#'s operator with the overflow obligation moved to the code. For `/` and `%`
+// it is not: F*'s `/` on `int` rounds toward minus infinity and C#'s rounds toward zero,
+// so `-7 / 2` is `-4` in F* and `-3` in C#, and `-7 % 2` is `1` and `-1`. A specification
+// written in C# syntax has to mean the C# — otherwise `Result == x / 2` is a claim the
+// reader and the prover disagree about, and the disagreement is invisible.
+//
+// `FStar.Int.op_Slash_Subtraction` is ulib's truncating division, defined for exactly
+// this reason ("Multiplicative operator semantics, see C11 6.5.5"); C# 6.5.5's is the
+// same. `crem` is the remainder that goes with it, which is how C# defines `%` too.
+// ---------------------------------------------------------------------------
+
+/// C#'s `/`: division truncating toward zero (ECMA-334 §12.10.3).
+let cdiv (a: int) (b: int { b <> 0 }) : int = FStar.Int.op_Slash_Subtraction a b
+
+/// C#'s `%`: the remainder that pairs with `cdiv`, so `(a/b)*b + a%b == a` and the sign
+/// of the result is the sign of the dividend (ECMA-334 §12.10.4).
+let crem (a: int) (b: int { b <> 0 }) : int = a - (cdiv a b) * b
+
+/// On non-negative operands the two agree with F*'s own, which is what lets a
+/// specification about unsigned quantities go on being discharged by `FStar.Math.Lemmas`
+/// and by everything else stated in terms of `/` and `%`. Patterned, because the whole
+/// point is that the user should not have to know the distinction exists in the case
+/// where there is none.
+let cdiv_nonneg (a: nat) (b: pos)
+  : Lemma (cdiv a b == a / b) [SMTPat (cdiv a b)]
+  = ()
+
+let crem_nonneg (a: nat) (b: pos)
+  : Lemma (crem a b == a % b) [SMTPat (crem a b)]
+  = Math.lemma_div_mod a b
+
+/// The defining equation, available whatever the signs.
+let cdiv_crem (a: int) (b: int { b <> 0 })
+  : Lemma ((cdiv a b) * b + crem a b == a) [SMTPat (crem a b)]
+  = ()

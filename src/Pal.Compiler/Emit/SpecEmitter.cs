@@ -398,13 +398,35 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             return $"({left} {op} {right})";
         }
 
+        // An operator whose C# meaning is a library function rather than one of F*'s.
+        string Prefix(string fn) => $"({fn} {Math(b.Left, scope)} {Math(b.Right, scope)})";
+
+        // R6.4a. C#'s `/` and `%` round toward zero and F*'s round toward minus infinity,
+        // so on a negative operand the two disagree: `-7 / 2` is `-3` in C# and `-4` in F*.
+        // A specification that quotes a *C#* expression has to mean the C#, or the reader
+        // and the prover read the same string differently — and that difference is
+        // invisible, because it shows up only in a sign the reader was not thinking about.
+        //
+        // Two conditions have to hold before the divergence is even reachable. Both
+        // operands must be machine integers, because a spec-only numeric has no runtime
+        // existence and no C# operator to disagree with; there `/` and `%` are the
+        // mathematics they look like. And one of them must be signed, because on
+        // unsigned operands the two roundings coincide exactly. Where neither holds,
+        // F*'s operators already *are* C#'s, and are left in place.
+        static bool Machine(IrExpr e) => e.Type is IrPrim { IsMachineInt: true };
+        static bool Signed(IrExpr e) => e.Type is IrPrim { IsSignedMachineInt: true };
+        var quotesCSharp = Machine(b.Left) && Machine(b.Right)
+            && (Signed(b.Left) || Signed(b.Right));
+
         return b.Op switch
         {
             BinOp.Add => new Term(Infix("+", TermKind.Math), TermKind.Math),
             BinOp.Sub => new Term(Infix("-", TermKind.Math), TermKind.Math),
             BinOp.Mul => new Term(Infix("*", TermKind.Math), TermKind.Math),
-            BinOp.Div => new Term(Infix("/", TermKind.Math), TermKind.Math),
-            BinOp.Rem => new Term(Infix("%", TermKind.Math), TermKind.Math),
+            BinOp.Div => new Term(
+                quotesCSharp ? Prefix("CS.cdiv") : Infix("/", TermKind.Math), TermKind.Math),
+            BinOp.Rem => new Term(
+                quotesCSharp ? Prefix("CS.crem") : Infix("%", TermKind.Math), TermKind.Math),
             BinOp.Lt => new Term(Infix("<", TermKind.Prop), TermKind.Prop),
             BinOp.Le => new Term(Infix("<=", TermKind.Prop), TermKind.Prop),
             BinOp.Gt => new Term(Infix(">", TermKind.Prop), TermKind.Prop),

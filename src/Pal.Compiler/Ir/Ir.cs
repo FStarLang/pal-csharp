@@ -56,6 +56,14 @@ public sealed record IrPrim(PrimKind Kind) : IrType
         or PrimKind.Char;
 
     public bool IsSpecNumeric => Kind is PrimKind.SpecInt or PrimKind.SpecNat;
+
+    /// <summary>
+    /// True for the machine integers that can hold a negative value. This is the
+    /// question <c>/</c> and <c>%</c> turn on: C# rounds them toward zero and F* toward
+    /// minus infinity, and the two answers differ only when an operand is negative.
+    /// </summary>
+    public bool IsSignedMachineInt => Kind is PrimKind.SByte or PrimKind.Short
+        or PrimKind.Int or PrimKind.Long;
 }
 
 /// <summary>A C# array, <c>T[]</c>. Owned as a Pulse <c>array</c> plus its contents.</summary>
