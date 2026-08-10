@@ -233,7 +233,7 @@ exit status, which `set -o pipefail` in `test/verify.mk` preserves through the p
 | `Span` | the borrowed window: `is_range_of`, and the borrow/restore operations |
 | `Seq` | `FStar.Seq` / `FStar.Seq.Permutation` wrappers and the general lemmas about them |
 | `List`, `Tree` | the spec-level `SpecList<T>` and `SpecTree<T>` models |
-| `Arith` | general facts about integer arithmetic — residues, and what makes a moving origin sound |
+| `Arith` | C#'s `/` and `%` at spec level (`cdiv`, `crem`), and general facts about integer arithmetic — residues, and what makes a moving origin sound |
 | `Int32`, `Casts`, `Inhabited` | the machine-integer model and the `int`↔`SizeT` bridge |
 | `Assumptions` | the one thing assumed (`recover`, §8.4), gathered where it can be read |
 

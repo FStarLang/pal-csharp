@@ -1493,6 +1493,22 @@ optimisations are how translators start fitting examples.
 after A-normalisation (R6.2). Compound assignment `x op= e` is normalised to `x = x op e`
 and `x++` to `x = x + 1` in the Normalize pass, which is a C#→C# rewrite.
 
+**R5.3a (the L-value is evaluated once).** That rewrite names the L-value twice — three
+times for the expression form `x++`, which also snapshots it — and C# names it once and
+evaluates it once (ECMA-334 §12.18.3, §12.21). For an L-value with no effects the
+difference is invisible. For `a[Bump(ref cursor)]++` it is not: a translation that spliced
+the lowered L-value into each position would call `Bump` twice, advance the cursor by two,
+and increment an element the C# never touches — and would then *prove* the cursor advances
+by two, which is a theorem about a different program.
+
+So the effectful part of an L-value is evaluated once, into a fresh immutable local, and
+every copy of the L-value names that local — the same discipline R5.14 already applies to
+a `switch` scrutinee. This is possible for an **index**, which is a value. It is not
+possible for the array or the receiver, which are resources: hoisting one is a move, not a
+binding. There the expansion is refused (**PALCS0578**) rather than approximated.
+`test/step_once` pins the single evaluation; `test/pulse_refusals/cases/StepCountedTwice.cs`
+is the false theorem, which must now fail.
+
 **R5.4 (`if`).** `if (c) s₁ else s₂` ⟶ `if (⟦c⟧) { ⟦s₁⟧ } else { ⟦s₂⟧ }`. **Both branches
 are always emitted**, even when one is empty.
 
@@ -1993,6 +2009,70 @@ C's, so the scheme fixes:
 A verified program therefore **throws no exception**; `try`/`catch`/`throw` are rejected. The
 no-overflow choice matches PAL and is revisited if it proves onerous; `[Unchecked]` would
 opt into a wrapping model.
+
+**R6.4a (what `/` and `%` mean in a specification).** C#'s `/` and `%` round toward zero;
+F*'s `Prims.op_Division` and `op_Modulus` round toward minus infinity. On a negative
+operand the two disagree — `-7 / 2` is `-3` in C# and `-4` in F*, and `-7 % 2` is `-1` and
+`1` — so the choice is not a matter of taste. A specification is read by someone reading
+C#, and where it quotes a C# expression it has to *mean* the C#; otherwise the reader and
+the prover agree on the string and disagree on the claim, and they disagree only about a
+sign the reader was not thinking about.
+
+In spec position, therefore, `e₁ / e₂` ⟶ `CA.cdiv ⟦e₁⟧ ⟦e₂⟧` and `e₁ % e₂` ⟶
+`CA.crem ⟦e₁⟧ ⟦e₂⟧` **when both operands are machine integers and at least one is
+signed** — the only configuration in which the divergence is reachable. `CA.cdiv` is
+`FStar.Int.op_Slash_Subtraction`, the truncating division, and `CA.crem a b` is
+`a - (cdiv a b) * b`. Both live in `Pulse.Lib.CSharp.Arith` (§0 rule 3: a fact about
+integers is filed under arithmetic, not under the first client that wanted it). Otherwise
+the operators are F*'s own:
+
+- over a spec-only numeric (`SpecInt`, `SpecNat`) there is no C# operator to disagree
+  with — the expression is mathematics, and `/` is the floor division it looks like;
+- over unsigned machine integers both operands are non-negative, where the two roundings
+  coincide exactly, so F*'s operators already *are* C#'s.
+
+`CA.cdiv_nonneg` and `CA.crem_nonneg` are `SMTPat` lemmas identifying the two on
+non-negative operands, which is where most specifications live; `CA.cdiv_crem` gives the
+division identity. In code position nothing changes: `I32.div` was always
+`FStar.Int.op_Slash_Subtraction`, so the *program* side was faithful throughout. It was
+the specification side that read C# syntax with F*'s meaning, and a method computing
+floor division could carry `[Ensures("Result == x / 2")]` and be believed
+(`test/pulse_refusals/cases/FloorDivContract.cs`; `test/spec_division` pins both sides).
+
+**R6.4b (bitwise and shift operators in a specification).** R6.4a's question, asked of the
+rest of the operator table. `&`, `|` and `^` over machine integers have an exact image:
+`FStar.Int32.logand` is specified as `v c == Int.logand (v a) (v b)`, so in spec position
+`e₁ & e₂` ⟶ `FStar.Int.logand #w ⟦e₁⟧ ⟦e₂⟧` — `FStar.UInt` where the operands are
+unsigned, `w` their common width — and a postcondition that quotes the code is discharged
+by the code. Both operands must be machine integers of the same kind: the operation is
+defined on `int_t n`, and `I32.v x` is exactly that.
+
+Everything else in the family is **refused** (`PALCS0001`). A bitwise operator over a
+spec-only numeric is bit manipulation of a number with no width. A shift is C#'s *masked*
+shift — §12.11 takes the count mod 32 or 64, so `x << 33` is `x << 1` — and F*'s
+`shift_left` carries a precondition on the count instead of masking, so there is no F*
+term that means C#'s `<<` until that masking is written down. §0 rule 3: refuse what
+cannot be translated rather than translate it into something else.
+
+The rule exists because the operator table used to end in a **catch-all arm returning
+`+`**. Every operator it did not recognise — `&`, `|`, `^`, `<<`, `>>` — was emitted as
+addition, so `[Ensures("Result == (x & 0)")]` reached F* as `Result == x + 0` and a method
+returning `x` proved it. Run as C#, it prints `7` where the certificate said `0`. That is
+R6.4a's disease in a much more virulent form: `/` and F*'s `/` at least agree on most
+inputs, while `&` and `+` agree on almost none. A default arm is a wrong answer given
+silently, and a specification is the one place a wrong answer cannot be caught downstream
+— the prover checks the translation, not the C#. Hence §0 rule 3a's shape: no catch-all, and an
+operator with no rule is refused by name (`test/pulse_refusals/cases/BitAndContract.cs`,
+`test/diagnostics/cases/ShiftInSpec.cs`; `test/spec_bitwise` pins the accepted side).
+
+**Known incompleteness.** No SMT patterns are supplied for these operators, so a
+specification needing a *fact* about them — that `x | 0 == x`, or that `x & 255 < 256` —
+must supply it, with a `[Lemma]` or `Pal.Assert`. Global patterns on `logand` were
+deliberately not added: `Pulse.Lib.CSharp.Casts` already carries patterns on the *idioms*
+`logand` appears in (F53), and `examples/adler32` depends on them, so a general pattern is
+a proof-stability risk taken for no program that currently needs it. §0 rule 3's usual
+route applies when one does — a general lemma in `Pulse.Lib.CSharp.Arith`.
+
 
 **R6.5 (array access).** `a[i]` ⟶ `array_read var_a (Idx ⟦i⟧)` in code, and
 `Seq.index s (Int32.v ⟦i⟧)` in spec position, where `s` is the array's contents
@@ -3747,6 +3827,7 @@ never approximated:
 | PALCS0567 | A field of a recursive class reached outside a null-test window (R10.7c). |
 | PALCS0568 | A self-recursive method with no `[Decreases]` (R10.6). |
 | PALCS0569 | A null test that is not the whole condition of an `if` (R10.7). |
+| PALCS0579 | A cycle in the call graph — mutual recursion between methods or between `[Spec]` functions (R10.6). |
 
 This is a narrow language. It is narrow *honestly*: every shape inside it is pinned by
 `test/pulse_facts/RecursiveFacts.fst`, and §0 rule 3 forbids widening it by guessing.
@@ -3799,6 +3880,16 @@ back (F38). A recursive method with no `[Decreases]` is PALCS0568 — inferring 
 the emitter inventing a proof step (§0 rule 3), and is the same refusal R5.9 already makes
 for a `while`. There is not even a counted-`for` case to fall back on: a recursion's measure
 is a term over the model, so the only two answers are the user's and a refusal.
+
+*Mutual recursion is refused* (**PALCS0579**). `fn rec` is a single-binding form, so a
+cycle through two or more methods has no emission at all — nor does one through two
+`[Spec]` functions, whose `let rec` is likewise per-definition. PALCS0568 sees only a
+direct self-call, so a cycle used to reach F* intact and be rejected there by an
+*internal error* ("Impossible: cycle detected after cycle detection has passed"), with no
+line, no C# name, and nothing a user could act on. §0's sentinel property says the
+pipeline never fails in a way it cannot explain, so the whole-program call graph — methods
+and `[Spec]` functions together — is checked for cycles in the Check pass, and a cycle is
+reported once, against its first member, naming the whole path.
 
 **R10.7 (the window).** `if (n == null) … else …` **is** the case analysis, so it is where
 the lemmas go — the user invokes nothing:

@@ -398,13 +398,35 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             return $"({left} {op} {right})";
         }
 
+        // An operator whose C# meaning is a library function rather than one of F*'s.
+        string Prefix(string fn) => $"({fn} {Math(b.Left, scope)} {Math(b.Right, scope)})";
+
+        // R6.4a. C#'s `/` and `%` round toward zero and F*'s round toward minus infinity,
+        // so on a negative operand the two disagree: `-7 / 2` is `-3` in C# and `-4` in F*.
+        // A specification that quotes a *C#* expression has to mean the C#, or the reader
+        // and the prover read the same string differently — and that difference is
+        // invisible, because it shows up only in a sign the reader was not thinking about.
+        //
+        // Two conditions have to hold before the divergence is even reachable. Both
+        // operands must be machine integers, because a spec-only numeric has no runtime
+        // existence and no C# operator to disagree with; there `/` and `%` are the
+        // mathematics they look like. And one of them must be signed, because on
+        // unsigned operands the two roundings coincide exactly. Where neither holds,
+        // F*'s operators already *are* C#'s, and are left in place.
+        static bool Machine(IrExpr e) => e.Type is IrPrim { IsMachineInt: true };
+        static bool Signed(IrExpr e) => e.Type is IrPrim { IsSignedMachineInt: true };
+        var quotesCSharp = Machine(b.Left) && Machine(b.Right)
+            && (Signed(b.Left) || Signed(b.Right));
+
         return b.Op switch
         {
             BinOp.Add => new Term(Infix("+", TermKind.Math), TermKind.Math),
             BinOp.Sub => new Term(Infix("-", TermKind.Math), TermKind.Math),
             BinOp.Mul => new Term(Infix("*", TermKind.Math), TermKind.Math),
-            BinOp.Div => new Term(Infix("/", TermKind.Math), TermKind.Math),
-            BinOp.Rem => new Term(Infix("%", TermKind.Math), TermKind.Math),
+            BinOp.Div => new Term(
+                quotesCSharp ? Prefix("CA.cdiv") : Infix("/", TermKind.Math), TermKind.Math),
+            BinOp.Rem => new Term(
+                quotesCSharp ? Prefix("CA.crem") : Infix("%", TermKind.Math), TermKind.Math),
             BinOp.Lt => new Term(Infix("<", TermKind.Prop), TermKind.Prop),
             BinOp.Le => new Term(Infix("<=", TermKind.Prop), TermKind.Prop),
             BinOp.Gt => new Term(Infix(">", TermKind.Prop), TermKind.Prop),
@@ -415,8 +437,67 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             BinOp.Or => new Term(Infix("\\/", TermKind.Prop, mathematical: false), TermKind.Prop),
             BinOp.Implies => new Term(Infix("==>", TermKind.Prop, mathematical: false), TermKind.Prop),
             BinOp.Iff => new Term(Infix("<==>", TermKind.Prop, mathematical: false), TermKind.Prop),
-            _ => new Term(Infix("+", TermKind.Math), TermKind.Math),
+
+            // R6.4b. A bitwise operator over machine integers is exactly what the code
+            // emits: `FStar.Int32.logand a b` is specified as `v c == Int.logand (v a)
+            // (v b)`, so naming `Int.logand` on the operands' values makes a contract
+            // that quotes `a & b` say what `a & b` computes.
+            BinOp.BitAnd or BinOp.BitOr or BinOp.BitXor when Bitwise(b) is { } fn
+                => new Term(Prefix(fn), TermKind.Math),
+
+            // R6.4b. Everything else in this family has no faithful image yet: a bitwise
+            // operator over a spec-only numeric is bit manipulation of a number with no
+            // width, and a shift is C#'s masked shift (§12.11: the count is taken mod 32
+            // or 64), which F*'s `shift_left` does not model. §0 rule 3 — refuse what
+            // cannot be translated rather than translate it into something else.
+            BinOp.BitAnd or BinOp.BitOr or BinOp.BitXor or BinOp.Shl or BinOp.Shr
+                => Unsupported(b),
+
+            _ => Unsupported(b),
         };
+    }
+
+    /// <summary>
+    /// R6.4b. The `FStar.Int`/`FStar.UInt` function a C# bitwise operator denotes, or
+    /// `null` where no faithful image exists. Both operands must be machine integers of
+    /// the same width and signedness: the operation is defined on `int_t n`, and the
+    /// value a specification speaks of (`I32.v x`) is exactly that.
+    /// </summary>
+    private static string? Bitwise(IrBinary b)
+    {
+        if (b.Left.Type is not IrPrim { IsMachineInt: true } l ||
+            b.Right.Type is not IrPrim { IsMachineInt: true } r ||
+            l.Kind != r.Kind)
+            return null;
+
+        var module = l.IsSignedMachineInt ? "FStar.Int" : "FStar.UInt";
+        var name = b.Op switch
+        {
+            BinOp.BitAnd => "logand",
+            BinOp.BitOr => "logor",
+            BinOp.BitXor => "logxor",
+            _ => null,
+        };
+        return name is null ? null : $"{module}.{name} #{Types.Width(l.Kind)}";
+    }
+
+    /// <summary>
+    /// R6.4b. An operator with no translation is refused, not approximated. This method
+    /// exists because the alternative — a catch-all arm — is how `&` came to be emitted
+    /// as `+`: a default that answers for operators it does not recognise gives a wrong
+    /// answer silently, and a specification is the one place a wrong answer cannot be
+    /// caught downstream, because the prover is checking the translation, not the C#.
+    /// </summary>
+    private Term Unsupported(IrBinary b)
+    {
+        var spelling = b.Op switch
+        {
+            BinOp.BitAnd => "&", BinOp.BitOr => "|", BinOp.BitXor => "^",
+            BinOp.Shl => "<<", BinOp.Shr => ">>",
+            _ => b.Op.ToString(),
+        };
+        diagnostics.Unsupported(b.Loc, $"The operator `{spelling}` in specification position");
+        return new Term("0", TermKind.Math);
     }
 
     /// <summary>

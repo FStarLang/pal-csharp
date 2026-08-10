@@ -1356,6 +1356,7 @@ public static class Preamble
         module U64 = FStar.UInt64
         module Seq = FStar.Seq
         module CS = Pulse.Lib.CSharp.Seq
+        module CA = Pulse.Lib.CSharp.Arith
         module CL = Pulse.Lib.CSharp.List
         module List = FStar.List.Tot
         module Cast = FStar.Int.Cast

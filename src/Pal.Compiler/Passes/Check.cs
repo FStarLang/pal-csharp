@@ -64,7 +64,72 @@ public static class Check
                 CheckConversions(withBody, methods, bases, diagnostics);
         }
 
+        CheckCallCycles(program, diagnostics);
+
         return program;
+    }
+
+    /// <summary>
+    /// R2.1 gives every declaration a module of its own, and a call is a reference to
+    /// another module. A cycle among them is therefore a cycle among F* modules, which F*
+    /// does not report as a program error at all: it reports an internal failure and asks
+    /// for a bug report. R10.7's measure would not help even where the recursion is
+    /// well-founded, because a measure is checked *within* a definition and there is no
+    /// one definition here.
+    ///
+    /// <para>Self-recursion is the case the scheme does have an image for — it becomes
+    /// <c>fn rec</c> / <c>let rec</c> in the single module — and it is handled where the
+    /// measure is, so it is excluded here.</para>
+    /// </summary>
+    private static void CheckCallCycles(IrProgram program, DiagnosticBag diagnostics)
+    {
+        var callees = new Dictionary<string, ImmutableHashSet<string>>();
+        var located = new Dictionary<string, IrDecl>();
+
+        foreach (var decl in program.Declarations)
+        {
+            var (name, calls) = decl switch
+            {
+                IrMethod { Body: { } body } m => (m.Name, Statements(body)
+                    .SelectMany(Expressions).SelectMany(Subexpressions).OfType<IrCall>()),
+                IrSpecFunction s => (s.Name, Subexpressions(s.Body).OfType<IrCall>()),
+                _ => (null, null),
+            };
+            if (name is null || calls is null) continue;
+
+            located[name] = decl;
+            callees[name] = calls
+                .Where(c => c.Kind is CalleeKind.Method or CalleeKind.Spec)
+                .Select(c => c.Callee).Where(c => c != name).ToImmutableHashSet();
+        }
+
+        // Report each cycle once, against whichever of its members comes first in the
+        // program, so that a pair does not produce two messages saying the same thing.
+        foreach (var name in callees.Keys.OrderBy(n => n, StringComparer.Ordinal))
+        {
+            if (Path(name, name, [], out var cycle) &&
+                cycle[0] == cycle.OrderBy(n => n, StringComparer.Ordinal).First())
+                diagnostics.Error("PALCS0579", located[name].Loc,
+                    $"`{name}` is part of a cycle of calls — {string.Join(" → ", cycle)} → {cycle[0]} " +
+                    "— and R2.1 puts each of them in a module of its own, so the cycle is a " +
+                    "cycle among F* modules and has no translation. Only direct recursion has " +
+                    "one (doc/translation.md R10.7, R5.9): inline one of these into the other, " +
+                    "or route the shared part through a `[Spec]` function that calls nothing.");
+        }
+
+        bool Path(string from, string goal, ImmutableList<string> seen, out ImmutableList<string> cycle)
+        {
+            cycle = seen.Add(from);
+            if (!callees.TryGetValue(from, out var next)) return false;
+            foreach (var to in next.OrderBy(n => n, StringComparer.Ordinal))
+            {
+                if (to == goal) return true;
+                if (cycle.Contains(to)) continue;
+                if (Path(to, goal, cycle, out cycle)) return true;
+                cycle = seen.Add(from);
+            }
+            return false;
+        }
     }
 
     // -----------------------------------------------------------------------

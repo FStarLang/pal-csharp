@@ -2,19 +2,24 @@ module Pulse.Lib.CSharp.Arith
 
 /// Specification-level integer arithmetic.
 ///
-/// C#'s `/` and `%` (ECMA-334 §12.9.3, §12.9.4) are lowered to the operations of
-/// `Pulse.Lib.CSharp.Int32` and friends, which carry the machine-level
-/// obligations: a non-zero divisor, and a representable result. What those
-/// modules do *not* carry is the mathematical reasoning a specification then
-/// needs about the values — that `x % len` and `y % len` are distinct when `x`
-/// and `y` are less than a period apart, say.
+/// Two things live here, and they are the same kind of thing.
 ///
-/// That reasoning is about integers, not about the type they were computed at
-/// and not about whatever data structure motivated it, so it lives in its own
-/// module. Like `Pulse.Lib.CSharp.Seq`, this is a place where proof difficulty
-/// the emitter must not invent (doc/translation.md §0, rule 3) is allowed to
-/// live — but only as *general-purpose* lemmas, phrased over arbitrary integers
-/// and never over a particular program.
+/// **C#'s `/` and `%`.** These round toward zero where F*'s round toward minus
+/// infinity, so a specification written in C# syntax needs `cdiv`/`crem` to mean
+/// what the C# means (R6.4a). The *program* side of `/` and `%` is already
+/// faithful — `Pulse.Lib.CSharp.Int32` carries the machine obligations, a
+/// non-zero divisor and a representable result — and this is its spec-level
+/// counterpart.
+///
+/// **Facts about `%` itself**, such as what makes a moving origin sound. These
+/// carry SMT patterns, so they apply wherever a C# `%` appears.
+///
+/// Both are about integers — not about the type the arithmetic was computed at,
+/// and not about whatever data structure motivated them. Like
+/// `Pulse.Lib.CSharp.Seq`, this is a place where proof difficulty the emitter
+/// must not invent (doc/translation.md §0, rule 3) is allowed to live — but only
+/// as *general-purpose* lemmas, phrased over arbitrary integers and never over a
+/// particular program.
 
 module Math = FStar.Math.Lemmas
 
@@ -55,3 +60,43 @@ let mod_one_period_apart (len: pos) (x: nat) (y: nat)
   = if x + len = y
     then Math.lemma_mod_plus x 1 len
     else Math.lemma_mod_plus y 1 len
+
+// ---------------------------------------------------------------------------
+// C#'s `/` and `%`, at the mathematical values a specification speaks.
+//
+// R6.4 makes a specification's arithmetic mathematical, which for `+`, `-` and `*` is
+// exactly C#'s operator with the overflow obligation moved to the code. For `/` and `%`
+// it is not: F*'s `/` on `int` rounds toward minus infinity and C#'s rounds toward zero,
+// so `-7 / 2` is `-4` in F* and `-3` in C#, and `-7 % 2` is `1` and `-1`. A specification
+// written in C# syntax has to mean the C# — otherwise `Result == x / 2` is a claim the
+// reader and the prover disagree about, and the disagreement is invisible.
+//
+// `FStar.Int.op_Slash_Subtraction` is ulib's truncating division, defined for exactly
+// this reason ("Multiplicative operator semantics, see C11 6.5.5"); C# 6.5.5's is the
+// same. `crem` is the remainder that goes with it, which is how C# defines `%` too.
+// ---------------------------------------------------------------------------
+
+/// C#'s `/`: division truncating toward zero (ECMA-334 §12.10.3).
+let cdiv (a: int) (b: int { b <> 0 }) : int = FStar.Int.op_Slash_Subtraction a b
+
+/// C#'s `%`: the remainder that pairs with `cdiv`, so `(a/b)*b + a%b == a` and the sign
+/// of the result is the sign of the dividend (ECMA-334 §12.10.4).
+let crem (a: int) (b: int { b <> 0 }) : int = a - (cdiv a b) * b
+
+/// On non-negative operands the two agree with F*'s own, which is what lets a
+/// specification about unsigned quantities go on being discharged by `FStar.Math.Lemmas`
+/// and by everything else stated in terms of `/` and `%`. Patterned, because the whole
+/// point is that the user should not have to know the distinction exists in the case
+/// where there is none.
+let cdiv_nonneg (a: nat) (b: pos)
+  : Lemma (cdiv a b == a / b) [SMTPat (cdiv a b)]
+  = ()
+
+let crem_nonneg (a: nat) (b: pos)
+  : Lemma (crem a b == a % b) [SMTPat (crem a b)]
+  = Math.lemma_div_mod a b
+
+/// The defining equation, available whatever the signs.
+let cdiv_crem (a: int) (b: int { b <> 0 })
+  : Lemma ((cdiv a b) * b + crem a b == a) [SMTPat (crem a b)]
+  = ()

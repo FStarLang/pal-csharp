@@ -16,11 +16,6 @@ module Seq = FStar.Seq
 module Math = FStar.Math.Lemmas
 open FStar.Seq
 
-/// Facts about `%` that a rotation client needs are facts about integers, not
-/// about sequences, so they live in `Pulse.Lib.CSharp.Arith`. Re-exported here
-/// because `rotate` is the reason a C# program reaches for them.
-include Pulse.Lib.CSharp.Arith
-
 /// `Pal.IsPermutation(s1, s2)`.
 let is_permutation (#a:eqtype) (s1 s2: Seq.seq a) : prop =
   Seq.permutation a s1 s2
