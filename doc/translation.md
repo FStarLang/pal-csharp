@@ -3716,6 +3716,7 @@ never approximated:
 | PALCS0567 | A field of a recursive class reached outside a null-test window (R10.7c). |
 | PALCS0568 | A self-recursive method with no `[Decreases]` (R10.6). |
 | PALCS0569 | A null test that is not the whole condition of an `if` (R10.7). |
+| PALCS0579 | A cycle in the call graph — mutual recursion between methods or between `[Spec]` functions (R10.6). |
 
 This is a narrow language. It is narrow *honestly*: every shape inside it is pinned by
 `test/pulse_facts/RecursiveFacts.fst`, and §0 rule 3 forbids widening it by guessing.
@@ -3768,6 +3769,16 @@ back (F38). A recursive method with no `[Decreases]` is PALCS0568 — inferring 
 the emitter inventing a proof step (§0 rule 3), and is the same refusal R5.9 already makes
 for a `while`. There is not even a counted-`for` case to fall back on: a recursion's measure
 is a term over the model, so the only two answers are the user's and a refusal.
+
+*Mutual recursion is refused* (**PALCS0579**). `fn rec` is a single-binding form, so a
+cycle through two or more methods has no emission at all — nor does one through two
+`[Spec]` functions, whose `let rec` is likewise per-definition. PALCS0568 sees only a
+direct self-call, so a cycle used to reach F* intact and be rejected there by an
+*internal error* ("Impossible: cycle detected after cycle detection has passed"), with no
+line, no C# name, and nothing a user could act on. §0's sentinel property says the
+pipeline never fails in a way it cannot explain, so the whole-program call graph — methods
+and `[Spec]` functions together — is checked for cycles in the Check pass, and a cycle is
+reported once, against its first member, naming the whole path.
 
 **R10.7 (the window).** `if (n == null) … else …` **is** the case analysis, so it is where
 the lemmas go — the user invokes nothing:
