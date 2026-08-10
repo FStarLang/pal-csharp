@@ -2288,10 +2288,11 @@ verification test cannot.
 * **`test/pulse_refusals`** is the suite that became possible once refusing was *not* the
   answer (R3.13): programs that translate cleanly, fail in F\*, and must fail for the
   stated reason on the marked line. It is indexed by *obligation kind* rather than by C#
-  feature — 24 cases, and `cases/README.md` is the inventory: an index in bounds, a sum
+  feature — 27 cases, and `cases/README.md` is the inventory: an index in bounds, a sum
   representable, all three parts of the loop rule separately, a measure that falls, a
   borrow given back, an invariant established by a constructor and restored by every
-  method. A negative suite grouped by feature exercises the same two obligations from a
+  method, a postcondition that has to hold on every path, and — the one the rest rests on —
+  a `[Lemma]` whose body is checked rather than admitted. A negative suite grouped by feature exercises the same two obligations from a
   dozen angles and leaves whole rules untested; grouped this way the table is a claim about
   coverage that can be read and disputed. Four cases are counter-tests — the exact program
   that verified before a soundness fix — and the rest are the obligation working.

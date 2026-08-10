@@ -37,7 +37,9 @@ each one is a false theorem that `palcs` once proved.
 | `PreservesViolated` | An argument a method claims to leave alone is left alone. |
 | `CalleePrecondition` | A call site establishes the callee's precondition. |
 | `StepCountedTwice` † | An l-value with a side effect is evaluated once, not twice. |
+| `BranchMissesPostcondition` | The postcondition holds on *every* path, not on one. |
 | `MissingLemma` | A recursive specification is not unfolded at a symbolic index; the step has to be supplied, and this is what happens when it is not. |
+| `LemmaNotProved` | A `[Lemma]` is proved, not declared. The most load-bearing case here: were lemma bodies admitted rather than checked, nothing else in this directory would mean anything. |
 
 ## Loop obligations
 
@@ -69,6 +71,7 @@ a third of it.
 | `FracSlotOverride` | An override honours the contract in the vtable slot. |
 | `UpcastParameter` | An upcast carries the sub-object's invariant to the base. |
 | `ListModelWrong` | The §10 inductive model refuses a false claim too. |
+| `GenericModelWrong` | So does §15's, at the class's type binders. |
 
 † Counter-test: this program verified before the bug named in `SOUNDNESS_FINDINGS.md` was
 fixed.
