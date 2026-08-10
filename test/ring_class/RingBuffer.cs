@@ -26,9 +26,11 @@ public struct RingModel
 ///
 /// The abstraction function is <c>Pal.Rotate</c>: the contents read from <c>head</c>,
 /// wrapping, truncated to <c>count</c>. Its characteristic equation
-/// (<c>Rotate(s, n)[k] == s[(n + k) % s.Length]</c>) and the two modular facts that make a
-/// moving origin sound live in <c>Pulse.Lib.CSharp.Seq</c>, stated over arbitrary
-/// sequences — §0 rule 3's second sanctioned home for proof difficulty.
+/// (<c>Rotate(s, n)[k] == s[(n + k) % s.Length]</c>) lives in
+/// <c>Pulse.Lib.CSharp.Seq</c>, stated over arbitrary sequences; the two modular facts
+/// that make a moving origin sound are not about sequences at all, and live in
+/// <c>Pulse.Lib.CSharp.Arith</c>, stated over arbitrary integers — §0 rule 3's second
+/// sanctioned home for proof difficulty.
 /// </summary>
 /// <remarks>
 /// The capacity bound is R6.4, not decoration. <c>Enqueue</c> computes <c>head + count</c>

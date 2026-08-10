@@ -42,6 +42,15 @@ comes from exactly two places:
 
 A special case in the emitter is never a legitimate fix.
 
+Which library module a lemma belongs in is decided by **what it is about, not by what
+motivated it**. A ring buffer wants both `Rotate(s, n)[k] == s[(n + k) % s.Length]` and
+"two offsets less than a period apart have distinct residues"; the first is a fact about
+sequences and belongs in `Pulse.Lib.CSharp.Seq`, the second is a fact about integers and
+belongs in `Pulse.Lib.CSharp.Arith`, however much one client wanted them together. Filing
+by motivation is the same mistake as rule 2's at library scale: it lets one example shape
+something that is meant to be general, and leaves the next reader unable to find a fact
+under the name of a data structure they are not using.
+
 The rule reads in both directions, and the second one is easier to forget: **the frontend
 never invents a refusal.** pal-csharp refuses what it cannot *translate* — a construct with
 no image in Pulse, a measure it would have to guess, a field with no ownership story. What
@@ -2009,6 +2018,13 @@ nothing. `rotate` is there because it is the abstraction function of any contain
 stores its elements at a moving origin, and because its characteristic equation
 `⟦Rotate(s, n)[k]⟧ == ⟦s[(n + k) % s.Length]⟧` is a fact about sequences that §0 rule 3
 places in the library rather than in the emitter or in one program's annotations.
+
+The *arithmetic* such a container also needs — that offsets less than a period apart have
+distinct residues, and that offsets a full period apart share one — is not sequence
+vocabulary and is not reached through any `Pal.*` name. It is stated over arbitrary
+integers in `Pulse.Lib.CSharp.Arith` and carries SMT patterns on `x % len`, so it applies
+wherever a C# `%` appears, to a ring buffer and to a program that has never allocated a
+sequence alike.
 
 **R6.8 (projection receivers).** `⟦e.f⟧ = ⟦e⟧′.Struct_S.fld_f`, where `⟦e⟧′` is `⟦e⟧`
 parenthesised unless it is already atomic. This is not cosmetic: `!var_s.M.fld` parses in

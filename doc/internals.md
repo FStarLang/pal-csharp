@@ -230,13 +230,24 @@ exit status, which `set -o pipefail` in `test/verify.mk` preserves through the p
 | Module | Contents |
 |---|---|
 | `Array` | `arr_length`, `read`, `write`, `alloc`, and the array-length modelling axiom |
+| `Span` | the borrowed window: `is_range_of`, and the borrow/restore operations |
 | `Seq` | `FStar.Seq` / `FStar.Seq.Permutation` wrappers and the general lemmas about them |
+| `List`, `Tree` | the spec-level `SpecList<T>` and `SpecTree<T>` models |
+| `Arith` | general facts about integer arithmetic — residues, and what makes a moving origin sound |
 | `Int32`, `Casts`, `Inhabited` | the machine-integer model and the `int`↔`SizeT` bridge |
+| `Assumptions` | the one thing assumed (`recover`, §8.4), gathered where it can be read |
 
 This is the *other* place proof help may live (`translation.md` §0 rule 3). A lemma belongs
 here if it is a general fact — about sequences, about arrays, about integers — usable by
 any program. A lemma that mentions a particular example does not belong here or anywhere
 else in the translator; it belongs in that example's `.cs` file.
+
+Which module it belongs in is decided by **what the lemma is about, not by what motivated
+it**. A ring buffer needs both `Rotate(s, n)[k] == s[(n + k) % s.Length]` and "offsets less
+than a period apart have distinct residues"; the first is a fact about sequences and lives
+in `Seq`, the second is a fact about integers and lives in `Arith`, even though one client
+wanted them together. Filing by motivation is how a module accretes an unrelated corner
+that the next reader cannot find.
 
 ---
 

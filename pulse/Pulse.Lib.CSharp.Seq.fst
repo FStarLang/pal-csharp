@@ -16,6 +16,11 @@ module Seq = FStar.Seq
 module Math = FStar.Math.Lemmas
 open FStar.Seq
 
+/// Facts about `%` that a rotation client needs are facts about integers, not
+/// about sequences, so they live in `Pulse.Lib.CSharp.Arith`. Re-exported here
+/// because `rotate` is the reason a C# program reaches for them.
+include Pulse.Lib.CSharp.Arith
+
 /// `Pal.IsPermutation(s1, s2)`.
 let is_permutation (#a:eqtype) (s1 s2: Seq.seq a) : prop =
   Seq.permutation a s1 s2
@@ -149,33 +154,6 @@ let rotate_index (#a:Type) (s: Seq.seq a) (n: nat) (k: nat { k < Seq.length s })
       Math.lemma_mod_plus_distr_l n k len;
       Math.lemma_mod_sub (m + k) len 1
     end
-
-/// Two offsets less than a period apart have different residues.
-///
-/// This is what makes a moving origin sound: the cells a `count`-long window
-/// covers are distinct as long as the window is shorter than the period, so a
-/// write at one of them leaves the rest alone. The pattern is conjunctive --- it
-/// fires only when both residues are already in play --- and the precondition
-/// travels with it, so the lemma is inert everywhere it does not apply.
-let mod_distinct_within_period (len: pos) (x: nat) (y: nat)
-  : Lemma (requires x <= y /\ y - x < len)
-          (ensures  (x % len == y % len ==> x == y))
-          [SMTPat (x % len); SMTPat (y % len)]
-  = if x % len = y % len
-    then begin
-      Math.lemma_mod_sub_distr y x len;
-      Math.small_mod (y - x) len
-    end
-
-/// Residues one full period apart coincide. The companion to the above: an
-/// origin that has just wrapped names the same cells as one that has not.
-let mod_one_period_apart (len: pos) (x: nat) (y: nat)
-  : Lemma (requires x + len == y \/ y + len == x)
-          (ensures  x % len == y % len)
-          [SMTPat (x % len); SMTPat (y % len)]
-  = if x + len = y
-    then Math.lemma_mod_plus x 1 len
-    else Math.lemma_mod_plus y 1 len
 
 // ---------------------------------------------------------------------------
 // `Pal.Splice(v, from, to, w)`: the contents of a parent after a borrowed window
