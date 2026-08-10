@@ -72,4 +72,17 @@ public static class SpecBitwise
     {
         return flags;
     }
+
+    /// <summary>
+    /// The unary half of the same rule. <c>FStar.Int32.lognot</c> is specified as
+    /// <c>lognot (v x) == v z</c>, so a contract quoting <c>~x</c> is discharged by a body
+    /// computing <c>~x</c>. Before R6.4b the unary table's catch-all returned the operand
+    /// with the operator <em>dropped</em>, so <c>~e</c> in a specification meant <c>e</c>.
+    /// </summary>
+    [Requires("x >= 0 && x < 256")]
+    [Ensures("Result == ~x")]
+    public static int Complement(int x)
+    {
+        return ~x;
+    }
 }

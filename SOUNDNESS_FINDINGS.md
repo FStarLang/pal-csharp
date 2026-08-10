@@ -283,7 +283,7 @@ Same sentinel-property violation as Finding 3, smaller blast radius. Replaced wi
 
 ---
 
-## Finding 5 — every bitwise operator in a specification meant `+` — **HIGH, unsound, fixed**
+## Finding 5 — every unrecognised operator in a specification was silently rewritten — **HIGH, unsound, fixed**
 
 *Found on merging this branch, by acting on Recommendation 4 below. It is the same bug as
 Finding 2 and it was sitting one arm further down the same `switch`.*
@@ -299,6 +299,15 @@ _ => new Term(Infix("+", TermKind.Math), TermKind.Math),
 so **every operator the table did not recognise was emitted as addition**: `&`, `|`, `^`,
 `<<`, `>>`. Not a rounding disagreement on a sign nobody was thinking about — a different
 operator, wrong on almost every input.
+
+The *unary* table had the same shape and did something quieter and worse:
+
+```csharp
+_ => new Term($"({Emit(u.Operand, scope).Text})", TermKind.Other),
+```
+
+It returned the operand **with the operator dropped**, so `~e` in a specification meant
+`e`.
 
 ### The exploit
 
@@ -322,20 +331,36 @@ XorSelf(7)=14   contract says Result == (7 ^ 7) == 0
 ShlOne(7)=8     contract says Result == (7 << 1) == 14
 ```
 
-Three false contracts, three certificates, three refuting executions.
+Three false contracts, three certificates, three refuting executions. And for the unary
+hole:
+
+```csharp
+[Requires("x > 0 && x < 100")]
+[Ensures("Result == ~(x + 1)")]    // C#: -(x + 2). At x == 7, claims -9.
+public static int NotPlus(int x) => x + 1;    // VERIFIED, as Result == x + 1
+```
+
+The unary case is worth dwelling on as a *methodological* result. `~x` alone produced an
+F* **type error**, not a false proof: the dropped operand was still an `I32.t` where a
+mathematical `int` was wanted. The obvious probe therefore made this hole look like an
+ordinary translator limitation, and only an operand that is already mathematical —
+`~(x + 1)`, i.e. `~` under any arithmetic at all — makes the emission typecheck and the
+false theorem go through. A probe that stops at the first error message can miss an
+unsoundness sitting one expression away.
 
 ### The fix
 
 Two halves, and the second is the one that matters.
 
-`&`, `|` and `^` over machine integers get their **exact** image: `FStar.Int32.logand` is
-specified as `v c == Int.logand (v a) (v b)`, so spec position emits
-`FStar.Int.logand #w` (`FStar.UInt` when the operands are unsigned) and a postcondition
-quoting the code is discharged by the code. Shifts are **refused**: C# masks the shift
+`&`, `|`, `^` and unary `~` over machine integers get their **exact** image:
+`FStar.Int32.logand` is specified as `v c == Int.logand (v a) (v b)` and `lognot`
+likewise, so spec position emits `FStar.Int.logand #w` / `FStar.Int.lognot #w`
+(`FStar.UInt` when the operands are unsigned) and a postcondition quoting the code is
+discharged by the code. Shifts are **refused**: C# masks the shift
 count (§12.11 — `x << 33` is `x << 1`) and F*'s `shift_left` carries a precondition
 instead, so no F* term means C#'s `<<` until that masking is written down.
 
-And **the catch-all is gone**. An operator with no rule is now refused by name. That is
+And **both catch-alls are gone**. An operator with no rule is now refused by name. That is
 the actual defect: a default arm answers for operators it does not recognise, and a
 specification is the one place a wrong answer cannot be caught downstream, because the
 prover is checking the translation rather than the C#. §0 rule 3a in its sharpest form.
@@ -349,10 +374,13 @@ is incompleteness and can only reject; the alternative was proving a false one.
 
 ### What now pins it
 
-- `test/spec_bitwise/SpecBitwise.cs` — five methods whose postconditions quote the
-  operator the body applies, signed and unsigned, in `Ensures` and in `Requires`.
+- `test/spec_bitwise/SpecBitwise.cs` — six methods whose postconditions quote the
+  operator the body applies, signed and unsigned, unary and binary, in `Ensures` and in
+  `Requires`.
 - `test/pulse_refusals/cases/BitAndContract.cs` — the counter-test: `AndZero` above must
   now fail, naming `logand`.
+- `test/pulse_refusals/cases/BitNotContract.cs` — the unary counter-test: `NotPlus` must
+  now fail, naming `lognot`.
 - `test/diagnostics/cases/ShiftInSpec.cs` — PALCS0001 on a shift in spec position.
 - `doc/translation.md` **R6.4b**.
 
@@ -463,13 +491,14 @@ this is checked.
 | `test/diagnostics/cases/MutualSpecs.cs` | diagnostic | PALCS0579 — mutual recursion between `[Spec]` functions. |
 | `test/spec_bitwise/SpecBitwise.cs` | acceptance | Spec `&`, `|` and `^` are C#'s, signed and unsigned, in `Ensures` and in `Requires`. |
 | `test/pulse_refusals/cases/BitAndContract.cs` | refusal | Finding 5's `x & 0` contract must now fail, naming `logand`. |
+| `test/pulse_refusals/cases/BitNotContract.cs` | refusal | Finding 5's `~(x + 1)` contract must now fail, naming `lognot`. |
 | `test/diagnostics/cases/ShiftInSpec.cs` | diagnostic | PALCS0001 — a shift in specification position. |
 
-Three of these are *counter-tests*: `StepCountedTwice`, `FloorDivContract` and
-`BitAndContract` are the exact programs that were verified before this audit. They are the tests that would have caught
+Four of these are *counter-tests*: `StepCountedTwice`, `FloorDivContract`,
+`BitAndContract` and `BitNotContract` are the exact programs that were verified before this audit. They are the tests that would have caught
 these bugs, and they are the reason the bugs cannot come back.
 
-`pulse_refusals` goes from 4 cases to 7; `diagnostics` from 64 to 69.
+`pulse_refusals` goes from 4 cases to 8; `diagnostics` from 64 to 69.
 
 ---
 
@@ -487,7 +516,8 @@ these bugs, and they are the reason the bugs cannot come back.
 4. **Consider a general C#-semantics audit of the spec language.** — **partly discharged;
    it immediately paid.** Finding 2 was one operator where spec syntax and C# syntax
    coincided while their meanings did not. Acting on this recommendation found **Finding
-   5**: every bitwise and shift operator in a specification was being emitted as `+`. That
+   5**: every unrecognised binary operator in a specification was emitted as `+`, and every
+   unrecognised unary operator had its operator dropped. That
    was not a subtle divergence like division's, and it was found by asking this question
    once. What remains unprobed is integral conversion and promotion, and `char`
    arithmetic. The shift operators are now refused rather than mistranslated, but C#'s

@@ -2039,13 +2039,14 @@ the specification side that read C# syntax with F*'s meaning, and a method compu
 floor division could carry `[Ensures("Result == x / 2")]` and be believed
 (`test/pulse_refusals/cases/FloorDivContract.cs`; `test/spec_division` pins both sides).
 
-**R6.4b (bitwise and shift operators in a specification).** R6.4a's question, asked of the
-rest of the operator table. `&`, `|` and `^` over machine integers have an exact image:
-`FStar.Int32.logand` is specified as `v c == Int.logand (v a) (v b)`, so in spec position
-`e₁ & e₂` ⟶ `FStar.Int.logand #w ⟦e₁⟧ ⟦e₂⟧` — `FStar.UInt` where the operands are
-unsigned, `w` their common width — and a postcondition that quotes the code is discharged
-by the code. Both operands must be machine integers of the same kind: the operation is
-defined on `int_t n`, and `I32.v x` is exactly that.
+**R6.4b (bitwise, shift and complement operators in a specification).** R6.4a's question,
+asked of the rest of the operator table. `&`, `|`, `^` and unary `~` over machine integers
+have an exact image: `FStar.Int32.logand` is specified as `v c == Int.logand (v a) (v b)`
+and `lognot` likewise, so in spec position `e₁ & e₂` ⟶ `FStar.Int.logand #w ⟦e₁⟧ ⟦e₂⟧` and
+`~e` ⟶ `FStar.Int.lognot #w ⟦e⟧` — `FStar.UInt` where the operands are unsigned, `w` their
+common width — and a postcondition that quotes the code is discharged by the code. Both
+operands must be machine integers of the same kind: the operation is defined on `int_t n`,
+and `I32.v x` is exactly that.
 
 Everything else in the family is **refused** (`PALCS0001`). A bitwise operator over a
 spec-only numeric is bit manipulation of a number with no width. A shift is C#'s *masked*
@@ -2054,15 +2055,27 @@ shift — §12.11 takes the count mod 32 or 64, so `x << 33` is `x << 1` — and
 term that means C#'s `<<` until that masking is written down. §0 rule 3: refuse what
 cannot be translated rather than translate it into something else.
 
-The rule exists because the operator table used to end in a **catch-all arm returning
-`+`**. Every operator it did not recognise — `&`, `|`, `^`, `<<`, `>>` — was emitted as
-addition, so `[Ensures("Result == (x & 0)")]` reached F* as `Result == x + 0` and a method
-returning `x` proved it. Run as C#, it prints `7` where the certificate said `0`. That is
-R6.4a's disease in a much more virulent form: `/` and F*'s `/` at least agree on most
-inputs, while `&` and `+` agree on almost none. A default arm is a wrong answer given
+The rule exists because **both** operator tables ended in a catch-all. The binary table's
+returned `+`, so every operator it did not recognise — `&`, `|`, `^`, `<<`, `>>` — was
+emitted as addition, and `[Ensures("Result == (x & 0)")]` reached F* as `Result == x + 0`,
+which a method returning `x` proves. Run as C#, it prints `7` where the certificate said
+`0`. The unary table's was quieter and worse: it returned the operand *with the operator
+dropped*, so `~e` meant `e`, and `[Ensures("Result == ~(x + 1)")]` — which in C# claims
+`-(x + 2)` — reached F* as `Result == x + 1`.
+
+That is R6.4a's disease in a much more virulent form: `/` and F*'s `/` at least agree on
+most inputs, while `&` and `+` agree on almost none. A default arm is a wrong answer given
 silently, and a specification is the one place a wrong answer cannot be caught downstream
-— the prover checks the translation, not the C#. Hence §0 rule 3a's shape: no catch-all, and an
-operator with no rule is refused by name (`test/pulse_refusals/cases/BitAndContract.cs`,
+— the prover checks the translation, not the C#. Hence §0 rule 3a's shape: no catch-all,
+and an operator with no rule is refused by name.
+
+The unary case carries a lesson about probing, too. `~x` *alone* produced an F* type error
+rather than a false proof, because the dropped operand was still an `I32.t` where a
+mathematical `int` was wanted — so the obvious probe made the hole look like a translator
+limitation. Only with an operand that is already mathematical (`~(x + 1)`) does the
+emission typecheck and the false theorem go through. A probe that stops at the first error
+message can miss an unsoundness sitting one expression away
+(`test/pulse_refusals/cases/BitAndContract.cs`, `BitNotContract.cs`,
 `test/diagnostics/cases/ShiftInSpec.cs`; `test/spec_bitwise` pins the accepted side).
 
 **Known incompleteness.** No SMT patterns are supplied for these operators, so a

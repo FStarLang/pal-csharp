@@ -385,8 +385,34 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     {
         UnOp.Not => new Term($"(~ {AsProp(Emit(u.Operand, scope))})", TermKind.Prop),
         UnOp.Neg => new Term($"(0 - {Math(u.Operand, scope)})", TermKind.Math),
-        _ => new Term($"({Emit(u.Operand, scope).Text})", TermKind.Other),
+
+        // R6.4b, at a unary operator. `FStar.Int32.lognot` is specified as
+        // `lognot (v x) == v z`, so naming `FStar.Int.lognot` on the operand's value says
+        // what `~x` computes. Refused where there is no faithful image, for the reason
+        // the arm below exists.
+        UnOp.BitNot when Complement(u) is { } fn
+            => new Term($"({fn} {Math(u.Operand, scope)})", TermKind.Math),
+
+        // R6.4b. No catch-all. This arm used to return the operand *with the operator
+        // dropped*, so `Result == ~(x + 1)` reached F* as `Result == x + 1` and a method
+        // returning `x + 1` proved it — where C#'s `~(x + 1)` is `-(x + 2)`.
+        _ => UnsupportedUnary(u),
     };
+
+    /// <summary>
+    /// R6.4b. The <c>FStar.Int</c>/<c>FStar.UInt</c> complement for a machine integer
+    /// operand, or <c>null</c> where no faithful image exists.
+    /// </summary>
+    private static string? Complement(IrUnary u) =>
+        u.Operand.Type is IrPrim { IsMachineInt: true } p
+            ? $"{(p.IsSignedMachineInt ? "FStar.Int" : "FStar.UInt")}.lognot #{Types.Width(p.Kind)}"
+            : null;
+
+    private Term UnsupportedUnary(IrUnary u)
+    {
+        diagnostics.Unsupported(u.Loc, $"The operator `{(u.Op == UnOp.BitNot ? "~" : u.Op.ToString())}` in specification position");
+        return new Term("0", TermKind.Math);
+    }
 
     private Term Binary(IrBinary b, SpecScope scope)
     {
