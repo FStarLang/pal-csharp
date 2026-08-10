@@ -30,9 +30,9 @@ public static class StepCountedTwice
     [Requires("0 <= cursor && cursor + 1 < a.Length && a.Length < 1000")]
     [Requires("a[cursor] == 0 && a[cursor + 1] == 0")]
     [Ensures("cursor == Old(cursor) + 2")]
+    // MARKER
     public static void PokeOnce(int[] a, ref int cursor)
     {
-        // MARKER
         a[Bump(ref cursor)]++;
     }
 }

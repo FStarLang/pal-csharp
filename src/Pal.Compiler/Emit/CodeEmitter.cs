@@ -210,11 +210,7 @@ public sealed class CodeEmitter(
         }
 
         if (statements.Length > 0) Tail(statements[^1], method, plan);
-        else
-        {
-            if (NeedsEpilogue) CloseObjects(method, plan);
-            if (IsVoid(method)) Line("()");
-        }
+        else EndOfMethod(method, plan);
     }
 
     private static bool IsVoid(IrMethod method) => method.ReturnType is IrPrim { Kind: PrimKind.Void };
@@ -300,10 +296,34 @@ public sealed class CodeEmitter(
 
             default:
                 Statement(stmt, plan);
-                if (NeedsEpilogue) CloseObjects(method, plan);
-                if (IsVoid(method)) Line("()");
+                // The block's value is not the statement above it: it is the point at which
+                // the method's postcondition is proved. Attributing it to the last statement
+                // reads as an accusation against a statement that is very often fine --
+                // `test/pulse_refusals/cases/BorrowNotReturned.cs` writes through a span, and
+                // it is the *method* that then cannot state anything about the array. So the
+                // epilogue is located at the method, where an unprovable postcondition
+                // belongs. An explicit `return` keeps its own location, because there the
+                // user did write the exit.
+                EndOfMethod(method, plan);
                 return;
         }
+    }
+
+    /// <summary>
+    /// The implicit exit at the bottom of a body: close any open objects and give the block
+    /// its unit value, both located at the method rather than at whatever statement happened
+    /// to come last.
+    /// </summary>
+    private void EndOfMethod(IrMethod method, MethodPlan plan)
+    {
+        var outer = _loc;
+        _loc = method.Loc;
+        try
+        {
+            if (NeedsEpilogue) CloseObjects(method, plan);
+            if (IsVoid(method)) Line("()");
+        }
+        finally { _loc = outer; }
     }
 
     // =======================================================================

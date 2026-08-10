@@ -334,6 +334,7 @@ You do not have to read the generated Pulse to start. `make` runs F\* through
 and the same message appears in the editor next time Roslyn re-analyses the file. When the
 message is about a resource — `Cannot prove: class_C__inv var_s _` — the C# line is usually
 the whole answer: it is a call that asked for an object's invariant when something else
-already held it. `test/pulse_refusals` collects three programs of exactly that kind, each
-pinned to the reason it fails and the line it fails on, so the round-trip is tested rather
-than asserted.
+already held it. `test/pulse_refusals` collects 24 programs that must fail, each pinned to
+the reason it fails and the line it fails on, so the round-trip is tested rather than
+asserted; `test/pulse_refusals/cases/README.md` indexes them by the obligation each one
+breaks, and is the quickest way to see what the verifier is being asked to prove at all.

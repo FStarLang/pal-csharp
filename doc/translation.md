@@ -311,6 +311,26 @@ Three properties are deliberate:
   caches and options against ranges in files nobody wrote; claiming those are about a
   particular class would be an invention. An *error* is reported wherever it lands, because
   an error the user cannot see is worse than one in roughly the right place.
+* **`use` before `def`.** An F* range has two halves: `def`, the declaration the error was
+  raised against, and `use`, the sub-term that provoked it. Either may point outside the
+  translation — when a library definition is at fault, `def` is the library and `use` is
+  the generated module — so each is tried and skipped if it does not map. When *both* map,
+  `use` is the narrower and is the one reported: `def` for a Pulse `fn` can be the whole
+  function. The order used to be the other way, and an array-bounds failure was announced
+  against the enclosing method's signature rather than the index that caused it
+  (`test/pulse_refusals/cases/IndexInBounds.cs`).
+* **The implicit exit belongs to the method.** A body's trailing `()` is not the statement
+  above it: it is the point at which the postcondition is proved, and it is located at the
+  method. The alternative — inheriting the last statement's location, which is what the
+  emitter used to do — is right only when the last statement happens to be the culprit, and
+  charging a construct because it is *usually* to blame is the same invention §0 rule 3
+  forbids elsewhere. `test/pulse_refusals/cases/BorrowNotReturned.cs` is the case that
+  distinguishes them: it writes through a span, the write is fine, and it is the method
+  that can no longer say anything about the array it lent out. An explicit `return` keeps
+  its own location, because there the author did write the exit.
+
+None of this is visible to a verification test. A proof that succeeds reports nothing, so a
+wrong location can only be seen in a suite of programs that must fail: §8.2.
 
 The line map is a separate file from `source_range_info.json` rather than a field in it:
 they answer different questions, one is read by the provenance lint and the other by the
@@ -2267,10 +2287,25 @@ verification test cannot.
   span in the user's own file rather than in generated Pulse.
 * **`test/pulse_refusals`** is the suite that became possible once refusing was *not* the
   answer (R3.13): programs that translate cleanly, fail in F\*, and must fail for the
-  stated reason on the marked line. Aliasing, a self-call with the invariant unfolded, and
-  ownership transfer into a field — the last two had been documented here for milestones
-  without ever being executed, because there was nowhere to put a test whose expected
-  outcome was a proof failure.
+  stated reason on the marked line. It is indexed by *obligation kind* rather than by C#
+  feature — 24 cases, and `cases/README.md` is the inventory: an index in bounds, a sum
+  representable, all three parts of the loop rule separately, a measure that falls, a
+  borrow given back, an invariant established by a constructor and restored by every
+  method. A negative suite grouped by feature exercises the same two obligations from a
+  dozen angles and leaves whole rules untested; grouped this way the table is a claim about
+  coverage that can be read and disputed. Four cases are counter-tests — the exact program
+  that verified before a soundness fix — and the rest are the obligation working.
+
+  Building it out found two provenance defects, neither of which any verification test
+  could have found, because both concern *where* a true refusal is reported. `palcs report`
+  preferred F\*'s `def` range over its `use` range, so an array-bounds failure was
+  announced against the enclosing method's signature instead of the indexing expression;
+  and the implicit `()` at the bottom of a body carried the location of whatever statement
+  came last, so a postcondition failure was charged to a statement that was very often
+  innocent. Both are fixed, and the cases that exhibit them — `IndexInBounds`,
+  `BorrowNotReturned` — are in the suite. That is the argument for building it: a suite of
+  programs that must fail is the only place a wrong *location* is visible, since every
+  passing proof reports nothing at all.
 * **Six lints** run in the same `make`: `no-example-names.sh` forbids any acceptance
   directory or method name from appearing in `Pal.Compiler`; `provenance-lint.sh` (R2.2)
   requires every top-level construct in every generated module to trace to a C# span;

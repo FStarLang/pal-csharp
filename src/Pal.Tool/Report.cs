@@ -112,10 +112,20 @@ public static class Report
 
         if (!message.TryGetProperty("range", out var range)) return null;
 
-        // `def` is where F* raised the error; `use` is the term that provoked it. They are
-        // usually the same, and when they differ the definition site is the one inside the
-        // module being checked.
-        foreach (var which in new[] { "def", "use" })
+        // `def` is where F* raised the error; `use` is the term that provoked it. When they
+        // differ, `use` is the narrower of the two -- `def` is the enclosing binding, which
+        // for a Pulse `fn` can be the whole function -- so `use` is tried first and `def`
+        // is the fallback. Either is skipped when it points outside this translation, which
+        // is what happens when the error is raised against a library definition and used
+        // here: then `use` is the generated module and `def` is the library, and the order
+        // does not matter. It matters when both are in the generated module, and there the
+        // narrower one is the one the user has to act on.
+        //
+        // The other order looked right until an array read went wrong: an index obligation
+        // has `def` on the `bind` spanning the whole statement and `use` on the `read`, and
+        // reporting `def` put "index may be out of bounds" on the method's signature line.
+        // `test/pulse_refusals/cases/IndexInBounds.cs` is that program.
+        foreach (var which in new[] { "use", "def" })
         {
             if (!range.TryGetProperty(which, out var r)) continue;
             if (!r.TryGetProperty("file_name", out var f) || f.GetString() is not { } file) continue;
