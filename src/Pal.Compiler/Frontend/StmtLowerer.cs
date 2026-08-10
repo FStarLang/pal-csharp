@@ -236,8 +236,11 @@ public sealed class StmtLowerer(
 
     private IrStmt Step(ExpressionSyntax target, BinOp op, IrLoc loc)
     {
-        var lowered = _code.Lower(target);
-        return new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, new IrLiteral(loc, 1)));
+        // R5.3 expands `x++` into `x = x + 1`, which names the L-value twice. C# evaluates
+        // it once, so anything effectful in it is hoisted first and both copies share it.
+        var lowered = _code.LinearizeLValue(_code.Lower(target), out var prelude);
+        var assign = new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, new IrLiteral(loc, 1)));
+        return prelude.IsEmpty ? assign : new IrBlock(loc, [.. prelude, assign]);
     }
 
     private IrStmt LowerAssignment(AssignmentExpressionSyntax node, IrLoc loc)
@@ -271,7 +274,11 @@ public sealed class StmtLowerer(
         var target = _code.Lower(node.Left);
         var value = _code.Lower(node.Right);
 
-        return new IrAssign(loc, target, op is null ? value : new IrBinary(loc, op.Value, target, value));
+        if (op is null) return new IrAssign(loc, target, value);
+
+        var linear = _code.LinearizeLValue(target, out var prelude);
+        var assign = new IrAssign(loc, linear, new IrBinary(loc, op.Value, linear, value));
+        return prelude.IsEmpty ? assign : new IrBlock(loc, [.. prelude, assign]);
     }
 
     /// <summary>

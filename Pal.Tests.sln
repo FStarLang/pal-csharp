@@ -82,6 +82,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "spec_let", "test/spec_let/s
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "stack_class", "test/stack_class/stack_class.csproj", "{EE9DD34F-7B61-7BCC-51C8-7512B9B1FB76}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "step_once", "test/step_once/step_once.csproj", "{96A35106-5ACA-02DE-2533-38C6357BF23B}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "sum_array", "test/sum_array/sum_array.csproj", "{8BF9E08A-51BB-6E1C-8B21-3B0E1522A267}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "swap", "test/swap/swap.csproj", "{9A7D9F0D-519F-CFA8-55B7-81D274F2C2D5}"
@@ -268,6 +270,10 @@ Global
 		{EE9DD34F-7B61-7BCC-51C8-7512B9B1FB76}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{EE9DD34F-7B61-7BCC-51C8-7512B9B1FB76}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{EE9DD34F-7B61-7BCC-51C8-7512B9B1FB76}.Release|Any CPU.Build.0 = Release|Any CPU
+		{96A35106-5ACA-02DE-2533-38C6357BF23B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{96A35106-5ACA-02DE-2533-38C6357BF23B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{96A35106-5ACA-02DE-2533-38C6357BF23B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{96A35106-5ACA-02DE-2533-38C6357BF23B}.Release|Any CPU.Build.0 = Release|Any CPU
 		{8BF9E08A-51BB-6E1C-8B21-3B0E1522A267}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{8BF9E08A-51BB-6E1C-8B21-3B0E1522A267}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8BF9E08A-51BB-6E1C-8B21-3B0E1522A267}.Release|Any CPU.ActiveCfg = Release|Any CPU

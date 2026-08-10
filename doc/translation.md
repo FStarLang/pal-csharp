@@ -1484,6 +1484,22 @@ optimisations are how translators start fitting examples.
 after A-normalisation (R6.2). Compound assignment `x op= e` is normalised to `x = x op e`
 and `x++` to `x = x + 1` in the Normalize pass, which is a C#→C# rewrite.
 
+**R5.3a (the L-value is evaluated once).** That rewrite names the L-value twice — three
+times for the expression form `x++`, which also snapshots it — and C# names it once and
+evaluates it once (ECMA-334 §12.18.3, §12.21). For an L-value with no effects the
+difference is invisible. For `a[Bump(ref cursor)]++` it is not: a translation that spliced
+the lowered L-value into each position would call `Bump` twice, advance the cursor by two,
+and increment an element the C# never touches — and would then *prove* the cursor advances
+by two, which is a theorem about a different program.
+
+So the effectful part of an L-value is evaluated once, into a fresh immutable local, and
+every copy of the L-value names that local — the same discipline R5.14 already applies to
+a `switch` scrutinee. This is possible for an **index**, which is a value. It is not
+possible for the array or the receiver, which are resources: hoisting one is a move, not a
+binding. There the expansion is refused (**PALCS0578**) rather than approximated.
+`test/step_once` pins the single evaluation; `test/pulse_refusals/cases/StepCountedTwice.cs`
+is the false theorem, which must now fail.
+
 **R5.4 (`if`).** `if (c) s₁ else s₂` ⟶ `if (⟦c⟧) { ⟦s₁⟧ } else { ⟦s₂⟧ }`. **Both branches
 are always emitted**, even when one is empty.
 

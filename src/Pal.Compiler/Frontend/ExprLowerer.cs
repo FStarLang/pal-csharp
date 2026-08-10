@@ -855,7 +855,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return Lower(operand);
         }
 
-        var target = Lower(operand);
+        var target = LinearizeLValue(Lower(operand), out var hoisted);
         var stepped = new IrBinary(loc, op, target, new IrLiteral(loc, 1)) { Type = target.Type };
         var write = new IrAssign(loc, target, stepped);
         var name = Fresh("step");
@@ -865,15 +865,132 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         // Postfix reads before writing; prefix writes before reading. Both take a
         // snapshot, because the operand is a mutable cell whose contents the write
-        // changes underneath any later mention of it.
+        // changes underneath any later mention of it. The hoisted parts of the L-value
+        // come first: they are what the three copies below share.
         var prelude = before
-            ? ImmutableArray.Create<IrStmt>(snapshot, write)
-            : ImmutableArray.Create<IrStmt>(write, snapshot);
+            ? ImmutableArray.CreateRange<IrStmt>([.. hoisted, snapshot, write])
+            : ImmutableArray.CreateRange<IrStmt>([.. hoisted, write, snapshot]);
         return new IrStmtExpr(loc, prelude, result) { Type = target.Type };
+    }
+
+    /// <summary>
+    /// <see cref="LinearizeLValue(IrExpr, ImmutableArray{IrStmt}.Builder)"/>, with the
+    /// prelude returned rather than appended.
+    /// </summary>
+    public IrExpr LinearizeLValue(IrExpr lvalue, out ImmutableArray<IrStmt> prelude)
+    {
+        var builder = ImmutableArray.CreateBuilder<IrStmt>();
+        var linear = LinearizeLValue(lvalue, builder);
+        prelude = builder.ToImmutable();
+        return linear;
     }
 
     private int _steps;
     private string Fresh(string hint) => $"__pal_{hint}{_steps++}";
+
+    /// <summary>
+    /// R5.3. <c>x op= e</c> and <c>x++</c> are notations for <c>x = x op e</c>, and that
+    /// expansion mentions the L-value <em>twice</em> — three times for the expression form,
+    /// which also snapshots it. C# evaluates it exactly once (ECMA-334 §12.21, §12.18.3),
+    /// so if any part of the L-value has an effect, the expansion is a different program
+    /// from the one that runs, and what is proved is a theorem about that other program.
+    ///
+    /// <para>The remedy is the one R5.14 already applies to a <c>switch</c> scrutinee: the
+    /// effectful part is evaluated once, into an immutable local, and every copy of the
+    /// L-value names that local. Only an <em>index</em> is hoisted. An effectful array or
+    /// receiver would have to be hoisted as a resource rather than a value — a move, not a
+    /// binding — so it is refused instead, per §0 rule 3.</para>
+    /// </summary>
+    public IrExpr LinearizeLValue(IrExpr lvalue, ImmutableArray<IrStmt>.Builder prelude)
+    {
+        switch (lvalue)
+        {
+            case IrElement el:
+                return el with
+                {
+                    Array = Opaque(el.Array, "array"),
+                    Index = Hoist(el.Index, prelude),
+                };
+
+            case IrField f:
+                return f with { Receiver = Opaque(f.Receiver, "receiver") };
+
+            default:
+                return Opaque(lvalue, "target");
+        }
+
+        // A part that cannot be hoisted must at least not be duplicated.
+        IrExpr Opaque(IrExpr part, string what)
+        {
+            if (!HasEffect(part)) return part;
+            diagnostics.Error("PALCS0578", part.Loc,
+                $"The {what} of this compound assignment or increment has an effect, and " +
+                "R5.3 expands the notation into an assignment that names the L-value twice. " +
+                "Evaluating it twice is not the program C# runs, and pal-csharp will not " +
+                "translate one program as another. Bind it to a local first.");
+            return part;
+        }
+    }
+
+    /// <summary>
+    /// Binds <paramref name="index"/> to a fresh immutable local when it has an effect, so
+    /// that the copies of the L-value around it share one evaluation.
+    /// </summary>
+    private IrExpr Hoist(IrExpr index, ImmutableArray<IrStmt>.Builder prelude)
+    {
+        if (!HasEffect(index)) return index;
+
+        if (index.Type is not { } type)
+        {
+            diagnostics.Error("PALCS0578", index.Loc,
+                "This index has an effect and no type pal-csharp can bind it at, so R5.3's " +
+                "expansion would evaluate it twice. Bind it to a local first.");
+            return index;
+        }
+
+        var name = Fresh("index");
+        prelude.Add(new IrLocalDecl(index.Loc, name, type, index) { Immutable = true });
+        return new IrVar(index.Loc, name) { Type = type };
+    }
+
+    /// <summary>
+    /// Whether evaluating this expression can do something — call a method, run the
+    /// prelude of an already-lowered increment, or allocate. Deliberately conservative:
+    /// the cost of a false positive is a refusal, and of a false negative a wrong program.
+    /// </summary>
+    private static bool HasEffect(IrExpr expr) =>
+        Subexpressions(expr).Any(e => e is IrCall { Kind: CalleeKind.Method }
+                                       or IrStmtExpr or IrNew or IrNewArray);
+
+    private static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
+    {
+        yield return expr;
+        IEnumerable<IrExpr> kids = expr switch
+        {
+            IrUnary u => [u.Operand],
+            IrBinary b => [b.Left, b.Right],
+            IrConditional c => [c.Cond, c.Then, c.Else],
+            IrElement e => [e.Array, e.Index],
+            IrLength l => [l.Array],
+            IrField f => [f.Receiver],
+            IrNew n => [.. n.Fields.Select(f => f.Value)],
+            IrRefArg r => [r.Operand],
+            IrCall c => c.Args,
+            IrConvert c => [c.Operand],
+            IrStmtExpr se => [se.Value],
+            IrOld o => [o.Operand],
+            IrLive l => [l.Operand],
+            IrQuantifier q => [q.Body],
+            IrNewArray n => [n.Length],
+            IrContents c => [c.Array],
+            IrSeqOp s => s.Args,
+            IrListOp l => l.Args,
+            IrSpecOp o => o.Args,
+            _ => [],
+        };
+        foreach (var kid in kids)
+            foreach (var r in Subexpressions(kid)) yield return r;
+    }
 
     /// <summary>
     /// R6.10. A <c>ref</c>/<c>out</c>/<c>in</c> argument passes the variable itself, so
