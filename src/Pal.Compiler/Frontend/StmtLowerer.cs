@@ -242,9 +242,6 @@ public sealed class StmtLowerer(
 
     private IrStmt LowerAssignment(AssignmentExpressionSyntax node, IrLoc loc)
     {
-        var target = _code.Lower(node.Left);
-        var value = _code.Lower(node.Right);
-
         // Compound assignment `x op= e` is `x = x op e` (R5.3).
         var op = node.Kind() switch
         {
@@ -259,8 +256,20 @@ public sealed class StmtLowerer(
             SyntaxKind.ExclusiveOrAssignmentExpression => BinOp.BitXor,
             SyntaxKind.LeftShiftAssignmentExpression => BinOp.Shl,
             SyntaxKind.RightShiftAssignmentExpression => BinOp.Shr,
-            _ => throw new NotSupportedException(node.Kind().ToString()),
+            // Every other assignment operator — `??=`, `>>>=` — is outside the subset.
+            // It reaches here like any other statement, so it is refused like any other:
+            // §18's totality is a property of the frontend, not of the operators it knows.
+            _ => null,
         };
+
+        if (op is null && !node.IsKind(SyntaxKind.SimpleAssignmentExpression))
+        {
+            diagnostics.Unsupported(loc, $"The assignment operator `{node.OperatorToken}`");
+            return new IrBlock(loc, []);
+        }
+
+        var target = _code.Lower(node.Left);
+        var value = _code.Lower(node.Right);
 
         return new IrAssign(loc, target, op is null ? value : new IrBinary(loc, op.Value, target, value));
     }
