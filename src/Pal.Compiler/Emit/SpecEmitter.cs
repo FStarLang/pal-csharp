@@ -565,7 +565,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.IsPermutation => new Term(
             $"(CS.is_permutation {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})",
             TermKind.Prop),
-        _ => new Term("True", TermKind.Prop),
+        // R6.4b. Every member of `SeqOpKind` is handled above, so this arm is
+        // unreachable — and it says so rather than emitting `True`, which is what it used
+        // to do. A `True` here would make a postcondition mentioning a new sequence
+        // operation vacuous instead of wrong, which is the quieter failure and the harder
+        // one to notice. An arm that cannot answer refuses.
+        _ => UnsupportedOp(s.Loc, $"The sequence operation `{s.Op}`"),
     };
 
     /// <summary>R10.5. The ghost list, F*'s own <c>list</c> and <c>FStar.List.Tot</c>.</summary>
@@ -600,8 +605,21 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             $"(CL.remove_at {Emit(l.Args[0], scope).Text} {Math(l.Args[1], scope)})", TermKind.Other),
         ListOpKind.Reverse => new Term(
             $"(CL.rev {Emit(l.Args[0], scope).Text})", TermKind.Other),
-        _ => new Term("True", TermKind.Prop),
+        // R6.4b, as for `SeqOp` above: unreachable, and refusing rather than emitting a
+        // vacuous `True` if it ever stops being so.
+        _ => UnsupportedOp(l.Loc, $"The list operation `{l.Op}`"),
     };
+
+    /// <summary>
+    /// R6.4b. A spec-level operation with no emission is refused. Shared by the arms that
+    /// are unreachable today, so that adding an enum member without adding its rule is a
+    /// diagnostic rather than a silently different specification.
+    /// </summary>
+    private Term UnsupportedOp(IrLoc loc, string what)
+    {
+        diagnostics.Unsupported(loc, $"{what} in specification position");
+        return new Term("True", TermKind.Prop);
+    }
 
     /// <summary>
     /// R11.2. A user-declared specification operation: the F* term it named, applied to
