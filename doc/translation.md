@@ -1515,8 +1515,19 @@ emitter never reorders, merges, or elides a statement.
 
 **R5.2 (local declaration).** `T x = e;` ⟶ `let mut var_x : ⟦T⟧ = ⟦e⟧;`. Every C# local is
 a Pulse `ref` cell; a read of `x` is `!var_x` (R6.1). Locals are *not* promoted to
-immutable `let` bindings even when never reassigned — that would be an optimisation, and
-optimisations are how translators start fitting examples.
+immutable `let` bindings merely because they are never reassigned — that would be an
+optimisation, and optimisations are how translators start fitting examples. R5.2a is the
+one exception, and it is about what a proof can know, not about speed.
+
+**R5.2a (a non-arithmetic local that is never written).** A local of type `bool`, `string`,
+an `option`, a `[SpecType]` or an exception, declared with an initialiser and never the
+target of an assignment, increment or `ref`/`out` argument anywhere in its scope, is
+`let var_x = ⟦e⟧;` — a value, not a cell. A cell's contents are generalised at every join
+of a stateful `if` (Pulse's join quantifies them afresh), so a fact about what `x` was
+initialised to, such as `bool hasCurrency = r != null && …;`, is lost the first time
+control merges after a branch that raised. A value cannot be generalised, so the fact
+survives. Arithmetic locals keep their cell: there the initialiser reaching the solver as
+an inlined term rather than as a name is what destabilises proofs (`examples/adler32`).
 
 **R5.3 (assignment).** `x = e;` ⟶ `var_x := ⟦e⟧;`. `a[i] = e;` ⟶ `array_write var_a (Idx ⟦i⟧) ⟦e⟧`
 after A-normalisation (R6.2). Compound assignment `x op= e` is normalised to `x = x op e`
@@ -5764,6 +5775,53 @@ A `[SpecOp]` property or method read in *code* is a pure application of the F\* 
 it names. This is what makes a `[SpecType]` class a value type to the translator, and it
 is sound only under R20.8's assumption that the object is not mutated.
 
+### R20.9 Code written before nullable reference types
+
+`palcs --nullable disable` (`PAL_CS_NULLABLE=disable` in a test or harness Makefile)
+compiles the sources with nullable reference types off, as pre-C# 8 production code is.
+
+* An *oblivious* `string` — one declared where nullable annotations are disabled — may be
+  null, and is `option string`. A string constant where one is expected is `Some "…"`.
+  Under `#nullable enable` a `string` stays `string` (R3.1).
+* `(int)E.M`, a cast of an enum constant, is the integer C# folds it to: enums are not a
+  type the translation models, but each of their constants is a literal.
+* `==` and `!=` on an `option` or a `[SpecType]` value is F\*'s decidable equality `=`;
+  `x == null` compares with the `None` of `x`'s type.
+
+### R20.10 The BCL members with a model
+
+`Pulse.Lib.CSharp.Bcl` models the few BCL members validation code calls, each as the
+function it is:
+
+| C# | F\* |
+|---|---|
+| `Guid`, `Guid.Empty` | `Bcl.guid` (an `eqtype`), `Bcl.guid_empty` |
+| `string.IsNullOrWhiteSpace(s)` | `Bcl.is_null_or_white_space s` |
+| `string.Equals(a, b, StringComparison.Ordinal)` | `Bcl.string_equals_ordinal a b` |
+| `new Regex(pattern, options)` with constant arguments | `Bcl.regex_create "pattern" options` |
+| `r.IsMatch(s)` | `Bcl.is_match r (Some?.v s)` — F\* proves `s` non-null |
+| `new HashSet<T> { a, b }`, `h.Contains(x)` | `Bcl.hash_set_add a (… Bcl.hash_set_empty)`, `Bcl.hash_set_contains h x` |
+
+Any other use of these members — another `StringComparison`, a non-constant pattern, a
+set built any other way — is PALCS0625.
+
+A `static readonly` field whose initialiser is such a value (built only from constants,
+`Some`, `null` and model applications) denotes its initialiser, which is written out at
+each use: the field is assigned once, before any method runs, and never again. Any other
+`static readonly` field read by verified code is PALCS0626.
+
+### R20.11 Nullable references: `[SpecType(…, Nullable = true)]`, `?.` and `??`
+
+A `[SpecType("T", Nullable = true)]` class is a reference that may be null: a variable of
+it is `option T` (unless `#nullable enable` marks the occurrence non-null). A `[SpecOp]`
+member read through such a variable is applied to `Some?.v x`, so F\* must prove `x`
+non-null where it is read — a `NullReferenceException` is ruled out, not assumed away.
+
+`a?.M` is `let t = a in if Some? t then [Some] ⟦t.M⟧ else None`, and `a ?? b` is
+`let t = a in if Some? t then Some?.v t else ⟦b⟧` (`t` itself when `b` is nullable). `a`
+is evaluated once (bound to a fresh local when it has an effect), and `M` and `b` only on
+the branch where C# evaluates them.
+
 ### R20.8 What a proof of production code trusts
 
 * the decimal model: `decimal` is an `eqtype` injected into `real` by `D.v`, and the C#
@@ -5773,5 +5831,8 @@ is sound only under R20.8's assumption that the object is not mutated.
   `foreach` enumerates in index order and the list is not modified during it);
 * a `[SpecType]` class read through `[SpecOp]`s: its elements are non-null and are not
   mutated through an alias while the verified method runs;
+* the BCL models of R20.10: `Guid` equality, `IsNullOrWhiteSpace` (with `char.IsWhiteSpace`
+  uninterpreted), ordinal `string.Equals`, `HashSet` membership, and that `Regex.IsMatch`
+  is a deterministic, terminating function of the pattern, options and input;
 * every `[Admit]`ed contract, and whatever stand-ins the harness supplies for types
   outside the file.

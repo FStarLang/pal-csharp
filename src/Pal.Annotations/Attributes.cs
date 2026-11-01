@@ -284,6 +284,13 @@ public sealed class GhostArgAttribute(string declaration) : Attribute
 public sealed class SpecTypeAttribute(string type) : Attribute
 {
     public string Type { get; } = type;
+
+    /// <summary>
+    /// R20.11. The type is a reference type whose values may be <c>null</c>: a variable of
+    /// it is an <c>option</c> of the F* type, and a member read through it requires it to
+    /// be non-null.
+    /// </summary>
+    public bool Nullable { get; init; }
 }
 
 /// <summary>

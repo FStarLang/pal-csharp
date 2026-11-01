@@ -33,6 +33,7 @@ public static class Program
         var printIr = false;
         var timePasses = false;
         var quiet = false;
+        var nullable = true;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -42,6 +43,17 @@ public static class Program
                 case "--print-ir": printIr = true; break;
                 case "--time-passes": timePasses = true; break;
                 case "-q" or "--quiet": quiet = true; break;
+                // R20.9. A program written before nullable reference types is compiled
+                // as it is built, so that its `string`s are the nullable ones it means.
+                case "--nullable" when i + 1 < args.Length:
+                    var mode = args[++i];
+                    if (mode is not ("enable" or "disable"))
+                    {
+                        Console.Error.WriteLine($"palcs: --nullable takes `enable` or `disable`, not `{mode}`");
+                        return 2;
+                    }
+                    nullable = mode == "enable";
+                    break;
                 case "-h" or "--help": Usage(); return 0;
                 default:
                     if (args[i].StartsWith('-')) { Console.Error.WriteLine($"palcs: unknown option `{args[i]}`"); return 2; }
@@ -57,7 +69,7 @@ public static class Program
         var diagnostics = new DiagnosticBag();
         var watch = Stopwatch.StartNew();
 
-        var compilation = Loader.Create(sources);
+        var compilation = Loader.Create(sources, nullable: nullable);
         var csharpErrors = compilation.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
@@ -250,6 +262,7 @@ public static class Program
               --print-ir     dump the IR after normalisation
               --time-passes  report per-stage timings
           -q, --quiet        suppress the summary line
+              --nullable M   compile with nullable reference types `enable`d (default) or `disable`d
           -h, --help         show this message
         """);
 }

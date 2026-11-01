@@ -57,7 +57,7 @@ translate: $(OUT)/.stamp
 
 $(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS)
 	@mkdir -p $(OUT)
-	$(PALCS) -o $(OUT) $(SOURCES)
+	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(SOURCES)
 	@touch $@
 
 verify: translate

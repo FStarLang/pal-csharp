@@ -42,6 +42,10 @@ public static class Declarations
     public static string? StringArgument(ISymbol symbol, INamedTypeSymbol attribute) =>
         Find(symbol, attribute) is { } data ? StringArgument(data) : null;
 
+    /// <summary>A named string property set on an attribute application.</summary>
+    public static string? NamedString(AttributeData data, string name) =>
+        data.NamedArguments.FirstOrDefault(a => a.Key == name).Value.Value as string;
+
     /// <summary>A named boolean property set on an attribute application.</summary>
     public static bool NamedFlag(AttributeData data, string name) =>
         data.NamedArguments.Any(a => a.Key == name && a.Value.Value is true);

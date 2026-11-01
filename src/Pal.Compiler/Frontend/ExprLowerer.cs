@@ -126,6 +126,15 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             PrefixUnaryExpressionSyntax u => LowerPrefixUnary(u, loc),
             ConditionalExpressionSyntax c =>
                 new IrConditional(loc, Lower(c.Condition), Lower(c.WhenTrue), Lower(c.WhenFalse)),
+            ConditionalAccessExpressionSyntax ca => LowerConditionalAccess(ca, loc),
+            MemberBindingExpressionSyntax mb when _bound is { } bound &&
+                                                  known.SpecTypeName(model.GetTypeInfo(BoundSyntax!).Type) is not null =>
+                SpecMember(model.GetSymbolInfo(mb).Symbol, [bound], mb, loc),
+            // R20.9. `(int)E.Member` is the number C# folds it to: an enum is not a type
+            // the translation models, but each of its constants is an integer literal.
+            CastExpressionSyntax c when model.GetTypeInfo(c.Expression).Type is { TypeKind: TypeKind.Enum } &&
+                                        model.GetConstantValue(c) is { HasValue: true, Value: { } folded } =>
+                new IrLiteral(loc, folded),
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -147,6 +156,12 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (result is IrSpanCreate) type = known.MapType(info.ConvertedType) ?? type;
 
         if (type is not null) result = result with { Type = type };
+
+        // R20.9. A constant at an `option` type -- an oblivious `string` constant -- is a
+        // value that is there: `Some` of it.
+        if (type is IrOptionType constOption && result is IrLiteral { Value: not null } constant)
+            result = new IrOptionOp(loc, OptionOpKind.Some, constant with { Type = constOption.Inner })
+                { Type = constOption };
 
         // R20.3. C# converts `T` to `T?` silently; the conversion is `Some`.
         if (type is not null and not IrOptionType && result is not IrNull &&
@@ -240,6 +255,27 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R20.10. A BCL value built from constants, or a set from its elements.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol bclType &&
+            Bcl.MapType(bclType, known.MapType) is not null)
+        {
+            var collection = node.Initializer is { } init &&
+                             init.IsKind(SyntaxKind.CollectionInitializerExpression);
+            var ctorArgs = node.ArgumentList?.Arguments ?? default;
+            var constants = ctorArgs.Select(a => model.GetConstantValue(a.Expression) is { HasValue: true } cv
+                ? cv.Value : null).ToImmutableArray();
+            var elements = collection
+                ? node.Initializer!.Expressions.Select(Lower).ToImmutableArray()
+                : [];
+            if ((collection ? ctorArgs.Count == 0 : node.Initializer is null) &&
+                Bcl.Construct(bclType, constants, elements, collection, loc) is { } built)
+                return built;
+            diagnostics.Error("PALCS0625", loc,
+                $"`{Trim(node)}`. A `{bclType.Name}` translates when it is built from constants, " +
+                "or a `HashSet` from a collection initializer (doc/translation.md R20.10).");
+            return new IrLiteral(loc, null);
+        }
+
         // R19.1. `new E(args)` of an exception class builds its payload: a pure value, so
         // it may appear anywhere an expression may, and is most often thrown at once.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol exn && known.IsExceptionClass(exn))
@@ -570,6 +606,39 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         return null;
     }
 
+    /// <summary>
+    /// R20.10. A <c>static readonly</c> field whose initializer is a pure value -- a BCL
+    /// model built from constants -- denotes that value. The field is assigned once, before
+    /// any method runs, and never again, so naming it and writing its initializer out are
+    /// the same expression. An initializer that is not pure is refused here.
+    /// </summary>
+    private IrExpr? StaticInitializer(IFieldSymbol field, IrLoc loc)
+    {
+        if (field.DeclaringSyntaxReferences is not [var reference] ||
+            reference.GetSyntax() is not VariableDeclaratorSyntax { Initializer.Value: { } init } ||
+            !model.Compilation.ContainsSyntaxTree(init.SyntaxTree))
+            return null;
+
+        var lowered = new ExprLowerer(
+            model.Compilation.GetSemanticModel(init.SyntaxTree), known, diagnostics, SpecPosition)
+            .Lower(init);
+        if (IsPureValue(lowered)) return lowered with { Loc = loc };
+
+        diagnostics.Error("PALCS0626", loc,
+            $"`{field.Name}` is a `static readonly` field whose initializer is not a value the " +
+            "translation models. A shared field denotes its initializer only when that is a BCL " +
+            "model built from constants (doc/translation.md R20.10).");
+        return new IrLiteral(loc, null);
+    }
+
+    private static bool IsPureValue(IrExpr e) => e switch
+    {
+        IrLiteral { Value: not null } or IrNull => true,
+        IrOptionOp o => IsPureValue(o.Operand),
+        IrSpecOp s => s.Args.All(IsPureValue),
+        _ => false,
+    };
+
     private static string Trim(SyntaxNode node)
     {
         var text = node.ToString();
@@ -606,6 +675,8 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         {
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
+            IFieldSymbol { IsStatic: true, IsReadOnly: true } shared
+                when StaticInitializer(shared, loc) is { } inlined => inlined,
             IFieldSymbol or IPropertySymbol when ClassMembers.Contains(node.Identifier.ValueText) =>
                 new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
@@ -648,6 +719,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+
+        if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        if (symbol is IFieldSymbol { IsStatic: true, IsReadOnly: true } shared &&
+            StaticInitializer(shared, loc) is { } inlined)
+            return inlined;
 
         // R14.1b. `g.Value` on a `Ghost<T>` is the ghost value, and is transparent — exactly
         // as `Ghost<T>` is transparent in a type (R14.1) and as a spec string, which is
@@ -697,7 +773,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         // first argument, which is the same rule for a property and for an instance
         // method, and the same rule a discriminator needs (F44).
         if (known.SpecTypeName(receiverType) is not null)
-            return SpecMember(symbol, [Lower(node.Expression)], node, loc);
+            return SpecMember(symbol, [NonNull(Lower(node.Expression))], node, loc);
 
         // `a.Length` on a real array is a pure function of the array (doc §3, R3.3).
         // R17.3. A span's `Length` is `Slice.len`, which is likewise pure and non-ghost, so
@@ -874,8 +950,52 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             _ => (BinOp?)null,
         };
 
+        if (node.IsKind(SyntaxKind.CoalesceExpression)) return LowerCoalesce(node, loc);
         if (op is null) return Unsupported(node, loc);
-        return new IrBinary(loc, op.Value, Lower(node.Left), Lower(node.Right));
+        var left = Lower(node.Left);
+        var right = Lower(node.Right);
+        // R20.11. `x == null` compares with the `None` of `x`'s own option type: C# types
+        // the `null` of a reference comparison as `object`, which has no translation.
+        if (op is BinOp.Eq or BinOp.Ne)
+        {
+            if (right is IrNull && right.Type is not IrOptionType && left.Type is IrOptionType lt)
+                right = right with { Type = lt };
+            else if (left is IrNull && left.Type is not IrOptionType && right.Type is IrOptionType rt)
+                left = left with { Type = rt };
+        }
+        return new IrBinary(loc, op.Value, left, right);
+    }
+
+    /// <summary>
+    /// R20.11. <c>a ?? b</c> evaluates <c>a</c> once, and <c>b</c> only when <c>a</c> is
+    /// null: <c>let t = a in if Some? t then Some?.v t else b</c>, or <c>t</c> in the then
+    /// branch when <c>b</c> is itself nullable.
+    /// </summary>
+    private IrExpr LowerCoalesce(BinaryExpressionSyntax node, IrLoc loc)
+    {
+        var tested = Lower(node.Left);
+        var fallback = Lower(node.Right);
+        if (tested.Type is not IrOptionType inner) return Unsupported(node, loc);
+
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        var subject = tested;
+        if (HasEffect(tested))
+        {
+            var name = Fresh("coalesce");
+            prelude.Add(new IrLocalDecl(loc, name, inner, tested) { Immutable = true });
+            subject = new IrVar(loc, name) { Type = inner };
+        }
+
+        var resultType = fallback.Type is IrOptionType ? inner : fallback.Type ?? inner.Inner;
+        IrExpr present = fallback.Type is IrOptionType
+            ? subject
+            : new IrOptionOp(loc, OptionOpKind.Value, subject) { Type = inner.Inner };
+        var conditional = new IrConditional(loc,
+            new IrOptionOp(loc, OptionOpKind.HasValue, subject) { Type = new IrPrim(PrimKind.Bool) },
+            present, fallback) { Type = resultType };
+        return prelude.Count == 0
+            ? conditional
+            : new IrStmtExpr(loc, prelude.ToImmutable(), conditional) { Type = resultType };
     }
 
     private IrExpr LowerPrefixUnary(PrefixUnaryExpressionSyntax node, IrLoc loc)
@@ -943,6 +1063,71 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var linear = LinearizeLValue(lvalue, builder);
         prelude = builder.ToImmutable();
         return linear;
+    }
+
+    /// <summary>
+    /// R20.11. A read through a nullable reference is a read through its value: the
+    /// <c>option</c> is unwrapped with <c>Some?.v</c>, whose refinement makes F* prove the
+    /// reference non-null where it is read -- which is exactly C#'s
+    /// <c>NullReferenceException</c>, ruled out.
+    /// </summary>
+    private static IrExpr NonNull(IrExpr receiver) =>
+        receiver.Type is IrOptionType o
+            ? new IrOptionOp(receiver.Loc, OptionOpKind.Value, receiver) { Type = o.Inner }
+            : receiver;
+
+    /// <summary>
+    /// The receiver of a member named by <paramref name="callee"/>: the expression left of
+    /// the dot, or, inside a <c>?.</c>, the non-null value it is testing.
+    /// </summary>
+    private IrExpr? Receiver(ExpressionSyntax callee) => callee switch
+    {
+        MemberAccessExpressionSyntax m => Lower(m.Expression),
+        MemberBindingExpressionSyntax => _bound,
+        _ => null,
+    };
+
+    private IrExpr? _bound;
+    private ExpressionSyntax? BoundSyntax;
+
+    /// <summary>
+    /// R20.11. <c>a?.M</c> evaluates <c>a</c> once, and is <c>null</c> when it is and
+    /// <c>a.M</c> otherwise: <c>let t = a in if Some? t then [Some] t.M else None</c>.
+    /// The member is evaluated only on the branch where <c>a</c> is not null, so a call in
+    /// it runs exactly when C# would run it.
+    /// </summary>
+    private IrExpr LowerConditionalAccess(ConditionalAccessExpressionSyntax node, IrLoc loc)
+    {
+        var resultType = known.MapType(model.GetTypeInfo(node).Type);
+        var tested = Lower(node.Expression);
+        if (tested.Type is not IrOptionType inner || resultType is not IrOptionType result)
+            return Unsupported(node, loc);
+
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        var subject = tested;
+        if (HasEffect(tested))
+        {
+            var name = Fresh("access");
+            prelude.Add(new IrLocalDecl(loc, name, inner, tested) { Immutable = true });
+            subject = new IrVar(loc, name) { Type = inner };
+        }
+
+        var (savedBound, savedSyntax) = (_bound, BoundSyntax);
+        _bound = new IrOptionOp(loc, OptionOpKind.Value, subject) { Type = inner.Inner };
+        BoundSyntax = node.Expression;
+        IrExpr member;
+        try { member = Lower(node.WhenNotNull); }
+        finally { (_bound, BoundSyntax) = (savedBound, savedSyntax); }
+
+        if (member.Type is not IrOptionType)
+            member = new IrOptionOp(loc, OptionOpKind.Some, member) { Type = result };
+        var conditional = new IrConditional(loc,
+            new IrOptionOp(loc, OptionOpKind.HasValue, subject) { Type = new IrPrim(PrimKind.Bool) },
+            member,
+            new IrNull(loc) { Type = result }) { Type = result };
+        return prelude.Count == 0
+            ? conditional
+            : new IrStmtExpr(loc, prelude.ToImmutable(), conditional) { Type = result };
     }
 
     private int _steps;
@@ -1123,10 +1308,25 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (known.SpecOpName(method) is not null || known.SpecCtorName(method) is not null)
         {
             var ops = ImmutableArray.CreateBuilder<IrExpr>();
-            if (!method.IsStatic && node.Expression is MemberAccessExpressionSyntax recv)
-                ops.Add(Lower(recv.Expression));
+            if (!method.IsStatic && Receiver(node.Expression) is { } recv)
+                ops.Add(NonNull(recv));
             foreach (var a in args) ops.Add(Lower(a.Expression));
             return SpecMember(method, ops.ToImmutable(), node, loc);
+        }
+
+        if (Bcl.Models(method))
+        {
+            var bclReceiver = !method.IsStatic && node.Expression is MemberAccessExpressionSyntax bm
+                ? Lower(bm.Expression) : null;
+            var bclArgs = args.Select(a => Lower(a.Expression)).ToImmutableArray();
+            var constants = args.Select(a => model.GetConstantValue(a.Expression) is { HasValue: true } cv
+                ? cv.Value : null).ToImmutableArray();
+            if (Bcl.Call(method, bclReceiver, bclArgs, constants, loc, out var refusal) is { } modelled)
+                return modelled;
+            diagnostics.Error("PALCS0625", loc,
+                $"`{Trim(node)}`. {refusal ?? "This use of the member is not modelled."} " +
+                "(doc/translation.md R20.10).");
+            return new IrLiteral(loc, null);
         }
 
         var kind = Declarations.KindOf(method, known);

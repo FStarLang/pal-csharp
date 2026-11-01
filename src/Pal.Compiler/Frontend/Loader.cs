@@ -15,7 +15,8 @@ public static class Loader
     /// <summary>The <c>PAL</c> preprocessor symbol, which makes annotations live.</summary>
     public const string PalSymbol = "PAL";
 
-    public static CSharpCompilation Create(IEnumerable<string> sourcePaths, string assemblyName = "PalInput")
+    public static CSharpCompilation Create(
+        IEnumerable<string> sourcePaths, string assemblyName = "PalInput", bool nullable = true)
     {
         var parseOptions = new CSharpParseOptions(
             LanguageVersion.Latest,
@@ -31,7 +32,9 @@ public static class Loader
             ReferenceSet(),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
-                nullableContextOptions: NullableContextOptions.Enable));
+                nullableContextOptions: nullable
+                    ? NullableContextOptions.Enable
+                    : NullableContextOptions.Disable));
     }
 
     private static Microsoft.CodeAnalysis.Text.SourceText SourceText(string path) =>

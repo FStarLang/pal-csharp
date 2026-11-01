@@ -3008,6 +3008,11 @@ public sealed class CodeEmitter(
         var l = Expr(b.Left);
         var r = Expr(b.Right);
 
+        // R20.9. `x == y` on a `T?`, or on a `[SpecType]` value, is F*'s decidable
+        // equality; C# lifts `int`'s `==` to `int?` exactly as `option`'s `=` does.
+        if (b.Op is BinOp.Eq or BinOp.Ne && b.Left.Type is IrOptionType or IrUserSpecType)
+            return b.Op is BinOp.Eq ? $"({l} = {r})" : $"(not ({l} = {r}))";
+
         // R18.1. R6.4 reads an operator's implementation off its operand type, and this
         // defaulted to `Int32` for an operand that was not primitive at all. `a == b` on
         // two objects then emitted `I32.eq` applied to two boxes: not a translation, and

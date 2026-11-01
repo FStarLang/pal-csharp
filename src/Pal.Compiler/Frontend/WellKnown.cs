@@ -16,6 +16,7 @@ public sealed class WellKnown
 
     private WellKnown(Compilation c)
     {
+        obliviousStrings = c.Options.NullableContextOptions == NullableContextOptions.Disable;
         INamedTypeSymbol Type(string name) =>
             c.GetTypeByMetadataName($"{Namespace}.{name}")
             ?? throw new InvalidOperationException(
@@ -66,6 +67,11 @@ public sealed class WellKnown
         Span = c.GetTypeByMetadataName("System.Span`1");
         ReadOnlySpan = c.GetTypeByMetadataName("System.ReadOnlySpan`1");
     }
+
+    // R20.9. Only a compilation with nullable reference types off (`--nullable disable`)
+    // has oblivious strings. Elsewhere an unannotated `string` -- a contract's literal,
+    // parsed apart from any `#nullable` context -- is the non-null `string` it is in code.
+    private readonly bool obliviousStrings;
 
     public static WellKnown For(Compilation compilation) => new(compilation);
 
@@ -166,6 +172,12 @@ public sealed class WellKnown
         Declarations.StringArgument(n.OriginalDefinition, SpecTypeAttribute) is { } name
             ? name
             : null;
+
+    /// <summary>R20.11. Whether a <c>[SpecType]</c> is declared <c>Nullable = true</c>.</summary>
+    public bool IsNullableSpecType(ITypeSymbol? t) =>
+        t is INamedTypeSymbol n &&
+        Declarations.Find(n.OriginalDefinition, SpecTypeAttribute) is { } data &&
+        Declarations.NamedFlag(data, "Nullable");
 
     /// <summary>R11.2. The F* term a <c>[SpecOp]</c> member denotes.</summary>
     public string? SpecOpName(ISymbol? m) =>
@@ -292,6 +304,9 @@ public sealed class WellKnown
             case INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable
                 when MapType(nullable.TypeArguments[0]) is { } inner:
                 return new IrOptionType(inner);
+            // R20.10. The BCL value types with a pure model.
+            case INamedTypeSymbol named when Bcl.MapType(named, MapType) is { } bcl:
+                return bcl;
             // R20.3. A delegate is held, passed on, and nothing else.
             case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del:
                 return new IrDelegateType(del.ToDisplayString());
@@ -333,7 +348,13 @@ public sealed class WellKnown
                     if (MapType(a) is not { } mapped) return null;
                     args.Add(mapped);
                 }
-                return new IrUserSpecType(named.Name, fstar, args.ToImmutable());
+                var spec = new IrUserSpecType(named.Name, fstar, args.ToImmutable());
+                // R20.11. A nullable specification type is an `option` of its F* type,
+                // except where `#nullable enable` says this occurrence is not null.
+                return IsNullableSpecType(named) &&
+                       named.NullableAnnotation != NullableAnnotation.NotAnnotated
+                    ? new IrOptionType(spec)
+                    : spec;
             }
             // §3.4. A class is translated exactly when it declares a [Model] member: R3.9
             // makes the model mandatory, so its presence is the same test as "annotated".
@@ -382,7 +403,13 @@ public sealed class WellKnown
             SpecialType.System_UInt64 => new IrPrim(PrimKind.ULong),
             SpecialType.System_Char => new IrPrim(PrimKind.Char),
             SpecialType.System_Decimal => new IrPrim(PrimKind.Decimal),
-            SpecialType.System_String => new IrPrim(PrimKind.String),
+            // R20.9. A `string` declared where nullable reference types are disabled is
+            // *oblivious*: C# lets it be null, and the program may test it. It is an
+            // `option string`. A `string` under `#nullable enable` stays non-null.
+            SpecialType.System_String => obliviousStrings &&
+                                          type.NullableAnnotation == NullableAnnotation.None
+                ? new IrOptionType(new IrPrim(PrimKind.String))
+                : new IrPrim(PrimKind.String),
             _ => type.TypeKind == TypeKind.Struct ? new IrNamedType(type.Name) : null,
         };
     }

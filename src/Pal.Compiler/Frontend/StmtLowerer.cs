@@ -244,10 +244,54 @@ public sealed class StmtLowerer(
                 continue;
             }
             statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
-                v.Initializer is null ? null : _code.Lower(v.Initializer.Value)));
+                v.Initializer is null ? null : _code.Lower(v.Initializer.Value))
+            {
+                Immutable = v.Initializer is not null && symbol is not null &&
+                            type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
+                                or IrUserSpecType or IrExnType &&
+                            NeverWritten(symbol, node.Parent ?? node),
+            });
         }
 
         return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable());
+    }
+
+    /// <summary>
+    /// R5.2a. Whether nothing in <paramref name="scope"/> writes <paramref name="local"/>
+    /// after its declaration: no assignment, compound assignment, increment or decrement has
+    /// it as its target, and it is never passed by <c>ref</c> or <c>out</c>. Such a local
+    /// names one value for its whole life, and is bound as one rather than kept in a cell.
+    /// An arithmetic local keeps its cell: its value then reaches the solver as a name
+    /// rather than as its initialiser inlined, which arithmetic proofs depend on.
+    /// </summary>
+    private bool NeverWritten(ILocalSymbol local, SyntaxNode scope)
+    {
+        foreach (var n in scope.DescendantNodes())
+        {
+            var target = n switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PreIncrementExpression) ||
+                                                   u.IsKind(SyntaxKind.PreDecrementExpression) => u.Operand,
+                PostfixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PostIncrementExpression) ||
+                                                    u.IsKind(SyntaxKind.PostDecrementExpression) => u.Operand,
+                ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => arg.Expression,
+                RefExpressionSyntax r => r.Expression,
+                _ => null,
+            };
+            while (target is ParenthesizedExpressionSyntax or MemberAccessExpressionSyntax or ElementAccessExpressionSyntax)
+                target = target switch
+                {
+                    ParenthesizedExpressionSyntax p => p.Expression,
+                    MemberAccessExpressionSyntax m => m.Expression,
+                    ElementAccessExpressionSyntax e => e.Expression,
+                    _ => target,
+                };
+            if (target is IdentifierNameSyntax id &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local))
+                return false;
+        }
+        return true;
     }
 
     private IrStmt LowerExpressionStatement(ExpressionStatementSyntax node, IrLoc loc) =>
