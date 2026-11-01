@@ -231,6 +231,25 @@ An exception class has an immutable payload (get-only properties set by its one
 constructor), and `finally`, and a `return` inside a `try`, are not supported.
 doc/translation.md §19 has the details.
 
+### 2.4 Verifying production code in place
+
+`[assembly: TranslateAnnotatedOnly]` makes pal-csharp translate only annotated members,
+so a production file can be verified by adding attributes to the one method that matters.
+That code may use `decimal`, `string`, `T?` (`HasValue`, `Value`), `IList<T>` / `List<T>`
+(treated as arrays), `foreach` over a list or array, and `OrderBy(x => x.P).ToList()`.
+Inside a `foreach`, `Pal.Index(x)` is the position of the current element:
+
+```csharp
+foreach (var band in schedule)
+{
+    Pal.Invariant(Pal.Forall((int j) => Pal.Implies(0 <= j && j < Pal.Index(band),
+        ScheduleResult.BoundOk(Pal.Contents(schedule)[j]))));
+    …
+}
+```
+
+doc/translation.md §20 has the rules, and the library assumptions such a proof trusts.
+
 ## 3. Ownership
 
 Most of what PAL spells with macros is already in the C# type system.

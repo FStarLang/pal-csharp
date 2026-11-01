@@ -186,6 +186,20 @@ public static class Pal
     /// <inheritdoc cref="Contents{T}(T[])"/>
     public static Seq<T> Contents<T>(ReadOnlySpan<T> span) => throw Ghost();
 
+    /// <summary>
+    /// R20.4. The contents of a list. A list is translated as the array it is a view of,
+    /// so this is the same sequence <see cref="Contents{T}(T[])"/> denotes.
+    /// </summary>
+    public static Seq<T> Contents<T>(System.Collections.Generic.IList<T> list) => throw Ghost();
+
+    /// <summary>
+    /// R20.5. In a loop invariant of a <c>foreach</c>, the position of the element
+    /// <paramref name="element"/> -- the loop's iteration variable -- in the collection:
+    /// how many elements the loop has already finished with. It is the counter the
+    /// translation of the <c>foreach</c> runs on, which C# gives no name.
+    /// </summary>
+    public static int Index<T>(T element) => throw Ghost();
+
     /// <summary>Whether two ghost sequences are permutations of one another.</summary>
     public static bool IsPermutation<T>(Seq<T> left, Seq<T> right) => throw Ghost();
 

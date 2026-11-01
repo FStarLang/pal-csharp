@@ -56,6 +56,8 @@ public sealed class WellKnown
         SpecOpAttribute = Type("SpecOpAttribute");
         SpecCtorAttribute = Type("SpecCtorAttribute");
         ThrowsAttribute = Type("ThrowsAttribute");
+        TranslateAnnotatedOnlyAttribute = Type("TranslateAnnotatedOnlyAttribute");
+        AnnotatedOnly = Declarations.Has(c.Assembly, TranslateAnnotatedOnlyAttribute);
         Exception = c.GetTypeByMetadataName("System.Exception");
 
         // R17.1. `Span<T>` and `ReadOnlySpan<T>` are BCL types, not pal-csharp ones, so
@@ -78,6 +80,13 @@ public sealed class WellKnown
 
     public INamedTypeSymbol ModelAttribute { get; }
     public INamedTypeSymbol ThrowsAttribute { get; }
+    public INamedTypeSymbol TranslateAnnotatedOnlyAttribute { get; }
+
+    /// <summary>
+    /// R20.1. True when the assembly carries <c>[TranslateAnnotatedOnly]</c>: only the
+    /// annotated declarations of the compilation are translated.
+    /// </summary>
+    public bool AnnotatedOnly { get; }
     public INamedTypeSymbol? Exception { get; }
 
     /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
@@ -257,6 +266,14 @@ public sealed class WellKnown
         return mapped.ToImmutable();
     }
 
+    /// <summary>R20.4. <c>List&lt;T&gt;</c>, <c>IList&lt;T&gt;</c> or <c>IReadOnlyList&lt;T&gt;</c>.</summary>
+    public static bool IsListLike(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeArguments.Length: 1 } named &&
+        named.OriginalDefinition.ToDisplayString() is
+            "System.Collections.Generic.List<T>" or
+            "System.Collections.Generic.IList<T>" or
+            "System.Collections.Generic.IReadOnlyList<T>";
+
     public IrType? MapType(ITypeSymbol? type)
     {
         switch (type)
@@ -265,6 +282,19 @@ public sealed class WellKnown
                 return null;
             case IArrayTypeSymbol { Rank: 1 } array when MapType(array.ElementType) is { } e:
                 return new IrArrayType(e);
+            // R20.4. `List<T>`, `IList<T>` and `IReadOnlyList<T>` are an array: an indexed
+            // sequence with a length. Nothing that changes a list's size translates (each
+            // is a call into the BCL, refused by R18.1), so the length is fixed for as long
+            // as verified code holds the list, which is all an array is.
+            case INamedTypeSymbol named when IsListLike(named) && MapType(named.TypeArguments[0]) is { } le:
+                return new IrArrayType(le);
+            // R20.3. `T?` on a value type is `option T`.
+            case INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable
+                when MapType(nullable.TypeArguments[0]) is { } inner:
+                return new IrOptionType(inner);
+            // R20.3. A delegate is held, passed on, and nothing else.
+            case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del:
+                return new IrDelegateType(del.ToDisplayString());
             // R14.1/R14.4. An *unconstrained* type parameter is a type like any other. A
             // constrained one is not mapped here: the constraint is a typeclass obligation
             // the scheme does not carry, and R14.1 refuses it with PALCS0580 rather than
@@ -351,6 +381,8 @@ public sealed class WellKnown
             SpecialType.System_Int64 => new IrPrim(PrimKind.Long),
             SpecialType.System_UInt64 => new IrPrim(PrimKind.ULong),
             SpecialType.System_Char => new IrPrim(PrimKind.Char),
+            SpecialType.System_Decimal => new IrPrim(PrimKind.Decimal),
+            SpecialType.System_String => new IrPrim(PrimKind.String),
             _ => type.TypeKind == TypeKind.Struct ? new IrNamedType(type.Name) : null,
         };
     }

@@ -1486,5 +1486,8 @@ public static class Preamble
         module CL = Pulse.Lib.CSharp.List
         module List = FStar.List.Tot
         module Cast = FStar.Int.Cast
+        module D = Pulse.Lib.CSharp.Decimal
+        module Linq = Pulse.Lib.CSharp.Linq
+        module Opaque = Pulse.Lib.CSharp.Opaque
         """;
 }

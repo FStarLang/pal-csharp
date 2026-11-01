@@ -63,7 +63,24 @@ public static class Declarations
         // never existed, and the program translated with no diagnostic at all.
         if (method.DeclaringSyntaxReferences.IsEmpty) return null;
 
+        // R20.1. Under `[TranslateAnnotatedOnly]` a method is translated when it, or the
+        // property it is the getter of, carries an annotation, or when its class is a
+        // translated one. Everything else is ordinary code the translation does not see,
+        // and a call to it is refused exactly as a call into another assembly is.
+        if (known.AnnotatedOnly && !InAnnotatedScope(method, known)) return null;
+
         if (method is { IsStatic: true, MethodKind: MethodKind.Ordinary }) return CalleeKind.Method;
+
+        // R20.1a. An annotated instance method of a class that is not translated is
+        // translated *receiver-free*: the class has no model and no invariant, so there
+        // is nothing for the receiver to carry, and the method is a function of its
+        // parameters -- which is what it must be, since a read of the receiver's state is
+        // refused (R18.1) like any other read of an untranslated object.
+        if (known.AnnotatedOnly &&
+            method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+            method.ContainingType is { TypeKind: TypeKind.Class } plainOwner &&
+            !known.HasModel(plainOwner))
+            return CalleeKind.Method;
 
         // §4.5. An instance method or constructor of a translated class: it carries the
         // object's invariant, which is what makes it translatable at all. R9.20 adds the
@@ -77,6 +94,11 @@ public static class Declarations
             ? CalleeKind.Method
             : null;
     }
+
+    private static bool InAnnotatedScope(IMethodSymbol method, WellKnown known) =>
+        IsAnnotated(method, known)
+        || method.AssociatedSymbol is { } property && IsAnnotated(property, known)
+        || method.ContainingType is { TypeKind: TypeKind.Class } owner && known.HasModel(owner);
 
     /// <summary>
     /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the

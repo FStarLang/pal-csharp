@@ -357,3 +357,12 @@ public sealed class IncludePulseFileAttribute(string path) : Attribute
     public string Path { get; } = path;
 }
 
+
+/// <summary>
+/// R20.1. Translate only the annotated declarations of this compilation. Applied at
+/// assembly scope, it turns a whole-program translation into one that verifies chosen
+/// methods of a program that is mostly ordinary code: a method is translated when it
+/// carries a pal-csharp attribute, and calling one that is not is refused.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly)]
+public sealed class TranslateAnnotatedOnlyAttribute : Attribute;

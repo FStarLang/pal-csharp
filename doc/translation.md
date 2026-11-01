@@ -5672,3 +5672,106 @@ try states them the way a loop does: `Pal.Invariant(INV)` at the head of the `tr
 reaches the handler, and at the end of every handler. It is stated over the slots' values
 at that point, and it is what a statement after the `try` may rely on. A
 `Pal.Decreases` there is refused (PALCS0614): a `try` runs once.
+
+---
+
+## 20. Verifying production code in place
+
+§§1–19 translate a program written for pal-csharp. This section is about the other case:
+a production file, written for a product, which is to be verified as it stands, by adding
+attributes to it and nothing else. `~/Verified-CPQ-Components/tier-schedule` is the
+motivating case, a Dataverse plugin of which one method is verified. Such a file uses
+library types the earlier sections refuse (`decimal`, `string`, `T?`, `IList<T>`, LINQ,
+delegates) and is mostly code nobody means to verify. The rules below admit exactly what
+that needs, each pinned by a hand-written probe first (§0), and each library model is a
+MODELING AXIOM that is listed under R20.8.
+
+### R20.1 `[assembly: TranslateAnnotatedOnly]`
+
+Under this attribute only *annotated* code is translated: a method that carries a
+pal-csharp attribute (`[Requires]`, `[Ensures]`, `[Throws]`, `[Admit]`, …), or is the
+getter of a property that does, or belongs to a class with a model; and a struct that, or
+one of whose members, carries one. Everything else in the compilation is ignored: it is
+not lowered, and the "specified class without a model" diagnostic (PALCS0524) is not
+raised. A call from translated code to an
+untranslated method is still refused, as before, so the scope narrows what is *looked at*
+and never what is *trusted*.
+
+**R20.1a (receiver-free instance methods).** In that scope an annotated instance method
+of a class with no model is translated as a static function when it does not touch
+`this`: a production class's private helper (`ValidateBandSchedule`) usually reads only
+its parameters, and the class around it (a plugin strategy, holding services) has no
+meaning in Pulse. A read of the receiver's state is refused, like any other read of an
+untranslated object (R18.1).
+
+### R20.2 `[Admit]` bodies are not lowered
+
+The body of an `[Admit]` method is never read: its contract is assumed (PALCS0900), so
+nothing in the body (a localised-message lookup, say) needs to be translatable.
+
+### R20.3 Library value types
+
+| C# | Pulse | Operations |
+|---|---|---|
+| `decimal` | `D.decimal` (`Pulse.Lib.CSharp.Decimal`) | literals `D.lit`; `==`/`!=` as `=`; `<` `<=` `>` `>=` as `D.lt` … `D.ge`, refined by the order on `D.v : decimal -> real` |
+| `string` | `string` | literals; `==`/`!=` |
+| `T?` (`Nullable<T>`) | `option ⟦T⟧` | `HasValue` ⟶ `Some?`; `Value` ⟶ `Some?.v` (well typed only under `HasValue`, which F\* checks); `null` ⟶ `None`; the implicit `T → T?` ⟶ `Some` |
+| a delegate type | `Opaque.delegate "D"` | a method group `C.M` ⟶ `Opaque.method_group "C.M"`; nothing else |
+
+Any other operator on `decimal` or `string` (arithmetic, concatenation, interpolation) is
+PALCS0624. A delegate value has no behaviour: it can be passed to an `[Admit]` method, and
+that is all; invoking one is refused.
+
+### R20.4 `IList<T>`, `IReadOnlyList<T>`, `List<T>` are arrays
+
+A list-like type is translated exactly as `T[]` (R6): a parameter is
+`A.pts_to a #p s`, `.Count` is `length_i32`, the indexer is `read`, and
+`Pal.Contents(list)` is its `Seq`. Parameter permissions follow the array rules, so
+`[Frac("p")]` makes a list parameter read-only.
+
+### R20.5 `foreach` over an array or list, and `Pal.Index`
+
+`foreach (var x in c) { INV; body }` is translated as the counted loop
+
+    for (int x__index = 0; x__index < c.Length; x__index++)
+    { Invariant(0 <= x__index && x__index <= Contents(c).Length); INV; var x = c[x__index]; body }
+
+so R5's loop rules apply, with the measure that R5's counter inference finds. Inside `INV`,
+`Pal.Index(x)` names the position of the current element, `x__index`. `c` must be a local
+or a parameter of array or list type that the body does not assign (PALCS0620), and
+`Pal.Index` must be applied to a `foreach` variable in scope (PALCS0621).
+
+### R20.6 `OrderBy(…).ToList()`
+
+`src.OrderBy(x => x.P).ToList()`, with `P` a `[SpecOp]` property of `decimal` or a machine
+integer type, is
+
+    let t = Linq.order_by_to_list ⟦src⟧ ⟦P⟧ ⟦≤⟧
+
+whose result owns a fresh array with contents `Linq.sort_by ⟦P⟧ ⟦≤⟧ s`. `sort_by` is a
+stable insertion sort, defined and proved in F\*; only `order_by_to_list`'s body, the link
+between it and the CLR's `OrderBy`, is assumed. Any other LINQ is PALCS0622.
+
+**R6.11a (array-owning locals).** A local initialised with `new T[n]` (R6.11) or with
+R20.6's `ToList` owns its array. Its declaration is `let var_x = …` (no reference cell),
+and it is dropped, like an object local (R4.14), at every `return` and `raise` and at the
+end of the method. It must be declared in the method's outermost block and not be
+reassigned (PALCS0623), so that a single drop point covers every exit.
+
+### R20.7 `[SpecOp]` members in code
+
+A `[SpecOp]` property or method read in *code* is a pure application of the F\* function
+it names. This is what makes a `[SpecType]` class a value type to the translator, and it
+is sound only under R20.8's assumption that the object is not mutated.
+
+### R20.8 What a proof of production code trusts
+
+* the decimal model: `decimal` is an `eqtype` injected into `real` by `D.v`, and the C#
+  comparisons agree with the order on `real`;
+* LINQ: `OrderBy` is stable and `ToList` copies its source in order;
+* `IList<T>`: the implementation honours its contract (`Count` agrees with the indexer,
+  `foreach` enumerates in index order and the list is not modified during it);
+* a `[SpecType]` class read through `[SpecOp]`s: its elements are non-null and are not
+  mutated through an alias while the verified method runs;
+* every `[Admit]`ed contract, and whatever stand-ins the harness supplies for types
+  outside the file.

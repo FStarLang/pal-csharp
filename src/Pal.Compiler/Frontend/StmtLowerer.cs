@@ -41,6 +41,7 @@ public sealed class StmtLowerer(
                 Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement)),
             WhileStatementSyntax w => LowerWhile(w, loc),
             ForStatementSyntax f => LowerFor(f, loc),
+            ForEachStatementSyntax f => LowerForEach(f, loc),
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : _code.Lower(r.Expression)),
             BreakStatementSyntax => new IrBreak(loc),
@@ -435,6 +436,63 @@ public sealed class StmtLowerer(
         return new IrFor(loc, init.ToImmutable(),
             node.Condition is null ? null : _code.Lower(node.Condition),
             step.ToImmutable(), invariants, decreases, body);
+    }
+
+    /// <summary>
+    /// R20.5. <c>foreach (var x in c) body</c>, over an array or list <c>c</c> named by a
+    /// local or a parameter, is the counted loop
+    /// <c>for (int x__index = 0; x__index &lt; c.Length; x__index++) { var x = c[x__index]; body }</c>.
+    /// The counter's range is an invariant of its own, and <c>Pal.Index(x)</c> names it.
+    /// </summary>
+    private IrStmt LowerForEach(ForEachStatementSyntax node, IrLoc loc)
+    {
+        var collectionType = model.GetTypeInfo(node.Expression).Type;
+        var symbol = model.GetSymbolInfo(node.Expression).Symbol;
+        if (known.MapType(collectionType) is not IrArrayType { Element: var element } arrayType ||
+            node.Expression is not IdentifierNameSyntax collection ||
+            symbol is not (ILocalSymbol or IParameterSymbol))
+        {
+            diagnostics.Error("PALCS0620", Locations.From(node.Expression),
+                $"`foreach` over `{node.Expression}`. Only an array or a list held in a local " +
+                "or a parameter is iterated (doc/translation.md R20.5).");
+            return new IrBlock(loc, []);
+        }
+
+        // C# forbids changing a list while it is enumerated, and this desugaring would
+        // silently tolerate it; so would reassigning the variable that names it.
+        if (node.Statement.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a =>
+                a.Left is IdentifierNameSyntax { Identifier.ValueText: var n } &&
+                n == collection.Identifier.ValueText))
+        {
+            diagnostics.Error("PALCS0620", Locations.From(node.Expression),
+                $"`{collection}` is assigned inside the `foreach` that iterates it " +
+                "(doc/translation.md R20.5).");
+            return new IrBlock(loc, []);
+        }
+
+        var name = node.Identifier.ValueText;
+        var index = ExprLowerer.ForEachIndex(name);
+        var vloc = Locations.From(node.Identifier);
+        IrExpr Index() => new IrVar(vloc, index) { Type = IrPrim.Int };
+        IrExpr Coll() => new IrVar(vloc, collection.Identifier.ValueText) { Type = arrayType };
+        IrExpr Length() => new IrLength(vloc, Coll()) { Type = IrPrim.Int };
+        IrExpr Zero() => new IrLiteral(vloc, 0) { Type = IrPrim.Int };
+
+        var range = new IrBinary(vloc, BinOp.And,
+            new IrBinary(vloc, BinOp.Le, Zero(), Index()) { Type = IrPrim.Bool },
+            new IrBinary(vloc, BinOp.Le, Index(), Length()) { Type = IrPrim.Bool }) { Type = IrPrim.Bool };
+
+        var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
+        var first = new IrLocalDecl(vloc, name, element,
+            new IrElement(vloc, Coll(), Index()) { Type = element }) { Immutable = true };
+        var step = new IrAssign(vloc, Index(),
+            new IrBinary(vloc, BinOp.Add, Index(), new IrLiteral(vloc, 1) { Type = IrPrim.Int }) { Type = IrPrim.Int });
+
+        return new IrFor(loc,
+            [new IrLocalDecl(vloc, index, IrPrim.Int, Zero())],
+            new IrBinary(vloc, BinOp.Lt, Index(), Length()) { Type = IrPrim.Bool },
+            [step], [range, .. invariants], decreases,
+            new IrBlock(body.Loc, [first, .. ((IrBlock)body).Statements]));
     }
 
     /// <summary>

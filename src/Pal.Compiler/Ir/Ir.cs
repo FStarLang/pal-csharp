@@ -33,6 +33,10 @@ public enum PrimKind
     SpecNat,
     /// <summary>Spec-only separation-logic proposition.</summary>
     SlProp,
+    /// <summary>R20.3. <c>decimal</c>, as <c>Pulse.Lib.CSharp.Decimal.decimal</c>.</summary>
+    Decimal,
+    /// <summary>R20.3. <c>string</c>, as an F* <c>string</c>: an immutable value.</summary>
+    String,
 }
 
 public abstract record IrType
@@ -183,6 +187,20 @@ public sealed record IrTypeParamType(string Name) : IrType
 public sealed record IrExnType(string? Name) : IrType
 {
     protected override string Describe() => Name ?? "Exception";
+}
+
+/// <summary>R20.3. <c>Nullable&lt;T&gt;</c> of a value type: F*'s <c>option</c>.</summary>
+public sealed record IrOptionType(IrType Inner) : IrType
+{
+    protected override string Describe() => $"{Inner}?";
+}
+
+/// <summary>
+/// R20.3. A delegate type, held opaquely: <c>Pulse.Lib.CSharp.Opaque.delegate "name"</c>.
+/// </summary>
+public sealed record IrDelegateType(string Name) : IrType
+{
+    protected override string Describe() => Name;
 }
 
 /// <summary>A type declared only in Pulse, via <c>[PulseType]</c>.</summary>
@@ -433,6 +451,20 @@ public sealed record IrQuantifier(
 /// in a specification.
 /// </summary>
 public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrExpr(Loc);
+
+/// <summary>R20.3. The operations of <c>Nullable&lt;T&gt;</c>.</summary>
+public enum OptionOpKind { HasValue, Value, Some }
+
+public sealed record IrOptionOp(IrLoc Loc, OptionOpKind Op, IrExpr Operand) : IrExpr(Loc);
+
+/// <summary>R20.3. A method group converted to a delegate: <c>Type.Method</c>.</summary>
+public sealed record IrMethodGroup(IrLoc Loc, string Method) : IrExpr(Loc);
+
+/// <summary>
+/// R20.6. <c>src.OrderBy(x =&gt; x.P).ToList()</c>: a fresh array holding the source's
+/// elements stably sorted by the specification operation <paramref name="Key"/>.
+/// </summary>
+public sealed record IrOrderBy(IrLoc Loc, IrExpr Source, string Key, IrType KeyType) : IrExpr(Loc);
 
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);

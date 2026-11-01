@@ -472,6 +472,10 @@ public static partial class FrontendPass
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
                 if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
+                // R20.1. Under `[TranslateAnnotatedOnly]` a struct is translated only when it
+                // or one of its members says so.
+                if (known.AnnotatedOnly && !Declarations.IsAnnotated(symbol, known) &&
+                    !symbol.GetMembers().Any(m => Declarations.IsAnnotated(m, known))) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
@@ -783,7 +787,9 @@ public static partial class FrontendPass
                         symbol.GetMembers().OfType<IMethodSymbol>()
                             .Any(m => !m.IsStatic && SpecAttributes(m, known).Any());
 
-                    if (annotated)
+                    // R20.1a. Under `[TranslateAnnotatedOnly]` such a method is translated
+                    // receiver-free instead.
+                    if (annotated && !known.AnnotatedOnly)
                         diagnostics.Error("PALCS0524", Locations.From(syntax.Identifier),
                             $"`{symbol.Name}` is specified but declares no `[Model]` member. " +
                             "A class needs a model for its invariant and its contracts to relate the " +
@@ -2140,11 +2146,18 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        var body = LowerBody(candidate.Syntax, lowerer);
+
+        // R20.2. An `[Admit]`ted body is not translated: its contract is assumed, so the
+        // body is never looked at, and refusing a construct in it would be refusing
+        // something the translation does not depend on. That is what lets a trusted method
+        // call code that is not translated at all -- the reason to admit it.
+        var admitted = Declarations.Has(symbol, known.AdmitAttribute);
+        var body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
-        var (bodyRequires, bodyEnsures, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer);
+        var (bodyRequires, bodyEnsures, trimmed) =
+            ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
 
         var pulseBody = Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
             ? Declarations.StringArgument(pb) : null;
@@ -2170,11 +2183,11 @@ public static partial class FrontendPass
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures],
             specs.Decreases,
-            trimmed ?? body)
+            admitted ? null : trimmed ?? body)
         {
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
-            Admit = Declarations.Has(symbol, known.AdmitAttribute),
+            Admit = admitted,
             Preserves = specs.Preserves,
             Throws = specs.Throws,
             DeclaringClass = declaringClass,
@@ -2420,7 +2433,8 @@ public static partial class FrontendPass
     /// </summary>
     private static (ImmutableArray<IrExpr> Requires, ImmutableArray<IrExpr> Ensures, IrStmt? Body)
         ExtractBodyContracts(
-            SyntaxNode syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer)
+            SyntaxNode syntax, SemanticModel model, WellKnown known, StmtLowerer lowerer,
+            bool lowerRest = true)
     {
         if (BlockOf(syntax) is not { } block)
             return ([], [], null);
@@ -2443,7 +2457,7 @@ public static partial class FrontendPass
             leading++;
         }
 
-        if (leading == 0) return ([], [], null);
+        if (leading == 0 || !lowerRest) return (requires.ToImmutable(), ensures.ToImmutable(), null);
 
         var body = new IrBlock(Locations.From(block),
             [.. block.Statements.Skip(leading).Select(lowerer.Lower)]);

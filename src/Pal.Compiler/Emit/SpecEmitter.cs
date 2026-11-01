@@ -114,9 +114,30 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         switch (expr)
         {
             case IrLiteral l:
-                return l.Value is bool b
-                    ? new Term(b ? "True" : "False", TermKind.Prop)
-                    : new Term(Render(l.Value), TermKind.Math);
+                return l.Value switch
+                {
+                    bool b => new Term(b ? "True" : "False", TermKind.Prop),
+                    // R20.3. Strings and decimals are values, not numbers.
+                    string or decimal => new Term(Types.Literal(l.Value, l.Type), TermKind.Other, l.Type),
+                    _ => new Term(Render(l.Value), TermKind.Math),
+                };
+
+            // R20.3. `T?` is `option T`, with the same reading as in code.
+            case IrNull { Type: IrOptionType on }:
+                return new Term($"(None #{Types.Atom(on.Inner)})", TermKind.Other, on);
+            case IrOptionOp oo:
+            {
+                var operand = Emit(oo.Operand, scope).Text;
+                return oo.Op switch
+                {
+                    OptionOpKind.HasValue => new Term($"(Some? {operand})", TermKind.Bool, IrPrim.Bool),
+                    OptionOpKind.Value => new Term($"(Some?.v {operand})",
+                        MethodPlan.KindOf(oo.Type ?? IrPrim.Int), oo.Type),
+                    _ => new Term($"(Some {operand})", TermKind.Other, oo.Type),
+                };
+            }
+            case IrMethodGroup mg:
+                return new Term($"(Opaque.method_group {Types.StringLiteral(mg.Method)})", TermKind.Other, mg.Type);
 
             case IrVar v when scope.TryGet(v.Name, out var bound):
                 return bound;
@@ -199,7 +220,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 }
                 return new Term(
                     $"(Seq.index {arr.Text} {Math(el.Index, scope)})",
-                    TermKind.Machine, el.Type);
+                    el.Type is null ? TermKind.Machine : MethodPlan.KindOf(el.Type), el.Type);
             }
 
             case IrSeqOp s:
@@ -366,6 +387,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrUnary { Op: UnOp.Not } u:
                 return $"(not {Bool(u.Operand, scope)})";
 
+            case IrBinary b when DecimalOrder(b, scope) is { } ordered:
+                return ordered;
+
             case IrBinary b:
             {
                 var op = b.Op switch
@@ -421,6 +445,18 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         return new Term("0", TermKind.Math);
     }
 
+    /// <summary>R20.3. A comparison of two decimals, as <c>Pulse.Lib.CSharp.Decimal</c>'s.</summary>
+    private string? DecimalOrder(IrBinary b, SpecScope scope)
+    {
+        if (b.Left.Type is not IrPrim { Kind: PrimKind.Decimal }) return null;
+        var fn = b.Op switch
+        {
+            BinOp.Lt => "D.lt", BinOp.Le => "D.le", BinOp.Gt => "D.gt", BinOp.Ge => "D.ge",
+            _ => null,
+        };
+        return fn is null ? null : $"({fn} {Emit(b.Left, scope).Text} {Emit(b.Right, scope).Text})";
+    }
+
     private Term Binary(IrBinary b, SpecScope scope)
     {
         string Infix(string op, TermKind kind, bool mathematical = true)
@@ -450,6 +486,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         static bool Signed(IrExpr e) => e.Type is IrPrim { IsSignedMachineInt: true };
         var quotesCSharp = Machine(b.Left) && Machine(b.Right)
             && (Signed(b.Left) || Signed(b.Right));
+
+        if (DecimalOrder(b, scope) is { } ordered) return new Term(ordered, TermKind.Bool, IrPrim.Bool);
+        if (b.Left.Type is IrPrim { Kind: PrimKind.Decimal or PrimKind.String } &&
+            b.Op is not (BinOp.Eq or BinOp.Ne))
+            return Unsupported(b);
 
         return b.Op switch
         {
@@ -555,7 +596,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.Length => new Term($"(Seq.length {Emit(s.Args[0], scope).Text})", TermKind.Math),
         SeqOpKind.Index => new Term(
             $"(Seq.index {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)})",
-            TermKind.Machine, ElementType(s.Args[0])),
+            ElementType(s.Args[0]) is { } et ? MethodPlan.KindOf(et) : TermKind.Machine, ElementType(s.Args[0])),
         SeqOpKind.SetAt => new Term(
             $"(Seq.upd {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)} {Emit(s.Args[2], scope).Text})",
             TermKind.Seq),

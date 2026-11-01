@@ -80,6 +80,14 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var type = Declared(node) ?? known.MapType(info.Type)
             ?? (node.IsKind(SyntaxKind.NullLiteralExpression) ? known.MapType(info.ConvertedType) : null);
 
+        // R20.3. A method group converted to a delegate is a value of an opaque type. The
+        // method is not called and nothing about it is translated.
+        if (info.ConvertedType is { TypeKind: TypeKind.Delegate } &&
+            node is IdentifierNameSyntax or MemberAccessExpressionSyntax &&
+            model.GetSymbolInfo(node).Symbol is IMethodSymbol group)
+            return new IrMethodGroup(loc, $"{group.ContainingType.Name}.{group.Name}")
+            { Type = known.MapType(info.ConvertedType) };
+
         IrExpr result = node switch
         {
             // R17.5. The implicit `T[]` -> `Span<T>` conversion is a *borrow*, so it is
@@ -139,6 +147,11 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (result is IrSpanCreate) type = known.MapType(info.ConvertedType) ?? type;
 
         if (type is not null) result = result with { Type = type };
+
+        // R20.3. C# converts `T` to `T?` silently; the conversion is `Some`.
+        if (type is not null and not IrOptionType && result is not IrNull &&
+            known.MapType(info.ConvertedType) is IrOptionType wrapped)
+            result = new IrOptionOp(loc, OptionOpKind.Some, result) { Type = wrapped };
 
         // R9.15. C# inserts a reference conversion silently wherever a derived reference
         // meets a base-typed context — an argument, a `return`, an assignment. The scheme's
@@ -645,6 +658,24 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (known.IsGhost(receiverType) && node.Name.Identifier.ValueText == "Value")
             return Lower(node.Expression);
 
+        // R20.3. `x.HasValue` and `x.Value` on a `T?`. Reading `Value` obliges the
+        // prover to show `HasValue`, which is what C#'s exception on a null makes it.
+        if (receiverType is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T })
+        {
+            var op = node.Name.Identifier.ValueText switch
+            {
+                "HasValue" => OptionOpKind.HasValue,
+                "Value" => OptionOpKind.Value,
+                _ => (OptionOpKind?)null,
+            };
+            if (op is null) return Unsupported(node, loc);
+            return new IrOptionOp(loc, op.Value, Lower(node.Expression));
+        }
+
+        // R20.4. A list's `Count` is an array's `Length`.
+        if (WellKnown.IsListLike(receiverType) && node.Name.Identifier.ValueText == "Count")
+            return new IrLength(loc, Lower(node.Expression));
+
         // R10.5. The ghost inductive types' observations. They are recognised by symbol,
         // before any class rule, because `SpecList<T>` is a struct and would otherwise
         // fall through to the struct-field rule.
@@ -1043,6 +1074,9 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
 
+        if (method.ContainingType?.ToDisplayString() == "System.Linq.Enumerable")
+            return LowerLinq(method, node, loc);
+
         // R17.5. The two ways to borrow a window by name. Both are recognised by
         // *shape* -- the name, the argument count, and the fact that the result is a span
         // -- rather than by symbol identity, because `AsSpan` is an extension method on
@@ -1132,7 +1166,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         // hands a derived reference to a wrapper expecting a base one. C# writes the same
         // bare `GetArea()` either way, so nothing in the source marks the difference.
         var receiver = method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
-                       known.HasModel(method.ContainingType)
+                       known.HasModel(method.ContainingType!)
             ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
                 ? Lower(m.Expression)
                 : new IrVar(loc, Names.This) { Type = Enclosing(node) }
@@ -1162,6 +1196,48 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             ? known.MapType(self) ?? new IrClassType(self.Name)
             : null;
 
+    /// <summary>R20.5. The hidden counter of the <c>foreach</c> over <paramref name="variable"/>.</summary>
+    public static string ForEachIndex(string variable) => variable + "__index";
+
+    /// <summary>
+    /// R20.6. <c>src.OrderBy(x =&gt; x.P).ToList()</c>, where <c>P</c> is a
+    /// <c>[SpecOp]</c> member: a stable sort, as <c>Pulse.Lib.CSharp.Linq.order_by_to_list</c>.
+    /// Every other LINQ operator is refused.
+    /// </summary>
+    private IrExpr LowerLinq(IMethodSymbol method, InvocationExpressionSyntax node, IrLoc loc)
+    {
+        if (method.Name == "ToList" && Key(node) is { } k &&
+            node.Expression is MemberAccessExpressionSyntax
+            {
+                Expression: InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax src },
+            } &&
+            known.MapType(model.GetTypeInfo(src.Expression).Type) is IrArrayType)
+            return new IrOrderBy(loc, Lower(src.Expression), k.Key, k.Type);
+
+        diagnostics.Error("PALCS0622", loc,
+            $"`{Trim(node)}`. The only LINQ translated is `src.OrderBy(x => x.P).ToList()` over " +
+            "an array or a list, where `P` is a `[SpecOp]` member of integer or decimal type " +
+            "(doc/translation.md R20.6).");
+        return new IrLiteral(loc, null);
+    }
+
+    private (string Key, IrType Type)? Key(InvocationExpressionSyntax toList)
+    {
+        if (toList.Expression is not MemberAccessExpressionSyntax { Expression: InvocationExpressionSyntax inner }) return null;
+        if (model.GetSymbolInfo(inner).Symbol is not IMethodSymbol { Name: "OrderBy" } ob ||
+            ob.ContainingType?.ToDisplayString() != "System.Linq.Enumerable") return null;
+        if (inner.ArgumentList.Arguments.Count != 1 ||
+            inner.ArgumentList.Arguments[0].Expression is not SimpleLambdaExpressionSyntax
+            {
+                Body: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax v } access,
+            } lambda ||
+            v.Identifier.ValueText != lambda.Parameter.Identifier.ValueText) return null;
+        if (model.GetSymbolInfo(access).Symbol is not IPropertySymbol prop ||
+            known.SpecOpName(prop) is not { } key) return null;
+        if (known.MapType(prop.Type) is not IrPrim { Kind: PrimKind.Decimal or PrimKind.Int or PrimKind.Long } t) return null;
+        return (key, t);
+    }
+
     private IrExpr LowerIntrinsic(
         IMethodSymbol method, InvocationExpressionSyntax node,
         SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
@@ -1178,6 +1254,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             // R15.6. The same equality `==` denotes everywhere else in spec position.
             case nameof(PalLang.Pal.Same): return new IrBinary(loc, BinOp.Eq, Arg(0), Arg(1));
             case nameof(PalLang.Pal.Contents): return new IrContents(loc, Arg(0));
+            // R20.5. The position of a `foreach` iteration variable: the loop's counter.
+            case nameof(PalLang.Pal.Index):
+                if (args[0].Expression is IdentifierNameSyntax iter &&
+                    model.GetSymbolInfo(iter).Symbol is ILocalSymbol local &&
+                    local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ForEachStatementSyntax)
+                    return new IrVar(loc, ForEachIndex(local.Name)) { Type = IrPrim.Int };
+                diagnostics.Error("PALCS0621", loc,
+                    "`Pal.Index` names the iteration variable of an enclosing `foreach` " +
+                    "(doc/translation.md R20.5).");
+                return new IrLiteral(loc, null);
             case nameof(PalLang.Pal.IsPermutation):
                 return new IrSeqOp(loc, SeqOpKind.IsPermutation, [Arg(0), Arg(1)]);
             case nameof(PalLang.Pal.SetAt):

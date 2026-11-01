@@ -9,13 +9,16 @@ set -euo pipefail
 name="$1"; shift
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 work="obj/cs"
+# A program written before nullable reference types (production code verified in place,
+# doc/translation.md §20) sets PAL_CS_NULLABLE=disable; the tests keep the default.
+nullable="${PAL_CS_NULLABLE:-enable}"
 
 mkdir -p "$work"
 cat > "$work/$name.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
+    <Nullable>$nullable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>

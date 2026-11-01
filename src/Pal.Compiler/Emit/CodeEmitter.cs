@@ -1403,6 +1403,10 @@ public sealed class CodeEmitter(
                 Scoped(() => Sequence(b.Statements, plan), dropAtEnd: true);
                 return;
 
+            case IrLocalDecl { Type: IrArrayType, Init: IrNewArray or IrOrderBy } d:
+                ArrayLocal(d);
+                return;
+
             case IrLocalDecl d:
                 LocalDeclaration(d);
                 return;
@@ -1516,6 +1520,39 @@ public sealed class CodeEmitter(
         _ => false,
     };
 
+    /// <summary>
+    /// R6.11a. A local initialised with a fresh array — <c>new T[n]</c>, or R20.6's sort —
+    /// owns that array. It is bound immutably to the array itself, so the resource is
+    /// named by the local, and is discarded where the local goes out of scope, exactly as
+    /// R4.14 discards an object local. Reassigning it is refused (PALCS0623): the array
+    /// it owned would be lost with nothing to discard it.
+    /// </summary>
+    private void ArrayLocal(IrLocalDecl d)
+    {
+        if (_closingBlocks > 0)
+        {
+            diagnostics.Error("PALCS0623", d.Loc,
+                $"`{d.Name}` is initialised with a fresh array in a nested block. The array " +
+                "would be discarded where the block closes, and a block in statement position " +
+                "has no postcondition for the discard to be checked against (F19). Declare it " +
+                "in the method's own block (doc/translation.md R6.11a).");
+            return;
+        }
+        var binder = Names.Local(d.Name);
+        switch (d.Init)
+        {
+            case IrNewArray na:
+                Line($"let {binder} = alloc {Expr(na.Length)} {Default(na.Element)};");
+                break;
+            case IrOrderBy ob:
+                Line($"let {binder} = Linq.order_by_to_list {Expr(ob.Source)} {ob.Key} {OrderOf(ob.KeyType)};");
+                break;
+        }
+        var local = new Slot(d.Name, d.Type, SlotKind.Array, binder);
+        _slots[d.Name] = local;
+        _objectLocals.Add(local);
+    }
+
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
     private void LocalDeclaration(IrLocalDecl d)
     {
@@ -1543,6 +1580,12 @@ public sealed class CodeEmitter(
     {
         switch (a.Target)
         {
+            case IrVar v when _objectLocals.Any(l => l.Name == v.Name && l.Kind == SlotKind.Array):
+                diagnostics.Error("PALCS0623", a.Loc,
+                    $"`{v.Name}` owns the array it was initialised with, and assigning it " +
+                    "would lose that array (doc/translation.md R6.11a). Declare another local.");
+                return;
+
             case IrVar v when _slots.TryGetValue(v.Name, out var slot) && slot.Kind is SlotKind.Cell or SlotKind.RefParam:
                 if (ReadOnly(slot, a.Loc)) return;
                 Line($"{slot.Binder} := {Expr(a.Value)};");
@@ -2612,6 +2655,40 @@ public sealed class CodeEmitter(
             // §12 derived no `intro_nil`, because it derived no predicate for the lemma to
             // be about. Whether a null pointer may stand where a segment is wanted is the
             // user's predicate's business.
+            // R20.3. `null` at a `T?` is `None`; the operations of `T?` are `option`'s.
+            case IrNull { Type: IrOptionType on }:
+                return $"(None #{Types.Atom(on.Inner)})";
+            case IrOptionOp oo:
+            {
+                var operand = Expr(oo.Operand);
+                return oo.Op switch
+                {
+                    OptionOpKind.HasValue => $"(Some? {operand})",
+                    OptionOpKind.Value => $"(Some?.v {operand})",
+                    _ => $"(Some {operand})",
+                };
+            }
+
+            // R20.3. A delegate is created and nothing more; its identity is opaque.
+            case IrMethodGroup mg:
+                return $"(Opaque.method_group {Types.StringLiteral(mg.Method)})";
+
+            // R20.7. A specification operation applied to values is a pure F* function:
+            // reading `band.Min` off a `[SpecType]` value is its `[SpecOp]`.
+            case IrSpecOp so:
+                return so.Args.IsEmpty
+                    ? so.Function
+                    : $"({so.Function} {string.Join(" ", so.Args.Select(a => Atom(Expr(a))))})";
+
+            // R20.6. A stable sort into a fresh array, at the order the key's type has.
+            case IrOrderBy ob:
+            {
+                var source = Expr(ob.Source);
+                var t = Fresh();
+                Line($"let {t} = Linq.order_by_to_list {source} {ob.Key} {OrderOf(ob.KeyType)};");
+                return t;
+            }
+
             case IrNull pn when pn.Type is IrClassType pk
                 && classes is not null && classes.TryGetValue(pk.Name, out var pnd) && pnd.IsPlain:
                 return "B.null";
@@ -2949,6 +3026,26 @@ public sealed class CodeEmitter(
             return "()";
         }
 
+        // R20.3. `decimal` and `string` are values with decidable equality; a decimal is
+        // ordered by `Pulse.Lib.CSharp.Decimal`'s comparisons. Nothing else is modelled.
+        if (b.Left.Type is IrPrim { Kind: PrimKind.Decimal or PrimKind.String } valueType)
+        {
+            var dec = valueType.Kind == PrimKind.Decimal;
+            switch (b.Op)
+            {
+                case BinOp.Eq: return $"({l} = {r})";
+                case BinOp.Ne: return $"(not ({l} = {r}))";
+                case BinOp.Lt when dec: return $"(D.lt {l} {r})";
+                case BinOp.Le when dec: return $"(D.le {l} {r})";
+                case BinOp.Gt when dec: return $"(D.gt {l} {r})";
+                case BinOp.Ge when dec: return $"(D.ge {l} {r})";
+            }
+            diagnostics.Error("PALCS0624", b.Loc,
+                $"`{b.Op}` on `{valueType}`. A `decimal` translates with its comparisons and " +
+                "equality only, and a `string` with equality only (doc/translation.md R20.3).");
+            return "()";
+        }
+
         var module = Types.Module((b.Left.Type as IrPrim)?.Kind ?? PrimKind.Int);
 
         // R13.5. C# takes a shift distance as an `int` whatever the operand's width, but
@@ -2994,6 +3091,17 @@ public sealed class CodeEmitter(
         var call = $"({module}.{op} {l} {r})";
         return b.Op == BinOp.Ne ? $"(not {call})" : call;
     }
+
+    /// <summary>R20.6. The total preorder <c>OrderBy</c> sorts by, for a key of this type.</summary>
+    private static string OrderOf(IrType key) => key switch
+    {
+        IrPrim { Kind: PrimKind.Decimal } => "D.le",
+        IrPrim p when p.IsMachineInt => $"(fun (x y: {Types.Machine(p.Kind)}) -> {Types.Module(p.Kind)}.lte x y)",
+        _ => "(fun _ _ -> true)",
+    };
+
+    private static string Atom(string term) =>
+        term.Contains(' ') && !term.StartsWith('(') ? $"({term})" : term;
 
     private string Convert(IrConvert cv)
     {

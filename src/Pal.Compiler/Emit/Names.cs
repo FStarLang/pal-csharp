@@ -343,6 +343,8 @@ public static class Types
         PrimKind.SpecInt => "int",
         PrimKind.SpecNat => "nat",
         PrimKind.SlProp => "slprop",
+        PrimKind.Decimal => "D.decimal",
+        PrimKind.String => "string",
         _ => "unit",
     };
 
@@ -454,6 +456,8 @@ public static class Types
             ? u.FStar
             : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
         IrPulseType p => p.PulseText,
+        IrOptionType o => $"option {Atom(o.Inner)}",
+        IrDelegateType d => $"Opaque.delegate {StringLiteral(d.Name)}",
         // R19.1. `System.Exception` is any exception; a class of the program the
         // refinement of `exn` to its discriminator.
         IrExnType { Name: null } => "exn",
@@ -483,12 +487,46 @@ public static class Types
         args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Render))})";
 
     /// <summary>The literal syntax for a value of a machine-integer type.</summary>
+    /// <summary>R20.3. An F* string literal. F* strings are UTF-8; only the escapes it reads are used.</summary>
+    public static string StringLiteral(string value)
+    {
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (var c in value)
+        {
+            sb.Append(c switch
+            {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                _ when c < ' ' => $"\\x{(int)c:x2}",
+                _ => c.ToString(),
+            });
+        }
+        return sb.Append('"').ToString();
+    }
+
+    /// <summary>R20.3. <c>m</c> as <c>D.lit n s</c>, with <c>m = n / 10^s</c> exactly.</summary>
+    public static string DecimalLiteral(decimal m)
+    {
+        var bits = decimal.GetBits(m);
+        var scale = (bits[3] >> 16) & 0xff;
+        var mantissa = new System.Numerics.BigInteger(m * Pow10(scale));
+        var n = mantissa.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return $"(D.lit {(mantissa.Sign < 0 ? $"({n})" : n)} {scale})";
+
+        static decimal Pow10(int k) { decimal r = 1; for (var i = 0; i < k; i++) r *= 10; return r; }
+    }
+
     public static string Literal(object? value, IrType? type)
     {
         switch (value)
         {
             case null: return "()";
             case bool b: return b ? "true" : "false";
+            case string str: return StringLiteral(str);
+            case decimal m: return DecimalLiteral(m);
         }
 
         var kind = (type as IrPrim)?.Kind ?? PrimKind.Int;
