@@ -2440,7 +2440,7 @@ public sealed class CodeEmitter(
             case GhostKind.LemmaCall when g.Prop is IrCall call:
                 // R14.5. A generic [Lemma] is applied to its type arguments first.
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
-                     string.Join(" ", call.TypeArguments.Select(Types.Render)
+                     string.Join(" ", call.TypeArguments.Select(Types.Atom)
                          .Concat(call.Args.Select((a, i) =>
                              SpecArgument(a, SpecEmitter.ParamType(call, i), scope)))) + ";");
                 return;
@@ -2676,9 +2676,13 @@ public sealed class CodeEmitter(
             // R20.7. A specification operation applied to values is a pure F* function:
             // reading `band.Min` off a `[SpecType]` value is its `[SpecOp]`.
             case IrSpecOp so:
-                return so.Args.IsEmpty
+            {
+                var operands = so.TypeArgs.Select(Types.Atom)
+                    .Concat(so.Args.Select(a => Atom(Expr(a)))).ToList();
+                return operands.Count == 0
                     ? so.Function
-                    : $"({so.Function} {string.Join(" ", so.Args.Select(a => Atom(Expr(a))))})";
+                    : $"({so.Function} {string.Join(" ", operands)})";
+            }
 
             // R20.6. A stable sort into a fresh array, at the order the key's type has.
             case IrOrderBy ob:
@@ -2903,7 +2907,7 @@ public sealed class CodeEmitter(
         // R14.5. Type arguments apply first, positionally, in declaration order. A generic
         // method with no value parameters still applies them, so the `()` below is reached
         // only by a call that is nullary in both senses.
-        var tyArgs = call.TypeArguments.Select(Types.Render).ToImmutableArray();
+        var tyArgs = call.TypeArguments.Select(Types.Atom).ToImmutableArray();
         var applied = args.Length == 0 && tyArgs.Length == 0
             ? "()"
             : string.Join(" ", tyArgs.Concat(args));
@@ -3010,6 +3014,11 @@ public sealed class CodeEmitter(
 
         // R20.9. `x == y` on a `T?`, or on a `[SpecType]` value, is F*'s decidable
         // equality; C# lifts `int`'s `==` to `int?` exactly as `option`'s `=` does.
+        // A test against `null` is `None?`, which needs no equality on the element type --
+        // and so also serves an `option` of a `noeq` model.
+        if (b.Op is BinOp.Eq or BinOp.Ne && (b.Left is IrNull || b.Right is IrNull) &&
+            (b.Left.Type is IrOptionType || b.Right.Type is IrOptionType))
+            return $"({(b.Op is BinOp.Eq ? "None?" : "Some?")} {Atom(b.Left is IrNull ? r : l)})";
         if (b.Op is BinOp.Eq or BinOp.Ne && b.Left.Type is IrOptionType or IrUserSpecType)
             return b.Op is BinOp.Eq ? $"({l} = {r})" : $"(not ({l} = {r}))";
 

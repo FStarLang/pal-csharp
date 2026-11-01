@@ -63,6 +63,9 @@ public sealed class MethodPlan
         // so no F* inference is relied on.
         foreach (var tp in method.TypeParameters)
             binders.Add($"({Names.TypeParam(tp)}: Type0)");
+        // R14.2a. A type parameter the body takes `default` at needs its default supplied.
+        foreach (var tp in method.DefaultedTypeParameters)
+            binders.Add($"{{| _: Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(tp)} |}}");
         var preResources = ImmutableArray.CreateBuilder<string>();
         var postResources = ImmutableArray.CreateBuilder<string>();
         var postExistentials = ImmutableArray.CreateBuilder<string>();
@@ -310,7 +313,7 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: R.ref {Types.Render(p.Type)})");
+                    binders.Add($"({name}: R.ref {Types.Atom(p.Type)})");
                     ghostBinders.Add($"(#{preValue}: erased ({Types.Render(p.Type)}))");
 
                     var refPerm = p.Fraction is null ? "" : $"#{p.Fraction} ";
@@ -339,8 +342,10 @@ public sealed class MethodPlan
 
                 default:
                 {
-                    // R4.2: a by-value parameter is rebound as a cell only if assigned.
-                    var isCell = assigned.Contains(p.Name);
+                    // R4.2: a by-value parameter is rebound as a cell only if assigned. A
+                    // context parameter (R20.12) is a readonly field, never assigned, though
+                    // passing it on to a callee looks like a write to Normalize.Assigned.
+                    var isCell = assigned.Contains(p.Name) && !p.IsContext;
                     var binder = isCell ? Names.Argument(p.Name) : name;
                     binders.Add($"({binder}: {Types.Render(p.Type)})");
                     if (isCell) prologue.Add((name, binder));

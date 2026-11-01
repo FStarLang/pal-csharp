@@ -4828,6 +4828,15 @@ Both forms were probed (`test/pulse_facts/GenericFacts.fst` uses implicit binder
 `BinderProbe` confirmed the explicit form, its application at a concrete type, and a generic
 caller passing its own type variable along).
 
+**R14.2a — `default(T)` at a type parameter is the caller's to supply.** Its value
+depends on what `T` is (`null`, `0`, `None`, …), so a method that takes `default` at a
+method type parameter `T` gets a typeclass binder `{| _: Inhabited.has_default ty_T |}`
+after the type binders, and `default(T)` is `Inhabited.default_of ty_T`. A caller at a
+concrete type has the instance resolved by F\*, from `Pulse.Lib.CSharp.Inhabited`'s
+instances (`option`, the machine integers, `bool`, …); a generic caller passes its own.
+The binder is added only where the body (or an expression body) takes a `default`, so
+generic code that never does is unaffected.
+
 **R14.2b — A specification's shim is generic in the same parameters.** R4.x binds an
 attribute's spec string by generating a shim method whose parameters are the annotated
 method's, and compiling it. A spec on a generic method mentions its type parameters —
@@ -5775,6 +5784,17 @@ A `[SpecOp]` property or method read in *code* is a pure application of the F\* 
 it names. This is what makes a `[SpecType]` class a value type to the translator, and it
 is sound only under R20.8's assumption that the object is not mutated.
 
+* A generic `[SpecOp]` method with a type parameter that no parameter type mentions,
+  `e.Get<T>(k)`, passes its type arguments first, as R14.2 does:
+  `M.get (option I32.t) ⟦e⟧ ⟦k⟧`. When every type parameter occurs in a parameter type,
+  the F\* function binds it implicitly and F\* infers it from the arguments. A `[SpecType]` may be an interface.
+* An indexer whose `get` carries a `[SpecOp]` is read as that operation applied to the
+  receiver and the index.
+* A constructor with a `[SpecOp]`, `new C(a, b)`, is `M.f ⟦a⟧ ⟦b⟧`; with an object
+  initializer it is refused. A user-defined *implicit* conversion with a `[SpecOp]` is
+  applied where C# applies it, ahead of R20.3's `Some`.
+* `x == null` on a `Nullable = true` value is `None? x`, and `x != null` is `Some? x`.
+
 ### R20.9 Code written before nullable reference types
 
 `palcs --nullable disable` (`PAL_CS_NULLABLE=disable` in a test or harness Makefile)
@@ -5810,6 +5830,10 @@ A `static readonly` field whose initialiser is such a value (built only from con
 each use: the field is assigned once, before any method runs, and never again. Any other
 `static readonly` field read by verified code is PALCS0626.
 
+A `static readonly` initialiser is *code*: written out at a use inside a specification it
+keeps its machine types (`0l`, not `0`), as do the arguments of the BCL models above,
+whose F\* signatures take machine integers.
+
 ### R20.11 Nullable references: `[SpecType(…, Nullable = true)]`, `?.` and `??`
 
 A `[SpecType("T", Nullable = true)]` class is a reference that may be null: a variable of
@@ -5821,6 +5845,30 @@ non-null where it is read — a `NullReferenceException` is ruled out, not assum
 `let t = a in if Some? t then Some?.v t else ⟦b⟧` (`t` itself when `b` is nullable). `a`
 is evaluated once (bound to a fresh local when it has an effect), and `M` and `b` only on
 the branch where C# evaluates them.
+
+### R20.12 Context fields of a receiver-free method
+
+A receiver-free method (R20.1a) may read the `readonly` instance fields of its class
+(services, configuration the constructor stored). Each such field that an annotated
+receiver-free method of the class reads, in its body or its contracts, becomes a parameter
+`this__f` of *every* annotated receiver-free method of the class, and a call between them
+passes it on. That is sound because a `readonly` field is assigned only by the
+constructor, and the receiver is the same object throughout such a chain of calls; it is
+never a `let mut` cell, since it cannot be assigned. A contract may name these fields, and
+the `static readonly` fields of R20.10, though they are private: the specification shim
+receives them as parameters, and a static one denotes its initialiser.
+
+### R20.13 An SDK object written through its indexer
+
+A by-value `[SpecType]` parameter `x` that the method writes through an indexer whose
+`set` carries a `[SpecOp]` — `x[k] = v` — or passes to a parameter that is written, is
+passed by reference: `x[k] = v` is `x := M.put (Some?.v x) ⟦k⟧ ⟦v⟧` (`Some?.v` when `x` is
+nullable, with F\* proving it non-null), its pre- and post-values are `Old(x)` and `x` in
+`[Ensures]`, and an argument to such a parameter must be a local or a parameter (PALCS0001
+otherwise). This models the write a caller observes on the shared object — the model is a
+value, so R20.8's "no mutation through an alias" becomes "no mutation except through the
+parameters R20.13 finds". `Pal.Same(a, b)` states equality where `==` is not decidable
+(a model holding a function).
 
 ### R20.8 What a proof of production code trusts
 
@@ -5834,5 +5882,11 @@ the branch where C# evaluates them.
 * the BCL models of R20.10: `Guid` equality, `IsNullOrWhiteSpace` (with `char.IsWhiteSpace`
   uninterpreted), ordinal `string.Equals`, `HashSet` membership, and that `Regex.IsMatch`
   is a deterministic, terminating function of the pattern, options and input;
+* an SDK object modelled as a value (R20.13): it changes only through the indexer writes
+  of the method under verification, and a generic read (`GetAttributeValue<T>`) returns
+  a value of the type it is read at (the cast failure the SDK throws otherwise is not
+  modelled);
+* the `readonly` fields of R20.12: the receiver of a chain of receiver-free calls is one
+  object, and a `[SpecType]` value in such a field (a `HashSet`, a model) is not mutated;
 * every `[Admit]`ed contract, and whatever stand-ins the harness supplies for types
   outside the file.

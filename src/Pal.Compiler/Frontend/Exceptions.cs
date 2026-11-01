@@ -147,7 +147,7 @@ public static partial class FrontendPass
             is not ConstructorDeclarationSyntax syntax)
             return null;
         var model = compilation.GetSemanticModel(syntax.SyntaxTree);
-        var parameters = LowerParameters(ctor, known, diagnostics);
+        var parameters = LowerParameters(ctor, model, known, diagnostics);
         var lowerer = new ExprLowerer(model, known, diagnostics, specPosition: false);
         var paramNames = new HashSet<string>(ctor.Parameters.Select(p => p.Name));
 

@@ -163,6 +163,16 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             result = new IrOptionOp(loc, OptionOpKind.Some, constant with { Type = constOption.Inner })
                 { Type = constOption };
 
+        // R20.7. An implicit user-defined conversion that is a `[SpecOp]` is an
+        // application of its function, wherever C# inserts it.
+        if (model.GetConversion(node) is { IsUserDefined: true, IsImplicit: true, MethodSymbol: { } conv } &&
+            known.SpecOpName(conv) is { } convOp)
+            return new IrSpecOp(loc, convOp, [result])
+            {
+                Type = known.MapType(info.ConvertedType),
+                ParamTypes = Declarations.ParamTypes(conv, known, receiver: false),
+            };
+
         // R20.3. C# converts `T` to `T?` silently; the conversion is `Some`.
         if (type is not null and not IrOptionType && result is not IrNull &&
             known.MapType(info.ConvertedType) is IrOptionType wrapped)
@@ -255,6 +265,17 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R20.7. A `[SpecOp]` constructor of a specification type is an application of its
+        // function to the arguments.
+        if (model.GetSymbolInfo(node).Symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } specCtor &&
+            known.SpecOpName(specCtor) is not null)
+        {
+            if (node.Initializer is not null)
+                return Unsupported(node, loc);
+            return SpecMember(specCtor,
+                [.. (node.ArgumentList?.Arguments ?? default).Select(a => Lower(a.Expression))], node, loc);
+        }
+
         // R20.10. A BCL value built from constants, or a set from its elements.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol bclType &&
             Bcl.MapType(bclType, known.MapType) is not null)
@@ -553,11 +574,36 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// translator guessing an F* name from a C# one, which §0 rule 3 forbids. So the
     /// remaining case is a refusal, and that is what makes the mechanism total.
     /// </summary>
+    /// <summary>
+    /// R20.7. Whether each type parameter of a generic <c>[SpecOp]</c> occurs in one of its
+    /// parameter types, so that F* infers it from the arguments (an implicit <c>#a</c>, as
+    /// in <c>Tree.khas</c>). When one does not (<c>GetAttributeValue&lt;T&gt;(string)</c>),
+    /// nothing determines it but the type argument, and the operation takes the type
+    /// arguments explicitly, ahead of its value arguments.
+    /// </summary>
+    private static bool InferableTypeParameters(IMethodSymbol method) =>
+        method.OriginalDefinition.TypeParameters.All(tp =>
+            method.OriginalDefinition.Parameters.Any(p => Mentions(p.Type, tp)));
+
+    private static bool Mentions(ITypeSymbol type, ITypeParameterSymbol tp) => type switch
+    {
+        ITypeParameterSymbol t => SymbolEqualityComparer.Default.Equals(t, tp),
+        IArrayTypeSymbol a => Mentions(a.ElementType, tp),
+        INamedTypeSymbol n => n.TypeArguments.Any(a => Mentions(a, tp)),
+        _ => false,
+    };
+
     private IrExpr SpecMember(ISymbol? symbol, ImmutableArray<IrExpr> args,
                               ExpressionSyntax node, IrLoc loc)
     {
         if (known.SpecOpName(symbol) is { } op)
-            return new IrSpecOp(loc, op, args) { ParamTypes = SpecParamTypes(symbol, args) };
+            return new IrSpecOp(loc, op, args)
+            {
+                ParamTypes = SpecParamTypes(symbol, args),
+                TypeArgs = symbol is IMethodSymbol { IsGenericMethod: true } generic &&
+                           !InferableTypeParameters(generic)
+                    ? known.TypeArguments(generic) : [],
+            };
 
         if (symbol is not null &&
             Declarations.Find(symbol, known.SpecCtorAttribute) is { } data &&
@@ -610,7 +656,9 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// R20.10. A <c>static readonly</c> field whose initializer is a pure value -- a BCL
     /// model built from constants -- denotes that value. The field is assigned once, before
     /// any method runs, and never again, so naming it and writing its initializer out are
-    /// the same expression. An initializer that is not pure is refused here.
+    /// the same expression. An initializer that is not pure is refused here. It is program
+    /// text, so it is lowered as code -- at machine integers -- even when a contract names
+    /// the field (R20.12): `{ 0, 1 }` is a set of `I32.t` wherever it is read.
     /// </summary>
     private IrExpr? StaticInitializer(IFieldSymbol field, IrLoc loc)
     {
@@ -620,7 +668,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             return null;
 
         var lowered = new ExprLowerer(
-            model.Compilation.GetSemanticModel(init.SyntaxTree), known, diagnostics, SpecPosition)
+            model.Compilation.GetSemanticModel(init.SyntaxTree), known, diagnostics, specPosition: false)
             .Lower(init);
         if (IsPureValue(lowered)) return lowered with { Loc = loc };
 
@@ -653,10 +701,35 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             : new IrLiteral(loc, node.Token.Value);
 
     /// <summary>R3.5. <c>default</c> at any translatable type.</summary>
+    /// <summary>
+    /// R20.12. In a contract, the shim parameters that stand for the receiver's context
+    /// fields, by field name.
+    /// </summary>
+    public ImmutableDictionary<string, IFieldSymbol> ContextNames { get; init; } =
+        ImmutableDictionary<string, IFieldSymbol>.Empty;
+
+    /// <summary>R20.12. A read of a receiver-free method's context field.</summary>
+    private IrExpr ContextRead(IFieldSymbol field) =>
+        new IrVar(Locations.From(field.Locations.FirstOrDefault() ?? Location.None),
+                  Declarations.ContextName(field)) { Type = known.MapType(field.Type) };
+
+    /// <summary>R14.2a. The method type parameters a <c>default</c> was taken at.</summary>
+    public HashSet<string> DefaultedTypeParameters { get; } = [];
+
     private IrExpr Default(ExpressionSyntax node, IrLoc loc)
     {
         if (model.GetTypeInfo(node).Type is not { } type) return Unsupported(node, loc);
         if (Zero(loc, type) is { } zero) return zero;
+
+        // R14.2a. `default(T)` at an unconstrained `T` is whatever `T`'s default is, which
+        // only the caller knows: it is the `has_default` dictionary the caller passes.
+        if (type is ITypeParameterSymbol { TypeParameterKind: TypeParameterKind.Method } tp &&
+            known.MapType(tp) is { } tpType)
+        {
+            DefaultedTypeParameters.Add(tp.Name);
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Inhabited.default_of", [])
+                { TypeArgs = [tpType], Type = tpType };
+        }
         diagnostics.Unsupported(loc, $"`default` at type `{type}`");
         return new IrLiteral(loc, null);
     }
@@ -673,12 +746,21 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         return symbol switch
         {
+            IParameterSymbol cp when ContextNames.TryGetValue(cp.Name, out var cf) &&
+                cp.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal) =>
+                cf.IsStatic
+                    ? StaticInitializer(cf, loc) ?? Unsupported(node, loc)
+                    : new IrVar(loc, Declarations.ContextName(cf)),
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
             IFieldSymbol { IsStatic: true, IsReadOnly: true } shared
                 when StaticInitializer(shared, loc) is { } inlined => inlined,
             IFieldSymbol or IPropertySymbol when ClassMembers.Contains(node.Identifier.ValueText) =>
                 new IrVar(loc, node.Identifier.ValueText),
+            IFieldSymbol { IsStatic: false, IsReadOnly: true, ContainingType: { } owner } f
+                when known.AnnotatedOnly && !known.HasModel(owner) &&
+                     Declarations.ContextFields(owner, model.Compilation, known)
+                         .Contains(f, SymbolEqualityComparer.Default) => ContextRead(f),
             IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
                 new IrField(loc, new IrVar(loc, Names.This), node.Identifier.ValueText),
             // R9.20a. `Span` and `this.Span` are the same reference, so they lower to the
@@ -913,6 +995,14 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             if (!known.IsAnySpan(receiverType)) return SpanUnsupported("a[i..j]", loc);
             return LowerRangeWindow(node.Expression, range, loc);
         }
+
+        // R20.7. A `[SpecOp]` indexer read is an application of its function, receiver
+        // first, as a `[SpecOp]` method's is.
+        if (model.GetSymbolInfo(node).Symbol is IPropertySymbol { IsIndexer: true } indexer &&
+            known.SpecOpName(indexer) is not null)
+            return SpecMember(indexer,
+                [NonNull(Lower(node.Expression)), Lower(node.ArgumentList.Arguments[0].Expression)],
+                node, loc);
 
         var receiver = Lower(node.Expression);
         var index = Lower(node.ArgumentList.Arguments[0].Expression);
@@ -1245,9 +1335,50 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     public IrExpr LowerArgument(ArgumentSyntax arg)
     {
         var inner = Lower(arg.Expression);
-        return arg.RefKindKeyword.IsKind(SyntaxKind.None)
-            ? inner
-            : new IrRefArg(Locations.From(arg), inner);
+        if (!arg.RefKindKeyword.IsKind(SyntaxKind.None))
+            return new IrRefArg(Locations.From(arg), inner);
+
+        // R20.13. A written parameter is passed by reference, so the argument must be a
+        // variable for the write to land in.
+        if (!SpecPosition && Declarations.WrittenParameterOf(arg, model, known) is { } written)
+        {
+            if (inner is not IrVar ||
+                model.GetSymbolInfo(arg.Expression).Symbol is not (IParameterSymbol or ILocalSymbol))
+            {
+                diagnostics.Unsupported(Locations.From(arg),
+                    $"An argument to `{written.Name}`, which the callee writes, that is not a " +
+                    "local or a parameter (doc/translation.md R20.13)");
+                return inner;
+            }
+            return new IrRefArg(Locations.From(arg), inner);
+        }
+        return inner;
+    }
+
+    /// <summary>
+    /// R20.13. <c>x[k] = v</c> through a <c>[SpecOp]</c> indexer setter: <c>x</c> becomes
+    /// the setter's function applied to <c>x</c>'s value, <c>k</c> and <c>v</c>. Null when the
+    /// assignment is not one.
+    /// </summary>
+    public IrStmt? SpecIndexerWrite(AssignmentExpressionSyntax node, IrLoc loc)
+    {
+        if (node.Left is not ElementAccessExpressionSyntax { ArgumentList.Arguments: [var key] } ea ||
+            Declarations.SpecSetter(model.GetSymbolInfo(ea).Symbol, known) is not { } setter)
+            return null;
+        if (!node.IsKind(SyntaxKind.SimpleAssignmentExpression) ||
+            ea.Expression is not IdentifierNameSyntax receiverName ||
+            model.GetSymbolInfo(receiverName).Symbol is not (IParameterSymbol or ILocalSymbol))
+        {
+            diagnostics.Unsupported(loc,
+                "A write through a `[SpecOp]` indexer whose receiver is not a local or a " +
+                "parameter, or by a compound operator (doc/translation.md R20.13)");
+            return new IrBlock(loc, []);
+        }
+        var receiver = Lower(receiverName);
+        var update = new IrSpecOp(loc, setter,
+            [NonNull(receiver), Lower(key.Expression), Lower(node.Right)])
+        { Type = receiver.Type };
+        return new IrAssign(loc, receiver, update);
     }
 
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
@@ -1372,15 +1503,36 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 : new IrVar(loc, Names.This) { Type = Enclosing(node) }
             : null;
 
+        // R20.12. A receiver-free callee is passed the receiver's readonly fields it reads.
+        // Only a receiver-free caller has them to pass, and only for its own receiver.
+        var context = ImmutableArray<IFieldSymbol>.Empty;
+        if (Declarations.IsReceiverFree(method, known) &&
+            Declarations.ContextFields(method.ContainingType!, model.Compilation, known) is { IsEmpty: false } fields)
+        {
+            var onThis = node.Expression is IdentifierNameSyntax or GenericNameSyntax ||
+                         node.Expression is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax };
+            if (!onThis || model.GetEnclosingSymbol(node.SpanStart) is not IMethodSymbol caller ||
+                !Declarations.IsReceiverFree(caller, known) ||
+                !SymbolEqualityComparer.Default.Equals(caller.ContainingType, method.ContainingType))
+            {
+                diagnostics.Unsupported(loc,
+                    $"A call to `{method.Name}`, which reads fields of its receiver, from outside a " +
+                    "receiver-free method of the same object (doc/translation.md R20.12)");
+                return new IrLiteral(loc, null);
+            }
+            context = fields;
+        }
+
         return new IrCall(loc, Naming.Of(method),
             receiver is null
-                ? [.. args.Select(LowerArgument)]
+                ? [.. args.Select(LowerArgument), .. context.Select(ContextRead)]
                 : [receiver, .. args.Select(LowerArgument)])
         {
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
             HasReceiver = receiver is not null,
-            ParamTypes = Declarations.ParamTypes(method, known, receiver is not null),
+            ParamTypes = [.. Declarations.ParamTypes(method, known, receiver is not null),
+                          .. context.Select(f => (IrType?)known.MapType(f.Type))],
             TypeArguments = known.TypeArguments(method),
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };

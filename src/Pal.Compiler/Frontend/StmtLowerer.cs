@@ -29,6 +29,11 @@ public sealed class StmtLowerer(
     /// </summary>
     public ExprLowerer Expressions => _code;
 
+    /// <summary>R14.2a. The type parameters either lowerer took a <c>default</c> at.</summary>
+    public bool Defaulted(string typeParameter) =>
+        _code.DefaultedTypeParameters.Contains(typeParameter) ||
+        _spec.DefaultedTypeParameters.Contains(typeParameter);
+
     public IrStmt Lower(StatementSyntax node)
     {
         var loc = Locations.From(node);
@@ -276,6 +281,8 @@ public sealed class StmtLowerer(
                 PostfixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PostIncrementExpression) ||
                                                     u.IsKind(SyntaxKind.PostDecrementExpression) => u.Operand,
                 ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => arg.Expression,
+                ArgumentSyntax arg when Declarations.WrittenParameterOf(arg, model, known) is not null
+                    => arg.Expression,
                 RefExpressionSyntax r => r.Expression,
                 _ => null,
             };
@@ -365,6 +372,8 @@ public sealed class StmtLowerer(
             diagnostics.Unsupported(loc, $"The assignment operator `{node.OperatorToken}`");
             return new IrBlock(loc, []);
         }
+
+        if (_code.SpecIndexerWrite(node, loc) is { } indexerWrite) return indexerWrite;
 
         var target = _code.Lower(node.Left);
         var value = _code.Lower(node.Right);

@@ -82,7 +82,7 @@ public static class Bcl
         }
 
         IrExpr Op(string name, params IrExpr[] operands) =>
-            new IrSpecOp(loc, F(name), [.. operands]);
+            new IrSpecOp(loc, F(name), [.. operands]) { MachineArgs = true };
     }
 
     /// <summary><c>new Regex(pattern, options)</c> with both constant.</summary>
@@ -99,19 +99,19 @@ public static class Bcl
                 [
                     new IrLiteral(loc, pattern) { Type = new IrPrim(PrimKind.String) },
                     new IrLiteral(loc, options ?? 0) { Type = new IrPrim(PrimKind.Int) },
-                ]);
+                ]) { MachineArgs = true };
             case "System.Text.RegularExpressions.Regex" when !collection && constants is [string only]:
                 return new IrSpecOp(loc, F("regex_create"),
                 [
                     new IrLiteral(loc, only) { Type = new IrPrim(PrimKind.String) },
                     new IrLiteral(loc, 0) { Type = new IrPrim(PrimKind.Int) },
-                ]);
+                ]) { MachineArgs = true };
             // A collection initializer: the set of its elements.
             case "System.Collections.Generic.HashSet<T>" when collection:
             {
                 IrExpr set = new IrSpecOp(loc, F("hash_set_empty"), []);
                 for (var i = elements.Length - 1; i >= 0; i--)
-                    set = new IrSpecOp(loc, F("hash_set_add"), [elements[i], set]);
+                    set = new IrSpecOp(loc, F("hash_set_add"), [elements[i], set]) { MachineArgs = true };
                 return set;
             }
             default:

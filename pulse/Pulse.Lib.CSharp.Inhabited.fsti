@@ -51,3 +51,12 @@ instance has_default_pair (a b : Type) {| has_default a |} {| has_default b |}
   : has_default (a & b) = {
   default_value = (default_value, default_value)
 }
+
+// R14.2a. `default` at a nullable type -- a class reference, `T?` -- is null, which is
+// `None` wherever the type is an `option`.
+instance has_default_option (a: Type) : has_default (option a) = {
+  default_value = None
+}
+
+// R14.2a. `default(T)`, with `T` applied explicitly as R14.5 applies every type argument.
+let default_of (a: Type) {| d: has_default a |} : a = d.default_value

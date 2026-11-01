@@ -224,6 +224,164 @@ public static class Declarations
     /// one, because a silently dropped contract is a proof that was never attempted and
     /// looks exactly like a proof that succeeded.
     /// </remarks>
+    /// <summary>
+    /// R20.12. Whether <paramref name="method"/> is translated receiver-free (R20.1a): an
+    /// annotated instance method of a class with no model, under
+    /// <c>[TranslateAnnotatedOnly]</c>.
+    /// </summary>
+    public static bool IsReceiverFree(IMethodSymbol method, WellKnown known) =>
+        known.AnnotatedOnly &&
+        method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+        method.ContainingType is { TypeKind: TypeKind.Class } owner &&
+        !known.HasModel(owner);
+
+    /// <summary>The R20.12 name a context field is bound to in a receiver-free method.</summary>
+    public static string ContextName(IFieldSymbol field) => "this__" + field.Name;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        INamedTypeSymbol, System.Runtime.CompilerServices.StrongBox<ImmutableArray<IFieldSymbol>>> contextFields = new();
+
+    /// <summary>
+    /// R20.12. The <c>readonly</c> instance fields of <paramref name="owner"/> that its
+    /// receiver-free methods read, in declaration order. Each is a parameter of every one
+    /// of those methods: the receiver is the same object throughout a chain of such calls,
+    /// and a `readonly` field of it is assigned only by its constructor, so each method
+    /// sees the same value. A field is read when an annotated instance method's body
+    /// names it, or a contract of one mentions it.
+    /// </summary>
+    public static ImmutableArray<IFieldSymbol> ContextFields(
+        INamedTypeSymbol owner, Compilation compilation, WellKnown known) =>
+        contextFields.GetValue(owner, o => new(ComputeContextFields(o, compilation, known))).Value;
+
+    private static ImmutableArray<IFieldSymbol> ComputeContextFields(
+        INamedTypeSymbol owner, Compilation compilation, WellKnown known)
+    {
+        var candidates = owner.GetMembers().OfType<IFieldSymbol>()
+            .Where(f => f is { IsStatic: false, IsReadOnly: true, IsImplicitlyDeclared: false } &&
+                        known.MapType(f.Type) is not null)
+            .ToList();
+        if (candidates.Count == 0) return [];
+        var read = new HashSet<IFieldSymbol>(SymbolEqualityComparer.Default);
+        foreach (var m in owner.GetMembers().OfType<IMethodSymbol>())
+        {
+            if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || Has(m, known.AdmitAttribute))
+                continue;
+            foreach (var reference in m.DeclaringSyntaxReferences)
+            {
+                var syntax = reference.GetSyntax();
+                var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+                foreach (var id in syntax.DescendantNodes().OfType<IdentifierNameSyntax>())
+                    if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f &&
+                        candidates.Contains(f, SymbolEqualityComparer.Default))
+                        read.Add(f);
+            }
+            foreach (var a in m.GetAttributes())
+                foreach (var arg in a.ConstructorArguments)
+                    if (arg.Value is string text)
+                        foreach (var f in candidates)
+                            if (System.Text.RegularExpressions.Regex.IsMatch(
+                                    text, $@"(?<![\w.]){f.Name}\b"))
+                                read.Add(f);
+        }
+        return [.. candidates.Where(read.Contains)];
+    }
+
+    /// <summary>
+    /// R20.12. The <c>static readonly</c> fields of <paramref name="method"/>'s class that its
+    /// own contracts mention.
+    /// </summary>
+    public static ImmutableArray<IFieldSymbol> ContractStatics(IMethodSymbol method, WellKnown known)
+    {
+        var texts = method.GetAttributes()
+            .Where(a => a.AttributeClass is { ContainingNamespace.Name: WellKnown.Namespace })
+            .SelectMany(a => a.ConstructorArguments)
+            .Select(arg => arg.Value as string)
+            .OfType<string>()
+            .ToList();
+        return [.. method.ContainingType.GetMembers().OfType<IFieldSymbol>()
+            .Where(f => f is { IsStatic: true, IsReadOnly: true, IsImplicitlyDeclared: false } &&
+                        known.MapType(f.Type) is not null &&
+                        texts.Any(t => System.Text.RegularExpressions.Regex.IsMatch(
+                            t, $@"(?<![\w.]){f.Name}\b")))];
+    }
+
+    /// <summary>
+    /// R20.13. The <c>[SpecOp]</c> function of an indexer's setter, when the indexer has
+    /// one: a write through it is a functional update of the receiver's value.
+    /// </summary>
+    public static string? SpecSetter(ISymbol? symbol, WellKnown known) =>
+        symbol is IPropertySymbol { IsIndexer: true, SetMethod: { } set } ? known.SpecOpName(set) : null;
+
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+        IParameterSymbol, System.Runtime.CompilerServices.StrongBox<bool>> written = new();
+
+    [ThreadStatic] private static HashSet<IParameterSymbol>? writtenInProgress;
+
+    /// <summary>
+    /// R20.13. Whether a by-value parameter of a specification type is <em>written</em>:
+    /// its method stores through a <c>[SpecOp]</c> indexer setter on it, or passes it to a
+    /// parameter that is written. Such a parameter is translated as <c>ref</c>, because the
+    /// object the caller holds is the one that changes.
+    /// </summary>
+    public static bool IsWritten(IParameterSymbol p, Compilation compilation, WellKnown known)
+    {
+        if (p.RefKind != RefKind.None || known.SpecTypeName(p.Type) is null ||
+            p.ContainingSymbol is not IMethodSymbol method ||
+            !IsAnnotated(method, known) || Has(method, known.AdmitAttribute))
+            return false;
+        if (written.TryGetValue(p, out var box)) return box.Value;
+
+        var top = writtenInProgress is null;
+        writtenInProgress ??= new HashSet<IParameterSymbol>(SymbolEqualityComparer.Default);
+        if (!writtenInProgress.Add(p)) return false;
+        try
+        {
+            var result = ComputeWritten(p, method, compilation, known);
+            // A result that depended on a parameter still being computed may be too
+            // small; only an outermost one is final.
+            if (top) { written.Remove(p); written.Add(p, new(result)); }
+            return result;
+        }
+        finally
+        {
+            writtenInProgress.Remove(p);
+            if (top) writtenInProgress = null;
+        }
+    }
+
+    private static bool ComputeWritten(
+        IParameterSymbol p, IMethodSymbol method, Compilation compilation, WellKnown known)
+    {
+        foreach (var reference in method.DeclaringSyntaxReferences)
+        {
+            var syntax = reference.GetSyntax();
+            var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+            // By declaration, not by symbol: `p` may come from another compilation of the
+            // same trees (the one the spec shims were added to).
+            bool Names(ExpressionSyntax e) =>
+                e is IdentifierNameSyntax id &&
+                model.GetSymbolInfo(id).Symbol is IParameterSymbol q &&
+                q.Locations.SequenceEqual(p.Locations);
+            foreach (var n in syntax.DescendantNodes())
+            {
+                if (n is AssignmentExpressionSyntax { Left: ElementAccessExpressionSyntax ea } &&
+                    Names(ea.Expression) && SpecSetter(model.GetSymbolInfo(ea).Symbol, known) is not null)
+                    return true;
+                if (n is ArgumentSyntax arg && Names(arg.Expression) &&
+                    WrittenParameterOf(arg, model, known) is not null)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>R20.13. The written parameter an argument is passed to, if it is one.</summary>
+    public static IParameterSymbol? WrittenParameterOf(ArgumentSyntax arg, SemanticModel model, WellKnown known) =>
+        model.GetOperation(arg) is Microsoft.CodeAnalysis.Operations.IArgumentOperation { Parameter: { } target } &&
+        IsWritten(target, model.Compilation, known)
+            ? target
+            : null;
+
     public static bool IsAnnotated(ISymbol symbol, WellKnown known) =>
         symbol.GetAttributes().Any(a =>
             a.AttributeClass is { ContainingNamespace.Name: WellKnown.Namespace });

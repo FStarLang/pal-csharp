@@ -270,12 +270,25 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     public ImmutableArray<IrType?> ParamTypes { get; init; } = [];
 
     /// <summary>
+    /// R20.10. The operation models a BCL member over program values, so its arguments
+    /// are at their machine types in a contract too -- `set.Contains(i)` asks about the
+    /// `I32.t` <c>i</c>, not about <c>I32.v i</c>.
+    /// </summary>
+    public bool MachineArgs { get; init; }
+
+    /// <summary>
     /// R11.3. When this is a <c>[SpecCtor]</c>, the F* name of its type's <em>empty</em>
     /// constructor — the sibling marked <c>Empty = true</c>. Null when this is an ordinary
     /// operation. It is carried here because §10 needs both constructors of a model, and a
     /// use of one is where the other becomes findable.
     /// </summary>
     public string? SiblingEmpty { get; init; }
+
+    /// <summary>
+    /// R14.5 for operations. The resolved type arguments of a generic <c>[SpecOp]</c>
+    /// method, applied explicitly ahead of its value arguments.
+    /// </summary>
+    public ImmutableArray<IrType> TypeArgs { get; init; } = [];
 }
 
 /// <summary>A read of a local, parameter, or ghost binder.</summary>
@@ -633,6 +646,8 @@ public sealed record IrParam(
     ParamMode Mode)
 {
     public bool IsGhost { get; init; }
+    /// <summary>R20.12. Stands for a readonly receiver field, so it is never written.</summary>
+    public bool IsContext { get; init; }
     /// <summary>Ownership is transferred to the callee (<c>[Consumes]</c>).</summary>
     public bool Consumes { get; init; }
     /// <summary>Passed by value with no resource (<c>[Plain]</c>).</summary>
@@ -669,6 +684,12 @@ public sealed record IrMethod(
     /// <c>Type0</c> binders ahead of every value parameter.
     /// </summary>
     public ImmutableArray<string> TypeParameters { get; init; } = ImmutableArray<string>.Empty;
+
+    /// <summary>
+    /// R14.2a. The type parameters the body takes <c>default</c> at. Each is a
+    /// <c>has_default</c> obligation on the caller, bound after the type binders.
+    /// </summary>
+    public ImmutableArray<string> DefaultedTypeParameters { get; init; } = [];
     public bool Admit { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>
     public ImmutableArray<IrExpr> Preserves { get; init; } = ImmutableArray<IrExpr>.Empty;

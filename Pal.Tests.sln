@@ -54,6 +54,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "insertion_sort_sorted", "te
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "interval_class", "test/interval_class/interval_class.csproj", "{8CD2F0E4-E0E8-11BB-372B-19BF8F50CA3B}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "legacy_entity", "test/legacy_entity/legacy_entity.csproj", "{CE37C249-635D-AEB7-A1A1-A9FCE14BEE17}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "legacy_validation", "test/legacy_validation/legacy_validation.csproj", "{4BAEE4DC-56CD-F7B8-B685-195A29F4A651}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "lemma_call", "test/lemma_call/lemma_call.csproj", "{0E0201E1-D373-A8EA-38BB-F1ACC0F4B420}"
@@ -226,6 +228,10 @@ Global
 		{8CD2F0E4-E0E8-11BB-372B-19BF8F50CA3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8CD2F0E4-E0E8-11BB-372B-19BF8F50CA3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8CD2F0E4-E0E8-11BB-372B-19BF8F50CA3B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CE37C249-635D-AEB7-A1A1-A9FCE14BEE17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CE37C249-635D-AEB7-A1A1-A9FCE14BEE17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CE37C249-635D-AEB7-A1A1-A9FCE14BEE17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CE37C249-635D-AEB7-A1A1-A9FCE14BEE17}.Release|Any CPU.Build.0 = Release|Any CPU
 		{4BAEE4DC-56CD-F7B8-B685-195A29F4A651}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{4BAEE4DC-56CD-F7B8-B685-195A29F4A651}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4BAEE4DC-56CD-F7B8-B685-195A29F4A651}.Release|Any CPU.ActiveCfg = Release|Any CPU

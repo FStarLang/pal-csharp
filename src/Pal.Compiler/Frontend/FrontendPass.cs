@@ -1815,7 +1815,7 @@ public static partial class FrontendPass
                     Key: $"{Naming.Of(candidate.Symbol)}_{index}",
                     Text: text,
                     Location: Declarations.ArgumentLocation(attribute),
-                    Parameters: ShimParameters(candidate.Symbol, known, wantsResult),
+                    Parameters: ShimParameters(candidate.Symbol, compilation, known, wantsResult),
                     Usings: usings)
                 {
                     TypeParameters = MethodTypeParameters(candidate.Symbol),
@@ -1831,7 +1831,7 @@ public static partial class FrontendPass
                     Key: $"{Naming.Of(candidate.Symbol)}_throws_{k}",
                     Text: Declarations.StringArgument(attribute, 1) ?? "true",
                     Location: Declarations.ArgumentLocation(attribute, 1),
-                    Parameters: [.. ShimParameters(candidate.Symbol, known, false),
+                    Parameters: [.. ShimParameters(candidate.Symbol, compilation, known, false),
                                  new SpecParam(ThrownParameter, thrown)],
                     Usings: usings)
                 {
@@ -2066,7 +2066,7 @@ public static partial class FrontendPass
     /// <c>Ghost&lt;T&gt;</c>, and — in a postcondition — <c>Result</c>.
     /// </summary>
     private static ImmutableArray<SpecParam> ShimParameters(
-        IMethodSymbol symbol, WellKnown known, bool wantsResult)
+        IMethodSymbol symbol, Compilation compilation, WellKnown known, bool wantsResult)
     {
         var result = ImmutableArray.CreateBuilder<SpecParam>();
 
@@ -2087,6 +2087,11 @@ public static partial class FrontendPass
             var type = known.IsGhost(p.Type) ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
             result.Add(new SpecParam(p.Name, type));
         }
+        // R20.12. A receiver-free method's contract may name the receiver's readonly fields
+        // it takes, by their own names -- unless a parameter shadows one, as in C#.
+        foreach (var f in ContextNames(symbol, compilation, known).Values)
+            result.Add(new SpecParam(f.Name, f.Type));
+
         if (wantsResult && !symbol.ReturnsVoid)
             result.Add(new SpecParam(SpecBinder.ResultParameter, symbol.ReturnType));
 
@@ -2108,7 +2113,11 @@ public static partial class FrontendPass
         var loc = Locations.From(candidate.Identifier);
 
         var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
-        var parameters = LowerParameters(symbol, known, diagnostics);
+        var parameters = LowerParameters(symbol, model, known, diagnostics);
+        // R20.12. A receiver-free method takes the receiver's readonly fields it reads.
+        if (Declarations.IsReceiverFree(symbol, known))
+            parameters = [.. parameters, .. Declarations.ContextFields(symbol.ContainingType, model.Compilation, known)
+                .Select(f => new IrParam(loc, Declarations.ContextName(f), known.MapType(f.Type)!, ParamMode.Value) { IsContext = true })];
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet,
                         ContainingType: { } self } &&
@@ -2206,6 +2215,8 @@ public static partial class FrontendPass
             // constrained case never reaches here: MapType declines a constrained type
             // parameter, so the signature that mentions it is refused first.
             TypeParameters = MethodTypeParameters(symbol),
+            DefaultedTypeParameters = [.. symbol.TypeParameters.Select(t => t.Name)
+                .Where(lowerer.Defaulted)],
             Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
                 ? baseName
                 : null,
@@ -2348,7 +2359,8 @@ public static partial class FrontendPass
             var key = $"{Naming.Of(symbol)}_{index}";
             if (!bound.TryGetValue(key, out var spec)) continue;
 
-            var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true);
+            var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;
@@ -2377,6 +2389,7 @@ public static partial class FrontendPass
             }
             if (!bound.TryGetValue($"{Naming.Of(symbol)}_throws_{k}", out var spec)) continue;
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) }
                 .Lower(spec.Expression);
             throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
         }
@@ -2387,8 +2400,27 @@ public static partial class FrontendPass
         };
     }
 
+    /// <summary>
+    /// R20.12. The receiver fields a contract of <paramref name="symbol"/> names, by name:
+    /// its context fields, and the class's <c>static readonly</c> fields the contract
+    /// mentions. Each is bound by a parameter of the spec shim, which lives outside the
+    /// class, so a private field binds too. A parameter of the method shadows a field.
+    /// </summary>
+    private static ImmutableDictionary<string, IFieldSymbol> ContextNames(
+        IMethodSymbol symbol, Compilation compilation, WellKnown known)
+    {
+        if (!Declarations.IsReceiverFree(symbol, known)) return ImmutableDictionary<string, IFieldSymbol>.Empty;
+        var result = ImmutableDictionary.CreateBuilder<string, IFieldSymbol>();
+        foreach (var f in Declarations.ContextFields(symbol.ContainingType, compilation, known))
+            result[f.Name] = f;
+        foreach (var f in Declarations.ContractStatics(symbol, known))
+            result[f.Name] = f;
+        foreach (var p in symbol.Parameters) result.Remove(p.Name);
+        return result.ToImmutable();
+    }
+
     private static ImmutableArray<IrParam> LowerParameters(
-        IMethodSymbol symbol, WellKnown known, DiagnosticBag diagnostics)
+        IMethodSymbol symbol, SemanticModel model, WellKnown known, DiagnosticBag diagnostics)
     {
         var result = ImmutableArray.CreateBuilder<IrParam>();
         foreach (var p in symbol.Parameters)
@@ -2403,7 +2435,9 @@ public static partial class FrontendPass
                 continue;
             }
 
-            result.Add(new IrParam(loc, p.Name, type, Declarations.ModeOf(p))
+            // R20.13. A written specification-type parameter is passed by reference.
+            var mode = Declarations.IsWritten(p, model.Compilation, known) ? ParamMode.Ref : Declarations.ModeOf(p);
+            result.Add(new IrParam(loc, p.Name, type, mode)
             {
                 IsGhost = isGhost,
                 Consumes = Declarations.Has(p, known.ConsumesAttribute),

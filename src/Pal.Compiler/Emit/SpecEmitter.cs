@@ -303,7 +303,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // IR call node and has no reason to differ.
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
-                    string.Join(" ", call.TypeArguments.Select(Types.Render)
+                    string.Join(" ", call.TypeArguments.Select(Types.Atom)
                         .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
@@ -685,12 +685,18 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private Term SpecOp(IrSpecOp op, SpecScope scope)
     {
-        var text = op.Args.IsEmpty
-            ? op.Function
-            : $"({op.Function} {string.Join(" ", op.Args.Select((a, i) =>
+        var operands = op.TypeArgs.Select(Types.Atom)
+            .Concat(op.Args.Select((a, i) =>
                 i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
                     ? Argument(a, op.ParamTypes[i], scope)
-                    : AsMath(Emit(a, scope))))})";
+                    : op.MachineArgs
+                        ? a is IrLiteral { Value: not (null or bool or string or decimal) } l
+                            ? Types.Literal(l.Value, l.Type)
+                            : Emit(a, scope).Text
+                        : AsMath(Emit(a, scope)))).ToList();
+        var text = operands.Count == 0
+            ? op.Function
+            : $"({op.Function} {string.Join(" ", operands)})";
         return new Term(text, Kind(op.Type));
     }
 

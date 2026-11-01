@@ -280,7 +280,7 @@ public sealed class GhostArgAttribute(string declaration) : Attribute
 /// translator emits the name it was given and does not check that it exists — that is
 /// F*'s job, and a misspelling surfaces as a type error carrying this string.</para>
 /// </summary>
-[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class)]
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Interface)]
 public sealed class SpecTypeAttribute(string type) : Attribute
 {
     public string Type { get; } = type;
@@ -299,7 +299,7 @@ public sealed class SpecTypeAttribute(string type) : Attribute
 /// property, an instance method, a static method and a discriminator, because all four are
 /// applications.
 /// </summary>
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property)]
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property | AttributeTargets.Constructor)]
 public sealed class SpecOpAttribute(string function) : Attribute
 {
     public string Function { get; } = function;
