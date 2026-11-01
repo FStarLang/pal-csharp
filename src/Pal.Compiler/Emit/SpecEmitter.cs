@@ -241,6 +241,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     "the model, not the fields (R3.9c).");
                 return new Term("()", TermKind.Other);
 
+            // R19.1. An exception's field is read through its class's accessor, which has
+            // a case for every subclass, so the field means the same whatever was thrown.
+            case IrField { Receiver.Type: IrExnType { Name: { } en } } ef:
+                return new Term(
+                    $"({Names.Qualified(Names.ExnField(en, ef.Field))} {Emit(ef.Receiver, scope).Text})",
+                    MethodPlan.KindOf(ef.Type ?? IrPrim.Int), ef.Type);
+
             case IrField f:
             {
                 // R3.5. The struct name comes from the receiver's C# type, which is what

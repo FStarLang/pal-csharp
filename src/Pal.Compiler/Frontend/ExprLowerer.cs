@@ -227,6 +227,21 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R19.1. `new E(args)` of an exception class builds its payload: a pure value, so
+        // it may appear anywhere an expression may, and is most often thrown at once.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol exn && known.IsExceptionClass(exn))
+        {
+            if (node.Initializer is not null)
+            {
+                diagnostics.Error("PALCS0613", loc,
+                    $"An object initializer on the exception `{exn.Name}`. Its fields are set " +
+                    "by its constructor alone (doc/translation.md R19.1).");
+                return new IrLiteral(loc, null);
+            }
+            return new IrNewException(loc, exn.Name,
+                [.. (node.ArgumentList?.Arguments ?? default).Select(a => Lower(a.Expression))]);
+        }
+
         // R4.12. `new C(args)` is a call to the constructor's own emitted function. Unlike
         // a struct, a class has a constructor *body* — it allocates — so there is a
         // function to call rather than a record to build.
@@ -674,6 +689,20 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         if (symbol is IFieldSymbol { HasConstantValue: true } konst)
             return new IrLiteral(loc, konst.ConstantValue);
+
+        // R19.1. A field of an exception is a projection out of its payload.
+        if (symbol is IFieldSymbol or IPropertySymbol && receiverType is INamedTypeSymbol rt &&
+            (known.IsExceptionClass(rt) || known.IsSystemException(rt)))
+        {
+            if (!known.IsExceptionClass(symbol.ContainingType))
+            {
+                diagnostics.Error("PALCS0611", loc,
+                    $"`{node}` reads a member of `System.Exception`. Only the fields an exception " +
+                    "class of the program declares are modelled (doc/translation.md R19.1).");
+                return new IrLiteral(loc, null);
+            }
+            return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
+        }
 
         if (symbol is IFieldSymbol or IPropertySymbol && receiverType?.TypeKind == TypeKind.Struct)
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);

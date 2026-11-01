@@ -38,6 +38,14 @@ pin() { sed -n "s/^$1=//p" "$SOURCE_PIN" | tr -d '[:space:]'; }
 REPO="$(pin repo)"; PR="$(pin pr)"; COMMIT="$(pin commit)"
 MERGE="$(pin merge)"; Z3="$(pin z3)"
 SRC="${FSTAR_SRC:-$TOOLS_DIR/fstar-src}"
+
+# Already installed at the pinned tree: nothing to do. `make` decides by timestamps, and
+# a checkout or merge that rewrites the pin file must not cost a full F* rebuild.
+if [[ -n "$(pin result)" && -x "$TOOLS_DIR/fstar/bin/fstar.exe" &&
+      "$(cat "$TOOLS_DIR/fstar/version.txt" 2>/dev/null)" == "$(pin result)" ]]; then
+  touch "$TOOLS_DIR/fstar/bin/fstar.exe"
+  exit 0
+fi
 JOBS="${FSTAR_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 if [[ ! -d "$SRC/.git" ]]; then

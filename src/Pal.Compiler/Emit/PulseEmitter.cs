@@ -268,6 +268,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 g => Enumerable.Range(0, g.First().Parameters.Length)
                     .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i]))
                     .ToImmutableHashSet());
+        var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
+        if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
+
         foreach (var decl in program.Declarations)
         {
             var module = decl switch
@@ -678,6 +681,115 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// pointer projectors, all of that machinery exists to model C's interior pointers,
     /// which C# does not have.
     /// </summary>
+    // =======================================================================
+    // Exceptions (§19)
+    // =======================================================================
+
+    /// <summary>
+    /// R19.1. One module declares every exception class of the program. Each concrete
+    /// class is an F* <c>exception</c> carrying a record of all its fields, inherited ones
+    /// included; each class, abstract or not, is the refinement of <c>exn</c> to its
+    /// discriminator, which matches the exceptions of the class and of its subclasses.
+    /// That is the whole of C#'s subtyping on exceptions: a handler for <c>B</c> catches a
+    /// <c>D : B</c> because <c>exn_B__is</c> holds of it, and a field of <c>B</c> read
+    /// through a <c>D</c> is the accessor's <c>D</c> case.
+    /// </summary>
+    private static EmittedModule EmitExceptions(ImmutableArray<IrException> exceptions)
+    {
+        var byName = exceptions.ToDictionary(e => e.Name);
+        bool Below(IrException e, string ancestor)
+        {
+            for (var at = e; at is not null; at = at.Base is { } b && byName.TryGetValue(b, out var up) ? up : null)
+                if (at.Name == ancestor) return true;
+            return false;
+        }
+        var concrete = exceptions.Where(e => !e.IsAbstract).ToImmutableArray();
+
+        var sb = new StringBuilder();
+        var origin = ImmutableArray.CreateBuilder<Provenance>();
+        sb.AppendLine($"module {Names.ExceptionsModule}");
+        sb.AppendLine();
+        sb.AppendLine(Preamble.Modules);
+
+        foreach (var e in concrete)
+        {
+            sb.AppendLine();
+            if (e.Fields.IsEmpty)
+            {
+                sb.AppendLine($"exception {Names.ExnCtor(e.Name)}");
+            }
+            else
+            {
+                sb.AppendLine($"noeq type {Names.ExnPayload(e.Name)} = {{");
+                foreach (var f in e.Fields)
+                    sb.AppendLine($"  {Names.ExnPayloadField(e.Name, f.Name)}: {Types.Render(f.Type)};");
+                sb.AppendLine("}");
+                sb.AppendLine($"exception {Names.ExnCtor(e.Name)} of {Names.ExnPayload(e.Name)}");
+                origin.Add(new Provenance(Names.ExnPayload(e.Name), e.Loc));
+            }
+            origin.Add(new Provenance(Names.ExnCtor(e.Name), e.Loc));
+        }
+
+        string Pattern(IrException d, string payload) =>
+            d.Fields.IsEmpty ? Names.ExnCtor(d.Name) : $"{Names.ExnCtor(d.Name)} {payload}";
+
+        foreach (var e in exceptions)
+        {
+            var cases = concrete.Where(d => Below(d, e.Name)).ToList();
+            sb.AppendLine();
+            sb.AppendLine($"let {Names.ExnIs(e.Name)} (e: exn) : bool =");
+            sb.AppendLine("  match e with");
+            foreach (var d in cases) sb.AppendLine($"  | {Pattern(d, "_")} -> true");
+            sb.AppendLine("  | _ -> false");
+            sb.AppendLine();
+            sb.AppendLine($"type {Names.ExnType(e.Name)} = e: exn {{ {Names.ExnIs(e.Name)} e }}");
+            origin.Add(new Provenance(Names.ExnIs(e.Name), e.Loc));
+            origin.Add(new Provenance(Names.ExnType(e.Name), e.Loc));
+
+            foreach (var f in e.Fields)
+            {
+                sb.AppendLine();
+                sb.AppendLine($"let {Names.ExnField(e.Name, f.Name)} (e: {Names.ExnType(e.Name)}) : {Types.Render(f.Type)} =");
+                if (cases.Count == 0)
+                {
+                    sb.AppendLine("  false_elim ()");
+                }
+                else
+                {
+                    sb.AppendLine("  match e with");
+                    foreach (var d in cases)
+                        sb.AppendLine($"  | {Pattern(d, "p")} -> p.{Names.ExnPayloadField(d.Name, f.Name)}");
+                }
+                origin.Add(new Provenance(Names.ExnField(e.Name, f.Name), f.Loc));
+            }
+
+            if (e.IsAbstract || e.Ctor is not { } ctor) continue;
+            sb.AppendLine();
+            var binders = ctor.IsEmpty
+                ? "(_: unit)"
+                : string.Join(" ", ctor.Select(p => $"({Names.Argument(p.Name)}: {Types.Render(p.Type)})"));
+            sb.AppendLine($"let {Names.ExnNew(e.Name)} {binders} : {Names.ExnType(e.Name)} =");
+            if (e.Fields.IsEmpty)
+            {
+                sb.AppendLine($"  {Names.ExnCtor(e.Name)}");
+            }
+            else
+            {
+                var inits = e.Fields.Select((f, i) =>
+                    $"{Names.ExnPayloadField(e.Name, f.Name)} = " + (e.Inits[i] switch
+                    {
+                        IrVar v => Names.Argument(v.Name),
+                        IrLiteral l => Types.Literal(l.Value, f.Type),
+                        _ => "()",
+                    }));
+                sb.AppendLine($"  {Names.ExnCtor(e.Name)} {{ {string.Join("; ", inits)} }}");
+            }
+            origin.Add(new Provenance(Names.ExnNew(e.Name), e.Loc));
+        }
+
+        return new EmittedModule(Names.ExceptionsModule, sb.ToString()) { Origin = origin.ToImmutable() };
+    }
+
     private EmittedModule EmitStruct(IrStruct s)
     {
         var scope = new SpecScope();
@@ -1132,7 +1244,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine();
         foreach (var open in Dependencies(
                      Names.FunctionModule(method.Name), method.Body,
-                     method.Requires, method.Ensures, method.Preserves))
+                     method.Requires, method.Ensures, method.Preserves,
+                     method.Throws.Where(t => t.When is not null).Select(t => t.When!)))
             sb.AppendLine($"open {open}");
         sb.AppendLine(Preamble.Opens);
         sb.AppendLine();
@@ -1156,6 +1269,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"  returns  {Names.Result}: {Types.Render(method.ReturnType)}");
         origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Ensures) ?? method.Loc));
         sb.AppendLine($"  ensures  {plan.Ensures}");
+        if (plan.Raises is { } raises)
+        {
+            origins.Add(new LineOrigin(Lines(sb) + 1, method.Throws[0].Loc));
+            sb.AppendLine($"  raises   {raises}");
+        }
 
         // R10.6/F2. A `fn rec` needs a measure for the same reason a `while` does: without
         // one it is `stt_div` and will not compose with its `stt` continuation. Guessing
@@ -1282,6 +1400,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     Collect(w.Body);
                     return;
                 case IrReturn r: CollectExpr(r.Value); return;
+                case IrThrow th: CollectExpr(th.Value); return;
+                case IrTry tr:
+                    foreach (var inv in tr.Invariants) CollectExpr(inv);
+                    Collect(tr.Body);
+                    foreach (var c in tr.Catches) { CollectExpr(c.When); Collect(c.Body); }
+                    return;
                 case IrExprStmt e: CollectExpr(e.Expr); return;
                 case IrGhostStmt g: CollectExpr(g.Prop); return;
                 default: return;
@@ -1308,6 +1432,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrLength l: CollectExpr(l.Array); return;
                 case IrOld o: CollectExpr(o.Operand); return;
                 case IrNewArray na: CollectExpr(na.Length); return;
+                case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
+                case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
                 case IrListOp l2: foreach (var a in l2.Args) CollectExpr(a); return;

@@ -363,6 +363,12 @@ public sealed class MethodPlan
         // R9.15 makes this every method's rule, not the constructor's: once a reference
         // conversion can happen at a `return`, an ordinary method can hand back an object
         // too, and the only difference is the name its contract calls it by.
+        // R19.3. What an exception leaves the caller owning: every parameter, as the
+        // postcondition owns it — and nothing the method was to return, since it returns
+        // nothing. Snapshotted before the result's conjunct joins.
+        var raisesResources = postResources.ToImmutable();
+        var raisesExistentials = postExistentials.ToImmutable();
+
         if (method.ReturnType is IrClassType { Plain: false } built)
         {
             // R10.2. A method may return `C?`, and then what it owns is the nullable
@@ -412,6 +418,15 @@ public sealed class MethodPlan
                 .Select(e => _spec.AsProp(_spec.Emit(e, post))))
             .ToImmutableArray();
 
+        _throws = method.Throws;
+        if (!method.Throws.IsEmpty)
+        {
+            // R19.3. `[Throws]` predicates speak of the pre-state, so they mean the same
+            // in the method's `raises` and in the `raises` of a `try` inside it.
+            Raises = $"(fun ({Thrown}: exn) ->\n           " + Clause(raisesResources,
+                UnderPrecondition(preConjuncts, [ThrowsProp(Thrown)]), raisesExistentials) + ")";
+        }
+
         Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
         Ensures = Clause(postResources.ToImmutable(), UnderPrecondition(preConjuncts, postConjuncts),
             postExistentials.ToImmutable());
@@ -424,6 +439,35 @@ public sealed class MethodPlan
     /// <summary>By-value parameters that must be rebound as cells (R4.2).</summary>
     public ImmutableArray<(string Cell, string Source)> Prologue { get; }
     public string Requires { get; }
+
+    /// <summary>R19.3. The <c>raises</c> clause; null for a method that throws nothing.</summary>
+    public string? Raises { get; }
+
+    /// <summary>The binder of a <c>raises</c> clause.</summary>
+    public const string Thrown = "thrown";
+
+    private readonly ImmutableArray<IrThrows> _throws;
+
+    /// <summary>
+    /// R19.3. That the exception <paramref name="exn"/> is one the method declares: the
+    /// disjunction, over its <c>[Throws]</c>, of the class's discriminator and the
+    /// predicate, which may read the exception's fields as <c>Thrown</c>. A method that
+    /// declares nothing may throw nothing, and Pulse makes it prove so.
+    /// </summary>
+    public string ThrowsProp(string exn)
+    {
+        if (_throws.IsEmpty) return "False";
+        var scope = new SpecScope(PreScope);
+        var cases = _throws.Select(t =>
+        {
+            scope.Bind(Frontend.FrontendPass.ThrownParameter, new Term(exn, TermKind.Other, t.Type));
+            var parts = new List<string>();
+            if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {exn}");
+            if (t.When is { } w) parts.Add(_spec.AsProp(_spec.Emit(w, scope)));
+            return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
+        });
+        return string.Join(" \\/ ", cases);
+    }
     public string Ensures { get; }
     public SpecScope PreScope { get; }
     public SpecScope PostScope { get; }

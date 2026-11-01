@@ -50,6 +50,7 @@ public static int Count(int[] a, int n) { … }
 | `[Preserves(p)]` | shorthand for `[Requires(p)] [Ensures(p)]` |
 | `[PreservesValue(e)]` | shorthand for `[Ensures("e == Old(e)")]` |
 | `[Decreases(m)]` | termination measure of a recursive method |
+| `[Throws(typeof(E), p)]` | the method may throw an `E`, and then `p` holds; repeatable, disjoined (§2.3) |
 
 **The strings are not opaque.** Each is parsed with `SyntaxFactory.ParseExpression` and
 bound by Roslyn *in the scope of the annotated member*, so parameters, locals, `[Spec]`
@@ -199,6 +200,36 @@ a loop condition, and a field read after it is checked against whatever your lem
 establish. That is §9's bargain: you own the predicate, so you own the case analysis.
 
 ---
+
+### 2.3 Exceptions
+
+A method that may throw says what, and when, with `[Throws]`. `Thrown` names the exception
+at the declared class, so its fields can be read; everything else in the predicate is read
+in the pre-state:
+
+```csharp
+[Throws(typeof(RangeError), "Thrown.Code == 2 && Contents(a)[Thrown.Index] < 0")]
+public static int CheckAll(int[] a) { … throw new RangeError(2, i); … }
+```
+
+A method with no `[Throws]` is proved never to throw, so every exception a callee declares
+has to be caught. A `try` is written the way a loop is: what holds when it exits goes in
+`Pal.Invariant`s at the head of its body, because a handler knows the *class* of what it
+caught and nothing more:
+
+```csharp
+try
+{
+    Pal.Invariant(result >= 0 - 2);
+    result = CheckAll(a);
+}
+catch (AppError e) when (e.Code == 25) { result = 0 - 2; }
+catch (AppError) { result = 0 - 1; }
+```
+
+An exception class has an immutable payload (get-only properties set by its one
+constructor), and `finally`, and a `return` inside a `try`, are not supported.
+doc/translation.md §19 has the details.
 
 ## 3. Ownership
 

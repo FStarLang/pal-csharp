@@ -175,6 +175,16 @@ public sealed record IrTypeParamType(string Name) : IrType
     protected override string Describe() => Name;
 }
 
+/// <summary>
+/// R19.1. An exception: F*'s open type <c>exn</c>. <see cref="Name"/> is the exception
+/// class declared in the program, rendered as the refinement of <c>exn</c> to that class
+/// and its subclasses; null is <c>System.Exception</c>, which is all of <c>exn</c>.
+/// </summary>
+public sealed record IrExnType(string? Name) : IrType
+{
+    protected override string Describe() => Name ?? "Exception";
+}
+
 /// <summary>A type declared only in Pulse, via <c>[PulseType]</c>.</summary>
 public sealed record IrPulseType(string Name, string PulseText) : IrType
 {
@@ -323,6 +333,9 @@ public sealed record IrNew(
 /// no constructor to call, because §12 emitted no constructor — a plain class is its
 /// representation, so allocating one is building the record and boxing it.
 /// </summary>
+/// <summary>R19.1. <c>new E(args)</c> for an exception class <c>E</c>: a pure value.</summary>
+public sealed record IrNewException(IrLoc Loc, string Class, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+
 public sealed record IrAlloc(IrLoc Loc, string Class, IrNew Record) : IrExpr(Loc);
 
 public enum CalleeKind { Method, Spec, Lemma }
@@ -542,6 +555,35 @@ public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
 public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore }
 
+/// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
+public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
+
+/// <summary>
+/// R19.4. One <c>catch</c> clause. <see cref="Type"/> is the exception type it selects
+/// (<c>IrExnType(null)</c> for <c>catch</c> or <c>catch (Exception)</c>); <see cref="Var"/>
+/// its binder, if any; <see cref="When"/> its filter.
+/// </summary>
+public sealed record IrCatch(IrLoc Loc, IrExnType Type, string? Var, IrExpr? When, IrBlock Body);
+
+/// <summary>
+/// R19.4. <c>try { … } catch …</c>. A Pulse <c>try</c> is not framed (F86): its
+/// contract must own every slot in scope, so <see cref="Live"/> is every local and
+/// parameter in scope, not only those mentioned, and <see cref="Unassigned"/> those the
+/// try never assigns, whose values its contract keeps.
+/// </summary>
+public sealed record IrTry(IrLoc Loc, IrBlock Body, ImmutableArray<IrCatch> Catches) : IrStmt(Loc)
+{
+    /// <summary>
+    /// R19.5. The leading <c>Pal.Invariant</c>s of the body: what holds wherever control
+    /// leaves the body — at its end, and at every raise that reaches a handler — and at
+    /// the end of each handler.
+    /// </summary>
+    public ImmutableArray<IrExpr> Invariants { get; init; } = [];
+
+    public ImmutableArray<string> Live { get; init; } = [];
+    public ImmutableArray<string> Unassigned { get; init; } = [];
+}
+
 /// <summary><c>Pal.Assert</c> / <c>Pal.Assume</c> / <c>Pal.GhostStmt</c> / <c>Pal.Share</c> /
 /// <c>Pal.Gather</c> / a <c>[Lemma]</c> call.</summary>
 public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string? Text) : IrStmt(Loc);
@@ -582,6 +624,13 @@ public sealed record IrMethod(
 {
     public bool IsLemma { get; init; }
     public string? PulseBody { get; init; }
+
+    /// <summary>
+    /// R19.2. The method's <c>[Throws]</c> clauses. Empty means it must not throw: no
+    /// <c>raises</c> clause is emitted, and Pulse then requires every exception the body
+    /// could propagate to be proved impossible.
+    /// </summary>
+    public ImmutableArray<IrThrows> Throws { get; init; } = [];
 
     /// <summary>
     /// R14.2. The method's type parameters, in declaration order. They become explicit
@@ -808,6 +857,26 @@ public sealed record IrClass(
 }
 
 /// <summary>Raw Pulse pulled in via <c>[assembly: IncludePulse]</c>.</summary>
+/// <summary>R19.2. One <c>[Throws(typeof(E), "when")]</c>: <see cref="When"/> may name <c>Thrown</c>.</summary>
+public sealed record IrThrows(IrLoc Loc, IrExnType Type, IrExpr? When);
+
+/// <summary>
+/// R19.1. An exception class declared in the program. <see cref="Fields"/> are all its
+/// fields, inherited ones first; <see cref="Ctor"/> the constructor's parameters and
+/// <see cref="Inits"/> the value each field receives, over those parameters. A class
+/// with no constructor of its own (an abstract base) has <see cref="Ctor"/> null.
+/// </summary>
+public sealed record IrException(
+    IrLoc Loc,
+    string Name,
+    string? Base,
+    ImmutableArray<IrFieldDecl> Fields,
+    ImmutableArray<IrParam>? Ctor,
+    ImmutableArray<IrExpr> Inits) : IrDecl(Loc, Name)
+{
+    public bool IsAbstract { get; init; }
+}
+
 public sealed record IrIncludePulse(IrLoc Loc, string Module, string Text) : IrDecl(Loc, Module);
 
 /// <summary>The whole translation unit.</summary>

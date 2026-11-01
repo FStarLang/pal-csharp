@@ -21,11 +21,15 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked \
      $(CACHE_DIR)/GenericClassFacts.fst.checked $(CACHE_DIR)/CursorFacts.fst.checked \
      $(CACHE_DIR)/TreeCursorFacts.fst.checked $(CACHE_DIR)/NullFacts.fst.checked \
-     $(CACHE_DIR)/SliceFacts.fst.checked
+     $(CACHE_DIR)/SliceFacts.fst.checked $(CACHE_DIR)/ExceptionFacts.fst.checked
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)
 	$(FSTAR_EXE) $(FSTAR_OPTIONS) PulseFacts.fst
+
+$(CACHE_DIR)/ExceptionFacts.fst.checked: ExceptionFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) ExceptionFacts.fst
 
 $(CACHE_DIR)/StructFacts.fst.checked: StructFacts.fst
 	@mkdir -p $(CACHE_DIR)

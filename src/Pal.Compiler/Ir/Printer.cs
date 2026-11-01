@@ -96,6 +96,25 @@ public static class Printer
                 sb.Append(pad).Append("return ").Append(r.Value?.ToString() ?? "").AppendLine(";");
                 return;
 
+            case IrThrow t:
+                sb.Append(pad).Append("throw ").Append(t.Value?.ToString() ?? "").AppendLine(";");
+                return;
+
+            case IrTry t:
+                sb.Append(pad).AppendLine("try");
+                sb.Append(pad).Append("  live [").Append(string.Join(", ", t.Live))
+                  .Append("] unassigned [").Append(string.Join(", ", t.Unassigned)).AppendLine("]");
+                foreach (var inv in t.Invariants) sb.Append(pad).Append("  invariant ").AppendLine(inv.ToString());
+                Stmt(sb, t.Body, depth + 1);
+                foreach (var c in t.Catches)
+                {
+                    sb.Append(pad).Append("catch (").Append(c.Type).Append(' ').Append(c.Var ?? "_").Append(')');
+                    if (c.When is not null) sb.Append(" when (").Append(c.When).Append(')');
+                    sb.AppendLine();
+                    Stmt(sb, c.Body, depth + 1);
+                }
+                return;
+
             default:
                 sb.Append(pad).AppendLine(stmt.ToString());
                 return;

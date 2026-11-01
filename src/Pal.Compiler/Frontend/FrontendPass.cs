@@ -14,7 +14,7 @@ namespace Pal.Compiler.Frontend;
 /// The Collect and Lower stages: walks the user's syntax with a semantic model,
 /// harvests annotations, binds the string specifications, and produces the IR.
 /// </summary>
-public static class FrontendPass
+public static partial class FrontendPass
 {
     public static IrProgram Run(CSharpCompilation compilation, DiagnosticBag diagnostics)
     {
@@ -32,6 +32,7 @@ public static class FrontendPass
         var bound = SpecBinder.Bind(ref compilation, sites, diagnostics);
 
         var declarations = ImmutableArray.CreateBuilder<IrDecl>();
+        declarations.AddRange(CollectExceptions(compilation, known, diagnostics));
         foreach (var s in structs)
             declarations.Add(LowerStruct(s, known, bound, diagnostics));
 
@@ -1814,6 +1815,23 @@ public static class FrontendPass
                     TypeParameters = MethodTypeParameters(candidate.Symbol),
                 });
             }
+
+            // R19.2. A `[Throws]` predicate is over the parameters and `Thrown`, the
+            // exception at its declared type. It describes an abortive exit, so there is
+            // no `Result` to name.
+            foreach (var (attribute, k, thrown) in ThrowsAttributes(candidate.Declaration, known))
+            {
+                sites.Add(new SpecSite(
+                    Key: $"{Naming.Of(candidate.Symbol)}_throws_{k}",
+                    Text: Declarations.StringArgument(attribute, 1) ?? "true",
+                    Location: Declarations.ArgumentLocation(attribute, 1),
+                    Parameters: [.. ShimParameters(candidate.Symbol, known, false),
+                                 new SpecParam(ThrownParameter, thrown)],
+                    Usings: usings)
+                {
+                    TypeParameters = MethodTypeParameters(candidate.Symbol),
+                });
+            }
         }
         return sites.ToImmutable();
     }
@@ -1852,6 +1870,28 @@ public static class FrontendPass
             .. own is null || helperTypes.Contains(own) ? ImmutableArray<string>.Empty : [own],
             .. helperTypes,
         ];
+    }
+
+    /// <summary>R19.2. The name a <c>[Throws]</c> predicate gives the exception.</summary>
+    public const string ThrownParameter = "Thrown";
+
+    /// <summary>
+    /// R19.2. The <c>[Throws(typeof(E), "…")]</c> attributes of a method, numbered in
+    /// declaration order, with <c>E</c>. An argument that is not an exception type is
+    /// reported where the clause is read (<see cref="ReadSpecs"/>) and skipped here.
+    /// </summary>
+    private static IEnumerable<(AttributeData Attribute, int Index, ITypeSymbol Thrown)> ThrowsAttributes(
+        ISymbol symbol, WellKnown known)
+    {
+        var index = 0;
+        foreach (var a in symbol.GetAttributes())
+        {
+            if (!Same(a.AttributeClass, known.ThrowsAttribute)) continue;
+            var k = index++;
+            if (a.ConstructorArguments is [{ Value: ITypeSymbol t }, ..] &&
+                known.MapType(t) is IrExnType)
+                yield return (a, k, t);
+        }
     }
 
     /// <summary>The spec-bearing attributes of a method, in declaration order.</summary>
@@ -2136,6 +2176,7 @@ public static class FrontendPass
             PulseBody = pulseBody,
             Admit = Declarations.Has(symbol, known.AdmitAttribute),
             Preserves = specs.Preserves,
+            Throws = specs.Throws,
             DeclaringClass = declaringClass,
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
             // R4.11b derives this from the write set. R9.7: an abstract method has no
@@ -2275,7 +2316,10 @@ public static class FrontendPass
         ImmutableArray<IrExpr> Requires,
         ImmutableArray<IrExpr> Ensures,
         ImmutableArray<IrExpr> Preserves,
-        IrExpr? Decreases);
+        IrExpr? Decreases)
+    {
+        public ImmutableArray<IrThrows> Throws { get; init; } = [];
+    }
 
     private static Specs ReadSpecs(
         IMethodSymbol symbol, ISymbol declaration, WellKnown known,
@@ -2302,7 +2346,32 @@ public static class FrontendPass
             else if (Same(cls, known.DecreasesAttribute)) decreases = expr;
         }
 
-        return new Specs(requires.ToImmutable(), ensures.ToImmutable(), preserves.ToImmutable(), decreases);
+        var throws = ImmutableArray.CreateBuilder<IrThrows>();
+        var throwsIndex = 0;
+        foreach (var attribute in declaration.GetAttributes())
+        {
+            if (!Same(attribute.AttributeClass, known.ThrowsAttribute)) continue;
+            var k = throwsIndex++;
+            var aloc = Locations.From(attribute.ApplicationSyntaxReference?.GetSyntax().GetLocation()
+                                      ?? Location.None);
+            if (attribute.ConstructorArguments is not [{ Value: ITypeSymbol t }, ..] ||
+                known.MapType(t) is not IrExnType type)
+            {
+                diagnostics.Error("PALCS0615", aloc,
+                    "The type a `[Throws]` names must be `System.Exception` or an exception class " +
+                    "the program declares (doc/translation.md R19.2).");
+                continue;
+            }
+            if (!bound.TryGetValue($"{Naming.Of(symbol)}_throws_{k}", out var spec)) continue;
+            var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
+                .Lower(spec.Expression);
+            throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
+        }
+
+        return new Specs(requires.ToImmutable(), ensures.ToImmutable(), preserves.ToImmutable(), decreases)
+        {
+            Throws = throws.ToImmutable(),
+        };
     }
 
     private static ImmutableArray<IrParam> LowerParameters(

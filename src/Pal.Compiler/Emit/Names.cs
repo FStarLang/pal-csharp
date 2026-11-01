@@ -61,6 +61,21 @@ public static class Names
     public static string Projection(string structName, string field) =>
         StructModule(structName) + "." + Field(field);
 
+    // §19. Every exception class of the program is declared in one module, because a
+    // class's discriminator has to match the F* exception of each of its subclasses.
+    public const string ExceptionsModule = "Exceptions";
+    /// <summary>R19.1. The F* exception (a constructor of <c>exn</c>) of a concrete class.</summary>
+    public static string ExnCtor(string name) => "Exn_" + name;
+    public static string ExnPayload(string name) => "exn_" + name + "__payload";
+    public static string ExnPayloadField(string name, string field) => "exn_" + name + "__p_" + field;
+    /// <summary>R19.1. The discriminator: the exception is of this class or a subclass.</summary>
+    public static string ExnIs(string name) => "exn_" + name + "__is";
+    /// <summary>R19.1. <c>e:exn{exn_E__is e}</c>, the image of the C# type <c>E</c>.</summary>
+    public static string ExnType(string name) => "exn_" + name;
+    public static string ExnField(string name, string field) => "exn_" + name + "__fld_" + field;
+    public static string ExnNew(string name) => "exn_" + name + "__new";
+    public static string Qualified(string name) => ExceptionsModule + "." + name;
+
     // §3.4. A class emits five constructs, all in one module: the representation record,
     // the object-reference type, the refined model type (predicate plus abbreviation),
     // and the model-indexed invariant. Field names are shared with R3.4 verbatim, so
@@ -439,6 +454,10 @@ public static class Types
             ? u.FStar
             : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
         IrPulseType p => p.PulseText,
+        // R19.1. `System.Exception` is any exception; a class of the program the
+        // refinement of `exn` to its discriminator.
+        IrExnType { Name: null } => "exn",
+        IrExnType e => Names.Qualified(Names.ExnType(e.Name)),
         _ => "unit",
     };
 

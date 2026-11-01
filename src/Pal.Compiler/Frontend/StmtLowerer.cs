@@ -48,8 +48,58 @@ public sealed class StmtLowerer(
             SwitchStatementSyntax s => LowerSwitch(s, loc),
             GotoStatementSyntax g => LowerGoto(g, loc),
             EmptyStatementSyntax => new IrBlock(loc, []),
+            ThrowStatementSyntax t => new IrThrow(loc,
+                t.Expression is null ? null : _code.Lower(t.Expression)),
+            TryStatementSyntax t => LowerTry(t, loc),
             _ => UnsupportedStatement(node, loc),
         };
+    }
+
+    /// <summary>
+    /// R19.4. <c>try { … } catch (E e) when (…) { … }</c>. A <c>finally</c> is refused:
+    /// it runs on every exit, including <c>return</c>, and Pulse's <c>try</c> has no such
+    /// clause.
+    /// </summary>
+    private IrStmt LowerTry(TryStatementSyntax node, IrLoc loc)
+    {
+        if (node.Finally is not null)
+        {
+            diagnostics.Error("PALCS0614", Locations.From(node.Finally.FinallyKeyword),
+                "A `finally` clause. Pulse's `try` has handlers but no clause that runs on every " +
+                "exit; restructure the code so the cleanup is in the try's tail and in each " +
+                "handler (doc/translation.md R19.4).");
+            return new IrBlock(loc, []);
+        }
+
+        var catches = ImmutableArray.CreateBuilder<IrCatch>();
+        foreach (var c in node.Catches)
+        {
+            var cloc = Locations.From(c.CatchKeyword);
+            IrExnType type = new(null);
+            string? name = null;
+            if (c.Declaration is { } d)
+            {
+                var t = model.GetTypeInfo(d.Type).Type;
+                if (known.MapType(t) is not IrExnType mapped)
+                {
+                    diagnostics.Error("PALCS0614", Locations.From(d.Type),
+                        $"A handler for `{t}`. Only `System.Exception` and the exception classes " +
+                        "the program declares can be caught (doc/translation.md R19.4).");
+                    continue;
+                }
+                type = mapped;
+                if (d.Identifier.ValueText is { Length: > 0 } id) name = id;
+            }
+            var when = c.Filter is { } f ? _code.Lower(f.FilterExpression) : null;
+            catches.Add(new IrCatch(cloc, type, name, when, LowerBlock(c.Block)));
+        }
+        // R19.5. A try states its invariant the way a loop does, at the head of its body.
+        var (invariants, decreases, body) = ExtractLoopSpecs(node.Block);
+        if (decreases is not null)
+            diagnostics.Error("PALCS0614", decreases.Loc,
+                "`Pal.Decreases` in a `try`. A `try` runs its body once; only a loop has a " +
+                "measure (doc/translation.md R19.5).");
+        return new IrTry(loc, (IrBlock)body, catches.ToImmutable()) { Invariants = invariants };
     }
 
     private IrStmt UnsupportedStatement(SyntaxNode node, IrLoc loc)

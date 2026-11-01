@@ -55,6 +55,8 @@ public sealed class WellKnown
         SpecTypeAttribute = Type("SpecTypeAttribute");
         SpecOpAttribute = Type("SpecOpAttribute");
         SpecCtorAttribute = Type("SpecCtorAttribute");
+        ThrowsAttribute = Type("ThrowsAttribute");
+        Exception = c.GetTypeByMetadataName("System.Exception");
 
         // R17.1. `Span<T>` and `ReadOnlySpan<T>` are BCL types, not pal-csharp ones, so
         // they are looked up by metadata name and are allowed to be absent: a host whose
@@ -75,6 +77,26 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecListOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
+    public INamedTypeSymbol ThrowsAttribute { get; }
+    public INamedTypeSymbol? Exception { get; }
+
+    /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
+    public bool IsSystemException(ITypeSymbol? type) =>
+        Exception is not null && SymbolEqualityComparer.Default.Equals(type, Exception);
+
+    /// <summary>
+    /// R19.1. A class this program declares that derives from <c>System.Exception</c>.
+    /// Its values are F* <c>exn</c> payloads, not objects: it has no invariant, no model
+    /// and no identity, and the constructor is a pure function of its arguments.
+    /// </summary>
+    public bool IsExceptionClass(ITypeSymbol? type)
+    {
+        if (type is not INamedTypeSymbol { TypeKind: TypeKind.Class } named) return false;
+        if (named.DeclaringSyntaxReferences.IsEmpty) return false;
+        for (var t = named.BaseType; t is not null; t = t.BaseType)
+            if (IsSystemException(t)) return true;
+        return false;
+    }
     public INamedTypeSymbol InvariantAttribute { get; }
 
     public INamedTypeSymbol RequiresAttribute { get; }
@@ -268,6 +290,11 @@ public sealed class WellKnown
             // R11.1. A user-declared specification type. It is tried before the class
             // rule because a `[SpecType]` may be a class, and before the struct rule
             // because it is usually a struct — it is not a representation either way.
+            // R19.1. Before the class rule: an exception is a value of F*'s `exn`.
+            case INamedTypeSymbol named when IsSystemException(named):
+                return new IrExnType(null);
+            case INamedTypeSymbol named when IsExceptionClass(named):
+                return new IrExnType(named.Name);
             case INamedTypeSymbol named when SpecTypeName(named) is { } fstar:
             {
                 var args = ImmutableArray.CreateBuilder<IrType>();

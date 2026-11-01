@@ -118,9 +118,29 @@ public sealed class CodeEmitter(
     /// <summary>The plan of the method being emitted, needed by R13.3's prelude.</summary>
     private MethodPlan? _plan;
 
+    /// <summary>The method being emitted: R19.2's throw closes its objects as a return does.</summary>
+    private IrMethod? _method;
+
+    /// <summary>
+    /// R19.3. The exceptions that may escape the innermost enclosing construct, as a
+    /// predicate of the exception's binder: the method's <c>[Throws]</c> at the top, and
+    /// inside a <c>try</c> its own <c>raises</c>. Innermost last.
+    /// </summary>
+    private readonly List<Func<string, string>> _raises = [];
+
+    /// <summary>R19.4. The exception binder of each enclosing catch clause, innermost last.</summary>
+    private readonly List<string> _caught = [];
+
+    /// <summary>How many object locals were declared outside the innermost <c>try</c>.</summary>
+    private readonly List<int> _tryMarks = [];
+
+    private int _try;
+
     public string EmitBody(IrMethod method, MethodPlan plan)
     {
         _plan = plan;
+        _method = method;
+        _raises.Add(plan.ThrowsProp);
         // In declaration order, not `plan.Slots`': see MethodPlan.SlotOrder. `_slots` is
         // a plain Dictionary, so every later walk of it inherits the order set here.
         foreach (var name in plan.SlotOrder) _slots[name] = plan.Slots[name];
@@ -267,6 +287,11 @@ public sealed class CodeEmitter(
 
             case IrBlock b:
                 Scoped(() => EmitSequence(b.Statements, method, plan), dropAtEnd: false);
+                return;
+
+            // R19.2. `raise` has every type, so a throw is a tail of any method.
+            case IrThrow th:
+                Throw(th, plan, tail: true);
                 return;
 
             case IrIf { Else: not null } i:
@@ -1406,6 +1431,14 @@ public sealed class CodeEmitter(
                 diagnostics.Unsupported(r.Loc, "A `return` in this position");
                 return;
 
+            case IrThrow th:
+                Throw(th, plan, tail: false);
+                return;
+
+            case IrTry tr:
+                Try(tr, plan);
+                return;
+
             case IrBreak b2:
                 if (_escape?.Break is { } brkCell) Line($"{brkCell} := true;");
                 else diagnostics.Unsupported(b2.Loc, "`break` outside a loop");
@@ -2022,6 +2055,192 @@ public sealed class CodeEmitter(
         _escape = outerEscape;
     }
 
+    // =======================================================================
+    // Exceptions (§19)
+    // =======================================================================
+
+    /// <summary>
+    /// R19.2. <c>throw e</c> is <c>raise</c>. The exception is let-bound first so that
+    /// building it is a step of its own, and a method's objects are closed before it
+    /// exactly as before a <c>return</c>: the <c>raises</c> clause owns them folded, as the
+    /// postcondition does. Inside a <c>try</c> only what the <c>try</c> declared is
+    /// dropped, because the <c>try</c>'s own <c>raises</c> owns the rest.
+    /// </summary>
+    private void Throw(IrThrow th, MethodPlan plan, bool tail)
+    {
+        string exn;
+        if (th.Value is { } value)
+        {
+            exn = Fresh();
+            Line($"let {exn} = {Expr(value)};");
+        }
+        else if (_caught.Count > 0)
+        {
+            exn = _caught[^1];
+        }
+        else
+        {
+            diagnostics.Unsupported(th.Loc, "`throw;` outside a catch clause");
+            return;
+        }
+
+        if (_tryMarks.Count == 0)
+        {
+            if (NeedsEpilogue) CloseObjects(_method!, plan);
+        }
+        else
+        {
+            DropLocals(null, _tryMarks[^1]);
+        }
+        Line(tail ? $"raise {exn}" : $"raise {exn};");
+    }
+
+    /// <summary>
+    /// R19.3. <c>try</c>/<c>catch</c> is Pulse's <c>try</c>, whose one handler tests the
+    /// exception against each catch clause in order and re-raises what none of them takes.
+    ///
+    /// <para>A Pulse <c>try</c> is not framed (F86): its <c>ensures</c> and <c>raises</c>
+    /// must own everything that is live across it, exactly as a loop invariant must, and
+    /// they are assembled the same way (R5.8b) — a slot the <c>try</c> does not assign is
+    /// held at the value it had, one it does is existentially quantified. The
+    /// <c>raises</c> adds what may reach the handler: an exception some unfiltered clause
+    /// handles, or one the enclosing construct may itself raise. That is precisely what
+    /// lets the handler's final <c>raise</c> be proved.</para>
+    /// </summary>
+    private void Try(IrTry tr, MethodPlan plan)
+    {
+        if (_objects.Length > 0 || _windows.Count > 0)
+        {
+            diagnostics.Error("PALCS0614", tr.Loc,
+                "A `try` where an object's representation is open (an instance method that " +
+                "reads a field, or inside a null test of a recursive object) is not " +
+                "supported (doc/translation.md R19.3): the `try` would have to carry the " +
+                "representation across both of its exits. Move the `try` to a method that " +
+                "works through calls.");
+            return;
+        }
+
+        var live = tr.Live.Where(n => _slots.TryGetValue(n, out var s) && s.Owns)
+            .Select(n => _slots[n])
+            .ToImmutableArray();
+        var unassigned = tr.Unassigned.ToImmutableHashSet();
+
+        var existentials = ImmutableArray.CreateBuilder<string>();
+        var resources = ImmutableArray.CreateBuilder<string>();
+        var fixedAll = new List<(string Name, string Resource)>();
+        var scope = new SpecScope(plan.PreScope) { Pre = plan.PreScope };
+        foreach (var slot in live)
+        {
+            var value = FreshValue(slot.Name);
+            if (unassigned.Contains(slot.Name)) fixedAll.Add((value, slot.Resource(value)));
+            else existentials.Add(value);
+            resources.Add(slot.Resource(value));
+            scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+        }
+        // R19.5. The invariant is stated over the same names, so that what is assigned is
+        // spoken of at whatever value it has when control leaves.
+        var invariant = tr.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))).ToImmutableArray();
+        // R5.10's flags of an enclosing loop are live too, though no C# names them.
+        foreach (var cell in new[] { _escape?.Break, _escape?.Continue })
+        {
+            if (cell is null) continue;
+            var value = FreshValue("esc");
+            existentials.Add(value);
+            resources.Add($"R.pts_to {cell} {value}");
+        }
+        if (fixedAll.Count > 0)
+        {
+            Line($"with {string.Join(" ", fixedAll.Select(f => f.Name))}. " +
+                 $"assert ({string.Join(" ** ", fixedAll.Select(f => f.Resource))});");
+        }
+
+        var ex = $"ex_{_try++}";
+        var enclosing = _raises[^1];
+        string Raised(string e)
+        {
+            var disjuncts = tr.Catches.Where(c => c.When is null)
+                .Select(c => c.Type.Name is { } n ? $"{Names.Qualified(Names.ExnIs(n))} {e}" : "True")
+                .Append(enclosing(e));
+            return "(" + string.Join(" \\/ ", disjuncts.Select(d => $"({d})")) + ")";
+        }
+
+        var owned = resources.ToImmutable();
+        var bound = existentials.ToImmutable();
+        Line("try");
+        _indent++;
+        Line("ensures " + MethodPlan.Clause(owned, invariant, bound));
+        Line($"raises (fun ({ex}: exn) -> " + MethodPlan.Clause(owned, [.. invariant, Raised(ex)], bound) + ")");
+        _indent--;
+        Line("{");
+        _indent++;
+        _raises.Add(Raised);
+        _tryMarks.Add(_objectLocals.Count);
+        Statement(tr.Body, plan);
+        _tryMarks.RemoveAt(_tryMarks.Count - 1);
+        _raises.RemoveAt(_raises.Count - 1);
+        Line("()");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{ex} -> {{");
+        _indent++;
+        _caught.Add(ex);
+        Catches(tr, 0, ex, plan);
+        _caught.RemoveAt(_caught.Count - 1);
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+    }
+
+    /// <summary>
+    /// R19.4. The catch clauses from the <paramref name="k"/>-th on, as a chain of tests.
+    /// A clause binds its variable to the exception at its class's type, which its test
+    /// has just established, and a filter is evaluated under that binding.
+    /// </summary>
+    private void Catches(IrTry tr, int k, string ex, MethodPlan plan)
+    {
+        if (k == tr.Catches.Length)
+        {
+            Line($"raise {ex}");
+            return;
+        }
+        var c = tr.Catches[k];
+        var test = c.Type.Name is { } n ? $"{Names.Qualified(Names.ExnIs(n))} {ex}" : "true";
+        var mark = new HashSet<string>(_slots.Keys);
+        string? binder = null;
+        if (c.Var is { } v)
+        {
+            binder = $"{Names.Local(v)}_{ex}_{k}";
+            Line($"let {binder} = {ex};");
+            _slots[v] = new Slot(v, c.Type, SlotKind.Value, binder);
+        }
+        if (c.When is { } when)
+        {
+            var filter = Capture(() => Expr(when));
+            if (!filter.Lines.IsEmpty)
+            {
+                diagnostics.Error("PALCS0614", when.Loc,
+                    "This exception filter reads state. A `when` clause has to be a pure " +
+                    "test of the exception and of values, because it is decided before any " +
+                    "handler runs (doc/translation.md R19.4).");
+            }
+            test = $"{test} && ({filter.Term})";
+        }
+        Line($"if ({test}) {{");
+        _indent++;
+        Statement(c.Body, plan);
+        Line("()");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        if (binder is not null) _slots.Remove(c.Var!);
+        foreach (var name in _slots.Keys.Where(x => !mark.Contains(x)).ToList()) _slots.Remove(name);
+        Catches(tr, k + 1, ex, plan);
+        _indent--;
+        Line("}");
+    }
+
     /// <summary>
     /// R5.8d. A statement in tail position whose value is unit — the last statement of a
     /// loop body. It is <see cref="Tail"/> without the return value or the object epilogue,
@@ -2425,6 +2644,17 @@ public sealed class CodeEmitter(
             // R12.3. A field of a `[Plain]` reference. The same memory operation as R3.8 —
             // dereference the box, project the record — reached by a different slot kind,
             // because a plain reference carries no model and so is an ordinary value.
+            // R19.1. An exception's field is its class's accessor applied to it; an
+            // exception is a value, so nothing is owned and nothing is opened.
+            case IrField { Receiver.Type: IrExnType { Name: { } en } } ef:
+                return $"({Names.Qualified(Names.ExnField(en, ef.Field))} {Expr(ef.Receiver)})";
+
+            // R19.2. Building an exception is a pure function of its arguments.
+            case IrNewException ne:
+                return ne.Args.IsEmpty
+                    ? $"({Names.Qualified(Names.ExnNew(ne.Class))} ())"
+                    : $"({Names.Qualified(Names.ExnNew(ne.Class))} {string.Join(" ", ne.Args.Select(a => $"({Expr(a)})"))})";
+
             case IrField { Receiver: IrVar pv } pf when
                 _slots.TryGetValue(pv.Name, out var pobj)
                 && pobj is { Kind: SlotKind.Value or SlotKind.Cell, Type: IrClassType pc }

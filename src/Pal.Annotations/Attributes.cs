@@ -36,6 +36,21 @@ public sealed class EnsuresAttribute(string predicate) : Attribute
     public string Predicate { get; } = predicate;
 }
 
+/// <summary>
+/// R19.2. The method may throw <paramref name="exception"/> (or a subclass of it), and
+/// when it does, <paramref name="predicate"/> holds. The predicate is written over the
+/// parameters and <c>Thrown</c>, the exception object, typed at
+/// <paramref name="exception"/>. A method with no <c>[Throws]</c> must be proved not to
+/// throw at all.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Constructor | AttributeTargets.Property,
+                AllowMultiple = true)]
+public sealed class ThrowsAttribute(Type exception, string predicate = "true") : Attribute
+{
+    public Type Exception { get; } = exception;
+    public string Predicate { get; } = predicate;
+}
+
 /// <summary>Shorthand for <c>[Requires(p)] [Ensures(p)]</c>.</summary>
 [AttributeUsage(AttributeTargets.Method | AttributeTargets.Property, AllowMultiple = true)]
 public sealed class PreservesAttribute(string predicate) : Attribute

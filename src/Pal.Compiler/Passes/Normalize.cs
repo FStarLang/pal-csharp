@@ -139,6 +139,17 @@ public static class Normalize
             case IrSwitch s:
                 return SwitchToIf(s, outer, diagnostics);
 
+            case IrTry t:
+                return Try(t with
+                {
+                    Body = (IrBlock)Statement(t.Body, outer, diagnostics),
+                    Catches = [.. t.Catches.Select(c => c with
+                    {
+                        Body = (IrBlock)Statement(
+                            c.Body, c.Var is null ? outer : outer.Add(c.Var), diagnostics),
+                    })],
+                }, outer);
+
             default:
                 return stmt;
         }
@@ -292,6 +303,29 @@ public static class Normalize
     }
 
     /// <summary>
+    /// R19.4. A try owns everything in scope (F86), and keeps the value of what neither
+    /// its body nor a handler assigns. As for a loop (R5.8b), an object counts as assigned
+    /// only if it is <see cref="Mutated"/>.
+    /// </summary>
+    private static IrTry Try(IrTry t, ImmutableHashSet<string> outer)
+    {
+        var assigned = new HashSet<string>();
+        var mutated = new HashSet<string>();
+        Assigned(t, assigned);
+        Mutated(t, mutated);
+        var objects = new HashSet<string>(
+            Check.Statements(t).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+                .OfType<IrVar>().Where(v => v.Type is IrClassType).Select(v => v.Name));
+        var live = outer.OrderBy(n => n, StringComparer.Ordinal).ToImmutableArray();
+        return t with
+        {
+            Live = live,
+            Unassigned = [.. live.Where(n =>
+                objects.Contains(n) ? !mutated.Contains(n) : !assigned.Contains(n))],
+        };
+    }
+
+    /// <summary>
     /// R5.9. Every Pulse <c>while</c> in a terminating <c>fn</c> needs a measure (F2).
     /// Case 1 (the user's own <c>Pal.Decreases</c>) is handled by the caller; this is
     /// case 2, and case 3 is the diagnostic.
@@ -380,6 +414,12 @@ public static class Normalize
             case IrReturn r: Free(r.Value, into); return;
             case IrExprStmt e: Free(e.Expr, into); return;
             case IrGhostStmt g: Free(g.Prop, into); return;
+            case IrThrow th: Free(th.Value, into); return;
+            case IrTry t:
+                foreach (var inv in t.Invariants) Free(inv, into);
+                Free(t.Body, into);
+                foreach (var c in t.Catches) { Free(c.When, into); Free(c.Body, into); }
+                return;
             default: return;
         }
     }
@@ -443,6 +483,11 @@ public static class Normalize
                 return;
             case IrReturn r: MutatedIn(r.Value, into); return;
             case IrExprStmt e: MutatedIn(e.Expr, into); return;
+            case IrThrow th: MutatedIn(th.Value, into); return;
+            case IrTry t:
+                Mutated(t.Body, into);
+                foreach (var c in t.Catches) { MutatedIn(c.When, into); Mutated(c.Body, into); }
+                return;
             default: return;
         }
     }
@@ -513,6 +558,11 @@ public static class Normalize
             case IrLocalDecl d: AssignedByCalls(d.Init, into); return;
             case IrReturn r: AssignedByCalls(r.Value, into); return;
             case IrExprStmt e: AssignedByCalls(e.Expr, into); return;
+            case IrThrow th: AssignedByCalls(th.Value, into); return;
+            case IrTry t:
+                Assigned(t.Body, into);
+                foreach (var c in t.Catches) { AssignedByCalls(c.When, into); Assigned(c.Body, into); }
+                return;
             default: return;
         }
     }

@@ -185,6 +185,8 @@ with the master of nightly-2026-10-31, with Z3 5.3.0. That build's installed
 | F83 | **A pure lemma must be called before the resource step it supports, not after.** `splice_same v i j; restore_range w;` verifies; the reverse order does not — the resource match happens first and has already failed by the time the lemma runs. Erased arguments must be passed `(reveal v)` explicitly. | `test/pulse_facts/SliceFacts.fst:s9_read_only_trip`. |
 | F84 | **A `prop`-valued definition's body reaches Z3 as native quantifiers (FStarLang/FStar#4519, since nightly-2026-10-31), so its `forall` needs a pattern.** Without one Z3 chooses its own trigger: a `[Spec]` `Sorted` over a sequence was instantiated ~20k times per query, and inside the loop that sorts the sequence even the decreases check `j - 1 + 1 << j + 1` timed out. Adding "the natural patterns" — the element reads — fixed it at the default rlimit, as it did F*'s own ulib. Hence R6.7b. | `test/insertion_sort_sorted`, verified at the default rlimit with R6.7b and not without it. |
 | F85 | **A record literal in a Pulse statement or tail position must be parenthesised (since nightly-2026-10-31).** `{ M.f = …; … }` there is read as a block and fails with "Module name M … not in scope"; as a `let` right-hand side, or as `({ … })` anywhere, it is a record. The emitter parenthesises every record literal and functional update. | `test/pulse_facts/StructFacts.fst`, `test/point_struct`. |
+| F86 | **A Pulse `try` is not framed, and its `ensures` defaults to `emp` (FStarLang/FStar#4798).** Whatever the context holds when the `try` starts and is not named in its `ensures` is lost after it, and whatever is not named in its `raises` is lost to the handler. So both clauses must own every resource live across the `try`, exactly as a loop invariant must (R5.8b). A `let mut` cell is reclaimed when an exception passes its scope, so a `raise` inside a block need not mention the block's own cells. | `test/pulse_facts/ExceptionFacts.fst`: P2 raises from a loop holding a cell, P3 owns a cell across a `try`, and P4, which names nothing, is `expect_failure`. |
+| F87 | **A `fn` with no `raises` clause must prove it raises nothing.** The default is `raises (fun _ -> pure False)`, so a handler's closing `raise ex` for the classes it does not handle is a proof obligation, discharged by the `try`'s `raises` saying the exception is one of those it handles. `raise e` has every type, so it may be a statement, a branch's value or a tail. A handler is entered with what the `raises` says and nothing else: the facts a callee's `raises` stated about the exception are gone, apart from those the `try`'s `raises` restates. | `test/pulse_facts/ExceptionFacts.fst` P3; `test/throw_catch/Throwing.cs:Classify`, which declares no `[Throws]`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -5541,6 +5543,13 @@ feature has to reach before it can be designed.
   declaration in the compilation. PALCS0530 previously read "does not translate classes
   yet", a message left over from before §3.4 was built and untrue as stated.
 
+* **What §19 does not yet translate** (PALCS0610–PALCS0615): an exception class that is
+  generic or derives from a library exception other than `System.Exception`; a payload
+  member that is settable or is not a value; more than one constructor, or one that
+  computes; `finally`; a `return`, `break` or `continue` that leaves a `try`; a `try` while
+  a receiver's representation is open; and a handler for a type that is not an exception
+  class of the program. Each is listed in §19 with what it waits on.
+
 ### 18.3 Why this is a section and not a bug list
 
 Everything above could have been fixed one `if` at a time. It is written down as a rule
@@ -5553,3 +5562,113 @@ That also fixes what the refusals mean. §0 rule 3 says the frontend refuses wha
 kind, and each names a construct with no image under any rule in this document — which is
 also why each is listed in §18.2 with the rule that would have to exist for it to be
 accepted.
+
+---
+
+## 19. Exceptions
+
+C#'s `throw` and `try`/`catch` are translated to the native exceptions of Pulse
+(FStarLang/FStar#4798): `raise`, `try … catch`, and a `raises` clause on a `fn` that says
+what holds when it raises. The translation is three rules about values and two about
+control.
+
+### R19.1 An exception class is an F* `exception` and a discriminator
+
+Every exception class of the program is declared in one module, `Exceptions`, because a
+class's discriminator has to name the F\* exception of each of its subclasses. For a class
+`E` with fields `F₁ … Fₙ` (inherited ones first):
+
+* if `E` is concrete, `noeq type exn_E__payload = { exn_E__p_F₁: τ₁; … }` and
+  `exception Exn_E of exn_E__payload` (or `exception Exn_E` with no fields). Field names are
+  prefixed by the class so that two payload records never share a field name;
+* `exn_E__is : exn -> bool` matches `Exn_D` for every concrete `D` that is `E` or derives
+  from it, and `type exn_E = e:exn{exn_E__is e}` is the image of the C# type `E`.
+  `System.Exception` is `exn`;
+* `exn_E__fld_Fᵢ : exn_E -> τᵢ` reads the field through whichever subclass was thrown. The
+  match is exhaustive because of the refinement;
+* `exn_E__new`, for a concrete class, is its constructor, which the frontend reads as a
+  pure function from its parameters to the payload.
+
+That is all of C#'s subtyping on exceptions: a handler for `B` catches a `D : B` because
+`exn_B__is` holds of it, and `e.Code` on a `B` is the accessor's `D` case.
+
+The payload is immutable, which is what C# programs overwhelmingly write: an exception
+class may have get-only auto-properties and readonly fields of value type (PALCS0611); at
+most one constructor (PALCS0612), which may only call `base(…)` with its parameters or
+literals and assign its own fields from them (PALCS0613); and it may derive only from
+`System.Exception` or from another exception class of the program (PALCS0610), since a
+library base's fields would be payload the translator cannot see. `Message` and
+`InnerException` are not modelled: arguments passed to `System.Exception`'s constructor
+must be parameters or literals, and are not evaluated.
+
+### R19.2 `throw` is `raise`
+
+`throw e;` is `let t = ⟦e⟧; raise t`. `raise` has every type, so a throw is a statement, a
+branch's value or a method's tail alike (F87). Before the `raise`, an object the method
+holds is closed exactly as before a `return` (R4.10, R4.14): the `raises` clause owns it
+folded, as the postcondition does. Inside a `try`, only object locals the `try` itself
+declared are dropped, since the `try`'s own `raises` owns the rest. `throw;` re-raises the
+innermost handler's exception.
+
+### R19.3 `[Throws]` is the `raises` clause
+
+`[Throws(typeof(E), "P")]` says the method may throw an `E` (or a subclass), and that `P`
+holds when it does. `P` is a specification over the parameters' *pre-state* values and
+`Thrown`, which denotes the exception at type `E`. Several `[Throws]` are a disjunction.
+The emitted clause is
+
+    raises (fun (thrown: exn) ->
+      exists* <post-state binders>. <every parameter's resource, as in the postcondition> **
+      pure (PRE ==> (exn_E₁__is thrown /\ ⟦P₁⟧) \/ …))
+
+It owns what an exception leaves the caller owning: each parameter, and nothing the
+method would have returned. Like R4.8's `ensures`, it is stated under the precondition. A
+method with no `[Throws]` has no `raises`, so Pulse makes it prove that it raises nothing
+(F87).
+
+`P` is stated over pre-state values, not post-state ones, so that the same text is
+meaningful inside a `try` (R19.4), where there is no post-state to speak of.
+
+### R19.4 `try`/`catch` is Pulse's `try`
+
+    try
+      ensures  exists* <assigned>. <live resources> ** pure (INV)
+      raises (fun ex -> exists* <assigned>. <live resources> **
+                        pure (INV /\ (exn_E₁__is ex \/ … \/ ENCLOSING ex)))
+    { body }
+    catch { ex -> { let var_e = ex; if (exn_E₁__is ex && ⟦when₁⟧) { h₁ } else … else { raise ex } } }
+
+* **Ownership.** A `try` is not framed (F86), so its clauses own every slot live across it,
+  assembled exactly as a loop invariant's are (R5.8b): a slot the `try` does not assign is
+  held at the value it had, one it does is existentially quantified, and R5.10's escape
+  flags of an enclosing loop are carried too.
+* **What reaches the handler.** The `raises` says the exception is one some unfiltered
+  clause handles (`catch (E)` contributes `exn_E__is ex`, `catch (Exception)` contributes
+  `True`), or one the enclosing construct may raise: the method's `[Throws]` (R19.3) or
+  an outer `try`'s `raises`. This is exactly what proves the handler's closing
+  `raise ex`. A `when` filter does not contribute, because a filtered clause may decline.
+* **The handler.** Clauses are tested in order. A clause's variable is bound to the
+  exception, and its filter is evaluated under that binding with `&&` guarding the class
+  test, so a field read in the filter is well typed. A filter must be pure (PALCS0614).
+* **What a handler knows.** It knows the class of what it caught and nothing more (F87):
+  a callee's `[Throws]` predicate is not carried into the `try`'s `raises`. A handler
+  must test the fields it relies on, and a rethrow can promise only what the `try`'s
+  `raises` says. `test/throw_catch` has both cases, and in both the verifier found the
+  overflow and the negative index a trusting handler would have had.
+
+Refused (PALCS0614): `finally`, which runs on every exit and has no Pulse counterpart; a
+`return` anywhere in a `try`, and a `break` or `continue` that leaves one, since the `try`'s
+`ensures` describes only its fall-through exit (assign a local and return after the
+`try`); and a `try` while a receiver's representation is open (R4.10) or inside a null
+test's window (R10.7), which the `try` would have to carry across both exits. Handlers
+for anything but `System.Exception` and the program's exception classes are refused
+there too, and a `[Throws]` naming a non-exception type is PALCS0615.
+
+### R19.5 A `try` invariant
+
+The value facts about a slot the `try` assigns would be lost by R19.4's existentials. A
+try states them the way a loop does: `Pal.Invariant(INV)` at the head of the `try` body.
+`INV` must hold wherever control leaves the body, at its end and at every raise that
+reaches the handler, and at the end of every handler. It is stated over the slots' values
+at that point, and it is what a statement after the `try` may rely on. A
+`Pal.Decreases` there is refused (PALCS0614): a `try` runs once.

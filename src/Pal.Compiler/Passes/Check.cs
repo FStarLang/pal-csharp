@@ -340,6 +340,15 @@ public static class Check
                         "window's extent is a branch. Write `if (x == null) { … } else { … }`.");
                     break;
 
+                case IrTry t when Jumps(t) is { } jump:
+                    diagnostics.Error("PALCS0614", jump.Loc,
+                        $"A `{(jump is IrReturn ? "return" : jump is IrBreak ? "break" : "continue")}` " +
+                        "that leaves a `try` block or a `catch` handler. A Pulse `try` is a " +
+                        "statement whose only exits are falling off its end and raising, so a " +
+                        "jump out of it has no image. Set a flag, and act on it after the " +
+                        "`try` (doc/translation.md R19.4).");
+                    break;
+
                 case IrWhile { Decreases: null, Counted: null } w:
                     // Belt and braces: Normalize reports this too (PALCS0200), but a
                     // loop reaching Emit without a measure produces a `while` that
@@ -424,6 +433,28 @@ public static class Check
     };
 
     /// <summary>
+    /// R19.4. A <c>return</c>, or a <c>break</c>/<c>continue</c> not inside a loop of its
+    /// own, in a try's body or handlers: a jump out of the try.
+    /// </summary>
+    private static IrStmt? Jumps(IrTry t)
+    {
+        return t.Catches.Select(c => (IrStmt)c.Body).Prepend(t.Body)
+            .Select(b => Find(b, false)).FirstOrDefault(j => j is not null);
+
+        static IrStmt? Find(IrStmt s, bool inLoop) => s switch
+        {
+            IrReturn => s,
+            IrBreak or IrContinue => inLoop ? null : s,
+            IrBlock b => b.Statements.Select(x => Find(x, inLoop)).FirstOrDefault(j => j is not null),
+            IrIf i => Find(i.Then, inLoop) ?? (i.Else is null ? null : Find(i.Else, inLoop)),
+            IrWhile w => Find(w.Body, true),
+            IrTry inner => inner.Catches.Select(c => (IrStmt)c.Body).Prepend(inner.Body)
+                .Select(b => Find(b, inLoop)).FirstOrDefault(j => j is not null),
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// Every statement in a body, outermost first. Shared with the emitter, which needs
     /// the same traversal to decide what a loop does to its enclosing object (R5.12).
     /// </summary>
@@ -455,6 +486,11 @@ public static class Check
                 foreach (var r in Statements(sw.Scrutinee)) yield return r;
                 foreach (var s in sw.Sections.SelectMany(sec => sec.Statements))
                     foreach (var r in Statements(s)) yield return r;
+                break;
+            case IrTry t:
+                foreach (var r in Statements(t.Body)) yield return r;
+                foreach (var c in t.Catches)
+                    foreach (var r in Statements(c.Body)) yield return r;
                 break;
         }
     }
@@ -495,6 +531,8 @@ public static class Check
         IrIf i => [i.Cond],
         IrWhile w => [w.Cond],
         IrGhostStmt g => g.Prop is null ? [] : [g.Prop],
+        IrThrow t => t.Value is null ? [] : [t.Value],
+        IrTry t => [.. t.Catches.Where(c => c.When is not null).Select(c => c.When!)],
         _ => [],
     };
 
