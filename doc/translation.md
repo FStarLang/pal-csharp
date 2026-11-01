@@ -91,7 +91,12 @@ stated in §7.2.
 ## 1. Validated Pulse facts
 
 The rules below depend on the following, each **verified against the pinned toolchain**
-(`tools/fstar`, nightly-2026-07-30) rather than assumed:
+(`tools/fstar`) rather than assumed. The facts were first established on nightly-2026-07-30
+and re-checked on each upgrade since; the current pin is F\* built from source
+(`tools/fstar-source.txt`): FStarLang/FStar#4798, which adds native Pulse exceptions, merged
+with the master of nightly-2026-10-31, with Z3 5.3.0. That build's installed
+`pulse/lib/fstar.include` omits the PR's `effects` directory (`Pulse.Lib.Effects.*`), and
+`tools/install-fstar.sh` adds it back.
 
 | # | Fact | Evidence |
 |---|---|---|

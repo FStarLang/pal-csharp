@@ -23,10 +23,11 @@ permissions:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    # A full cold-cache gate is about fifteen minutes locally. The ceiling is here to turn
+    # A full cold-cache gate is about fifteen minutes locally, plus about an hour to build
+    # F* when a source pin misses the toolchain cache. The ceiling is here to turn
     # a proof that diverges -- an ordinary way for an SMT query to fail -- into a failure
     # in the first hour rather than one that runs for GitHub's six-hour default.
-    timeout-minutes: 90
+    timeout-minutes: 150
 
     steps:
       - uses: actions/checkout@v4
@@ -52,18 +53,29 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: tools/fstar
-          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt') }}
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+
+      # Only a source pin (tools/fstar-source.txt) needs OCaml; a nightly is a binary.
+      - name: Set up OCaml for a source-pinned F*
+        if: steps.fstar-cache.outputs.cache-hit != 'true' && hashFiles('tools/fstar-source.txt') != ''
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.3.0'
 
       - name: Install F* toolchain
         if: steps.fstar-cache.outputs.cache-hit != 'true'
-        run: make tools
+        env:
+          FSTAR_OPAM_DEPS: '1'
+        run: |
+          if [ -f tools/fstar-source.txt ]; then eval "$(opam env)"; fi
+          make tools
 
       - name: Save F* toolchain
         if: always() && steps.fstar-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: tools/fstar
-          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt') }}
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
 
       # `make tools` builds tools/fstar/bin/fstar.exe from tools/fstar-version.txt, and a
       # restored cache defeats that rule: the archive keeps the toolchain's original
@@ -76,15 +88,22 @@ jobs:
 
       # The pin is the reason this repository can reproduce a proof at all, so CI asserts
       # it instead of assuming it. This also catches a cache entry that was restored under
-      # the right key but holds the wrong build.
+      # the right key but holds the wrong build. A source pin (tools/fstar-source.txt)
+      # names the merged commit install-fstar.sh recorded in tools/fstar/version.txt; otherwise the nightly's version string is
+      # compared with tools/fstar-version.txt.
       - name: Check the toolchain matches the pin
         run: |
-          pinned="nightly-$(tr -d '[:space:]' < tools/fstar-version.txt)"
-          actual="$(tools/fstar/bin/fstar.exe --version | head -1 | cut -d' ' -f2-)"
+          if [ -f tools/fstar-source.txt ]; then
+            pinned="$(sed -n 's/^result=//p' tools/fstar-source.txt | tr -d '[:space:]')"
+            actual="$(tr -d '[:space:]' < tools/fstar/version.txt)"
+          else
+            pinned="nightly-$(tr -d '[:space:]' < tools/fstar-version.txt)"
+            actual="$(tools/fstar/bin/fstar.exe --version | head -1 | cut -d' ' -f2-)"
+          fi
           echo "pinned: $pinned"
           echo "actual: $actual"
-          if [ "$pinned" != "$actual" ]; then
-            echo "::error::F* is $actual but tools/fstar-version.txt pins $pinned"
+          if [ -z "$pinned" ] || [ "$pinned" != "$actual" ]; then
+            echo "::error::F* is $actual but the pin in tools/ says $pinned"
             exit 1
           fi
 

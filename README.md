@@ -116,9 +116,15 @@ To translate and verify one program:
 palcs -o out MyProgram.cs        # C# ─► Pulse
 ```
 
-The F\* version is pinned in [`tools/fstar-version.txt`](tools/fstar-version.txt) and used
-by both local builds and CI, so the two cannot drift. The F\* binary release bundles Pulse,
-so no separate Pulse install is needed.
+The F\* version is pinned and used by both local builds and CI, so the two cannot drift.
+There are two kinds of pin. [`tools/fstar-version.txt`](tools/fstar-version.txt) names a
+nightly binary release, which bundles Pulse. [`tools/fstar-source.txt`](tools/fstar-source.txt),
+when present, takes precedence: it pins F\* built from source at fixed commits, which is how
+the repository tracks an F\* pull request that has no release yet. The current pin is
+FStarLang/FStar#4798 (native Pulse exceptions, §19 of the translation document) merged with
+master. A source build needs an OCaml switch with F\*'s dependencies; `make tools` then
+clones, builds and installs it into `tools/fstar` in the binary-release layout, with the
+pinned Z3 (5.3.0).
 
 ### Reading the generated Pulse interactively
 
@@ -176,8 +182,9 @@ excluded, for the reason they are red above.
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `make test` — the same gate,
 not a reimplementation of it, so CI and a working copy cannot disagree about what passing
-means. The pinned toolchain is cached on `tools/fstar-version.txt` and CI asserts that the
-F\* it ended up with is the one the pin names, so neither a stale cache nor a silent
+means. The pinned toolchain is cached on both pin files and CI asserts that the F\* it
+ended up with is the one the pin names (for a source pin, the merged commit recorded in
+`tools/fstar/version.txt` against the pin's `result=`), so neither a stale cache nor a silent
 upgrade can go unnoticed. The analyzer check runs again as its own job, where it needs no
 F\* and so reports a regression in minutes rather than after a verification run.
 

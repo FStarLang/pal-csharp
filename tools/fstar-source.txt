@@ -1,0 +1,14 @@
+# F* built from source, which takes precedence over tools/fstar-version.txt.
+#
+# FStarLang/FStar#4798 (native Pulse exceptions: raises/raise/try/catch) with
+# master merged in, so that everything else matches the nightly the repository
+# was upgraded to. The merge is replayed by tools/install-fstar.sh; both commits
+# are fixed so that the build is reproducible. Delete this file to return to the
+# nightly pinned in tools/fstar-version.txt.
+repo=https://github.com/FStarLang/FStar.git
+pr=4798
+commit=dae442be92f59010232789ec9d4eb4ce6fce6a5e
+merge=b09d608ca5a580ceebbb3ffae3d8cad4bbbfaf69
+z3=5.3.0
+# The merged HEAD the replay must produce (checked by install-fstar.sh and CI).
+result=b6b10e72d9cd42a56e5b09c25208de61119bf484
