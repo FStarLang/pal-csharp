@@ -51,7 +51,7 @@ fn read (#t: Type0) (s: S.slice t) (i: I32.t)
   returns  x : t
   ensures  rewrites_to x (Seq.index v (I32.v i))
 {
-  S.op_Array_Access s (idx i)
+  S.op_Dot_Lparen_Rparen s (idx i)
 }
 
 fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
@@ -59,7 +59,7 @@ fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
   requires S.pts_to s v
   ensures  S.pts_to s (Seq.upd v (I32.v i) x)
 {
-  S.op_Array_Assignment s (idx i) x
+  S.op_Dot_Lparen_Rparen_Less_Minus s (idx i) x
 }
 
 (* ---------------------------------------------------------------------- *)

@@ -64,6 +64,17 @@ public static class Adler32Variant
     [System.Diagnostics.Conditional("PAL")]
     public static void CongAdd(SpecInt a, SpecInt b, SpecInt c, SpecInt d) { }
 
+    // The step of the bound on `high`: the bound grows by `LOMAX` a byte, and `low`
+    // never exceeds it. Stated apart from the loop, where the solver meets it in a
+    // context of sequence and modular facts and does not find the linear proof.
+    [Lemma]
+    [Requires("1 <= k && k <= CHUNK")]
+    [Requires("low <= MOD - 1 + 255 * (CHUNK - (k - 1))")]
+    [Requires("high <= MOD - 1 + (CHUNK - k) * LOMAX")]
+    [Ensures("high + low <= MOD - 1 + (CHUNK - (k - 1)) * LOMAX")]
+    [System.Diagnostics.Conditional("PAL")]
+    public static void HighStep(SpecInt k, SpecInt low, SpecInt high) { }
+
     [Lemma]
     [Ensures("(a % MOD) % MOD == a % MOD")]
     [System.Diagnostics.Conditional("PAL")]
@@ -108,6 +119,7 @@ public static class Adler32Variant
                 low += (uint)(data[at++] & 0xff);
                 CongAdd(high, Hi(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at) - 1),
                        low, Lo(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at)));
+                HighStep(k, low, high);
                 high += low;
                 // Splitting the invariant's re-establishment into its conjuncts. The
                 // proof is the same one `Adler32` gives; stating the intermediate steps

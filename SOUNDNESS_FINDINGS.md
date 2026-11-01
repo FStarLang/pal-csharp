@@ -160,7 +160,7 @@ tests:
 | `-7 % 2` | `-1` | `1` |
 
 The *program* side was always faithful: `CodeEmitter` emits `I32.div`, which is
-`FStar.Int.op_Slash_Subtraction`, the truncating division ("Multiplicative operator
+`FStar.Int.( /- )`, the truncating division ("Multiplicative operator
 semantics, see C11 6.5.5"). The *specification* side emitted F*'s `/` and `%`. So a
 contract written in C# syntax meant something the C# does not, and the divergence is
 invisible: both readings are spelled `x / 2`, and they part company only at a sign the
@@ -201,7 +201,7 @@ rounding, so this was an undocumented discrepancy rather than a considered choic
 
 ### The fix
 
-`Pulse.Lib.CSharp.Arith` gains `cdiv` (`FStar.Int.op_Slash_Subtraction`) and `crem`
+`Pulse.Lib.CSharp.Arith` gains `cdiv` (`FStar.Int.( /- )`) and `crem`
 (`a - cdiv a b * b`), plus `SMTPat` lemmas `cdiv_nonneg` / `crem_nonneg` identifying them
 with F*'s operators on non-negative operands, and `cdiv_crem` for the division identity.
 

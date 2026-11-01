@@ -684,10 +684,140 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         }
 
         var keyword = q.IsForall ? "forall" : "exists";
+        var body = AsProp(Emit(q.Body, inner));
         return new Term(
-            $"({keyword} {string.Join(" ", binders)}. {AsProp(Emit(q.Body, inner))})",
+            $"({keyword} {string.Join(" ", binders)}.{Pattern(q, inner)} {body})",
             TermKind.Prop);
     }
+
+    /// <summary>
+    /// R6.7b. The SMT trigger of a quantifier, chosen from its body the way a reader would
+    /// choose it: the uninterpreted applications — element reads, sequence indexing and
+    /// <c>[Spec]</c> calls — whose arguments are bound variables or other such terms.
+    ///
+    /// <para>F* encodes a <c>prop</c>-valued definition's body as a native SMT quantifier
+    /// (FStarLang/FStar#4519), so a <c>[Spec]</c> function such as <c>Sorted</c> reaches the
+    /// solver as a <c>forall</c> with no pattern, and Z3 is free to pick one that fires on
+    /// every integer in the context. Inside a loop over an array that is enough to time
+    /// out a goal as small as <c>j - 1 + 1 &lt;&lt; j + 1</c>. Naming the pattern
+    /// instantiates the quantifier only at the reads the proof actually makes.</para>
+    ///
+    /// <para>Every term that covers all binders on its own is offered as an alternative;
+    /// failing that, one multi-pattern is assembled greedily. A quantifier with no
+    /// covering set of terms is left to the solver, as before.</para>
+    /// </summary>
+    private string Pattern(IrQuantifier q, SpecScope inner)
+    {
+        var bound = new HashSet<string>(q.Binders.Select(b => b.Name));
+        // The body has already been emitted, with its diagnostics; a candidate is emitted
+        // a second time only to learn its text, and must not report anything twice. One
+        // that would not emit cleanly is not a trigger.
+        var probeBag = new DiagnosticBag();
+        var probe = new SpecEmitter(probeBag) { Bases = Bases };
+        var candidates = new List<(string Text, HashSet<string> Covers)>();
+        var seen = new HashSet<string>();
+        Collect(q.Body, inner);
+
+        if (candidates.Count == 0) return "";
+
+        var singles = candidates.Where(c => c.Covers.SetEquals(bound)).Select(c => c.Text).ToList();
+        if (singles.Count > 0)
+            return "{:pattern " + string.Join(" \\/ ", singles) + "}";
+
+        var chosen = new List<string>();
+        var covered = new HashSet<string>();
+        foreach (var c in candidates.OrderByDescending(c => c.Covers.Count))
+        {
+            if (c.Covers.IsSubsetOf(covered)) continue;
+            chosen.Add(c.Text);
+            covered.UnionWith(c.Covers);
+            if (covered.SetEquals(bound)) break;
+        }
+        return covered.SetEquals(bound) ? "{:pattern " + string.Join("; ", chosen) + "}" : "";
+
+        void Collect(IrExpr? e, SpecScope s)
+        {
+            switch (e)
+            {
+                case null:
+                    return;
+                case IrElement or IrSeqOp { Op: SeqOpKind.Index } or IrCall { Kind: CalleeKind.Spec }
+                    when Mentions(e) is { Count: > 0 } covers && Triggerable(e, s):
+                {
+                    // Emitted in the scope it occurs in, so the pattern is textually the
+                    // term the body contains — `Old(a[k])` is the pre-state read.
+                    var errors = probeBag.Items.Length;
+                    var text = probe.Emit(e, s).Text;
+                    if (probeBag.Items.Length == errors && seen.Add(text))
+                        candidates.Add((text, covers));
+                    break;
+                }
+                case IrOld o when s.Pre is { } pre:
+                    Collect(o.Operand, pre);
+                    return;
+                // A nested quantifier's terms may mention its own binders; they are its
+                // triggers, not this one's.
+                case IrQuantifier:
+                    return;
+            }
+            foreach (var child in Children(e)) Collect(child, s);
+        }
+
+        HashSet<string> Mentions(IrExpr e)
+        {
+            var found = new HashSet<string>();
+            Visit(e);
+            return found;
+
+            void Visit(IrExpr? x)
+            {
+                if (x is IrVar v && bound.Contains(v.Name)) found.Add(v.Name);
+                if (x is IrQuantifier) return;
+                foreach (var c in Children(x)) Visit(c);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a term may appear in an SMT pattern: no interpreted symbol (arithmetic, a
+    /// comparison, a connective, a conditional) anywhere in it, and no conversion that
+    /// emits one (R13.2's truncation is a <c>%</c>).
+    /// </summary>
+    private static bool Triggerable(IrExpr e, SpecScope scope) => e switch
+    {
+        IrVar => true,
+        IrLiteral { Value: not bool } => true,
+        IrOld o => scope.Pre is not null && Triggerable(o.Operand, scope),
+        IrContents c => Triggerable(c.Array, scope),
+        IrLength l => Triggerable(l.Array, scope),
+        IrElement el => Triggerable(el.Array, scope) && Triggerable(el.Index, scope),
+        IrSeqOp { Op: SeqOpKind.Index or SeqOpKind.Length or SeqOpKind.SetAt } s
+            => s.Args.All(a => Triggerable(a, scope)),
+        IrCall { Kind: CalleeKind.Spec } call => call.Args.All(a => Triggerable(a, scope)),
+        IrConvert { Operand.Type: IrPrim { Kind: var src }, Target: IrPrim { Kind: var dst } } cv
+            => (src == dst || Types.RangeFits(src, dst)) && Triggerable(cv.Operand, scope),
+        _ => false,
+    };
+
+    private static IEnumerable<IrExpr> Children(IrExpr? e) => e switch
+    {
+        IrUnary u => [u.Operand],
+        IrBinary b => [b.Left, b.Right],
+        IrConditional c => [c.Cond, c.Then, c.Else],
+        IrElement el => [el.Array, el.Index],
+        IrLength l => [l.Array],
+        IrContents ct => [ct.Array],
+        IrField f => [f.Receiver],
+        IrObserve o => [o.Receiver],
+        IrConvert cv => [cv.Operand],
+        IrOld o => [o.Operand],
+        IrQuantifier q => [q.Body],
+        IrCall call => call.Args,
+        IrSeqOp s => s.Args,
+        IrListOp l => l.Args,
+        IrSpecOp o => o.Args,
+        _ => [],
+    };
 
     /// <summary>
     /// A spec-position argument: mathematical for integers, the sequence for arrays

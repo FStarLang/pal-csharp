@@ -118,6 +118,28 @@ public static class Adler32
     /// </summary>
     public const uint S1MAX = 1034520;
 
+    /// <summary>One byte's worth of the comment's first claim: <c>s1</c> gains at most 255.</summary>
+    [Lemma]
+    [Requires("1 <= n && n <= NMAX && 0 <= b && b <= 255")]
+    [Requires("s1 <= BASE - 1 + 255 * (NMAX - n)")]
+    [Ensures("s1 + b <= BASE - 1 + 255 * (NMAX - (n - 1))")]
+    [System.Diagnostics.Conditional("PAL")]
+    public static void S1Step(SpecInt n, SpecInt s1, SpecInt b) { }
+
+    /// <summary>
+    /// One byte's worth of the comment's second claim: <c>s2</c>'s bound grows by
+    /// <see cref="S1MAX"/>, and <c>s1</c> never exceeds it. Stated apart from the loop,
+    /// where the solver meets it among sequence and modular facts and does not find the
+    /// linear proof on its own.
+    /// </summary>
+    [Lemma]
+    [Requires("1 <= n && n <= NMAX")]
+    [Requires("s1 <= BASE - 1 + 255 * (NMAX - (n - 1))")]
+    [Requires("s2 <= BASE - 1 + (NMAX - n) * S1MAX")]
+    [Ensures("s2 + s1 <= BASE - 1 + (NMAX - (n - 1)) * S1MAX")]
+    [System.Diagnostics.Conditional("PAL")]
+    public static void S2Step(SpecInt n, SpecInt s1, SpecInt s2) { }
+
     [Requires("0 <= offset && 0 <= count && offset + count <= buf.Length")]
     [Requires("s1In == 1 && s2In == 0")]
     [Ensures("Contents(buf) == Old(Contents(buf))")]
@@ -170,6 +192,7 @@ public static class Adler32
                 Step(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset));
                 ModAdd(s1, A1(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset)),
                        Pal.Contents(buf)[offset], Pal.Contents(buf)[offset]);
+                S1Step(n, s1, Pal.Contents(buf)[offset]);
                 s1 = s1 + (uint)(buf[offset++] & 0xff);
                 // `s1` is only *congruent* to the specification's unreduced accumulator,
                 // never equal to it, so the step that adds `s1` to `s2` must be justified
@@ -177,6 +200,7 @@ public static class Adler32
                 // has just established for `s1`.
                 ModAdd(s2, A2(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset) - 1),
                        s1, A1(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset)));
+                S2Step(n, s1, s2);
                 s2 = s2 + s1;
                 n--;
             }

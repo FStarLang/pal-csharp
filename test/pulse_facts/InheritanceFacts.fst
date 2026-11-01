@@ -210,8 +210,11 @@ let stt_is_type0_at_any_result_universe : Type0 =
 ///
 ///      Every virtual call the emitter produces is a projection out of a vtable, so
 ///      this shape is forced on the rule, not a matter of taste.
+///
+///      No longer true as of nightly-2026-10-31: Pulse now runs the projected
+///      computation in place, so the body below verifies and is kept as a positive
+///      check. The emitter still let-binds the slot, which is correct either way.
 
-[@@expect_failure]
 fn dispatch_without_let_binding (s: shape) (#p: perm) (#m: erased shape__model)
   preserves shape__inv s #p m
   returns v: I32.t

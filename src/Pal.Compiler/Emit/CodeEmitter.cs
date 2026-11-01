@@ -1609,7 +1609,7 @@ public sealed class CodeEmitter(
         }
 
         var updated =
-            $"{{ {Path(root, field.Receiver, loc)} with {Names.Projection(named.Name, field.Field)} = {value} }}";
+            $"({{ {Path(root, field.Receiver, loc)} with {Names.Projection(named.Name, field.Field)} = {value} }})";
         return Update(root, field.Receiver, updated, loc);
     }
 
@@ -1695,7 +1695,7 @@ public sealed class CodeEmitter(
         var flds = al.Record.Fields.Select((f, i) =>
             (i == 0 ? Names.ClassProjection(al.Class, f.Field) : Names.Field(f.Field))
             + " = " + Inject(f.FieldType, f.Value, Expr(f.Value)));
-        return "{ " + string.Join("; ", flds) + " }";
+        return "({ " + string.Join("; ", flds) + " })";
     }
 
     private IrType? FieldType(IrClassType owner, string field) =>
@@ -2483,7 +2483,8 @@ public sealed class CodeEmitter(
                 var fields = n.Fields.Select((f, i) =>
                     (i == 0 ? Names.Projection(n.Struct, f.Field) : Names.Field(f.Field))
                     + " = " + Expr(f.Value)).ToImmutableArray();
-                return "{ " + string.Join("; ", fields) + " }";
+                // Parenthesised: in statement position Pulse reads a bare `{ … }` as a block.
+                return "({ " + string.Join("; ", fields) + " })";
             }
 
             case IrUnary u:

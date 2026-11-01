@@ -100,7 +100,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F3 | A `decreases` measure **may dereference mutable locals** (`!i`), but **may not** mention invariant-bound existentials. | `Pulse.Lib.Array.fst:49`, `Pulse.Lib.ArrayPtr.fst:385`; local `W3.fst` failed with `reveal v`, succeeded with `!i`. |
 | F4 | Pulse source requires the `#lang-pulse` pragma after the module header and `open`s. | `pal/pulse/Pulse.Lib.C.Array.fst:9`; local `Smoke.fst`, verified. |
 | F5 | The F* binary release bundles Pulse; no separate install is needed. | `tools/fstar/lib/fstar/pulse/` present after `make tools`. |
-| F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the insertion-sort probe (`test/probe_insertion_sort`): both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Array_Access` and PAL's `array_read_all` do the same. |
+| F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the insertion-sort probe (`test/probe_insertion_sort`): both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Dot_Lparen_Rparen` and PAL's `array_read_all` do the same. |
 | F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
 | F8 | A **stateful block may appear in term position**, as the scrutinee of a `let`: `let t = if (c) { <stateful block> } else { e };` is well-formed Pulse. This is what makes the short-circuit rule R6.3 compositional — the same lowering serves a loop guard, an `if` condition and an assignment right-hand side, with no context-dependent special case. | `test/pulse_facts/PulseFacts.fst:short_circuit_in_term_position`, verified; relied on by every generated short-circuit. |
 | F9 | A `decreases` measure may dereference a mutable local, but **not underneath an `if`**. `decreases (if !b then 0 else I32.v !r)` is rejected with "Expected type `FStar.Int32.t` but `!r` has type `fn …`", because the `!` sugar is elaborated only outside the branches. A conditional measure must keep its dereferences out of the branches. | `test/pulse_facts/PulseFacts.fst:decreases_conditional_without_deref`, verified; the failing form was reproduced while writing `test/binary_search`. |
@@ -125,7 +125,7 @@ The rules below depend on the following, each **verified against the pinned tool
 | F28 | **A vtable cannot be a `Box` payload.** `slprop : Type u#4`, so a record with an invariant field lives far above `Type0` — and `Box` needs a `Type0`. So an object reference cannot simply be a box of its vtable, which is what forces F29's `dyn`. (F28b: the restriction is `Box`'s, not Pulse's — a *plain* record is unaffected.) | `test/pulse_facts/InheritanceFacts.fst:49-82`, verified. Relied on by R9.8. |
 | F29 | **`FStar.Dyn.dyn : Type0`, and `mkdyn` is universe-polymorphic.** Lowering a vtable-carrying object into `dyn` puts it back in `Type0`, so a reference into a hierarchy is boxable, arrayable and legal as a field. `mkdyn` is *not* injective (it cannot be, on pain of Cantor), which is the source of every remaining difficulty. | `test/pulse_facts/InheritanceFacts.fst:84-96`, verified. Relied on by R9.8, R9.11. |
 | F30 | **`FStar.Dyn.undyn` cannot be called from Pulse.** It is in `Dv`, and `Dv` results cannot be equated in specifications, so recovering the object needs an axiom (`recover`) rather than a definition. It must be stated in `stt`, not `stt_div`: `stt_div a emp post` is inhabited for *every* `post` (F30b, verified by a hang), so an `stt_div` axiom would be free and worthless. (F30c: `stt` itself is a `Type0`.) | `test/pulse_facts/InheritanceFacts.fst:113-201`, verified. Relied on by R9.9, §8.4's one assumption. |
-| F31 | **A stored Pulse computation must be let-bound before it is applied.** `ob.pkg.area x` does not run; `let f = ob.pkg.area in f x` does. Pulse runs an `stt`-valued term only as the head of an application. | `test/pulse_facts/InheritanceFacts.fst:203-256`, both polarities verified. Relied on by R9.12. |
+| F31 | **A stored Pulse computation must be let-bound before it is applied.** `ob.pkg.area x` does not run; `let f = ob.pkg.area in f x` does. Pulse runs an `stt`-valued term only as the head of an application. | `test/pulse_facts/InheritanceFacts.fst:203-256`. Held up to nightly-2026-08-05; since nightly-2026-10-31 Pulse also runs `ob.pkg.area x` directly, and both forms verify. The emitter keeps the let-binding, which is valid on both. Relied on by R9.12. |
 | F32 | **The model may not be fixed per hierarchy.** A vtable fixes one model type, but a subclass needs its own; the base invariant existentially quantifies the subclass model and relates it by a pure forgetting function. This is R3.9's abstraction function one level up. | `test/pulse_facts/InheritanceFacts.fst:257-316`, verified. Relied on by R9.5, R9.6. |
 | F33 | **A pack site must eta-expand every vtable slot.** F21 gives every class invariant a meta-argument-defaulted permission binder, which does not match a vtable field type until the slot is eta-expanded. | `test/pulse_facts/InheritanceFacts.fst:317-340`, verified. Relied on by R9.13. |
 | F34 | **An upcast moves no memory.** `Shape s = c;` is a pure re-reading of the same reference, so it is a `ghost fn` and free at runtime — which is what C# requires of a reference conversion. | `test/pulse_facts/InheritanceFacts.fst:341+`, verified. Relied on by R9.14. |
@@ -178,6 +178,8 @@ The rules below depend on the following, each **verified against the pinned tool
 | F81 | **A receipt may not be indexed by `SZ.t` if its bounds are `exists*`-bound.** `Pulse.Lib.Slice.subslice_rest` carries the refinement `SZ.v i <= SZ.v j /\ SZ.v j <= Seq.length v`, which cannot be discharged for bounds bound by an existential — the receipt fails to typecheck. Putting the refinement in a `pure` *inside* the `exists*` does not help: it is not available where `subslice_rest` is typed. The fix is to inline `subslice_rest` into a predicate indexed by `nat`, moving the refinement onto that predicate's own binder. | `pulse/Pulse.Lib.CSharp.Span.fst`'s internal `rest`; found while writing `is_range_of`. Relied on by R17.5. |
 | F82 | **A `fold` does not normalise its indices.** `fold (rest s w p (I32.v i) …)` fails against a context holding `rest s w p (SZ.v lo) …` even where `SZ.v lo == I32.v i` is known to SMT; an explicit `rewrite … as …` first is required. F77 in a second guise, and the reason the library's borrow operations are written with a `rewrite` before each `fold`. | `pulse/Pulse.Lib.CSharp.Span.fst`, `intro_rest`. |
 | F83 | **A pure lemma must be called before the resource step it supports, not after.** `splice_same v i j; restore_range w;` verifies; the reverse order does not — the resource match happens first and has already failed by the time the lemma runs. Erased arguments must be passed `(reveal v)` explicitly. | `test/pulse_facts/SliceFacts.fst:s9_read_only_trip`. |
+| F84 | **A `prop`-valued definition's body reaches Z3 as native quantifiers (FStarLang/FStar#4519, since nightly-2026-10-31), so its `forall` needs a pattern.** Without one Z3 chooses its own trigger: a `[Spec]` `Sorted` over a sequence was instantiated ~20k times per query, and inside the loop that sorts the sequence even the decreases check `j - 1 + 1 << j + 1` timed out. Adding "the natural patterns" — the element reads — fixed it at the default rlimit, as it did F*'s own ulib. Hence R6.7b. | `test/insertion_sort_sorted`, verified at the default rlimit with R6.7b and not without it. |
+| F85 | **A record literal in a Pulse statement or tail position must be parenthesised (since nightly-2026-10-31).** `{ M.f = …; … }` there is read as a block and fails with "Module name M … not in scope"; as a `let` right-hand side, or as `({ … })` anywhere, it is a record. The emitter parenthesises every record literal and functional update. | `test/pulse_facts/StructFacts.fst`, `test/point_struct`. |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -2041,7 +2043,7 @@ sign the reader was not thinking about.
 In spec position, therefore, `e₁ / e₂` ⟶ `CA.cdiv ⟦e₁⟧ ⟦e₂⟧` and `e₁ % e₂` ⟶
 `CA.crem ⟦e₁⟧ ⟦e₂⟧` **when both operands are machine integers and at least one is
 signed** — the only configuration in which the divergence is reachable. `CA.cdiv` is
-`FStar.Int.op_Slash_Subtraction`, the truncating division, and `CA.crem a b` is
+`FStar.Int.( /- )`, the truncating division, and `CA.crem a b` is
 `a - (cdiv a b) * b`. Both live in `Pulse.Lib.CSharp.Arith` (§0 rule 3: a fact about
 integers is filed under arithmetic, not under the first client that wanted it). Otherwise
 the operators are F*'s own:
@@ -2054,7 +2056,7 @@ the operators are F*'s own:
 `CA.cdiv_nonneg` and `CA.crem_nonneg` are `SMTPat` lemmas identifying the two on
 non-negative operands, which is where most specifications live; `CA.cdiv_crem` gives the
 division identity. In code position nothing changes: `I32.div` was always
-`FStar.Int.op_Slash_Subtraction`, so the *program* side was faithful throughout. It was
+`FStar.Int.( /- )`, so the *program* side was faithful throughout. It was
 the specification side that read C# syntax with F*'s meaning, and a method computing
 floor division could carry `[Ensures("Result == x / 2")]` and be believed
 (`test/pulse_refusals/cases/FloorDivContract.cs`; `test/spec_division` pins both sides).
@@ -2122,6 +2124,16 @@ A quantifier binder is bound *outside* both program states, so it is in scope on
 sides of `Old`: under `forall (int k)`, `Old(a[k])` reads the pre-state array at the
 same `k` the postcondition speaks of. Emit therefore extends the pre-state scope with
 the binder as well as the current one.
+
+**R6.7b (triggers).** Each quantifier carries an SMT pattern inferred from its body: the
+element reads `a[k]`, sequence indexings and `[Spec]` calls whose arguments are binders,
+literals, `Old`, `Contents`, lengths, widening conversions or further such terms — never
+arithmetic, a comparison or a connective, which are interpreted and illegal in a pattern.
+If some terms each mention every binder, the pattern is their disjunction
+(`{:pattern t1 \/ t2}`); otherwise one multi-pattern covering every binder is assembled
+greedily (`{:pattern (Seq.index s i); (Seq.index s j)}`). A quantifier with no covering set
+is emitted without a pattern, as before. A nested quantifier's terms are its own triggers,
+not the enclosing one's. F84 is why this is needed.
 
 **R6.7a (sequence vocabulary).** `Pal.Slice(s, i, j)` ⟶ `Seq.slice ⟦s⟧ ⟦i⟧ ⟦j⟧`,
 `Pal.SetAt(s, i, v)` ⟶ `Seq.upd`, `Pal.IsPermutation` ⟶ `CS.is_permutation`, and

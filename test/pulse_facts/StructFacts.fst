@@ -62,5 +62,5 @@ requires emp
 returns  r: struct_Iv
 ensures  pure (I32.v r.fld_Lo == 0)
 {
-  { StructFacts.fld_Lo = 0l; fld_Hi = 0l }
+  ({ StructFacts.fld_Lo = 0l; fld_Hi = 0l })
 }

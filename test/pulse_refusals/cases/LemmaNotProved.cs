@@ -1,4 +1,4 @@
-// EXPECT-PULSE: Could not prove post-condition
+// EXPECT-PULSE: Failed to prove: FStar.Int32.v (FStar.Seq.Base.index var_s (FStar.Int32.v var_i)) == 0
 // R4.7. A `[Lemma]` is a proof obligation, not a declaration. This is the case that says so,
 // and it is the most load-bearing one in the directory: if a lemma's body were admitted
 // rather than checked, every other proof in the system would rest on whatever its author

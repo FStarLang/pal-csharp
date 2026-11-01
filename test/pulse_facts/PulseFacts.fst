@@ -31,7 +31,7 @@ ensures exists* s'. A.pts_to a s' ** pure (s' == reveal s)
   let mut i = 0sz;
   while (
     let iv = !i;
-    if (SZ.lt iv n) { let x = A.op_Array_Access a iv; (x > 0) } else { false }
+    if (SZ.lt iv n) { let x = A.op_Dot_Lparen_Rparen a iv; (x > 0) } else { false }
   )
   invariant exists* v. R.pts_to i v ** A.pts_to a s ** pure (SZ.v v <= SZ.v n)
   decreases (SZ.v n - SZ.v !i)

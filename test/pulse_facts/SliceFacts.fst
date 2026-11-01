@@ -57,7 +57,7 @@ fn s1_read_only (#t: Type0) (s: S.slice t) (i: SZ.t) (#p: perm)
   returns  x : t
   ensures  pure (x == Seq.index v (SZ.v i))
 {
-  S.op_Array_Access s i
+  S.op_Dot_Lparen_Rparen s i
 }
 
 /// The full-permission shape -- `Span<T>`, the `array_pts_to_full` row.
@@ -66,7 +66,7 @@ fn s1_write (#t: Type0) (s: S.slice t) (i: SZ.t) (x: t)
   requires S.pts_to s v
   ensures  S.pts_to s (Seq.upd v (SZ.v i) x)
 {
-  S.op_Array_Assignment s i x
+  S.op_Dot_Lparen_Rparen_Less_Minus s i x
 }
 
 /// The length is `SZ.t` and is *not* ghost, so `for (int k = 0; k < s.Length; k++)` has a
@@ -156,7 +156,7 @@ fn s3_lend_and_redeem (#t: Type0) (a: A.array t) (n: SZ.t) (i: SZ.t) (x: t)
   ensures  A.pts_to a (Seq.upd v (SZ.v i) x)
 {
   let s = S.from_array a n;
-  S.op_Array_Assignment s i x;
+  S.op_Dot_Lparen_Rparen_Less_Minus s i x;
   S.to_array s;
 }
 
@@ -181,10 +181,10 @@ fn s4_copy_is_alias (#t: Type0) (s: S.slice t) (i: SZ.t) (x: t)
 {
   let s2 = s;
   rewrite (S.pts_to s v) as (S.pts_to s2 v);
-  S.op_Array_Assignment s2 i x;
+  S.op_Dot_Lparen_Rparen_Less_Minus s2 i x;
   with v2. assert (S.pts_to s2 v2);
   rewrite (S.pts_to s2 v2) as (S.pts_to s v2);
-  S.op_Array_Access s i
+  S.op_Dot_Lparen_Rparen s i
 }
 
 /// The safe form of the same thing, and the reason `ReadOnlySpan<T>` is the easier half:
@@ -312,7 +312,7 @@ fn s8_restore_by_unification (#t: Type0) (s: S.slice t) (i j: SZ.t) (x: t)
 {
   let w = S.subslice s i j;
   S.pts_to_len w;
-  S.op_Array_Assignment w 0sz x;
+  S.op_Dot_Lparen_Rparen_Less_Minus w 0sz x;
   give_back w;
 }
 
@@ -383,7 +383,7 @@ fn s9_round_trip (#t: Type0) (a: A.array t) (n: SZ.t) (i j: SZ.t) (x: t)
 {
   let w = take_range a n i j;
   S.pts_to_len w;
-  S.op_Array_Assignment w 0sz x;
+  S.op_Dot_Lparen_Rparen_Less_Minus w 0sz x;
   restore_range w;
 }
 

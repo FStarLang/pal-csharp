@@ -71,13 +71,13 @@ let mod_one_period_apart (len: pos) (x: nat) (y: nat)
 // written in C# syntax has to mean the C# — otherwise `Result == x / 2` is a claim the
 // reader and the prover disagree about, and the disagreement is invisible.
 //
-// `FStar.Int.op_Slash_Subtraction` is ulib's truncating division, defined for exactly
+// `FStar.Int.( /- )` is ulib's truncating division, defined for exactly
 // this reason ("Multiplicative operator semantics, see C11 6.5.5"); C# 6.5.5's is the
 // same. `crem` is the remainder that goes with it, which is how C# defines `%` too.
 // ---------------------------------------------------------------------------
 
 /// C#'s `/`: division truncating toward zero (ECMA-334 §12.10.3).
-let cdiv (a: int) (b: int { b <> 0 }) : int = FStar.Int.op_Slash_Subtraction a b
+let cdiv (a: int) (b: int { b <> 0 }) : int = FStar.Int.(a /- b)
 
 /// C#'s `%`: the remainder that pairs with `cdiv`, so `(a/b)*b + a%b == a` and the sign
 /// of the result is the sign of the dividend (ECMA-334 §12.10.4).
