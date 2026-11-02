@@ -32,7 +32,11 @@ public readonly record struct Term(string Text, TermKind Kind, IrType? Type = nu
 /// <summary>Naming conventions (doc/translation.md R2.1).</summary>
 public static class Names
 {
-    public static string Local(string name) => "var_" + name;
+    /// <summary>
+    /// A C# variable. One named <c>result</c> would be the <c>returns</c> binder (R4.4),
+    /// so it is primed: a prime cannot occur in a C# identifier.
+    /// </summary>
+    public static string Local(string name) => name == "result" ? "var_result'" : "var_" + name;
     public static string Argument(string name) => "arg_" + name;
     public static string Function(string name) => "func_" + name;
     public static string SpecFunction(string name) => "spec_" + name;

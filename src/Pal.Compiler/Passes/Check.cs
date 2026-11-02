@@ -553,6 +553,7 @@ public static class Check
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],
+            IrRaise ra => [ra.Exception],
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],

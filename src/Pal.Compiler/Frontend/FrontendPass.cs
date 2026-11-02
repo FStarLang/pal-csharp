@@ -1451,6 +1451,7 @@ public static partial class FrontendPass
                 case IrObserve o: Walk(o.Receiver); return;
                 case IrConvert cv: Walk(cv.Operand); return;
                 case IrStmtExpr se: Walk(se.Value); return;
+                case IrRaise ra: Walk(ra.Exception); return;
                 case IrOld o2: Walk(o2.Operand); return;
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); return;
@@ -2090,7 +2091,7 @@ public static partial class FrontendPass
         // R20.12. A receiver-free method's contract may name the receiver's readonly fields
         // it takes, by their own names -- unless a parameter shadows one, as in C#.
         foreach (var f in ContextNames(symbol, compilation, known).Values)
-            result.Add(new SpecParam(f.Name, f.Type));
+            result.Add(new SpecParam(f.Name, Declarations.ContextType(f)));
 
         if (wantsResult && !symbol.ReturnsVoid)
             result.Add(new SpecParam(SpecBinder.ResultParameter, symbol.ReturnType));
@@ -2117,7 +2118,7 @@ public static partial class FrontendPass
         // R20.12. A receiver-free method takes the receiver's readonly fields it reads.
         if (Declarations.IsReceiverFree(symbol, known))
             parameters = [.. parameters, .. Declarations.ContextFields(symbol.ContainingType, model.Compilation, known)
-                .Select(f => new IrParam(loc, Declarations.ContextName(f), known.MapType(f.Type)!, ParamMode.Value) { IsContext = true })];
+                .Select(f => new IrParam(loc, Declarations.ContextName(f), known.MapType(Declarations.ContextType(f))!, ParamMode.Value) { IsContext = true })];
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet,
                         ContainingType: { } self } &&
@@ -2406,11 +2407,11 @@ public static partial class FrontendPass
     /// mentions. Each is bound by a parameter of the spec shim, which lives outside the
     /// class, so a private field binds too. A parameter of the method shadows a field.
     /// </summary>
-    private static ImmutableDictionary<string, IFieldSymbol> ContextNames(
+    private static ImmutableDictionary<string, ISymbol> ContextNames(
         IMethodSymbol symbol, Compilation compilation, WellKnown known)
     {
-        if (!Declarations.IsReceiverFree(symbol, known)) return ImmutableDictionary<string, IFieldSymbol>.Empty;
-        var result = ImmutableDictionary.CreateBuilder<string, IFieldSymbol>();
+        if (!Declarations.IsReceiverFree(symbol, known)) return ImmutableDictionary<string, ISymbol>.Empty;
+        var result = ImmutableDictionary.CreateBuilder<string, ISymbol>();
         foreach (var f in Declarations.ContextFields(symbol.ContainingType, compilation, known))
             result[f.Name] = f;
         foreach (var f in Declarations.ContractStatics(symbol, known))

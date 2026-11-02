@@ -28,15 +28,22 @@ OUT        ?= out
 CACHE_DIR  ?= _cache
 
 SOURCES    ?= $(sort $(wildcard *.cs))
+# More F* include directories: a harness whose contract is an F* development kept beside it.
+EXTRA_INCLUDES ?=
+# The modules of that development, checked by its own build: used, never re-checked here.
+# Comma-separated, as F*'s `--already_cached` takes them.
+EXTRA_CACHED ?=
+comma := ,
 
 # `--message_format json` so that a failure can be read by `palcs report` and said again
 # against the C# it came from. F* still prints nothing else, so a passing run is as quiet
 # as it ever was; the pipeline below only has work to do when there is a failure.
 FSTAR_OPTIONS := --message_format json \
                  --cache_checked_modules --cache_dir $(CACHE_DIR) \
-                 --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
+                 --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore$(if $(EXTRA_CACHED),$(comma)$(EXTRA_CACHED))' \
                  --include $(CACHE_DIR) --include $(OUT) \
-                 --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR)
+                 --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR) \
+                 $(foreach d,$(EXTRA_INCLUDES),--include $(d))
 
 .PHONY: all cs translate verify _verify clean
 

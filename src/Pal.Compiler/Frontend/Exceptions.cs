@@ -33,7 +33,17 @@ public static partial class FrontendPass
         foreach (var s in symbols.OrderBy(Depth).ThenBy(s => s.Name, StringComparer.Ordinal))
         {
             if (done.ContainsKey(s)) continue;
-            var lowered = LowerException(compilation, s, known, done, diagnostics);
+            // R20.1b. Under `[TranslateAnnotatedOnly]` an exception class whose payload does
+            // not translate is not refused: like any class the annotations do not reach, it
+            // is simply not translated, and a use of it in translated code is refused there.
+            var bag = known.AnnotatedOnly ? new DiagnosticBag() : diagnostics;
+            var lowered = LowerException(compilation, s, known, done, bag);
+            if (known.AnnotatedOnly && bag.HasErrors)
+            {
+                known.SkipException(s);
+                continue;
+            }
+            foreach (var d in bag == diagnostics ? [] : bag.Items) diagnostics.Add(d);
             if (lowered is null) continue;
             done[s] = lowered;
             result.Add(lowered);

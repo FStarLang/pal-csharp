@@ -1442,6 +1442,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrQuantifier q: CollectExpr(q.Body); return;
                 case IrConvert cv: CollectExpr(cv.Operand); return;
                 case IrStmtExpr se: foreach (var s in se.Prelude) Collect(s); CollectExpr(se.Value); return;
+                case IrOptionOp oo: CollectExpr(oo.Operand); return;
+                case IrRaise ra: CollectExpr(ra.Exception); return;
                 default: return;
             }
         }

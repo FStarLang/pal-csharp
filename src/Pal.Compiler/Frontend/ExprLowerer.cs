@@ -17,7 +17,7 @@ namespace Pal.Compiler.Frontend;
 /// maps one C# construct to one IR construct.
 /// </para>
 /// </summary>
-public sealed class ExprLowerer(SemanticModel model, WellKnown known, DiagnosticBag diagnostics, bool specPosition)
+public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, DiagnosticBag diagnostics, bool specPosition)
 {
     /// <summary>
     /// True when lowering a specification. In spec position arithmetic is mathematical
@@ -59,8 +59,12 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     private bool _inImplicitBorrow;
 
     private IrType? Declared(ExpressionSyntax node)
-    {        if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
+    {
+        if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
         var symbol = model.GetSymbolInfo(node).Symbol;
+        // R21.6. A pattern variable is the value it was bound to, at that value's type:
+        // `var` declares it nullable whatever it matched.
+        if (symbol is ILocalSymbol pl && _patternBindings.TryGetValue(pl, out var bound)) return bound.Type;
         var declared = symbol switch
         {
             ILocalSymbol l => l.Type,
@@ -122,6 +126,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.AsExpression) => LowerAs(b, loc),
             BinaryExpressionSyntax b => LowerBinary(b, loc),
             PrefixUnaryExpressionSyntax u => LowerPrefixUnary(u, loc),
             ConditionalExpressionSyntax c =>
@@ -148,6 +153,9 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                 SpanUnsupported("stackalloc", loc),
             ObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
             ImplicitObjectCreationExpressionSyntax o => LowerObjectCreation(o, loc),
+            IsPatternExpressionSyntax ip => LowerIsPattern(ip, loc),
+            SwitchExpressionSyntax sw => LowerSwitchExpression(sw, loc),
+            ThrowExpressionSyntax th => new IrRaise(loc, Lower(th.Expression)) { Type = known.MapType(info.ConvertedType) },
             _ => Unsupported(node, loc),
         };
 
@@ -156,6 +164,14 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         if (result is IrSpanCreate) type = known.MapType(info.ConvertedType) ?? type;
 
         if (type is not null) result = result with { Type = type };
+
+        // R21.9. A nullable variable C#'s flow analysis knows is not null, used where a
+        // non-nullable value is expected, is its value: `Some?.v`, whose refinement F*
+        // proves from the same tests C# drew the conclusion from.
+        if (type is IrOptionType declaredOption && info.ConvertedType is { } narrowedTo &&
+            known.MapType(narrowedTo) is { } narrowed and not IrOptionType &&
+            narrowed.Equals(declaredOption.Inner))
+            result = NonNull(result);
 
         // R20.9. A constant at an `option` type -- an oblivious `string` constant -- is a
         // value that is there: `Some` of it.
@@ -265,6 +281,36 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R21.1. A case record is built by its F* constructor.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol caseType &&
+            known.CaseConstructor(caseType) is { } caseCtor)
+        {
+            if (node.Initializer is not null || known.CaseComponents(caseType).IsDefault)
+                return Unsupported(node, loc);
+            var caseArgs = (node.ArgumentList?.Arguments ?? default).Select(a => Lower(a.Expression)).ToImmutableArray();
+            return new IrSpecOp(loc, caseCtor, caseArgs)
+            {
+                ParamTypes = model.GetSymbolInfo(node).Symbol is IMethodSymbol cm
+                    ? Declarations.ParamTypes(cm, known, receiver: false)
+                    : [],
+            };
+        }
+
+        // R21.7. An exception the BCL declares, built from constants.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol libExn && known.IsLibraryException(libExn))
+        {
+            var args = node.ArgumentList?.Arguments ?? default;
+            if (node.Initializer is not null ||
+                args.Any(a => !model.GetConstantValue(a.Expression).HasValue))
+            {
+                diagnostics.Error("PALCS0628", loc,
+                    $"`{Trim(node)}`. An exception the BCL declares translates when it is built " +
+                    "from constants: its message is not modelled (doc/translation.md R21.7).");
+                return new IrLiteral(loc, null);
+            }
+            return LibraryException(loc, libExn.ToDisplayString());
+        }
+
         // R20.7. A `[SpecOp]` constructor of a specification type is an application of its
         // function to the arguments.
         if (model.GetSymbolInfo(node).Symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } specCtor &&
@@ -605,6 +651,10 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
                     ? known.TypeArguments(generic) : [],
             };
 
+        // R21.2. A component of a case record.
+        if (symbol is IPropertySymbol prop && args.Length == 1 && Projection(prop, args[0], loc) is { } projected)
+            return projected;
+
         if (symbol is not null &&
             Declarations.Find(symbol, known.SpecCtorAttribute) is { } data &&
             Declarations.StringArgument(data) is { } ctor)
@@ -705,13 +755,13 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// R20.12. In a contract, the shim parameters that stand for the receiver's context
     /// fields, by field name.
     /// </summary>
-    public ImmutableDictionary<string, IFieldSymbol> ContextNames { get; init; } =
-        ImmutableDictionary<string, IFieldSymbol>.Empty;
+    public ImmutableDictionary<string, ISymbol> ContextNames { get; init; } =
+        ImmutableDictionary<string, ISymbol>.Empty;
 
     /// <summary>R20.12. A read of a receiver-free method's context field.</summary>
-    private IrExpr ContextRead(IFieldSymbol field) =>
+    private IrExpr ContextRead(ISymbol field) =>
         new IrVar(Locations.From(field.Locations.FirstOrDefault() ?? Location.None),
-                  Declarations.ContextName(field)) { Type = known.MapType(field.Type) };
+                  Declarations.ContextName(field)) { Type = known.MapType(Declarations.ContextType(field)) };
 
     /// <summary>R14.2a. The method type parameters a <c>default</c> was taken at.</summary>
     public HashSet<string> DefaultedTypeParameters { get; } = [];
@@ -744,13 +794,24 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal))
             return new IrResult(loc);
 
+        // R21.3. A pattern variable is the expression it was bound to.
+        if (symbol is ILocalSymbol pl && _patternBindings.TryGetValue(pl, out var bound)) return bound;
+        if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
+            return new IrSpecOp(loc, enumCtor, []);
+
         return symbol switch
         {
             IParameterSymbol cp when ContextNames.TryGetValue(cp.Name, out var cf) &&
                 cp.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal) =>
-                cf.IsStatic
-                    ? StaticInitializer(cf, loc) ?? Unsupported(node, loc)
+                cf is IFieldSymbol { IsStatic: true } sf
+                    ? StaticInitializer(sf, loc) ?? Unsupported(node, loc)
                     : new IrVar(loc, Declarations.ContextName(cf)),
+            // R20.12a. A captured primary-constructor parameter, read by a method.
+            IParameterSymbol { ContainingSymbol: IMethodSymbol { MethodKind: MethodKind.Constructor, ContainingType: { } powner } } pp
+                when known.AnnotatedOnly && !known.HasModel(powner) &&
+                     model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol { MethodKind: not MethodKind.Constructor } &&
+                     Declarations.ContextFields(powner, model.Compilation, known)
+                         .Contains(pp, SymbolEqualityComparer.Default) => ContextRead(pp),
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
             IFieldSymbol { IsStatic: true, IsReadOnly: true } shared
@@ -803,6 +864,13 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         var receiverType = model.GetTypeInfo(node.Expression).Type;
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        // R21.8. A constant of a `[SpecType]` enum is its constructor.
+        if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
+            return new IrSpecOp(loc, enumCtor, []);
+        // R21.5. A static member bound to an F* term is that term.
+        if (symbol is IPropertySymbol { IsStatic: true } or IFieldSymbol { IsStatic: true } &&
+            known.SpecOpName(symbol) is { } staticOp)
+            return new IrSpecOp(loc, staticOp, []);
         if (symbol is IFieldSymbol { IsStatic: true, IsReadOnly: true } shared &&
             StaticInitializer(shared, loc) is { } inlined)
             return inlined;
@@ -1041,6 +1109,13 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         };
 
         if (node.IsKind(SyntaxKind.CoalesceExpression)) return LowerCoalesce(node, loc);
+        // R21.5. A user-defined operator bound to an F* function is an application of it.
+        if (model.GetSymbolInfo(node).Symbol is IMethodSymbol { MethodKind: MethodKind.UserDefinedOperator } uop &&
+            known.SpecOpName(uop) is { } opName)
+            return new IrSpecOp(loc, opName, [NonNull(Lower(node.Left)), NonNull(Lower(node.Right))])
+            {
+                ParamTypes = Declarations.ParamTypes(uop, known, receiver: false),
+            };
         if (op is null) return Unsupported(node, loc);
         var left = Lower(node.Left);
         var right = Lower(node.Right);
@@ -1154,6 +1229,18 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
         prelude = builder.ToImmutable();
         return linear;
     }
+
+    /// <summary>
+    /// R21.10. A non-null reference written to a nullable reference variable or
+    /// returned at one: C# reports no conversion, nullability being an annotation on
+    /// reference types, but the images differ, <c>T</c> and <c>option T</c>; the
+    /// conversion is <c>Some</c>.
+    /// </summary>
+    public IrExpr ToDeclared(IrExpr value, IrType? declared) =>
+        declared is IrOptionType option && value is not IrNull &&
+        value.Type is { } type and not IrOptionType && type.Equals(option.Inner)
+            ? new IrOptionOp(value.Loc, OptionOpKind.Some, value) { Type = option }
+            : value;
 
     /// <summary>
     /// R20.11. A read through a nullable reference is a read through its value: the
@@ -1295,7 +1382,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
     /// </summary>
     private static bool HasEffect(IrExpr expr) =>
         Subexpressions(expr).Any(e => e is IrCall { Kind: CalleeKind.Method }
-                                       or IrStmtExpr or IrNew or IrNewArray);
+                                       or IrStmtExpr or IrNew or IrNewArray or IrRaise);
 
     private static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
@@ -1313,6 +1400,8 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],
+            IrRaise ra => [ra.Exception],
+            IrOptionOp oo => [oo.Operand],
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],
@@ -1505,7 +1594,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
 
         // R20.12. A receiver-free callee is passed the receiver's readonly fields it reads.
         // Only a receiver-free caller has them to pass, and only for its own receiver.
-        var context = ImmutableArray<IFieldSymbol>.Empty;
+        var context = ImmutableArray<ISymbol>.Empty;
         if (Declarations.IsReceiverFree(method, known) &&
             Declarations.ContextFields(method.ContainingType!, model.Compilation, known) is { IsEmpty: false } fields)
         {
@@ -1532,7 +1621,7 @@ public sealed class ExprLowerer(SemanticModel model, WellKnown known, Diagnostic
             ResultType = known.MapType(method.ReturnType),
             HasReceiver = receiver is not null,
             ParamTypes = [.. Declarations.ParamTypes(method, known, receiver is not null),
-                          .. context.Select(f => (IrType?)known.MapType(f.Type))],
+                          .. context.Select(f => (IrType?)known.MapType(Declarations.ContextType(f)))],
             TypeArguments = known.TypeArguments(method),
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
         };

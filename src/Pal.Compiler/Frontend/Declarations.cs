@@ -236,10 +236,44 @@ public static class Declarations
         !known.HasModel(owner);
 
     /// <summary>The R20.12 name a context field is bound to in a receiver-free method.</summary>
-    public static string ContextName(IFieldSymbol field) => "this__" + field.Name;
+    public static string ContextName(ISymbol field) => "this__" + field.Name;
+
+    /// <summary>The type of a context value: a field's, or a captured parameter's (R20.12a).</summary>
+    public static ITypeSymbol ContextType(ISymbol field) => field switch
+    {
+        IFieldSymbol f => f.Type,
+        IParameterSymbol p => p.Type,
+        _ => throw new ArgumentException($"not a context value: {field}"),
+    };
+
+    /// <summary>
+    /// R20.12a. The parameters of <paramref name="owner"/>'s primary constructor that its
+    /// members capture and nothing assigns. Each holds the value the constructor was given
+    /// for as long as the object lives, exactly as a <c>readonly</c> field does.
+    /// </summary>
+    public static IEnumerable<IParameterSymbol> CapturedParameters(INamedTypeSymbol owner, Compilation compilation)
+    {
+        foreach (var ctor in owner.InstanceConstructors)
+        {
+            if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not TypeDeclarationSyntax decl)
+                continue;
+            var model = compilation.GetSemanticModel(decl.SyntaxTree);
+            foreach (var p in ctor.Parameters)
+            {
+                var assigned = decl.DescendantNodes().Any(n =>
+                    n is AssignmentExpressionSyntax a &&
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, p) ||
+                    n is PrefixUnaryExpressionSyntax or PostfixUnaryExpressionSyntax &&
+                    n.ChildNodes().Any(c => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(c).Symbol, p)) ||
+                    n is ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg &&
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(arg.Expression).Symbol, p));
+                if (!assigned) yield return p;
+            }
+        }
+    }
 
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
-        INamedTypeSymbol, System.Runtime.CompilerServices.StrongBox<ImmutableArray<IFieldSymbol>>> contextFields = new();
+        INamedTypeSymbol, System.Runtime.CompilerServices.StrongBox<ImmutableArray<ISymbol>>> contextFields = new();
 
     /// <summary>
     /// R20.12. The <c>readonly</c> instance fields of <paramref name="owner"/> that its
@@ -249,19 +283,21 @@ public static class Declarations
     /// sees the same value. A field is read when an annotated instance method's body
     /// names it, or a contract of one mentions it.
     /// </summary>
-    public static ImmutableArray<IFieldSymbol> ContextFields(
+    public static ImmutableArray<ISymbol> ContextFields(
         INamedTypeSymbol owner, Compilation compilation, WellKnown known) =>
         contextFields.GetValue(owner, o => new(ComputeContextFields(o, compilation, known))).Value;
 
-    private static ImmutableArray<IFieldSymbol> ComputeContextFields(
+    private static ImmutableArray<ISymbol> ComputeContextFields(
         INamedTypeSymbol owner, Compilation compilation, WellKnown known)
     {
         var candidates = owner.GetMembers().OfType<IFieldSymbol>()
             .Where(f => f is { IsStatic: false, IsReadOnly: true, IsImplicitlyDeclared: false } &&
                         known.MapType(f.Type) is not null)
+            .Cast<ISymbol>()
+            .Concat(CapturedParameters(owner, compilation).Where(p => known.MapType(p.Type) is not null))
             .ToList();
         if (candidates.Count == 0) return [];
-        var read = new HashSet<IFieldSymbol>(SymbolEqualityComparer.Default);
+        var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var m in owner.GetMembers().OfType<IMethodSymbol>())
         {
             if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || Has(m, known.AdmitAttribute))
@@ -271,7 +307,8 @@ public static class Declarations
                 var syntax = reference.GetSyntax();
                 var model = compilation.GetSemanticModel(syntax.SyntaxTree);
                 foreach (var id in syntax.DescendantNodes().OfType<IdentifierNameSyntax>())
-                    if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f &&
+                    if (model.GetSymbolInfo(id).Symbol is IFieldSymbol or IParameterSymbol &&
+                        model.GetSymbolInfo(id).Symbol is { } f &&
                         candidates.Contains(f, SymbolEqualityComparer.Default))
                         read.Add(f);
             }

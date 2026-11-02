@@ -280,7 +280,8 @@ public sealed class GhostArgAttribute(string declaration) : Attribute
 /// translator emits the name it was given and does not check that it exists — that is
 /// F*'s job, and a misspelling surfaces as a type error carrying this string.</para>
 /// </summary>
-[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Interface)]
+[AttributeUsage(AttributeTargets.Struct | AttributeTargets.Class | AttributeTargets.Interface |
+                AttributeTargets.Enum)]
 public sealed class SpecTypeAttribute(string type) : Attribute
 {
     public string Type { get; } = type;
@@ -291,6 +292,33 @@ public sealed class SpecTypeAttribute(string type) : Attribute
     /// be non-null.
     /// </summary>
     public bool Nullable { get; init; }
+}
+
+/// <summary>
+/// R21.1. On a case of a closed hierarchy — a <c>sealed record</c> deriving from an
+/// <c>abstract record</c> that carries <see cref="SpecTypeAttribute"/> — or on a constant of
+/// an enum that carries one: the F* data constructor it denotes. Without it, the case's
+/// constructor is the one in the base type's F* module with the case's own C# name.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Field)]
+public sealed class SpecCaseAttribute(string constructor) : Attribute
+{
+    public string Constructor { get; } = constructor;
+}
+
+/// <summary>
+/// R21.5. Binds a member of a library type the program cannot annotate — named by its
+/// documentation-comment ID, <c>"T:System.DateOnly"</c>,
+/// <c>"M:System.DateOnly.op_LessThan(System.DateOnly,System.DateOnly)"</c> — to the F*
+/// term it denotes: a type to the F* type (as <see cref="SpecTypeAttribute"/> does), and a
+/// method, operator or property to a function (as <see cref="SpecOpAttribute"/> does). Each
+/// binding is an assumption, listed among what the proof trusts.
+/// </summary>
+[AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]
+public sealed class SpecBindingAttribute(string member, string term) : Attribute
+{
+    public string Member { get; } = member;
+    public string Term { get; } = term;
 }
 
 /// <summary>

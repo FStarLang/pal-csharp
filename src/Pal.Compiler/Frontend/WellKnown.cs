@@ -56,6 +56,12 @@ public sealed class WellKnown
         SpecTypeAttribute = Type("SpecTypeAttribute");
         SpecOpAttribute = Type("SpecOpAttribute");
         SpecCtorAttribute = Type("SpecCtorAttribute");
+        SpecCaseAttribute = Type("SpecCaseAttribute");
+        SpecBindingAttribute = Type("SpecBindingAttribute");
+        foreach (var binding in Declarations.All(c.Assembly, SpecBindingAttribute))
+            if (Declarations.StringArgument(binding, 0) is { } member &&
+                Declarations.StringArgument(binding, 1) is { } term)
+                bindings[member] = term;
         ThrowsAttribute = Type("ThrowsAttribute");
         TranslateAnnotatedOnlyAttribute = Type("TranslateAnnotatedOnlyAttribute");
         AnnotatedOnly = Declarations.Has(c.Assembly, TranslateAnnotatedOnlyAttribute);
@@ -104,10 +110,16 @@ public sealed class WellKnown
     /// Its values are F* <c>exn</c> payloads, not objects: it has no invariant, no model
     /// and no identity, and the constructor is a pure function of its arguments.
     /// </summary>
+    private readonly HashSet<INamedTypeSymbol> skippedExceptions = new(SymbolEqualityComparer.Default);
+
+    /// <summary>R20.1b. An exception class left untranslated under <c>[TranslateAnnotatedOnly]</c>.</summary>
+    public void SkipException(INamedTypeSymbol symbol) => skippedExceptions.Add(symbol);
+
     public bool IsExceptionClass(ITypeSymbol? type)
     {
         if (type is not INamedTypeSymbol { TypeKind: TypeKind.Class } named) return false;
         if (named.DeclaringSyntaxReferences.IsEmpty) return false;
+        if (skippedExceptions.Contains(named)) return false;
         for (var t = named.BaseType; t is not null; t = t.BaseType)
             if (IsSystemException(t)) return true;
         return false;
@@ -135,6 +147,16 @@ public sealed class WellKnown
     public INamedTypeSymbol IncludePulseFileAttribute { get; }
     public INamedTypeSymbol BackwardAttribute { get; }
     public INamedTypeSymbol SpecTypeAttribute { get; }
+    public INamedTypeSymbol SpecCaseAttribute { get; }
+    public INamedTypeSymbol SpecBindingAttribute { get; }
+
+    /// <summary>R21.5. <c>[assembly: SpecBinding]</c>s, by documentation-comment ID.</summary>
+    private readonly Dictionary<string, string> bindings = new(StringComparer.Ordinal);
+
+    /// <summary>R21.5. The F* term a library type or member is bound to, if any.</summary>
+    public string? Binding(ISymbol? symbol) =>
+        symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
+        bindings.TryGetValue(id, out var term) ? term : null;
     public INamedTypeSymbol SpecOpAttribute { get; }
     public INamedTypeSymbol SpecCtorAttribute { get; }
 
@@ -168,20 +190,97 @@ public sealed class WellKnown
     /// the whole of what the translator knows about a user's specification type.
     /// </summary>
     public string? SpecTypeName(ITypeSymbol? t) =>
-        t is INamedTypeSymbol n &&
-        Declarations.StringArgument(n.OriginalDefinition, SpecTypeAttribute) is { } name
-            ? name
+        t is INamedTypeSymbol n
+            ? Declarations.StringArgument(n.OriginalDefinition, SpecTypeAttribute)
+              ?? (CaseBase(n) is { } b ? SpecTypeName(b) : null)
+              ?? Binding(n)
             : null;
 
-    /// <summary>R20.11. Whether a <c>[SpecType]</c> is declared <c>Nullable = true</c>.</summary>
+    /// <summary>
+    /// R20.11. Whether a <c>[SpecType]</c> is declared <c>Nullable = true</c>. A case of a
+    /// closed hierarchy is as nullable as its base (R21.1), and a library reference type
+    /// bound by R21.5 is nullable exactly where C# says it may be null.
+    /// </summary>
     public bool IsNullableSpecType(ITypeSymbol? t) =>
         t is INamedTypeSymbol n &&
-        Declarations.Find(n.OriginalDefinition, SpecTypeAttribute) is { } data &&
-        Declarations.NamedFlag(data, "Nullable");
+        (Declarations.Find(n.OriginalDefinition, SpecTypeAttribute) is { } data
+            ? Declarations.NamedFlag(data, "Nullable")
+            : CaseBase(n) is { } b
+                ? IsNullableSpecType(b)
+                : n.IsReferenceType && Binding(n) is not null);
 
     /// <summary>R11.2. The F* term a <c>[SpecOp]</c> member denotes.</summary>
     public string? SpecOpName(ISymbol? m) =>
-        m is not null ? Declarations.StringArgument(m, SpecOpAttribute) : null;
+        m is not null ? Declarations.StringArgument(m, SpecOpAttribute) ?? Binding(m) : null;
+
+    /// <summary>
+    /// R21.7. An exception class the BCL declares: one deriving from <c>System.Exception</c>
+    /// that the program does not declare. Its values are <c>exn</c>s.
+    /// </summary>
+    public bool IsLibraryException(ITypeSymbol? t)
+    {
+        if (t is not INamedTypeSymbol n || n.Locations.Any(l => l.IsInSource)) return false;
+        for (var b = n.BaseType; b is not null; b = b.BaseType)
+            if (b.ToDisplayString() == "System.Exception") return true;
+        return false;
+    }
+
+    /// <summary>
+    /// R21.1. The base of a case of a closed hierarchy: <paramref name="t"/> is a sealed
+    /// record whose direct base is an abstract record carrying <c>[SpecType]</c>.
+    /// </summary>
+    public INamedTypeSymbol? CaseBase(ITypeSymbol? t) =>
+        t is INamedTypeSymbol { IsRecord: true, IsSealed: true, BaseType: { IsRecord: true, IsAbstract: true } b } &&
+        Declarations.Has(b.OriginalDefinition, SpecTypeAttribute)
+            ? b
+            : null;
+
+    /// <summary>
+    /// R21.1. The F* data constructor of a case record or of a constant of a
+    /// <c>[SpecType]</c> enum: its <c>[SpecCase]</c>, or else the constructor of that
+    /// name in the F* module of the type it belongs to.
+    /// </summary>
+    public string? CaseConstructor(ISymbol? symbol)
+    {
+        INamedTypeSymbol? owner = symbol switch
+        {
+            INamedTypeSymbol n when CaseBase(n) is { } b => b,
+            IFieldSymbol { ContainingType.TypeKind: TypeKind.Enum, HasConstantValue: true } f => f.ContainingType,
+            _ => null,
+        };
+        if (owner is null || Declarations.StringArgument(owner.OriginalDefinition, SpecTypeAttribute) is not { } type)
+            return null;
+        if (Declarations.StringArgument(symbol!.OriginalDefinition, SpecCaseAttribute) is { } given) return given;
+        var dot = type.LastIndexOf('.');
+        return dot < 0 ? symbol.Name : type[..(dot + 1)] + symbol.Name;
+    }
+
+    /// <summary>
+    /// R21.2. The components of a case record: the parameters of its one constructor, in
+    /// order. Each is the argument of the F* constructor at its position, and the property
+    /// of the same name (up to the case of its first letter) reads it back. Default when
+    /// the record does not declare exactly one constructor besides its copy constructor.
+    /// </summary>
+    public ImmutableArray<IParameterSymbol> CaseComponents(INamedTypeSymbol c)
+    {
+        var ctors = c.InstanceConstructors
+            .Where(m => !(m.Parameters.Length == 1 &&
+                          SymbolEqualityComparer.Default.Equals(m.Parameters[0].Type, c)))
+            .ToList();
+        return ctors.Count == 1 ? ctors[0].Parameters : default;
+    }
+
+    /// <summary>R21.2. The position of a case record's property among its components.</summary>
+    public int CaseComponentIndex(IPropertySymbol property)
+    {
+        if (CaseBase(property.ContainingType) is null) return -1;
+        var components = CaseComponents(property.ContainingType);
+        if (components.IsDefault) return -1;
+        for (var i = 0; i < components.Length; i++)
+            if (string.Equals(components[i].Name, property.Name, StringComparison.OrdinalIgnoreCase))
+                return i;
+        return -1;
+    }
 
     /// <summary>
     /// R11.1a. Whether this type is part of a <em>specification-type declaration</em>:
@@ -340,6 +439,8 @@ public sealed class WellKnown
                 return new IrExnType(null);
             case INamedTypeSymbol named when IsExceptionClass(named):
                 return new IrExnType(named.Name);
+            case INamedTypeSymbol named when IsLibraryException(named):
+                return new IrExnType(null);
             case INamedTypeSymbol named when SpecTypeName(named) is { } fstar:
             {
                 var args = ImmutableArray.CreateBuilder<IrType>();
@@ -348,7 +449,7 @@ public sealed class WellKnown
                     if (MapType(a) is not { } mapped) return null;
                     args.Add(mapped);
                 }
-                var spec = new IrUserSpecType(named.Name, fstar, args.ToImmutable());
+                var spec = new IrUserSpecType((CaseBase(named) ?? named).Name, fstar, args.ToImmutable());
                 // R20.11. A nullable specification type is an `option` of its F* type,
                 // except where `#nullable enable` says this occurrence is not null.
                 return IsNullableSpecType(named) &&

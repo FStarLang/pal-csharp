@@ -48,7 +48,8 @@ public sealed class StmtLowerer(
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
             ReturnStatementSyntax r => new IrReturn(loc,
-                r.Expression is null ? null : _code.Lower(r.Expression)),
+                r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
+                    known.MapType(ReturnType(r)))),
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
@@ -249,7 +250,7 @@ public sealed class StmtLowerer(
                 continue;
             }
             statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
-                v.Initializer is null ? null : _code.Lower(v.Initializer.Value))
+                v.Initializer is null ? null : _code.ToDeclared(_code.Lower(v.Initializer.Value), type))
             {
                 Immutable = v.Initializer is not null && symbol is not null &&
                             type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
@@ -378,7 +379,7 @@ public sealed class StmtLowerer(
         var target = _code.Lower(node.Left);
         var value = _code.Lower(node.Right);
 
-        if (op is null) return new IrAssign(loc, target, value);
+        if (op is null) return new IrAssign(loc, target, _code.ToDeclared(value, target.Type));
 
         var linear = _code.LinearizeLValue(target, out var prelude);
         var assign = new IrAssign(loc, linear, new IrBinary(loc, op.Value, linear, value));
@@ -474,7 +475,7 @@ public sealed class StmtLowerer(
                     continue;
                 }
                 init.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
-                    v.Initializer is null ? null : _code.Lower(v.Initializer.Value)));
+                    v.Initializer is null ? null : _code.ToDeclared(_code.Lower(v.Initializer.Value), type)));
             }
         }
         foreach (var e in node.Initializers)
@@ -586,4 +587,12 @@ public sealed class StmtLowerer(
 
     /// <summary>Lowers an expression in specification position.</summary>
     public IrExpr LowerSpec(ExpressionSyntax expression) => _spec.Lower(expression);
+
+    private ITypeSymbol? ReturnType(ReturnStatementSyntax r) =>
+        model.GetEnclosingSymbol(r.SpanStart) switch
+        {
+            IMethodSymbol { MethodKind: MethodKind.LambdaMethod or MethodKind.LocalFunction } => null,
+            IMethodSymbol m => m.ReturnType,
+            _ => null,
+        };
 }

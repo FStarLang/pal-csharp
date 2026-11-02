@@ -470,6 +470,12 @@ public enum OptionOpKind { HasValue, Value, Some }
 
 public sealed record IrOptionOp(IrLoc Loc, OptionOpKind Op, IrExpr Operand) : IrExpr(Loc);
 
+/// <summary>
+/// R21.7. <c>throw e</c> in expression position — a switch arm, a conditional branch. It
+/// has whatever type its context wants and never yields a value.
+/// </summary>
+public sealed record IrRaise(IrLoc Loc, IrExpr Exception) : IrExpr(Loc);
+
 /// <summary>R20.3. A method group converted to a delegate: <c>Type.Method</c>.</summary>
 public sealed record IrMethodGroup(IrLoc Loc, string Method) : IrExpr(Loc);
 

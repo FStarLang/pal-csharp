@@ -187,6 +187,8 @@ with the master of nightly-2026-10-31, with Z3 5.3.0. That build's installed
 | F85 | **A record literal in a Pulse statement or tail position must be parenthesised (since nightly-2026-10-31).** `{ M.f = …; … }` there is read as a block and fails with "Module name M … not in scope"; as a `let` right-hand side, or as `({ … })` anywhere, it is a record. The emitter parenthesises every record literal and functional update. | `test/pulse_facts/StructFacts.fst`, `test/point_struct`. |
 | F86 | **A Pulse `try` is not framed, and its `ensures` defaults to `emp` (FStarLang/FStar#4798).** Whatever the context holds when the `try` starts and is not named in its `ensures` is lost after it, and whatever is not named in its `raises` is lost to the handler. So both clauses must own every resource live across the `try`, exactly as a loop invariant must (R5.8b). A `let mut` cell is reclaimed when an exception passes its scope, so a `raise` inside a block need not mention the block's own cells. | `test/pulse_facts/ExceptionFacts.fst`: P2 raises from a loop holding a cell, P3 owns a cell across a `try`, and P4, which names nothing, is `expect_failure`. |
 | F87 | **A `fn` with no `raises` clause must prove it raises nothing.** The default is `raises (fun _ -> pure False)`, so a handler's closing `raise ex` for the classes it does not handle is a proof obligation, discharged by the `try`'s `raises` saying the exception is one of those it handles. `raise e` has every type, so it may be a statement, a branch's value or a tail. A handler is entered with what the `raises` says and nothing else: the facts a callee's `raises` stated about the exception are gone, apart from those the `try`'s `raises` restates. | `test/pulse_facts/ExceptionFacts.fst` P3; `test/throw_catch/Throwing.cs:Classify`, which declares no `[Throws]`. |
+| F88 | **A raise with no expected type is `unit`.** In a branch of an `if` whose type comes only from a `let x : T =` annotation, `raise e` is typed `unit` with postcondition `pure False`; `raise e; let _ = elim_pure_explicit False; false_elim #(T) ()` is a `T`. | `test/record_cases/Shapes.cs:Next`, `ColorOf` (R21.7). |
+| F89 | **The join of an `if` whose branches differ in shape can lose the facts of one.** `if c { stmts; t } else { false }` kept nothing from the then-branch; let-binding the bare `false` in its branch restores the join. | `test/record_cases`, and dmn-feel's `RangeEqual` (R21.4). |
 
 F1 and F8 together **retire** the plan's original top risk: no `cont`-flag rotation and no
 auto-generated short-circuit invariants are needed. F2 introduces a new obligation
@@ -1005,6 +1007,8 @@ state: the emitter binds the pre-state existentials once and refers to them. `Ol
 illegal outside a postcondition.
 
 **R4.4 (`Result`).** In an `ensures`, `Result` denotes the `returns` binder `var_result`.
+A C# parameter or local named `result` is translated as `var_result'` so that it cannot
+be captured by the binder; a prime cannot occur in a C# identifier.
 
 **R4.6 (`[Spec]` methods).** A `[Spec]` method is pure, ghost, and
 usable *only* in specification position. Consequently its C# parameter types are
@@ -5724,6 +5728,17 @@ its parameters, and the class around it (a plugin strategy, holding services) ha
 meaning in Pulse. A read of the receiver's state is refused, like any other read of an
 untranslated object (R18.1).
 
+**R20.1b (exception classes out of reach).** In that scope a user exception class whose
+payload does not translate (it carries a `DateOnly`, a list, an object) is not refused:
+like any class the annotations do not reach, it is left untranslated, and a `throw` of it
+in translated code is refused there.
+
+**Harness variables.** `test/verify.mk` reads `PAL_CS_NULLABLE` (R20.9),
+`EXTRA_INCLUDES` (directories of F\* sources a harness's model lives in, added to
+`--include`) and `EXTRA_CACHED` (a comma-separated list of those modules, added to
+`--already_cached`, since they are checked by the model's own build). The file re-invokes
+itself, so a harness Makefile `export`s them.
+
 ### R20.2 `[Admit]` bodies are not lowered
 
 The body of an `[Admit]` method is never read: its contract is assumed (PALCS0900), so
@@ -5858,6 +5873,12 @@ never a `let mut` cell, since it cannot be assigned. A contract may name these f
 the `static readonly` fields of R20.10, though they are private: the specification shim
 receives them as parameters, and a static one denotes its initialiser.
 
+**R20.12a (captured primary-constructor parameters).** A parameter of a class's primary
+constructor that a member captures and nothing assigns, `class C(IKernel kernel)`, holds
+the constructor's argument for the object's lifetime, exactly as a `readonly` field does,
+and is a context value like one: a parameter `this__kernel` of every annotated
+receiver-free method of the class.
+
 ### R20.13 An SDK object written through its indexer
 
 A by-value `[SpecType]` parameter `x` that the method writes through an indexer whose
@@ -5888,5 +5909,117 @@ parameters R20.13 finds". `Pal.Same(a, b)` states equality where `==` is not dec
   modelled);
 * the `readonly` fields of R20.12: the receiver of a chain of receiver-free calls is one
   object, and a `[SpecType]` value in such a field (a `HashSet`, a model) is not mutated;
+* the bindings of R21.5: each `[SpecBinding]` is an axiom that the library member
+  computes the F\* term it is bound to;
+* a `[SpecType]` enum (R21.8): every value of it a program sees is one of its declared
+  constants (no `(E)42`);
+* a closed hierarchy (R21.1): no case beyond the sealed records the compilation declares,
+  and the validation a record's constructor performs is not modelled (construction is
+  total);
+* the BCL exceptions of R21.7 are distinguished by type only: their messages are not
+  modelled;
 * every `[Admit]`ed contract, and whatever stand-ins the harness supplies for types
   outside the file.
+
+## 21. Closed record hierarchies, enums, patterns and library bindings
+
+Production C# written in a functional style -- a value domain as an `abstract record`
+with `sealed record` cases, dispatch by `switch` expressions and `is` patterns, enums as
+tags, `throw` in expression position -- maps onto an F\* inductive and `match`, which is
+how the F\* model of such code is usually written. `~/Verified-CPQ-Components/dmn-feel`,
+whose `Feel.Core` evaluator is verified in place against the `Feel.Semantics` model, is
+the motivating case; `test/record_cases` pins each rule.
+
+### R21.1 A closed hierarchy is an inductive
+
+An `abstract record B` carrying `[SpecType("M.t")]` (with `Nullable = true` when a `B`
+variable may be null, R20.11) whose cases are the `sealed record`s deriving from it is the
+F\* inductive `M.t`. A case `C` is the data constructor `[SpecCase("M.K")]` names, or `M.C`
+by default; `new C(a, b)` is `M.C ⟦a⟧ ⟦b⟧` with the arguments in the order of `C`'s one
+constructor. A case is not a separate type in F\*: a variable of type `C` is an `M.t`, and
+`C`'s image of a test is `M.C? x`.
+
+### R21.2 Components
+
+A positional property of a case, `c.P`, is the projection
+`(fun (x:M.t{M.C? x}) -> match x with | M.C .. v .. -> v) ⟦c⟧`, so F\* proves `c` is a `C`
+where it is read -- which C#'s static type of `c` guarantees, and the narrowing of R21.3
+supplies.
+
+### R21.3 Patterns
+
+`e is P` is a boolean, and the variables `P` binds are in scope where C# says they are
+definitely assigned, each the expression it was bound to (so no `let mut` cell, and F\*
+sees the same term the test was about). The subject is evaluated once: an expression with
+an effect is bound to a fresh local first.
+
+* A type pattern `C c` is `Some? x && M.C? (Some?.v x)` (the `Some?` only when the subject
+  is nullable), binding `c` to the narrowed value; a type that is not a case of the
+  subject's hierarchy, nor its own type, is PALCS0627. A constant pattern that names a type
+  (`case B.C =>`) is the same test.
+* A property pattern `{ P: p, Q: 3 }` and a positional pattern `(p, 3)` test and bind
+  components (R21.2); `var x` and `_` always match; `not`, `and`, `or`, relational
+  patterns (`< 3`) and constants are their boolean images.
+* `null` tests `None?`, and `not null` `Some?`.
+
+### R21.4 `switch` expressions
+
+A switch expression is a chain of conditionals, one per arm in order, each the pattern's
+test conjoined with its `when` clause; the last falls through to a raise of C#'s
+`SwitchExpressionException` (R21.7), which F\* must prove unreachable unless the method
+`[Throws]` it. When the switch's type is an `option`, an arm whose value is not one is
+`Some` of it (Roslyn reports a target-typed switch's conversion on the switch, not the arms).
+
+When one branch of a conditional emits statements and the other is a bare term, the term
+is let-bound in its branch: Pulse's join of the two branches otherwise lost the facts the
+statement branch established (F89).
+
+### R21.5 Library bindings: `[assembly: SpecBinding(id, term)]`
+
+A library member the program cannot annotate is bound by documentation-comment ID:
+`"T:System.DateOnly"` to an F\* type, and `"M:…"`/`"P:…"`/`"F:…"` -- methods, operators
+(`op_LessThan`), properties and static fields -- to an F\* function or constant, applied
+like a `[SpecOp]` (R11.2). A user-defined operator so bound is an application wherever C#
+calls it. Each binding is an axiom (R20.8).
+
+### R21.6 `as` and pattern variables
+
+`e as C` is `if ⟦e is C⟧ then Some e else None`. A pattern variable has the type of the
+value it was bound to: `var` declares it nullable whatever it matched, so the translation
+uses the bound value's type rather than the declared one.
+
+### R21.7 `throw` in expression position; BCL exceptions
+
+`throw e` in a switch arm or a conditional branch is a raise at the type of its context:
+`raise e; let _ = elim_pure_explicit False; false_elim #(T) ()`. Pulse types a raise with no
+expected type as `unit`, with postcondition `pure False`; the elimination turns that into
+any `T` (F88).
+
+An exception the BCL declares (`ArgumentException`, `InvalidOperationException`, …)
+is `Pulse.Lib.CSharp.Exn.BclException "System.ArgumentException"`: one F\* exception
+carrying the class's full name, so a `catch` of it, or `[Throws]`, distinguishes classes
+but not messages. It translates when its arguments are constants (PALCS0628 otherwise).
+
+### R21.8 Enums
+
+An `enum` carrying `[SpecType("M.t")]` is the F\* inductive `M.t` with one nullary
+constructor per constant (`[SpecCase]` renames one). A constant is its constructor, `==`
+is F\* equality, and a `case E.A` pattern is `M.A? x`. An enum without the attribute keeps
+the R20.9 reading: each constant is the integer it folds to.
+
+### R21.9 Flow-narrowed nullable variables
+
+A nullable variable that C#'s flow analysis knows is not null at a use where a non-nullable
+value is expected (`if (x is null) return …; f(x)`) is `Some?.v x`: F\* proves it non-null
+from the same tests C# drew the conclusion from.
+
+### R21.10 A non-null reference written at a nullable type
+
+Nullability of a reference type is an annotation, so C# reports no conversion when a `B`
+is assigned to a `B?` local, initialises one, or is returned from a method returning `B?`;
+the images differ, `M.t` and `option M.t`, and the conversion is `Some`.
+
+### R21.11 A parameter named `result`
+
+The postcondition's binder is `var_result`, so a C# parameter or local named `result` is
+`var_result'` (R4.4).

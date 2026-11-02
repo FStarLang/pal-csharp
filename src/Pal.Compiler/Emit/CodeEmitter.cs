@@ -2837,6 +2837,29 @@ public sealed class CodeEmitter(
                 foreach (var s in se.Prelude) Statement(s, _plan!);
                 return Expr(se.Value);
 
+            // R21.7. A raise in expression position is a computation of any type, so it is
+            // always a line of its own: a branch holding one is a Pulse `if`, never F*'s.
+            // Pulse gives a `raise` with no expected type the type `unit` and leaves
+            // `pure False` behind it; the value of the expression's own type is then
+            // `false_elim`, so the branch has the type the other arm has.
+            case IrRaise ra:
+            {
+                var exn = Fresh();
+                Line($"let {exn} = {Expr(ra.Exception)};");
+                if (_tryMarks.Count == 0)
+                {
+                    if (NeedsEpilogue) CloseObjects(_method!, _plan!);
+                }
+                else
+                {
+                    DropLocals(null, _tryMarks[^1]);
+                }
+                if (ra.Type is not { } raType) return $"raise {exn}";
+                Line($"raise {exn};");
+                Line("let _ = elim_pure_explicit False;");
+                return $"(FStar.Pervasives.false_elim #({Types.Render(raType)}) ())";
+            }
+
             default:
                 diagnostics.Unsupported(expr.Loc, $"`{expr.GetType().Name}` in executable code");
                 return "()";
@@ -3189,10 +3212,23 @@ public sealed class CodeEmitter(
     /// A two-armed branch used as a value. Pulse permits this in any position, so
     /// short-circuiting needs no flag encoding (fact F8).
     /// </summary>
+    private Captured Bound(string term) => Capture(() =>
+    {
+        var t = Fresh();
+        Line($"let {t} = {term};");
+        return t;
+    });
+
     private string Branch(string cond, Captured whenTrue, Captured whenFalse)
     {
         if (whenTrue.Lines.Length == 0 && whenFalse.Lines.Length == 0)
             return $"(if {cond} then {whenTrue.Term} else {whenFalse.Term})";
+
+        // A bare value beside a branch of statements is let-bound: Pulse's join of the
+        // two postconditions otherwise keeps only the bare branch's fact when the other
+        // ends in a nested `if` (the conditional of a switch arm, for one).
+        if (whenTrue.Lines.Length == 0) whenTrue = Bound(whenTrue.Term);
+        if (whenFalse.Lines.Length == 0) whenFalse = Bound(whenFalse.Term);
 
         var t = Fresh();
         Line($"let {t} = if ({cond}) {{");
