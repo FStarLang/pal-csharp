@@ -70,7 +70,12 @@ git submodule update --init --quiet karamel
 if [[ "${FSTAR_OPAM_DEPS:-0}" == 1 ]]; then
   opam install --yes --deps-only ./fstar.opam
 fi
-make -j"$JOBS" 3
+# Building F* checks ulib and Pulse, and F* looks for `z3-<version>` on PATH to do
+# that. A fresh machine (CI) has none, so put the solvers on PATH for the build.
+Z3_BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$Z3_BUILD_DIR"' EXIT
+"$SRC/.scripts/get_fstar_z3.sh" "$Z3_BUILD_DIR" >/dev/null
+PATH="$Z3_BUILD_DIR:$PATH" make -j"$JOBS" 3
 
 rm -rf "$TOOLS_DIR/fstar"
 mkdir -p "$TOOLS_DIR/fstar"
