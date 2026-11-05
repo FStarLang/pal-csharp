@@ -634,6 +634,7 @@ public sealed class StmtLowerer(
     /// R22.20, R22.25. <c>Array.Copy</c> (3- and 5-argument), <c>Array.Clear(a, i, n)</c>
     /// and <c>Array.Reverse(a, i, n)</c>, or null when the call is not one of them.
     /// </summary>
+
     private IrStmt? ArrayBulkOp(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         if (args.Count != method.Parameters.Length) return null;
@@ -669,9 +670,20 @@ public sealed class StmtLowerer(
                     : new IrArrayOp(loc, ArrayOpKind.CopyAt, [L(0), L(1), L(2), L(3), L(4)]);
 
             case ("Clear", 3) when IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } ct:
-                if (ct.ElementType is ITypeParameterSymbol tp)
+                foreach (var tp in ExprLowerer.TypeParametersIn(ct.ElementType))
                     _code.DefaultedTypeParameters.Add(tp.Name);
                 return new IrArrayOp(loc, ArrayOpKind.Clear, [L(0), L(1), L(2)]);
+
+            // R24.10. `Array.Clear(a)` clears the whole array.
+            case ("Clear", 1) when ArrayOf(byParam[0]) is { } wt:
+            {
+                foreach (var wtp in ExprLowerer.TypeParametersIn(wt.ElementType))
+                    _code.DefaultedTypeParameters.Add(wtp.Name);
+                var whole = L(0);
+                return new IrArrayOp(loc, ArrayOpKind.Clear,
+                    [whole, new IrLiteral(loc, 0) { Type = IrPrim.Int },
+                     new IrLength(loc, L(0)) { Type = IrPrim.Int }]);
+            }
 
             case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
                 return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);

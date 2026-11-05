@@ -531,14 +531,40 @@ public sealed class WellKnown
     /// <summary>R3.4, and R22.6 for a generic <c>[Spec]</c> struct.</summary>
     private IrNamedType? NamedStruct(ITypeSymbol type)
     {
-        if (type is not INamedTypeSymbol { TypeArguments.IsEmpty: false } named)
-            return new IrNamedType(type.Name);
+        if (type is not INamedTypeSymbol named) return new IrNamedType(type.Name);
+        var all = AllTypeArguments(named);
+        if (all.IsEmpty) return new IrNamedType(StructName(named));
         var args = ImmutableArray.CreateBuilder<IrType>();
-        foreach (var a in named.TypeArguments)
+        foreach (var a in all)
         {
             if (MapType(a) is not { } mapped) return null;
             args.Add(mapped);
         }
-        return new IrNamedType(type.Name) { TypeArguments = args.ToImmutable() };
+        return new IrNamedType(StructName(named)) { TypeArguments = args.ToImmutable() };
     }
+
+    /// <summary>
+    /// R24.6. A struct nested in a generic type (`HashSet&lt;T&gt;.Entry`) is implicitly
+    /// generic in the outer parameters, so they lead its own; and two such structs may
+    /// share a simple name (`HashSet&lt;T&gt;.Entry`, `Dictionary&lt;K,V&gt;.Entry`), so its
+    /// name is qualified by the outer type's.
+    /// </summary>
+    public static ImmutableArray<ITypeSymbol> AllTypeArguments(INamedTypeSymbol named) =>
+        named.ContainingType is { } outer && OuterGeneric(named)
+            ? [.. AllTypeArguments(outer), .. named.TypeArguments]
+            : named.TypeArguments;
+
+    public static ImmutableArray<ITypeParameterSymbol> AllTypeParameters(INamedTypeSymbol named) =>
+        named.ContainingType is { } outer && OuterGeneric(named)
+            ? [.. AllTypeParameters(outer), .. named.TypeParameters]
+            : named.TypeParameters;
+
+    public static string StructName(INamedTypeSymbol named) =>
+        named.ContainingType is { } outer && OuterGeneric(named)
+            ? $"{outer.Name}_{named.Name}"
+            : named.Name;
+
+    private static bool OuterGeneric(INamedTypeSymbol named) =>
+        named.TypeKind == TypeKind.Struct &&
+        named.ContainingType is { } outer && (outer.IsGenericType || OuterGeneric(outer));
 }

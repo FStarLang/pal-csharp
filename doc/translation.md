@@ -6253,3 +6253,102 @@ for `c.Compare(x, y)`, up to sign. A comparer is assumed to be a deterministic t
 preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collection's
 contract names its comparer, and how a call to `Compare` lowers, is given with the
 collection families that use it.
+
+## 24. Hashing
+
+`HashSet<T>` and `Dictionary<TKey,TValue>` keep their elements in an `Entry[]` of
+`(hashCode, next, value)` structs threaded into chains from an `int[]` of 1-based bucket
+heads, with removed entries linked into a free list through the same `next` field. Both
+arrays are `null` until the first insertion, and the comparer is an
+`IEqualityComparer<T>?` that is `null` for the default. The harnesses are `pal/HashSet`
+and `pal/Dictionary` in the runtime checkout; `test/collections_hashing` pins each rule
+below on a smaller table.
+
+The translator sees the runtime's sources with only `PAL` defined, so `TARGET_64BIT` is
+off: `GetBucket` is `buckets[(uint)hashCode % (uint)buckets.Length]`, and the
+`_fastModMultiplier` field and `HashHelpers.FastMod` are not part of the verified code.
+The two compute the same bucket (that is `FastMod`'s own contract); the 64-bit path is
+not verified.
+
+### R24.1 `unsafe` members compile
+
+The compilation allows `unsafe` code, since production sources contain some; such a member
+is refused only if something asks for it to be translated.
+
+### R24.2 A comparer is a value field
+
+A field whose type is a `[SpecType]` or a bound library type (R20.11, R21.5) — an
+`IEqualityComparer<T>?` — is held in the class's record like a field at a type parameter
+(R15.5): the type is opaque, so nothing but the record can own it.
+
+### R24.3 An invariant sees private nested types
+
+Like `[Model]` (R4.10b), an `[Invariant]` describes the representation, so it may mention a
+field whose type is a private nested type (`HashSet<T>.Entry[]`). Its shim is bound with
+accessibility checks off; every other error, and every inaccessibility outside an
+invariant, is still reported.
+
+### R24.4 Effectively sealed
+
+Under `[TranslateAnnotatedOnly]`, a class whose only virtual members are unannotated
+(`HashSet<T>` implements `ISerializable` through a virtual `GetObjectData`) is treated as
+sealed (R22.5): an unannotated virtual has no module, so no translated body calls it, and
+an override changes nothing that was verified.
+
+### R24.5 The program's own collection
+
+R20.4 reads a BCL `HashSet<T>`/`Dictionary<K,V>` as an opaque model. A type whose source
+is part of the compilation is the program's own and is translated as written.
+
+### R24.6 Nested structs of generic classes
+
+A struct nested in a generic type (`HashSet<T>.Entry`) is generic in the outer type
+parameters, which come before its own. Its module name is qualified by the outer type
+(`Struct_HashSet_Entry`), because `Dictionary<K,V>` has an `Entry` too.
+
+### R24.7 Nullable array fields
+
+An array field declared `T[]?` is owned through `Pulse.Lib.CSharp.NullableArray.pts_to`
+(verified): a `null` reference owns nothing and holds the empty sequence, and a non-null
+one owns its cells exactly as `A.pts_to` does. The parts that differ from R22.12:
+
+- A constructor that does not assign the field leaves it `null`. A null written by the
+  constructor or by a method is a fresh name from `NA.alloc_null`, and a non-null array
+  moves in by `NA.intro`, which also records that the reference is not null.
+- Reading, writing or bulk-operating on the field opens it with `NA.elim` under a
+  non-null fact and closes it again with `NA.intro`. In both code and specs, `a == null`
+  is `A.is_null a`; nullness is a property of the reference, which a spec binds next to
+  the contents.
+- An invariant over such a field can say how its nullness relates to the other fields
+  (`(_buckets == null) == (_entries == null)`, `_entries != null || _count == 0`). In a
+  spec, `_entries.Length` is the length of the contents, which is 0 while the field is
+  null.
+
+### R24.10 `Array.Clear(a)`
+
+`Array.Clear(a)` clears the whole array: it is `Array.Clear(a, 0, a.Length)` (R22.25).
+
+### R24.11 The default of a code struct
+
+A struct that is not `[Spec]`, has no `[Refine]`, and whose fields are all machine
+integers, `bool`s or type parameters has C#'s `default(S)`. This is the `has_default`
+instance that sets every field to its default, and it requires `has_default` for each
+type parameter. So `new Entry[n]` and `Array.Clear(entries, …)` need the caller's
+defaults for the type parameters that `Entry` mentions (R22.22).
+
+### R24.13 What is trusted
+
+`Pulse.Lib.CSharp.Equality` (an interface, every `val` a modeling axiom) is the trusted base
+for hashing:
+
+- A comparer is an opaque handle. Its `Equals` and `GetHashCode` are functions:
+  deterministic, terminating, and without effects.
+- The one law the tables need is `equals_hash`: equal values hash alike. This is the
+  `IEqualityComparer<T>` contract.
+- `EqualityComparer<T>.Default.Equals` is R22.25's `default_equals`. `x.GetHashCode()` on a
+  value of a type parameter is the default comparer's hash.
+- `typeof(T)` is an opaque type handle, and `IsValueType` is a function of it.
+
+The R21.5 bindings that attach these to the BCL's members live in the harness
+(`pal/HashCommon/Bindings.cs`). `Pulse.Lib.CSharp.NullableArray` and
+`Pulse.Lib.CSharp.HashChain` are proved, and assume nothing.

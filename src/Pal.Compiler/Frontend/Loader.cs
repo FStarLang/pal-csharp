@@ -32,6 +32,9 @@ public static class Loader
             ReferenceSet(),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
+                // R24.1: production code may contain `unsafe` members; they compile, and are
+                // refused only if something asks for them to be translated.
+                allowUnsafe: true,
                 nullableContextOptions: nullable
                     ? NullableContextOptions.Enable
                     : NullableContextOptions.Disable));

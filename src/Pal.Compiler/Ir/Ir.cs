@@ -803,6 +803,12 @@ public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
 {
     /// <summary>R10.10. A back pointer: constrained by the invariant, not owned by it.</summary>
     public bool IsBackward { get; init; }
+
+    /// <summary>
+    /// R24.7. An array field declared <c>T[]?</c>: the class owns it through
+    /// <c>Pulse.Lib.CSharp.NullableArray.pts_to</c>, which owns nothing when it is null.
+    /// </summary>
+    public bool IsNullableArray { get; init; }
 }
 
 /// <summary>One argument of a recursive class's model constructor (R10.5).</summary>

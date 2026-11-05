@@ -255,13 +255,24 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R22.10. `new T[n]` fills with `default(T)`, so at a type parameter it needs the
         // caller's default exactly as R14.2a's `default(T)` does -- unless the length is
         // the literal zero, which fills nothing.
+        // R24.11: so does an array of a struct whose default mentions a type parameter.
         if (length is not IrLiteral { Value: 0 or 0L } &&
-            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: ITypeParameterSymbol tp })
+            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: var element })
         {
-            DefaultedTypeParameters.Add(tp.Name);
+            foreach (var tp in TypeParametersIn(element))
+                DefaultedTypeParameters.Add(tp.Name);
         }
         return new IrNewArray(loc, array.Element, length) { Type = array };
     }
+
+    /// <summary>R24.11. The type parameters a type's default value depends on.</summary>
+    public static IEnumerable<ITypeParameterSymbol> TypeParametersIn(ITypeSymbol t) => t switch
+    {
+        ITypeParameterSymbol tp => [tp],
+        INamedTypeSymbol n => n.TypeArguments.Concat(n.ContainingType?.TypeArguments ?? [])
+            .SelectMany(TypeParametersIn),
+        _ => [],
+    };
 
     /// <summary>
     /// R3.5. <c>new S { f = e, … }</c>. Only object-initializer syntax is translated:
