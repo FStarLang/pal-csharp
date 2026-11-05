@@ -255,6 +255,14 @@ public static class Pal
     /// </summary>
     public static Seq<T> Rotate<T>(Seq<T> s, int offset) => throw Ghost();
 
+    /// <summary>
+    /// R23.10. The <paramref name="count"/> elements of the circular buffer
+    /// <paramref name="s"/> read from <paramref name="start"/>, wrapping round once:
+    /// <c>Ring(s, h, n)[k] == s[h + k &lt; s.Length ? h + k : h + k - s.Length]</c>. Meaningful when
+    /// <c>0 &lt;= h &lt;= s.Length</c> and <c>0 &lt;= n &lt;= s.Length</c>; empty otherwise.
+    /// </summary>
+    public static Seq<T> Ring<T>(Seq<T> s, SpecInt start, SpecInt count) => throw Ghost();
+
     // -- Separation-logic propositions -------------------------------------
 
     /// <summary>The points-to resource for a location, Pulse's <c>pts_to</c>.</summary>

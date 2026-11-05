@@ -591,7 +591,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // Only a sequence *built* by an operation is compared so: between two names the
         // quantifier `Seq.equal` unfolds to buys nothing and costs the solver.
         var text = left.Kind is TermKind.Seq && right.Kind is TermKind.Seq &&
-                   (Built(b.Left) || Built(b.Right))
+                   (Built(b.Left) || Built(b.Right) || TwoState(b.Left, b.Right))
             ? $"(Seq.equal {left.Text} {right.Text})"
             : comparable
             ? $"({left.Text} == {right.Text})"
@@ -601,7 +601,20 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // R22.28. The contents of a returned array are as fresh as a built sequence: a
         // `==` there would let Pulse's prover pick the existential from the equation and
         // then fail to match the array it actually owns.
-        static bool Built(IrExpr e) => e is IrSeqOp or IrContents { Array: IrResult } or IrResult { Type: IrArrayType };
+        // R23.14. A conditional is built when an arm is; and an abstraction of one state
+        // compared with the other state's is not a name compared with itself: what the
+        // method did to the representation is between them, so they are compared pointwise too.
+        static bool Built(IrExpr e) => e switch
+        {
+            IrSeqOp or IrContents { Array: IrResult } or IrResult { Type: IrArrayType } => true,
+            IrConditional c => Built(c.Then) || Built(c.Else) || c.Then is IrOld || c.Else is IrOld,
+            _ => false,
+        };
+        // An array's contents are a name in either state, and a frame like
+        // `Contents(a) == Old(Contents(a))` is better left to `==`.
+        static bool TwoState(IrExpr l, IrExpr r) =>
+            (l is IrOld) != (r is IrOld) && !IsContents(l) && !IsContents(r);
+        static bool IsContents(IrExpr e) => (e is IrOld o ? o.Operand : e) is IrContents;
     }
 
     private Term SeqOp(IrSeqOp s, SpecScope scope) => s.Op switch

@@ -216,7 +216,8 @@ let cleared (#t: Type) (z: t) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.len
       if i <= j && j < i + n then z else Seq.index s j)
 
 /// `Array.Reverse(s, i, n)`.
-let reversed (#t: Type) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.length s }) : Seq.seq t
+let reversed (#t: Type) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.length s })
+  : r: Seq.seq t { Seq.length r == Seq.length s }
   = Seq.init (Seq.length s) (fun (j: nat { j < Seq.length s }) ->
       if i <= j && j < i + n then Seq.index s (2 * i + n - 1 - j) else Seq.index s j)
 
@@ -257,7 +258,18 @@ let rec last_index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat 
   = if n = 0 then () else last_index_of_slice s x lo hi i (n - 1)
 
 /// `Pal.Reverse(s)`: `s` back to front.
-let reverse_all (#t: Type) (s: Seq.seq t) : Seq.seq t = reversed s 0 (Seq.length s)
+let reverse_all (#t: Type) (s: Seq.seq t) : r: Seq.seq t { Seq.length r == Seq.length s } = reversed s 0 (Seq.length s)
+
+/// R23. `reverse_all`, pointwise.
+let reverse_all_length (#t: Type) (s: Seq.seq t)
+  : Lemma (Seq.length (reverse_all s) == Seq.length s) [SMTPat (Seq.length (reverse_all s))]
+  = ()
+
+let reverse_all_index (#t: Type) (s: Seq.seq t) (k: nat { k < Seq.length s })
+  : Lemma (Seq.length (reverse_all s) == Seq.length s /\
+           Seq.index (reverse_all s) k == Seq.index s (Seq.length s - 1 - k))
+          [SMTPat (Seq.index (reverse_all s) k)]
+  = ()
 
 /// `Pal.LastIndexOf(s, x, index, count)`, in C#'s `(index, count)` convention.
 let last_index_of_at (#t: Type) (s: Seq.seq t) (x: t) (index: int) (count: nat { index - count + 1 >= 0 /\ index + 1 <= Seq.length s })
@@ -279,3 +291,80 @@ let rec last_index_of_range (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat {
           [SMTPat (last_index_of s x lo n)]
   = if n = 0 then () else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s (lo + n - 1)) x then ()
     else last_index_of_range s x lo (n - 1)
+
+// ---------------------------------------------------------------------------
+// R23.5. Searches (queuestack). A search finds something exactly when there is a match in its range,
+// whichever end it starts from; so `Contains` may be specified by `IndexOf` and
+// implemented by `LastIndexOf`.
+// ---------------------------------------------------------------------------
+
+let rec index_of_found (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+  : Lemma (ensures (index_of s x i n >= 0 <==>
+                    (exists (k: nat). i <= k /\ k < i + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s k) x)))
+          (decreases n)
+  = if n = 0 then () else index_of_found s x (i + 1) (n - 1)
+
+let rec last_index_of_found (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+  : Lemma (ensures (last_index_of s x lo n >= 0 <==>
+                    (exists (k: nat). lo <= k /\ k < lo + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s k) x)))
+          (decreases n)
+  = if n = 0 then () else last_index_of_found s x lo (n - 1)
+
+/// The two searches of one range agree on whether they find anything.
+let last_index_of_found_iff (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+  : Lemma (last_index_of s x lo n >= 0 <==> index_of s x lo n >= 0)
+          [SMTPat (last_index_of s x lo n)]
+  = index_of_found s x lo n; last_index_of_found s x lo n
+
+// ---------------------------------------------------------------------------
+// R23.10. `Pal.Ring(s, h, n)`: a circular buffer's `n` live elements from `h`, wrapping
+// once. Stated by its index equation, which has no modulus, so that the head moving
+// and the tail moving are both index arithmetic.
+// ---------------------------------------------------------------------------
+
+let ring (#t: Type) (s: Seq.seq t) (h: int) (n: int) : Seq.seq t =
+  if 0 <= h && h <= Seq.length s && 0 <= n && n <= Seq.length s
+  then Seq.init n (fun (k: nat { k < n }) ->
+         if h + k < Seq.length s then Seq.index s (h + k) else Seq.index s (h + k - Seq.length s))
+  else Seq.empty
+
+let ring_length (#t: Type) (s: Seq.seq t) (h: int) (n: int)
+  : Lemma (requires 0 <= h /\ h <= Seq.length s /\ 0 <= n /\ n <= Seq.length s)
+          (ensures Seq.length (ring s h n) == n)
+          [SMTPat (ring s h n)]
+  = ()
+
+let ring_index (#t: Type) (s: Seq.seq t) (h: int) (n: int) (k: nat)
+  : Lemma (requires 0 <= h /\ h <= Seq.length s /\ 0 <= n /\ n <= Seq.length s /\ k < n)
+          (ensures Seq.length (ring s h n) == n /\
+                   Seq.index (ring s h n) k ==
+                   (if h + k < Seq.length s then Seq.index s (h + k) else Seq.index s (h + k - Seq.length s)))
+          [SMTPat (Seq.index (ring s h n) k)]
+  = ()
+
+/// A search of a ring is a search of the store: of one range when the live elements do
+/// not wrap, of the head's part and then the tail's when they do.
+let ring_index_of (#t: Type) (s: Seq.seq t) (x: t) (h: int) (n: int)
+  : Lemma (requires 0 <= h /\ h <= Seq.length s /\ 0 <= n /\ n <= Seq.length s)
+          (ensures (index_of_all (ring s h n) x >= 0 <==>
+                    (if h + n <= Seq.length s then index_of s x h n >= 0
+                     else (index_of s x h (Seq.length s - h) >= 0 \/
+                           index_of s x 0 (h + n - Seq.length s) >= 0))))
+          [SMTPat (index_of_all (ring s h n) x)]
+  = let len = Seq.length s in
+    let r = ring s h n in
+    index_of_found r x 0 n;
+    if h + n <= len then begin
+      index_of_found s x h n;
+      let aux (k: nat { k < n }) : Lemma (Seq.index r k == Seq.index s (h + k)) = () in
+      FStar.Classical.forall_intro aux;
+      assert (forall (j: nat). h <= j /\ j < h + n ==> Seq.index r (j - h) == Seq.index s j)
+    end else begin
+      index_of_found s x h (len - h);
+      index_of_found s x 0 (h + n - len);
+      let aux (k: nat { k < n })
+        : Lemma (Seq.index r k == (if h + k < len then Seq.index s (h + k) else Seq.index s (h + k - len))) = () in
+      FStar.Classical.forall_intro aux;
+      assert (forall (j: nat). h <= j /\ j < len ==> Seq.index r (j - h) == Seq.index s j);
+      assert (forall (j: nat). j < h + n - len ==> Seq.index r (j + len - h) == Seq.index s j)
+    end

@@ -477,7 +477,14 @@ public sealed record IrQuantifier(
 /// <c>new T[n]</c> (R6.9). Executable only: an array is a resource, so it has no meaning
 /// in a specification.
 /// </summary>
-public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrExpr(Loc);
+public sealed record IrNewArray(IrLoc Loc, IrType Element, IrExpr Length) : IrExpr(Loc)
+{
+    /// <summary>
+    /// R23.4. The array whose contents the new one starts with (<c>Array.Resize</c>): its
+    /// first <c>min(length, n)</c> cells are copied and the rest are <c>default(T)</c>.
+    /// </summary>
+    public IrExpr? Source { get; init; }
+}
 
 /// <summary>R20.3. The operations of <c>Nullable&lt;T&gt;</c>.</summary>
 public enum OptionOpKind { HasValue, Value, Some }

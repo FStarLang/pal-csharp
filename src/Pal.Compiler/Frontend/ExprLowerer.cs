@@ -123,6 +123,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 Default(node, loc),
             LiteralExpressionSyntax l => LowerLiteral(l, loc),
             ThisExpressionSyntax => new IrVar(loc, Names.This),
+            // R23.13. The empty collection expression at a one-dimensional array type is
+            // `Array.Empty<T>()` (R23.1).
+            CollectionExpressionSyntax { Elements.Count: 0 } ce when !SpecPosition &&
+                model.GetTypeInfo(ce).ConvertedType is IArrayTypeSymbol { Rank: 1 } emptyArray &&
+                known.MapType(emptyArray) is IrArrayType emptyType =>
+                new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType },
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
@@ -313,8 +319,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol libExn && known.IsLibraryException(libExn))
         {
             var args = node.ArgumentList?.Arguments ?? default;
-            if (node.Initializer is not null ||
-                args.Any(a => !model.GetConstantValue(a.Expression).HasValue))
+            if (node.Initializer is not null || args.Any(a => !UnevaluatedExceptionArgument(a.Expression)))
             {
                 diagnostics.Error("PALCS0628", loc,
                     $"`{Trim(node)}`. An exception the BCL declares translates when it is built " +
@@ -746,6 +751,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             "model built from constants (doc/translation.md R20.10).");
         return new IrLiteral(loc, null);
     }
+
+    /// <summary>
+    /// R21.7, R23.3. An argument of a BCL exception's constructor is not modelled, so it is
+    /// not evaluated: a constant, or a read of a local or parameter, which has no effect to lose.
+    /// </summary>
+    private bool UnevaluatedExceptionArgument(ExpressionSyntax e) =>
+        model.GetConstantValue(e).HasValue ||
+        (e is IdentifierNameSyntax && model.GetSymbolInfo(e).Symbol is ILocalSymbol or IParameterSymbol);
 
     private static bool IsPureValue(IrExpr e) => e switch
     {
@@ -1475,7 +1488,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],
-            IrNewArray n => [n.Length],
+            IrNewArray n => n.Source is { } src ? [n.Length, src] : [n.Length],
             IrContents c => [c.Array],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
@@ -1560,6 +1573,42 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrArraySearch(loc, method.Name == "LastIndexOf",
                 Lower(args[0].Expression), Lower(args[1].Expression),
                 Lower(args[2].Expression), Lower(args[3].Expression)) { Type = IrPrim.Int };
+
+        // R23.5. `Array.LastIndexOf(a, x, startIndex)` searches `[0, startIndex]`: it is the
+        // four-argument search with `count = startIndex + 1`, the index evaluated once.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "LastIndexOf", IsGenericMethod: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 3 &&
+            method.Parameters[2].Type.SpecialType == SpecialType.System_Int32 &&
+            Lower(args[2].Expression) is var lastStart && !HasEffect(lastStart))
+            return new IrArraySearch(loc, true,
+                Lower(args[0].Expression), Lower(args[1].Expression), lastStart,
+                new IrBinary(loc, BinOp.Add, lastStart, new IrLiteral(loc, 1) { Type = IrPrim.Int }) { Type = IrPrim.Int })
+                { Type = IrPrim.Int };
+
+        // R23.1. `Array.Empty<T>()` is read, in code, as a fresh `new T[0]`, as R22.8 reads
+        // a class's own shared empty array.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "Empty", IsGenericMethod: true, Parameters.Length: 0 } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array &&
+            known.MapType(method.ReturnType) is IrArrayType emptyType)
+            return new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType };
+
+        // R23.12. `Math.Min(a, b)` and `Math.Max(a, b)` at `int`, with effect-free arguments,
+        // are the conditionals they compute.
+        if (method is { IsStatic: true, Name: "Min" or "Max", Parameters.Length: 2 } &&
+            method.ContainingType?.ToDisplayString() == "System.Math" &&
+            method.Parameters.All(p => p.Type.SpecialType == SpecialType.System_Int32))
+        {
+            var a = Lower(node.ArgumentList.Arguments[0].Expression);
+            var b = Lower(node.ArgumentList.Arguments[1].Expression);
+            if (!HasEffect(a) && !HasEffect(b))
+            {
+                var op = method.Name == "Min" ? BinOp.Le : BinOp.Ge;
+                return new IrConditional(loc, new IrBinary(loc, op, a, b) { Type = IrPrim.Bool }, a, b)
+                    { Type = IrPrim.Int };
+            }
+        }
 
         // R22.26. `RuntimeHelpers.IsReferenceOrContainsReferences<T>()` is a constant per
         // type that the JIT folds; to the proof it is an unknown one.
@@ -1825,6 +1874,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);
             case nameof(PalLang.Pal.Rotate):
                 return new IrSeqOp(loc, SeqOpKind.Rotate, [Arg(0), Arg(1)]);
+            // R23.10. A circular buffer's live elements.
+            case nameof(PalLang.Pal.Ring):
+                return new IrSpecOp(loc, "CS.ring", [Arg(0), Arg(1), Arg(2)])
+                    { Type = known.MapType(method.ReturnType) };
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             case nameof(PalLang.Pal.InlinePulse) when ConstantString(args[0].Expression) is { } text:

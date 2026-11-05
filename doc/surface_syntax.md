@@ -97,6 +97,7 @@ Both forms lower to the same thing. Mix them freely.
 | `IsPermutation(s, t)` | `s` is a rearrangement of `t` |
 | `SetAt(s, i, v)`, `Slice(s, i, j)` | ghost sequence update and subsequence |
 | `Splice(s, i, j, t)`, `Reverse(s)` | `s` with `[i, j)` replaced by `t`; `s` reversed |
+| `Ring(s, h, n)` | the `n` elements of a circular buffer `s` from `h`, wrapping once (`0 <= h <= s.Length`, `0 <= n <= s.Length`; else empty) |
 | `IndexOf(s, x)`, `IndexOf(s, x, i, n)` | first match of `x` in `s` (or in `[i, i+n)`), else `-1` |
 | `LastIndexOf(s, x)`, `LastIndexOf(s, x, index, count)` | last match, searching back from `index` over `count` elements |
 | `DefaultEquals(a, b)` | `EqualityComparer<T>.Default.Equals(a, b)` |

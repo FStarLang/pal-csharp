@@ -370,7 +370,7 @@ public static class Normalize
             case IrStmtExpr se: foreach (var s in se.Prelude) Free(s, into); Free(se.Value, into); return;
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
-            case IrNewArray na: Free(na.Length, into); return;
+            case IrNewArray na: Free(na.Length, into); if (na.Source is { } nas) Free(nas, into); return;
             case IrArraySearch se: Free(se.Array, into); Free(se.Item, into); Free(se.Start, into); Free(se.Count, into); return;
             case IrContents ct: Free(ct.Array, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
@@ -547,6 +547,8 @@ public static class Normalize
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;
                     case IrField { Receiver: IrVar rec }: into.Add(rec.Name); break;
                 }
+                // R23.9. The target's index is evaluated too, and may write: `a[--i] = x`.
+                if (a.Target is IrElement target) AssignedByCalls(target.Index, into);
                 AssignedByCalls(a.Value, into);
                 return;
             case IrIf i:

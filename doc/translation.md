@@ -6253,3 +6253,162 @@ for `c.Compare(x, y)`, up to sign. A comparer is assumed to be a deterministic t
 preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collection's
 contract names its comparer, and how a call to `Compare` lowers, is given with the
 collection families that use it.
+
+## 23. Queue, Stack and LinkedList
+
+The array-backed `Stack<T>` and `Queue<T>` of dotnet/runtime are verified in place with
+§22's machinery; the rules below are what they needed in addition. Library support is in
+`Pulse.Lib.CSharp.QueueStack` (proved; nothing assumed) and `Pulse.Lib.CSharp.Seq`.
+`test/collections_queuestack` exercises each rule.
+
+### R23.1 `Array.Empty<T>()`
+
+is a fresh array of length 0, as `new T[0]` (and trusted in the same way as R22.8: the
+CLR shares one instance per `T`, and a zero-length array has no cells to alias).
+
+### R23.2 Argument guards
+
+`ArgumentOutOfRangeException.ThrowIfNegative(x)`, `ThrowIfNegativeOrZero`, `ThrowIfZero`,
+`ThrowIfLessThan(x, y)`, `ThrowIfLessThanOrEqual`, `ThrowIfGreaterThan`,
+`ThrowIfGreaterThanOrEqual`, `ThrowIfEqual` and `ThrowIfNotEqual`, at an integral type, are
+the `if (cmp) throw new ArgumentOutOfRangeException(...)` they abbreviate, so the
+contract states the throw with `[Throws]`. `ArgumentNullException.ThrowIfNull(a)` of a
+non-nullable array or class reference is nothing: such a reference is non-null (R10.2
+for a class; an array is translated as owned and so live), so the guard never fires.
+
+### R23.3 Exception arguments
+
+A BCL exception's constructor arguments (R21.7) may be constants or reads of a local or
+parameter, as in `new ArgumentOutOfRangeException(nameof(i), i, SR.Message)`: they have no
+effect, and the exception is modelled by its type alone, so they are not evaluated.
+
+### R23.4 `Array.Resize(ref a, n)`
+
+is `a = resize a n`: a fresh array of length `n` whose first `min(len a, n)` cells are
+`a`'s and whose rest are `default(T)` (`resized`, with `resized_length` and
+`resized_prefix` patterned). The old array is kept rather than consumed, because a field
+replaced in an open object drops what it held (R22.12).
+
+### R23.5 `Array.LastIndexOf(a, x, start)`
+
+with an effect-free `start` is R22.25's search over `[0, start]` from the top.
+`last_index_of_found_iff` (patterned) states that a search from either end of a range
+finds something exactly when the other does, so `Contains` may be specified by
+`Pal.IndexOf` and implemented by `LastIndexOf`.
+
+### R23.6 Array distinctness in `Debug.Assert`
+
+`Debug.Assert(a != b)` for two arrays is the ghost step `distinct a b`, which proves
+`a =!= b` from both being owned, when one of them has a cell (the gathered permission
+would exceed 1). Two empty arrays may be the same object — `Array.Empty<T>()` is shared —
+so the step needs `length a > 0 \/ length b > 0` of its context.
+
+### R23.7 `[DoesNotReturn]` on the open receiver
+
+A call to a `[DoesNotReturn]` instance method on the receiver (R22.11) closes the receiver
+once, as at a `throw`, and calls it closed; R22.15's bracket around a self-call is not
+added, since nothing follows the call to reopen it for.
+
+### R23.8 Split guards
+
+`if (a || b) throw …;` with no `else` is `if (a) throw …; else if (b) throw …;`. Lowered as
+one `if`, a `b` that needs statements (an array's length, a field read) leaves the
+condition a bound `bool` Pulse knows nothing about, and what follows cannot use the
+guard's failure; split, each disjunct's failure is a path condition of its own. The throw
+is duplicated, which is harmless: it is reached on exactly the paths it was.
+
+### R23.9 Writes in an element target
+
+The index of an element assignment is evaluated too, so `a[--j] = x` assigns `j` for
+R5.8b: a loop containing it quantifies `j` in its invariant.
+
+### R23.10 `Pal.Ring(s, h, n)`
+
+⟶ `CS.ring ⟦s⟧ ⟦h⟧ ⟦n⟧`: the `n` live elements of a circular buffer whose head is at
+`h`, wrapping once — `s[h + k]` when `h + k < len s`, else `s[h + k - len s]` — for
+`0 <= h <= len s` and `0 <= n <= len s` (else empty). Stated by that index equation
+(`ring_index`, patterned) rather than with a modulus, so that a head or tail moving by
+one is index arithmetic. `ring_length` is patterned on the ring itself, so that two
+states whose rings are equal (R22.15's model equality across a self-call) have equal
+counts. `ring_index_of` reads a search of a ring as one search of the store, or two when
+the live range wraps: `Queue<T>.Contains`' two `Array.IndexOf` calls.
+
+### R23.11 A field passed by `ref`
+
+A call `M(ref _f)` on the receiver, where `_f` is a scalar field of the class and `M`'s
+body names neither `_f` nor any method, is `{ var t = _f; M(ref t); _f = t; }` (R6.10 needs
+a `ref` argument to be a cell). The copy is exact: `M` cannot observe `_f` while it runs.
+
+### R23.12 `Math.Min` and `Math.Max`
+
+at `int`, of effect-free arguments, are the conditional `a <= b ? a : b` (`a >= b ? a : b`).
+
+### R23.13 `[]`
+
+An empty collection expression at an array type is `new T[0]` (and trusted as R23.1 is:
+the compiler may share `Array.Empty<T>()`).
+
+### R23.14 Two-state sequence equality
+
+R22.23's `Seq.equal` is used also when an abstraction of one state is compared with one
+of the other (`Items == Old(Items)`), and when a conditional's arm is built or old: what
+the method did to the representation lies between the two sides, so the solver must
+compare them pointwise; the patterned `lemma_eq_elim` restores `==` at a caller. An
+array's contents are a name in either state, so a frame `Contents(a) == Old(Contents(a))`
+stays `==` (as a loop invariant, `Seq.equal` there costs the solver an extensionality
+quantifier per iteration for nothing).
+
+### Queue<T>
+
+`Queue<T>`'s model is `Items = Ring(Contents(_array), _head, _size)` with the store and
+head alongside, so that a model equality across a read-only self-call (`MoveNext`)
+determines the raw state. The invariant states `_tail` as `_head + _size` wrapped once.
+`CopyTo`'s second destination index `arrayIndex + _array.Length - _head` can overflow in
+its first addition and is correct only because unchecked arithmetic wraps back; the
+method is verified as `[Wrapping]` for that reason.
+
+### LinkedList<T>: not verified
+
+`LinkedList<T>` (System.Collections) is a *circular* doubly linked list of
+`LinkedListNode<T>` objects, each of which also points back at its list. Marking both
+classes `[Plain]` (§12) and translating `LinkedList.cs` in place stops at four distinct
+obstacles, each confirmed by a probe:
+
+1. **An untranslatable field.** `LinkedList<T>._siInfo : SerializationInfo?` (binary
+   serialization state) has no translation, so `LinkedList<T>`'s record cannot be emitted
+   at all (PALCS0500). Needed: an *opaque field* — a field no translated member reads,
+   emitted as an abstract placeholder type.
+2. **Mutually referencing classes.** `LinkedList<T>.head : LinkedListNode<T>?` and
+   `LinkedListNode<T>.list : LinkedList<T>?` make `Class_LinkedList` and
+   `Class_LinkedListNode` depend on each other, and F\* refuses the module cycle (Error
+   308). Needed: the classes of a reference cycle emitted as one module of mutually
+   recursive types (`type … and …`), with per-class modules re-exporting it by `include`.
+3. **Constructors of a `[Plain]` class.** `AddFirst(T)`/`AddLast(T)` allocate with
+   `new LinkedListNode<T>(this, value)`; R12.4 accepts only object-initializer syntax.
+   Needed: a `[Plain]` constructor given an explicit contract (`[Ensures]` an `SlProp`
+   cell), translated like any method rather than read for field assignments.
+4. **Aliasing inside one statement.** `InternalInsertNodeBefore` (behind every `Add*`)
+   executes `node.prev!.next = newNode`, which reads `node` and writes `node.prev` in a
+   single statement. On a one-element list `node.prev == node`; otherwise they are
+   distinct boxes. A per-node `pts_to` encoding needs *one* resource in the first case and
+   *two* in the second, but the statement is one straight-line Pulse step with no branch
+   to split on, and Pulse matches a box by unification, not by an SMT equality, so no
+   ghost step placed between C# statements can serve both. Needed: either a *region*
+   encoding of `[Plain]` objects (all nodes owned by one ghost map, a field access proving
+   membership, so aliasing is a pure fact), or an emitter rule that, at a statement whose
+   two box accesses may alias, case-splits on the reference equality and emits the
+   statement in each branch.
+
+Removal (`RemoveFirst`/`RemoveLast` via `InternalRemoveNode`) does not meet obstacle 4 —
+the code itself branches on `node.next == node` before touching a second node, and in
+the two-element case the two writes are separate statements between which a ghost
+lemma can re-open the segment — so with 1 and 2 removed it is within the §12 method:
+a circular-segment predicate over `head` (closed through `head.prev`) and a `[Plain]`
+receiver whose record the user's predicate owns. `Count` and `First` are field reads of
+that record; `Last` (`head?.prev`) reads the head node and needs only the predicate's
+"open first node" lemma.
+
+### Trusted
+
+Beyond §22's: R23.1's (and R23.13's) reading of the shared empty array as fresh, and R23.2's trust that a
+non-nullable reference is not null.
