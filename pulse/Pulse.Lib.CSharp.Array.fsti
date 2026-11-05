@@ -31,6 +31,7 @@ module A = Pulse.Lib.Array
 module I32 = FStar.Int32
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
+module CS = Pulse.Lib.CSharp.Seq
 
 /// The pure model of the CLR array-length header field.
 ///
@@ -131,3 +132,65 @@ fn copy (#t: Type0) (src dst: array t) (len: I32.t)
                  Seq.slice (copied s d (I32.v len)) 0 (I32.v len) == Seq.slice s 0 (I32.v len) /\
                  Seq.slice (copied s d (I32.v len)) (I32.v len) (Seq.length d) ==
                    Seq.slice d (I32.v len) (Seq.length d))
+
+/// `Array.Copy(src, si, dst, di, len)` between distinct arrays (R22.20). The CLR
+/// throws on a bad range; here the range is the caller's obligation.
+fn copy_at (#t: Type0) (src: array t) (si: I32.t) (dst: array t) (di: I32.t) (len: I32.t)
+  (#p: perm) (#s: Ghost.erased (Seq.seq t))
+  (#d: Ghost.erased (Seq.seq t) {
+     I32.v si >= 0 /\ I32.v di >= 0 /\ I32.v len >= 0 /\
+     I32.v si + I32.v len <= Seq.length s /\ I32.v di + I32.v len <= Seq.length d })
+  requires A.pts_to src #p s ** A.pts_to dst d
+  ensures  A.pts_to src #p s ** A.pts_to dst (CS.copied_at s (I32.v si) d (I32.v di) (I32.v len))
+
+/// `Array.Copy(a, si, a, di, len)`, within one array: as if through a temporary.
+fn move (#t: Type0) (a: array t) (si: I32.t) (di: I32.t) (len: I32.t)
+  (#s: Ghost.erased (Seq.seq t) {
+     I32.v si >= 0 /\ I32.v di >= 0 /\ I32.v len >= 0 /\
+     I32.v si + I32.v len <= Seq.length s /\ I32.v di + I32.v len <= Seq.length s })
+  requires A.pts_to a s
+  ensures  A.pts_to a (CS.copied_at s (I32.v si) s (I32.v di) (I32.v len))
+
+/// `Array.Clear(a, i, n)` with the default given explicitly.
+fn clear_with (#t: Type0) (z: t) (a: array t) (i: I32.t) (n: I32.t)
+  (#s: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\ I32.v i + I32.v n <= Seq.length s })
+  requires A.pts_to a s
+  ensures  A.pts_to a (CS.cleared z s (I32.v i) (I32.v n))
+
+/// `Array.Reverse(a, i, n)`.
+fn reverse (#t: Type0) (a: array t) (i: I32.t) (n: I32.t)
+  (#s: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\ I32.v i + I32.v n <= Seq.length s })
+  requires A.pts_to a s
+  ensures  A.pts_to a (CS.reversed s (I32.v i) (I32.v n))
+
+/// `Array.IndexOf(a, x, i, n)`, by `EqualityComparer<T>.Default` (R22.25).
+fn index_of (#t: Type0) (a: array t) (x: t) (i: I32.t) (n: I32.t)
+  (#p: perm)
+  (#s: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\ I32.v i + I32.v n <= Seq.length s })
+  preserves A.pts_to a #p s
+  returns  r: I32.t
+  ensures  pure (I32.v r == CS.index_of s x (I32.v i) (I32.v n))
+
+/// `Array.LastIndexOf(a, x, index, count)` searches `[index-count+1, index]`; here it
+/// is given the bottom of that range, `lo`, and its size.
+fn last_index_of_lo (#t: Type0) (a: array t) (x: t) (lo: I32.t) (n: I32.t)
+  (#p: perm)
+  (#s: Ghost.erased (Seq.seq t) { I32.v lo >= 0 /\ I32.v n >= 0 /\ I32.v lo + I32.v n <= Seq.length s })
+  preserves A.pts_to a #p s
+  returns  r: I32.t
+  ensures  pure (I32.v r == CS.last_index_of s x (I32.v lo) (I32.v n))
+
+/// `Array.Clear(a, i, n)`: the cells become `default(T)` (R22.25).
+fn clear (#t: Type0) {| d: has_default t |} (a: array t) (i: I32.t) (n: I32.t)
+  (#s: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\ I32.v i + I32.v n <= Seq.length s })
+  requires A.pts_to a s
+  ensures  A.pts_to a (CS.cleared (default_of t) s (I32.v i) (I32.v n))
+
+/// `Array.LastIndexOf(a, x, index, count)`: the last match in `[index-count+1, index]`.
+fn last_index_of (#t: Type0) (a: array t) (x: t) (index: I32.t) (count: I32.t)
+  (#p: perm)
+  (#s: Ghost.erased (Seq.seq t) {
+     I32.v count >= 0 /\ I32.v index - I32.v count + 1 >= 0 /\ I32.v index < Seq.length s })
+  preserves A.pts_to a #p s
+  returns  r: I32.t
+  ensures  pure (I32.v r == CS.last_index_of s x (I32.v index - I32.v count + 1) (I32.v count))

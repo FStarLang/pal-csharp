@@ -79,6 +79,9 @@ public sealed class MethodPlan
         // denotes that model, not the binder — the same substitution R4.10 makes for
         // `this`, and the reason `Result.TheArea` means anything at all.
         var returnsObject = method.ReturnType is IrClassType { Plain: false };
+        // R22.28. A method returning an array returns it owned, and `Result` denotes the
+        // contents it is owned at, as an array parameter's name does (R4.9).
+        var returnsArray = method.ReturnType is IrArrayType;
         var resultModel = "post_" + (method.IsConstructor ? Names.This : Names.Result);
 
         // Otherwise `Result` denotes the value the method returns, so it carries that
@@ -88,7 +91,7 @@ public sealed class MethodPlan
         var post = new SpecScope
         {
             Pre = pre,
-            ResultTerm = returnsObject ? resultModel : Names.Result,
+            ResultTerm = returnsObject || returnsArray ? resultModel : Names.Result,
             ResultKind = returnsObject ? TermKind.Math : KindOf(method.ReturnType),
             ResultType = returnsObject ? null : method.ReturnType,
         };
@@ -383,6 +386,11 @@ public sealed class MethodPlan
                 PulseEmitter.SubInvApp(built, Names.Result, "1.0R", resultModel));
             postExistentials.Add(resultModel);
             if (method.IsConstructor) post.Bind(Names.This, new Term(resultModel, TermKind.Math, built));
+        }
+        else if (returnsArray)
+        {
+            postResources.Add($"A.pts_to {Names.Result} {resultModel}");
+            postExistentials.Add(resultModel);
         }
 
         // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method

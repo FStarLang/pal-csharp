@@ -591,12 +591,17 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // Only a sequence *built* by an operation is compared so: between two names the
         // quantifier `Seq.equal` unfolds to buys nothing and costs the solver.
         var text = left.Kind is TermKind.Seq && right.Kind is TermKind.Seq &&
-                   (b.Left is IrSeqOp || b.Right is IrSeqOp)
+                   (Built(b.Left) || Built(b.Right))
             ? $"(Seq.equal {left.Text} {right.Text})"
             : comparable
             ? $"({left.Text} == {right.Text})"
             : $"({AsMath(left)} == {AsMath(right)})";
         return negated ? $"(~ {text})" : text;
+
+        // R22.28. The contents of a returned array are as fresh as a built sequence: a
+        // `==` there would let Pulse's prover pick the existential from the equation and
+        // then fail to match the array it actually owns.
+        static bool Built(IrExpr e) => e is IrSeqOp or IrContents { Array: IrResult } or IrResult { Type: IrArrayType };
     }
 
     private Term SeqOp(IrSeqOp s, SpecScope scope) => s.Op switch
@@ -623,6 +628,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.Concat => new Term(
             $"(Seq.append {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})", TermKind.Seq),
         SeqOpKind.Empty => new Term("Seq.empty", TermKind.Seq),
+        SeqOpKind.Reverse => new Term($"(CS.reverse_all {Emit(s.Args[0], scope).Text})", TermKind.Seq),
         SeqOpKind.IsPermutation => new Term(
             $"(CS.is_permutation {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})",
             TermKind.Prop),

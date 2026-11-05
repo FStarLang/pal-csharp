@@ -220,6 +220,7 @@ public sealed class CodeEmitter(
     /// </summary>
     private void EmitSequence(ImmutableArray<IrStmt> statements, IrMethod method, MethodPlan plan)
     {
+        statements = [.. statements.Select(SplitShortCircuit)];
         for (var i = 0; i < statements.Length - 1; i++)
         {
             // R22.12. Pulse joins the arms of an unannotated `if` resource by resource, so
@@ -229,8 +230,14 @@ public sealed class CodeEmitter(
             if (statements[i] is IrIf split && JoinLoses(split))
             {
                 var rest = statements.RemoveRange(0, i + 1);
-                ImmutableArray<IrStmt> Arm(IrStmt? arm) =>
-                    [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest];
+                // An arm that never completes keeps none of the rest: behind its
+                // `unreachable ()` nothing is held, so not even a read typechecks.
+                ImmutableArray<IrStmt> Arm(IrStmt? arm)
+                {
+                    ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
+                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } }]
+                        ? own : [.. own, .. rest];
+                }
                 Tail(split with
                 {
                     Then = new IrBlock(split.Then.Loc, Arm(split.Then)),
@@ -288,7 +295,9 @@ public sealed class CodeEmitter(
                 // re-binding it would leave the context holding its invariant under the
                 // old name, which the frame rule cannot match (Error 228). Everything else
                 // is let-bound so the epilogue can be interposed before the block's value.
-                if (IsObjectBinder(text))
+                // R22.28. A returned array is matched by name just as an object is.
+                if (IsObjectBinder(text) ||
+                    method.ReturnType is IrArrayType && System.Text.RegularExpressions.Regex.IsMatch(text, @"^[A-Za-z_][\w']*$"))
                 {
                     if (_objectLocals.FirstOrDefault(l => l.Binder == text) is { Index: not null } ix)
                         Forget(ix);
@@ -348,6 +357,14 @@ public sealed class CodeEmitter(
                 Line("}");
                 return;
             }
+
+            // R22.11, in tail position. `unreachable ()` has every type, so it is the
+            // block's value, and no epilogue follows it: behind it nothing is held.
+            case IrExprStmt { Expr: IrCall { DoesNotReturn: true } dnr }:
+                ReleaseForThrow(plan);
+                Line(Expr(dnr) + ";");
+                Line("unreachable ()");
+                return;
 
             default:
                 Statement(stmt, plan);
@@ -610,6 +627,36 @@ public sealed class CodeEmitter(
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i);
 
+    /// <summary>
+    /// R22.15, R22.12. A <c>return</c> or declaration whose value is <c>a &amp;&amp; b</c>,
+    /// <c>a || b</c> or <c>c ? x : y</c> with an arm that calls a method on an open
+    /// receiver is the <c>if</c> it abbreviates, so that R22.12 moves what follows into
+    /// both arms rather than leave Pulse to join a reopened receiver with an untouched one.
+    /// </summary>
+    private IrStmt SplitShortCircuit(IrStmt s)
+    {
+        if (_objects.Length == 0) return s;
+        var value = s switch { IrReturn r => r.Value, IrLocalDecl d => d.Init, _ => null };
+        (IrExpr Cond, IrExpr Then, IrExpr Else)? arms = value switch
+        {
+            IrBinary { Op: BinOp.And } b => (b.Left, b.Right, new IrLiteral(b.Loc, false) { Type = b.Type }),
+            IrBinary { Op: BinOp.Or } b => (b.Left, new IrLiteral(b.Loc, true) { Type = b.Type }, b.Right),
+            IrConditional c => (c.Cond, c.Then, c.Else),
+            _ => null,
+        };
+        if (arms is not { } a ||
+            !CallsOpenReceiver(new IrExprStmt(a.Then.Loc, a.Then)) &&
+            !CallsOpenReceiver(new IrExprStmt(a.Else.Loc, a.Else)))
+            return s;
+        IrStmt With(IrExpr v) => s switch
+        {
+            IrReturn r => r with { Value = v },
+            IrLocalDecl d => d with { Init = v },
+            _ => s,
+        };
+        return new IrIf(s.Loc, a.Cond, With(a.Then), With(a.Else));
+    }
+
     /// <summary>R22.15. Whether an arm calls a method on an open receiver, which reopens it afresh.</summary>
     private bool CallsOpenReceiver(IrStmt s) =>
         Passes.Check.Statements(s).SelectMany(Passes.Check.Expressions)
@@ -619,7 +666,7 @@ public sealed class CodeEmitter(
 
     private static bool CopiesArray(IrStmt s) => s switch
     {
-        IrArrayCopy => true,
+        IrArrayOp => true,
         IrBlock b => b.Statements.Any(CopiesArray),
         IrIf i => CopiesArray(i.Then) || i.Else is { } e && CopiesArray(e),
         _ => false,
@@ -1638,11 +1685,18 @@ public sealed class CodeEmitter(
                 Line("unreachable ();");
                 return;
 
-            case IrArrayCopy c:
+            case IrArrayOp c:
             {
-                var src = Expr(c.Source);
-                var dst = Expr(c.Destination);
-                Line($"Pulse.Lib.CSharp.Array.copy {src} {dst} {Expr(c.Length)};");
+                var args = c.Args.Select(a => Atom(Expr(a))).ToList();
+                var fn = c.Op switch
+                {
+                    ArrayOpKind.Copy => "copy",
+                    ArrayOpKind.CopyAt => "copy_at",
+                    ArrayOpKind.Move => "move",
+                    ArrayOpKind.Clear => "clear",
+                    _ => "reverse",
+                };
+                Line($"Pulse.Lib.CSharp.Array.{fn} {string.Join(" ", args)};");
                 return;
             }
             case IrExprStmt e:
@@ -2963,6 +3017,19 @@ public sealed class CodeEmitter(
             }
 
             // R20.6. A stable sort into a fresh array, at the order the key's type has.
+            // R22.25. A search reads the array and yields a position.
+            case IrArraySearch se:
+            {
+                var array = Atom(Expr(se.Array));
+                var item = Atom(Expr(se.Item));
+                var start = Atom(Expr(se.Start));
+                var count = Atom(Expr(se.Count));
+                var t = Fresh();
+                var fn = se.Last ? "last_index_of" : "index_of";
+                Line($"let {t} = Pulse.Lib.CSharp.Array.{fn} {array} {item} {start} {count};");
+                return t;
+            }
+
             case IrOrderBy ob:
             {
                 var source = Expr(ob.Source);
@@ -3509,6 +3576,11 @@ public sealed class CodeEmitter(
     /// inside the branch or guard they belong to rather than hoisted out of it —
     /// hoisting would change evaluation order.
     /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex TotalReadLine =
+        new(@"^\s*let t\d+ = (B\.op_Bang var_this|!var_\w+);\s*$");
+
+    private static bool TotalRead(EmittedLine line) => TotalReadLine.IsMatch(line.Text);
+
     private Captured Capture(Func<string> emit)
     {
         var saved = _lines.Count;
@@ -3531,6 +3603,20 @@ public sealed class CodeEmitter(
 
     private string Branch(string cond, Captured whenTrue, Captured whenFalse)
     {
+        // R6.3a. An arm that only reads locals or the open receiver's box does nothing
+        // that can fail or be observed, so its reads are made ahead of the branch, which
+        // is then F*'s: Pulse's join of a value-returning `if` keeps no relation between
+        // its result and a read made in one arm.
+        // Only where an arm reads the box: a branch over locals alone keeps its Pulse
+        // `if`, whose arms the solver sees separately rather than as one `if` term.
+        if (whenTrue.Lines.All(TotalRead) && whenFalse.Lines.All(TotalRead) &&
+            whenTrue.Lines.Concat(whenFalse.Lines).Any(l => l.Text.Contains("B.op_Bang")))
+        {
+            _lines.AddRange(whenTrue.Lines);
+            _lines.AddRange(whenFalse.Lines);
+            whenTrue = whenTrue with { Lines = [] };
+            whenFalse = whenFalse with { Lines = [] };
+        }
         if (whenTrue.Lines.Length == 0 && whenFalse.Lines.Length == 0)
             return $"(if {cond} then {whenTrue.Term} else {whenFalse.Term})";
 

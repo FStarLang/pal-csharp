@@ -143,6 +143,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
+            // R22.27. `checked(e)` throws on overflow where `e` would wrap. Without
+            // `[Wrapping]` no arithmetic wraps: each operation must be shown not to
+            // overflow, which shows the `OverflowException` is never thrown.
+            CheckedExpressionSyntax ce when ce.IsKind(SyntaxKind.CheckedExpression) => Lower(ce.Expression),
             ArrayCreationExpressionSyntax a => LowerArrayCreation(a, loc),
             // R17.7. `stackalloc` allocates, and every other allocation in the subset is
             // `new T[n]`, whose translation (R6.9) rests on the CLR's garbage collector.
@@ -1188,7 +1192,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// <summary>R22.14. The node sits in a method marked <c>[Wrapping]</c>.</summary>
     private bool InWrappingMethod(SyntaxNode node) =>
         model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol m &&
-        Declarations.Has(m, known.WrappingAttribute);
+        Declarations.Has(m, known.WrappingAttribute) &&
+        !node.Ancestors().Any(a => a.IsKind(SyntaxKind.CheckedExpression));
 
     /// <summary>
     /// R20.11. <c>a ?? b</c> evaluates <c>a</c> once, and <c>b</c> only when <c>a</c> is
@@ -1547,6 +1552,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (method.ContainingType?.ToDisplayString() == "System.Linq.Enumerable")
             return LowerLinq(method, node, loc);
 
+        // R22.25. `Array.IndexOf(a, x, i, n)` and `Array.LastIndexOf(a, x, index, count)`
+        // read `a` and compare by the default equality.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "IndexOf" or "LastIndexOf", IsGenericMethod: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 4)
+            return new IrArraySearch(loc, method.Name == "LastIndexOf",
+                Lower(args[0].Expression), Lower(args[1].Expression),
+                Lower(args[2].Expression), Lower(args[3].Expression)) { Type = IrPrim.Int };
+
+        // R22.26. `RuntimeHelpers.IsReferenceOrContainsReferences<T>()` is a constant per
+        // type that the JIT folds; to the proof it is an unknown one.
+        if (method is { IsStatic: true, Name: "IsReferenceOrContainsReferences", TypeArguments.Length: 1 } &&
+            method.ContainingType?.ToDisplayString() == "System.Runtime.CompilerServices.RuntimeHelpers" &&
+            known.MapType(method.TypeArguments[0]) is { } refType)
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Bcl.is_reference_or_contains_references", [])
+                { TypeArgs = [refType], Type = IrPrim.Bool };
+
         // R17.5. The two ways to borrow a window by name. Both are recognised by
         // *shape* -- the name, the argument count, and the fact that the result is a span
         // -- rather than by symbol identity, because `AsSpan` is an extension method on
@@ -1784,6 +1806,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSeqOp(loc, SeqOpKind.Concat, [Arg(0), Arg(1)]);
             case nameof(PalLang.Pal.EmptySeq):
                 return new IrSeqOp(loc, SeqOpKind.Empty, []);
+            case nameof(PalLang.Pal.Reverse):
+                return new IrSeqOp(loc, SeqOpKind.Reverse, [Arg(0)]);
+            // R22.25. The default equality, and the searches made with it.
+            case nameof(PalLang.Pal.DefaultEquals):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Bcl.default_equals", [Arg(0), Arg(1)])
+                    { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.IndexOf) when args.Count == 4:
+                return new IrSpecOp(loc, "CS.index_of", [Arg(0), Arg(1), Arg(2), Arg(3)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.IndexOf):
+                return new IrSpecOp(loc, "CS.index_of_all", [Arg(0), Arg(1)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.LastIndexOf) when args.Count == 4:
+                return new IrSpecOp(loc, "CS.last_index_of_at", [Arg(0), Arg(1), Arg(2), Arg(3)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.LastIndexOf):
+                return new IrSpecOp(loc, "CS.last_index_of_all", [Arg(0), Arg(1)]) { Type = IrPrim.SpecIntType };
             // R17.8. What a parent holds after a window is given back.
             case nameof(PalLang.Pal.Splice):
                 return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);

@@ -445,15 +445,13 @@ public sealed class StmtLowerer(
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
-        // R22.20. `Array.Copy(src, dst, len)` between arrays of one element type.
-        if (method is { Name: "Copy", IsStatic: true, Parameters.Length: 3 } &&
-            method.ContainingType.SpecialType == SpecialType.System_Array &&
-            method.Parameters[2].Type.SpecialType == SpecialType.System_Int32 &&
-            model.GetTypeInfo(args[0].Expression).Type is IArrayTypeSymbol st &&
-            model.GetTypeInfo(args[1].Expression).Type is IArrayTypeSymbol dt &&
-            SymbolEqualityComparer.Default.Equals(st.ElementType, dt.ElementType))
-            return new IrArrayCopy(loc, _code.Lower(args[0].Expression),
-                _code.Lower(args[1].Expression), _code.Lower(args[2].Expression));
+        // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
+        // arrays. Arguments are matched to parameters by name, so `length:` and the like
+        // need no special treatment.
+        if (method is { IsStatic: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array &&
+            ArrayBulkOp(method, args, loc) is { } bulk)
+            return bulk;
 
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)
@@ -610,6 +608,20 @@ public sealed class StmtLowerer(
     /// <summary>Lowers an expression in specification position.</summary>
     public IrExpr LowerSpec(ExpressionSyntax expression) => _spec.Lower(expression);
 
+    /// <summary>
+    /// An expression body <c>=&gt; e</c> of a member returning a value is <c>return e;</c>,
+    /// and of one returning nothing is <c>e;</c>; each is lowered as that statement is.
+    /// </summary>
+    public IrStmt LowerArrow(ArrowExpressionClauseSyntax arrow)
+    {
+        var loc = Locations.From(arrow);
+        if (model.GetEnclosingSymbol(arrow.Expression.SpanStart) is IMethodSymbol { ReturnsVoid: false } m)
+            return new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+        if (arrow.Expression is ThrowExpressionSyntax th)
+            return new IrThrow(loc, _code.Lower(th.Expression));
+        return LowerSideEffect(arrow.Expression, loc);
+    }
+
     private ITypeSymbol? ReturnType(ReturnStatementSyntax r) =>
         model.GetEnclosingSymbol(r.SpanStart) switch
         {
@@ -617,4 +629,53 @@ public sealed class StmtLowerer(
             IMethodSymbol m => m.ReturnType,
             _ => null,
         };
+
+    /// <summary>
+    /// R22.20, R22.25. <c>Array.Copy</c> (3- and 5-argument), <c>Array.Clear(a, i, n)</c>
+    /// and <c>Array.Reverse(a, i, n)</c>, or null when the call is not one of them.
+    /// </summary>
+    private IrStmt? ArrayBulkOp(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (args.Count != method.Parameters.Length) return null;
+        var byParam = new ExpressionSyntax[args.Count];
+        for (int i = 0; i < args.Count; i++)
+        {
+            int at = args[i].NameColon is { } nc
+                ? method.Parameters.IndexOf(method.Parameters.FirstOrDefault(p => p.Name == nc.Name.Identifier.ValueText)!)
+                : i;
+            if (at < 0 || byParam[at] is not null) return null;
+            byParam[at] = args[i].Expression;
+        }
+        bool IsInt(int i) => method.Parameters[i].Type.SpecialType == SpecialType.System_Int32;
+        IArrayTypeSymbol? ArrayOf(ExpressionSyntax e) =>
+            model.GetTypeInfo(e).Type is IArrayTypeSymbol { Rank: 1 } at ? at : null;
+        IrExpr L(int i) => _code.Lower(byParam[i]);
+
+        switch (method.Name, args.Count)
+        {
+            case ("Copy", 3) when IsInt(2) &&
+                ArrayOf(byParam[0]) is { } st && ArrayOf(byParam[1]) is { } dt &&
+                SymbolEqualityComparer.Default.Equals(st.ElementType, dt.ElementType):
+                return new IrArrayOp(loc, ArrayOpKind.Copy, [L(0), L(1), L(2)]);
+
+            // A copy within one array may overlap, and is a `Move`; one array is
+            // recognised syntactically, and two distinct expressions must then denote
+            // distinct arrays, which the separate permissions the copy needs ensure.
+            case ("Copy", 5) when IsInt(1) && IsInt(3) && IsInt(4) &&
+                ArrayOf(byParam[0]) is { } st && ArrayOf(byParam[2]) is { } dt &&
+                SymbolEqualityComparer.Default.Equals(st.ElementType, dt.ElementType):
+                return SyntaxFactory.AreEquivalent(byParam[0], byParam[2])
+                    ? new IrArrayOp(loc, ArrayOpKind.Move, [L(0), L(1), L(3), L(4)])
+                    : new IrArrayOp(loc, ArrayOpKind.CopyAt, [L(0), L(1), L(2), L(3), L(4)]);
+
+            case ("Clear", 3) when IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } ct:
+                if (ct.ElementType is ITypeParameterSymbol tp)
+                    _code.DefaultedTypeParameters.Add(tp.Name);
+                return new IrArrayOp(loc, ArrayOpKind.Clear, [L(0), L(1), L(2)]);
+
+            case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
+                return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);
+        }
+        return null;
+    }
 }

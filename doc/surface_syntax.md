@@ -96,6 +96,10 @@ Both forms lower to the same thing. Mix them freely.
 | `Contents(a)` | the ghost `Seq<T>` of an array's contents |
 | `IsPermutation(s, t)` | `s` is a rearrangement of `t` |
 | `SetAt(s, i, v)`, `Slice(s, i, j)` | ghost sequence update and subsequence |
+| `Splice(s, i, j, t)`, `Reverse(s)` | `s` with `[i, j)` replaced by `t`; `s` reversed |
+| `IndexOf(s, x)`, `IndexOf(s, x, i, n)` | first match of `x` in `s` (or in `[i, i+n)`), else `-1` |
+| `LastIndexOf(s, x)`, `LastIndexOf(s, x, index, count)` | last match, searching back from `index` over `count` elements |
+| `DefaultEquals(a, b)` | `EqualityComparer<T>.Default.Equals(a, b)` |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |

@@ -2427,7 +2427,7 @@ public static partial class FrontendPass
 
         if (BlockOf(syntax) is { } block) return lowerer.Lower(block);
         if (ArrowOf(syntax) is { } arrow)
-            return new IrReturn(Locations.From(arrow), lowerer.LowerSpec(arrow.Expression));
+            return lowerer.LowerArrow(arrow);
         return null;
     }
 

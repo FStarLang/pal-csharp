@@ -201,6 +201,14 @@ public static class Declarations
                 // An owned array handed to a callee may come back written. Assuming it
                 // does is the strict direction, and the strict direction costs a caller an
                 // existential; the permissive one would be a lie.
+                // R22.25. Except where R22.25 models the callee as a search, which takes
+                // the array read-only.
+                if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
+                    {
+                        Name: "IndexOf" or "LastIndexOf",
+                        ContainingType: { Name: "Array", ContainingNamespace.Name: "System" },
+                    })
+                    continue;
                 foreach (var argument in call.ArgumentList.Arguments)
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })

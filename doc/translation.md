@@ -6110,6 +6110,19 @@ so the facts that tie an open object's fields to the arrays it owns are lost. Wh
 replaces an array field of an open object, calls a method on an open receiver (R22.15), or
 copies into an array (R22.20), the `if` does not join: the statements after it are emitted
 in each arm. An `if` with no `else` in tail position is split as one with an empty `else`.
+An arm that never completes — it ends in a `throw`, a `return`, or a `[DoesNotReturn]`
+call (R22.11) — does not receive them: behind its `unreachable ()` nothing is held. A
+`[DoesNotReturn]` call in tail position makes `unreachable ()` the block's value, with no
+epilogue after it.
+
+R22.12a. A `return`, or a local initialised, with `&&`, `||` or `?:` one of whose operands
+calls a method on an open receiver (R22.15) is first rewritten to the `if` it abbreviates,
+so that the call is a statement and the receiver can be folded around it.
+
+R6.3a (amended here). When both arms of a value-returning branch consist only of total
+reads (`!x` of a local cell, `B.op_Bang this`), at least one of the receiver's box, the
+reads are hoisted before an F\* `if`:
+a Pulse `if` with a value loses the relation between its result and a read made in an arm.
 
 ### R22.13 Properties and indexers
 
@@ -6174,10 +6187,60 @@ point over the calls.
 `==` between two sequences, one of which is built by an operation (R22.16, `Pal.SetAt`,
 `Pal.Slice`), is `Seq.equal`: they agree pointwise, and the SMT pattern of
 `Seq.lemma_eq_elim` turns that into equality. Between two names, `Seq.equal` would only
-cost the solver a quantifier, so `==` stays.
+cost the solver a quantifier, so `==` stays. `Pal.Reverse` and `Pal.Splice` are built;
+so is the contents of a returned array (R22.28), where `==` would let Pulse's prover pick
+the existential from the equation and then fail to match the array the method owns.
 
 ### R22.24 What is trusted
 
 Beyond R20.8: `alloc_empty` (R22.10), the sharing of the empty array (R22.8), the value of
-`Array.MaxLength` (R22.18). Out-of-memory is not modelled: an allocation succeeds, so a
+`Array.MaxLength` (R22.18), `default_equals` (R22.25: that `EqualityComparer<T>.Default`
+is the uninterpreted equality the model searches with) and
+`is_reference_or_contains_references` (R22.26). Out-of-memory is not modelled: an allocation succeeds, so a
 capacity is not proved to be at most `Array.MaxLength`.
+
+### R22.25 Array bulk operations and searches
+
+The `System.Array` members the collections use are modelled in
+`Pulse.Lib.CSharp.Array`, each proved from Pulse's array library:
+
+| C# | Pulse | contents afterwards |
+|---|---|---|
+| `Array.Copy(s, si, d, di, n)`, `s` and `d` distinct | `copy_at` | `CS.copied_at` |
+| `Array.Copy(a, si, a, di, n)` (one array, by syntax) | `move` | `CS.copied_at`, of the old contents |
+| `Array.Clear(a, i, n)` | `clear` (`has_default`) | `CS.cleared` |
+| `Array.Reverse(a, i, n)` | `reverse` | `CS.reversed` |
+| `Array.IndexOf(a, x, i, n)` | `index_of` | unchanged; returns `CS.index_of s x i n` |
+| `Array.LastIndexOf(a, x, i, n)` | `last_index_of` | unchanged; returns `CS.last_index_of_at s x i n` |
+
+The BCL's argument errors become preconditions, not `[Throws]`: the caller proves the range
+is in bounds. Named arguments are matched to parameters. A search compares with
+`default_equals`, so `Pal.DefaultEquals(a, b)` is available in specifications, and its
+result is `-1` or an in-range index holding a match (lemmas `index_of_range`,
+`last_index_of_range`, with SMT patterns). A search is not a write for R4.11b. In
+specifications, `Pal.IndexOf(s, x)`, `Pal.IndexOf(s, x, i, n)`, `Pal.LastIndexOf(s, x)`,
+`Pal.LastIndexOf(s, x, index, count)` and `Pal.Reverse(s)` denote these functions, and
+`Pal.Slice`/`Pal.Splice` take `SpecInt` indices so that `Pal.Old(...)` may be passed.
+
+### R22.26 `RuntimeHelpers.IsReferenceOrContainsReferences<T>()`
+
+is the uninterpreted `is_reference_or_contains_references ty_T` (trusted, R22.24): it only
+decides whether the runtime clears storage, and either answer is safe in the model.
+
+### R22.27 `checked(e)`
+
+is `e` with R5.3's no-overflow obligation, even inside a `[Wrapping]` method: an
+`OverflowException` is proved never to be thrown rather than modelled.
+
+### R22.28 Returning an array
+
+A method whose return type is an array returns it owned: the postcondition holds
+`A.pts_to result s` for an existential `s`, and `Result`/`Pal.Contents(Result)` in the
+contract denote `s`. A returned array local is not re-bound before the epilogue (as R4.12
+for an object), so Pulse's matcher sees it by name.
+
+### R22.29 Expression-bodied members
+
+An `=>` body is lowered as code, as the block `{ return e; }` (or `{ e; }` for a void
+member, `{ throw … }` for a throw expression), so that code-only forms such as R22.25's
+searches are available in it.

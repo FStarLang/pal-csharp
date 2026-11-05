@@ -1410,7 +1410,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     foreach (var c in tr.Catches) { CollectExpr(c.When); Collect(c.Body); }
                     return;
                 case IrExprStmt e: CollectExpr(e.Expr); return;
-                case IrArrayCopy c: CollectExpr(c.Source); CollectExpr(c.Destination); CollectExpr(c.Length); return;
+                case IrArrayOp c: foreach (var a in c.Args) CollectExpr(a); return;
                 case IrGhostStmt g: CollectExpr(g.Prop); return;
                 default: return;
             }
@@ -1436,6 +1436,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrLength l: CollectExpr(l.Array); return;
                 case IrOld o: CollectExpr(o.Operand); return;
                 case IrNewArray na: CollectExpr(na.Length); return;
+                case IrArraySearch se: CollectExpr(se.Array); CollectExpr(se.Item); CollectExpr(se.Start); CollectExpr(se.Count); return;
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
                 case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;

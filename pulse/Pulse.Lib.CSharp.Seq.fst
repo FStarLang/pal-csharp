@@ -194,3 +194,88 @@ let splice_all (#t: Type0) (v: Seq.seq t) (w: Seq.seq t)
   : Lemma (requires Seq.length w == Seq.length v)
           (ensures  splice v 0 (Seq.length v) w == w)
   = Seq.lemma_eq_intro (splice v 0 (Seq.length v) w) w
+
+// ---------------------------------------------------------------------------
+// R22.20, R22.25. What `System.Array`'s bulk operations leave behind, each
+// stated pointwise, as `Seq.init`, so that a client's `Seq.equal` reduces to
+// index arithmetic.
+// ---------------------------------------------------------------------------
+
+/// `Array.Copy(s, si, d, di, len)`: `d` with `len` cells from `si` written at `di`.
+/// A copy within one array is `copied_at s si s di len`: the CLR copies as if
+/// through a temporary, so the cells read are those of the original.
+let copied_at (#t: Type) (s: Seq.seq t) (si: nat) (d: Seq.seq t) (di: nat)
+    (len: nat { si + len <= Seq.length s /\ di + len <= Seq.length d })
+  : Seq.seq t
+  = Seq.init (Seq.length d) (fun (j: nat { j < Seq.length d }) ->
+      if di <= j && j < di + len then Seq.index s (j - di + si) else Seq.index d j)
+
+/// `Array.Clear(s, i, n)`, at the element type's default `z`.
+let cleared (#t: Type) (z: t) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.length s }) : Seq.seq t
+  = Seq.init (Seq.length s) (fun (j: nat { j < Seq.length s }) ->
+      if i <= j && j < i + n then z else Seq.index s j)
+
+/// `Array.Reverse(s, i, n)`.
+let reversed (#t: Type) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.length s }) : Seq.seq t
+  = Seq.init (Seq.length s) (fun (j: nat { j < Seq.length s }) ->
+      if i <= j && j < i + n then Seq.index s (2 * i + n - 1 - j) else Seq.index s j)
+
+/// `Array.IndexOf(s, x, i, n)`: the first position in `[i, i+n)` whose element
+/// `EqualityComparer<T>.Default` calls equal to `x`, or -1.
+let rec index_of (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+  : Tot int (decreases n)
+  = if n = 0 then -1
+    else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s i) x then i
+    else index_of s x (i + 1) (n - 1)
+
+/// `Array.LastIndexOf`, over `[lo, lo+n)` from the top: the last such position.
+let rec last_index_of (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+  : Tot int (decreases n)
+  = if n = 0 then -1
+    else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s (lo + n - 1)) x then lo + n - 1
+    else last_index_of s x lo (n - 1)
+
+/// `Pal.IndexOf(s, x)` and `Pal.LastIndexOf(s, x)`: the searches over all of `s`.
+let index_of_all (#t: Type) (s: Seq.seq t) (x: t) : int = index_of s x 0 (Seq.length s)
+let last_index_of_all (#t: Type) (s: Seq.seq t) (x: t) : int = last_index_of s x 0 (Seq.length s)
+
+/// A search of a slice is a search of the whole, shifted.
+let rec index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
+    (i: nat) (n: nat { i + n <= hi - lo })
+  : Lemma (ensures index_of (Seq.slice s lo hi) x i n ==
+                   (let r = index_of s x (lo + i) n in if r = -1 then -1 else r - lo))
+          (decreases n)
+          [SMTPat (index_of (Seq.slice s lo hi) x i n)]
+  = if n = 0 then () else index_of_slice s x lo hi (i + 1) (n - 1)
+
+let rec last_index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
+    (i: nat) (n: nat { i + n <= hi - lo })
+  : Lemma (ensures last_index_of (Seq.slice s lo hi) x i n ==
+                   (let r = last_index_of s x (lo + i) n in if r = -1 then -1 else r - lo))
+          (decreases n)
+          [SMTPat (last_index_of (Seq.slice s lo hi) x i n)]
+  = if n = 0 then () else last_index_of_slice s x lo hi i (n - 1)
+
+/// `Pal.Reverse(s)`: `s` back to front.
+let reverse_all (#t: Type) (s: Seq.seq t) : Seq.seq t = reversed s 0 (Seq.length s)
+
+/// `Pal.LastIndexOf(s, x, index, count)`, in C#'s `(index, count)` convention.
+let last_index_of_at (#t: Type) (s: Seq.seq t) (x: t) (index: int) (count: nat { index - count + 1 >= 0 /\ index + 1 <= Seq.length s })
+  : int = last_index_of s x (index - count + 1) count
+
+/// What a search returns: -1, or a position in the range holding a match.
+let rec index_of_range (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+  : Lemma (ensures (let r = index_of s x i n in
+                    r == -1 \/ (i <= r /\ r < i + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s r) x)))
+          (decreases n)
+          [SMTPat (index_of s x i n)]
+  = if n = 0 then () else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s i) x then ()
+    else index_of_range s x (i + 1) (n - 1)
+
+let rec last_index_of_range (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+  : Lemma (ensures (let r = last_index_of s x lo n in
+                    r == -1 \/ (lo <= r /\ r < lo + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s r) x)))
+          (decreases n)
+          [SMTPat (last_index_of s x lo n)]
+  = if n = 0 then () else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s (lo + n - 1)) x then ()
+    else last_index_of_range s x lo (n - 1)

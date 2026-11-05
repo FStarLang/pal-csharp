@@ -371,6 +371,7 @@ public static class Normalize
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
             case IrNewArray na: Free(na.Length, into); return;
+            case IrArraySearch se: Free(se.Array, into); Free(se.Item, into); Free(se.Start, into); Free(se.Count, into); return;
             case IrContents ct: Free(ct.Array, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
             case IrListOp lo: foreach (var a in lo.Args) Free(a, into); return;
@@ -415,7 +416,7 @@ public static class Normalize
                 return;
             case IrReturn r: Free(r.Value, into); return;
             case IrExprStmt e: Free(e.Expr, into); return;
-            case IrArrayCopy c: Free(c.Source, into); Free(c.Destination, into); Free(c.Length, into); return;
+            case IrArrayOp c: foreach (var a in c.Args) Free(a, into); return;
             case IrGhostStmt g: Free(g.Prop, into); return;
             case IrThrow th: Free(th.Value, into); return;
             case IrTry t:
@@ -486,10 +487,10 @@ public static class Normalize
                 return;
             case IrReturn r: MutatedIn(r.Value, into); return;
             case IrExprStmt e: MutatedIn(e.Expr, into); return;
-            case IrArrayCopy c:
-                if (c.Destination is IrVar dv) into.Add(dv.Name);
-                else if (c.Destination is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
-                MutatedIn(c.Source, into); MutatedIn(c.Destination, into); MutatedIn(c.Length, into);
+            case IrArrayOp c:
+                if (c.Written is IrVar dv) into.Add(dv.Name);
+                else if (c.Written is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
+                foreach (var a in c.Args) MutatedIn(a, into);
                 return;
             case IrThrow th: MutatedIn(th.Value, into); return;
             case IrTry t:

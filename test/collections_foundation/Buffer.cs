@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using PalLang;
 
 // §22. A growable buffer in the style of dotnet/runtime's `List<T>`, verified in place:
@@ -189,7 +190,118 @@ public class Buffer<T>
     }
 
     // R22.3. Unannotated: outside the scope, not refused.
-    public void Clear() { _size = 0; }
+    public void Reset() { _size = 0; }
+
+    // R22.25, R22.26. Clearing a range at a type parameter, guarded by the JIT constant.
+    [Ensures("@this.SpecCount == 0")]
+    public void Clear()
+    {
+        _version++;
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            int size = _size;
+            _size = 0;
+            if (size > 0)
+                Array.Clear(_items, 0, size);
+        }
+        else
+        {
+            _size = 0;
+        }
+    }
+
+    // R22.25. An overlapping copy down, then a defaulted cell.
+    [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+    [Ensures("0 <= index && index < Pal.Old(@this.SpecCount)")]
+    [Ensures("@this.Items == Pal.Concat(Pal.Slice(Pal.Old(@this.Items), 0, index), " +
+             "Pal.Slice(Pal.Old(@this.Items), index + 1, Pal.Old(@this.SpecCount)))")]
+    public void RemoveAt(int index)
+    {
+        if ((uint)index >= (uint)_size)
+            Fail.OutOfRange(Argument.Index);
+        _size--;
+        if (index < _size)
+            Array.Copy(_items, index + 1, _items, index, _size - index);
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+            _items[_size] = default!;
+        _version++;
+    }
+
+    // R22.25. An overlapping copy up, after growing if full.
+    [Requires("@this.SpecCount < int.MaxValue")]
+    [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index > @this.SpecCount")]
+    [Ensures("0 <= index && index <= Pal.Old(@this.SpecCount)")]
+    [Ensures("@this.Items == Pal.Concat(Pal.Snoc(Pal.Slice(Pal.Old(@this.Items), 0, index), item), " +
+             "Pal.Slice(Pal.Old(@this.Items), index, Pal.Old(@this.SpecCount)))")]
+    public void Insert(int index, T item)
+    {
+        if ((uint)index > (uint)_size)
+            Fail.OutOfRange(Argument.Index);
+        if (_size == _items.Length) Grow(_size + 1);
+        if (index < _size)
+            Array.Copy(_items, index, _items, index + 1, _size - index);
+        _items[index] = item;
+        _size++;
+        _version++;
+    }
+
+    // R22.25. Searches by the default equality.
+    [Ensures("Result == Pal.IndexOf(@this.Items, item)")]
+    public int IndexOf(T item) => Array.IndexOf(_items, item, 0, _size);
+
+    [Ensures("Result == Pal.LastIndexOf(@this.Items, item)")]
+    public int LastIndexOf(T item)
+    {
+        if (_size == 0) return -1;
+        return Array.LastIndexOf(_items, item, _size - 1, _size);
+    }
+
+    [Ensures("Result == (Pal.IndexOf(@this.Items, item) >= 0)")]
+    public bool Contains(T item) => _size != 0 && IndexOf(item) >= 0;
+
+    [Ensures("@this.Items == Pal.Reverse(Pal.Old(@this.Items))")]
+    public void Reverse()
+    {
+        if (_size > 1)
+            Array.Reverse(_items, 0, _size);
+        _version++;
+    }
+
+    // R22.25. A copy into another array.
+    [Requires("arrayIndex >= 0 && arrayIndex + @this.SpecCount <= Pal.Contents(array).Length")]
+    [Ensures("@this.Items == Pal.Old(@this.Items)")]
+    [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+    [Ensures("Pal.Slice(Pal.Contents(array), arrayIndex, arrayIndex + @this.SpecCount) == @this.Items")]
+    public void CopyTo(T[] array, int arrayIndex)
+    {
+        Array.Copy(_items, 0, array, arrayIndex, _size);
+    }
+
+    // R22.28. A returned array is owned by the caller.
+    [Ensures("Pal.Contents(Result) == @this.Items")]
+    public T[] ToArray()
+    {
+        if (_size == 0) return s_empty;
+        T[] array = new T[_size];
+        Array.Copy(_items, array, _size);
+        return array;
+    }
+
+    // R22.11/R22.12. Each throwing arm ends in `unreachable ()`, the last in tail position.
+    [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+    [Ensures("0 <= index && index < @this.SpecCount && Pal.Same(Result, @this.Items[index])")]
+    public T At(int index)
+    {
+        if (index < 0) Fail.OutOfRange(Argument.Index);
+        if (index < _size) return _items[index];
+        Fail.OutOfRange(Argument.Index);
+        return default!;
+    }
+
+    // R22.27. `checked` arithmetic carries the no-overflow obligation.
+    [Requires("@this.SpecCount < int.MaxValue")]
+    [Ensures("Result == @this.SpecCount + 1")]
+    public int NextSize() => checked(_size + 1);
 }
 
 /// <summary>

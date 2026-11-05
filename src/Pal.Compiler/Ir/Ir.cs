@@ -502,7 +502,7 @@ public sealed record IrOrderBy(IrLoc Loc, IrExpr Source, string Key, IrType KeyT
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
-public enum SeqOpKind { Length, Index, SetAt, Slice, Splice, Rotate, IsPermutation, Snoc, Concat, Empty }
+public enum SeqOpKind { Length, Index, SetAt, Slice, Splice, Rotate, IsPermutation, Snoc, Concat, Empty, Reverse }
 
 /// <summary>An operation on ghost sequences.</summary>
 public sealed record IrSeqOp(IrLoc Loc, SeqOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
@@ -614,8 +614,32 @@ public sealed record IrReturn(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
 
 public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 
-/// <summary>R22.20. <c>Array.Copy(src, dst, len)</c>: writes <c>dst</c>'s first <c>len</c> cells.</summary>
-public sealed record IrArrayCopy(IrLoc Loc, IrExpr Source, IrExpr Destination, IrExpr Length) : IrStmt(Loc);
+/// <summary>R22.20, R22.25. A bulk operation of <c>System.Array</c>; its arguments, by kind:</summary>
+/// <list type="bullet">
+/// <item><c>Copy</c>: <c>src, dst, len</c> -- <c>Array.Copy(src, dst, len)</c>.</item>
+/// <item><c>CopyAt</c>: <c>src, si, dst, di, len</c>, between distinct arrays.</item>
+/// <item><c>Move</c>: <c>a, si, di, len</c> -- the same, within one array.</item>
+/// <item><c>Clear</c>, <c>Reverse</c>: <c>a, i, n</c>.</item>
+/// </list>
+public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse }
+
+public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr> Args) : IrStmt(Loc)
+{
+    /// <summary>The array the operation writes.</summary>
+    public IrExpr Written => Op switch
+    {
+        ArrayOpKind.Copy => Args[1],
+        ArrayOpKind.CopyAt => Args[2],
+        _ => Args[0],
+    };
+}
+
+/// <summary>
+/// R22.25. <c>Array.IndexOf(a, x, i, n)</c>, or with <see cref="Last"/>
+/// <c>Array.LastIndexOf(a, x, index, count)</c>: a read of <c>a</c> that yields a position.
+/// </summary>
+public sealed record IrArraySearch(IrLoc Loc, bool Last, IrExpr Array, IrExpr Item, IrExpr Start, IrExpr Count)
+    : IrExpr(Loc);
 
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
 

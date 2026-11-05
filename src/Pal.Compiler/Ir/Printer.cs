@@ -87,9 +87,9 @@ public static class Printer
                 Stmt(sb, w.Body, depth + 1);
                 return;
 
-            case IrArrayCopy c:
-                sb.Append(pad).Append("Array.Copy(").Append(c.Source).Append(", ")
-                  .Append(c.Destination).Append(", ").Append(c.Length).AppendLine(")");
+            case IrArrayOp c:
+                sb.Append(pad).Append("Array.").Append(c.Op).Append('(')
+                  .Append(string.Join(", ", c.Args)).AppendLine(")");
                 return;
 
             case IrGhostStmt g:

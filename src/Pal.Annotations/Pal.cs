@@ -128,7 +128,7 @@ public static class Pal
     /// <paramref name="window"/>: <c>parent</c> outside the window, <paramref name="window"/>
     /// inside it. This is what <see cref="Restore{T}(Span{T})"/> leaves behind.
     /// </summary>
-    public static Seq<T> Splice<T>(Seq<T> parent, int from, int to, Seq<T> window) => throw Ghost();
+    public static Seq<T> Splice<T>(Seq<T> parent, SpecInt from, SpecInt to, Seq<T> window) => throw Ghost();
 
     // -- Escape hatches to raw Pulse ---------------------------------------
 
@@ -207,7 +207,7 @@ public static class Pal
     public static Seq<T> SetAt<T>(Seq<T> s, int index, T value) => throw Ghost();
 
     /// <summary>The ghost subsequence <c>[from, to)</c>.</summary>
-    public static Seq<T> Slice<T>(Seq<T> s, int from, int to) => throw Ghost();
+    public static Seq<T> Slice<T>(Seq<T> s, SpecInt from, SpecInt to) => throw Ghost();
 
     /// <summary>R22.16. <paramref name="s"/> with <paramref name="value"/> appended, F*'s <c>Seq.snoc</c>.</summary>
     public static Seq<T> Snoc<T>(Seq<T> s, T value) => throw Ghost();
@@ -217,6 +217,36 @@ public static class Pal
 
     /// <summary>R22.16. The empty sequence, F*'s <c>Seq.empty</c>.</summary>
     public static Seq<T> EmptySeq<T>() => throw Ghost();
+
+    /// <summary>
+    /// R22.25. <c>EqualityComparer&lt;T&gt;.Default.Equals(x, y)</c>: the equality every
+    /// collection without a comparer of its own uses. Nothing is known of it.
+    /// </summary>
+    public static bool DefaultEquals<T>(T x, T y) => throw Ghost();
+
+    /// <summary>
+    /// R22.25. The first position of <paramref name="s"/> whose element
+    /// <see cref="DefaultEquals{T}"/> calls equal to <paramref name="value"/>, or -1.
+    /// </summary>
+    public static SpecInt IndexOf<T>(Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>R22.25. The last such position, or -1.</summary>
+    public static SpecInt LastIndexOf<T>(Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>
+    /// R22.25. <c>Array.IndexOf(s, value, start, count)</c>: the first such position in
+    /// <c>[start, start + count)</c>, or -1.
+    /// </summary>
+    public static SpecInt IndexOf<T>(Seq<T> s, T value, SpecInt start, SpecInt count) => throw Ghost();
+
+    /// <summary>
+    /// R22.25. <c>Array.LastIndexOf(s, value, index, count)</c>: the last such position in
+    /// <c>[index - count + 1, index]</c>, or -1.
+    /// </summary>
+    public static SpecInt LastIndexOf<T>(Seq<T> s, T value, SpecInt index, SpecInt count) => throw Ghost();
+
+    /// <summary>R22.25. <paramref name="s"/> back to front.</summary>
+    public static Seq<T> Reverse<T>(Seq<T> s) => throw Ghost();
 
     /// <summary>
     /// The ghost sequence <paramref name="s"/> read starting at <paramref name="offset"/>
