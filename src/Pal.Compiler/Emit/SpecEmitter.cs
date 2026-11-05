@@ -606,7 +606,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // method did to the representation is between them, so they are compared pointwise too.
         static bool Built(IrExpr e) => e switch
         {
-            IrSeqOp or IrContents { Array: IrResult } or IrResult { Type: IrArrayType } => true,
+            IrSeqOp or IrSpecOp { Built: true } or IrContents { Array: IrResult } or IrResult { Type: IrArrayType } => true,
             IrConditional c => Built(c.Then) || Built(c.Else) || c.Then is IrOld || c.Else is IrOld,
             _ => false,
         };

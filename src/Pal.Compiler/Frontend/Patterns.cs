@@ -272,7 +272,9 @@ public sealed partial class ExprLowerer
     {
         var loc = Locations.From(c);
         if (c.Expression.IsKind(SyntaxKind.NullLiteralExpression))
-            return value.Type is IrOptionType
+            return Sorted.HasOpaqueNull(value.Type)
+                ? Sorted.IsNull(loc, value)
+                : value.Type is IrOptionType
                 ? new IrUnary(loc, UnOp.Not, new IrOptionOp(loc, OptionOpKind.HasValue, value) { Type = Bool }) { Type = Bool }
                 : new IrLiteral(loc, false) { Type = Bool };
 

@@ -249,6 +249,96 @@ public static class Pal
     public static Seq<T> Reverse<T>(Seq<T> s) => throw Ghost();
 
     /// <summary>
+    /// R26.3. The first position of <paramref name="s"/> whose element <paramref name="match"/>
+    /// holds of, or -1. A delegate is a pure function in a contract (R26.1): <c>match(x)</c>.
+    /// </summary>
+    public static SpecInt FindIndex<T>(Seq<T> s, Predicate<T> match) => throw Ghost();
+
+    /// <summary>R26.3. The first such position in <c>[start, start + count)</c>, or -1.</summary>
+    public static SpecInt FindIndex<T>(Seq<T> s, Predicate<T> match, SpecInt start, SpecInt count) => throw Ghost();
+
+    /// <summary>R26.3. The last such position, or -1.</summary>
+    public static SpecInt FindLastIndex<T>(Seq<T> s, Predicate<T> match) => throw Ghost();
+
+    /// <summary>R26.3. The last such position in <c>[index - count + 1, index]</c>, or -1.</summary>
+    public static SpecInt FindLastIndex<T>(Seq<T> s, Predicate<T> match, SpecInt index, SpecInt count) => throw Ghost();
+
+    /// <summary>R26.3. Whether <paramref name="match"/> holds of every element.</summary>
+    public static bool TrueForAll<T>(Seq<T> s, Predicate<T> match) => throw Ghost();
+
+    /// <summary>R26.3. The elements <paramref name="match"/> holds of, in order.</summary>
+    public static Seq<T> FindAll<T>(Seq<T> s, Predicate<T> match) => throw Ghost();
+
+    /// <summary>R26.3. The elements <paramref name="match"/> does not hold of, in order.</summary>
+    public static Seq<T> RemoveAll<T>(Seq<T> s, Predicate<T> match) => throw Ghost();
+
+    /// <summary>R26.3. <paramref name="converter"/> applied to each element.</summary>
+    public static Seq<TOutput> ConvertAll<T, TOutput>(Seq<T> s, Converter<T, TOutput> converter) => throw Ghost();
+
+    /// <summary>R26.7. Whether <paramref name="b"/> is <paramref name="a"/> reordered.</summary>
+    public static bool Permutation<T>(Seq<T> a, Seq<T> b) => throw Ghost();
+
+    /// <summary>
+    /// R26.7. Whether <paramref name="after"/> is <paramref name="before"/> with
+    /// <c>[index, index + count)</c> sorted by <paramref name="comparer"/>: a permutation
+    /// of that range, sorted, and everything outside it unchanged.
+    /// </summary>
+    public static bool SortedRange<T>(Seq<T> before, Seq<T> after, SpecInt index, SpecInt count,
+        System.Collections.Generic.IComparer<T>? comparer) => throw Ghost();
+
+    /// <summary>
+    /// R26.10. Whether <paramref name="s"/> is a 4-ary min-heap of <c>(element, priority)</c>
+    /// nodes: every node's priority, by <c>comparer ?? Comparer&lt;TP&gt;.Default</c>, is at
+    /// least that of its parent, node <c>i</c>'s parent being <c>(i - 1) / 4</c>.
+    /// </summary>
+    public static bool IsHeap<TE, TP>(Seq<(TE, TP)> s, System.Collections.Generic.IComparer<TP>? comparer) => throw Ghost();
+
+    /// <summary>R26.10. Whether no node of <paramref name="s"/> has a priority below <paramref name="x"/>'s.</summary>
+    public static bool HeapMin<TE, TP>(Seq<(TE, TP)> s, (TE, TP) x, System.Collections.Generic.IComparer<TP>? comparer) => throw Ghost();
+
+    /// <summary>
+    /// R26.10. A sift-up loop: <paramref name="x"/> is on its way up to the hole
+    /// <paramref name="h"/> of <c>s[0, n)</c>, every edge not touching the hole is in order,
+    /// and <c>s[0, n)</c> with <paramref name="x"/> in the hole is <paramref name="t"/> reordered.
+    /// </summary>
+    public static bool HeapUp<TE, TP>(Seq<(TE, TP)> s, SpecInt n, SpecInt h, (TE, TP) x,
+        System.Collections.Generic.IComparer<TP>? comparer, Seq<(TE, TP)> t) => throw Ghost();
+
+    /// <summary>R26.10. A sift-down loop, as <see cref="HeapUp"/> with <paramref name="x"/> on its way down.</summary>
+    public static bool HeapDown<TE, TP>(Seq<(TE, TP)> s, SpecInt n, SpecInt h, (TE, TP) x,
+        System.Collections.Generic.IComparer<TP>? comparer, Seq<(TE, TP)> t) => throw Ghost();
+
+    /// <summary>R26.10. Whether a sift-up may stop: <paramref name="h"/> is the root, or <paramref name="x"/>'s priority is not below its parent's in <paramref name="s"/>.</summary>
+    public static bool HeapUpStop<TE, TP>(Seq<(TE, TP)> s, SpecInt h, (TE, TP) x,
+        System.Collections.Generic.IComparer<TP>? comparer) => throw Ghost();
+
+    /// <summary>
+    /// R26.10. Whether a sift-down may stop: <paramref name="h"/> has no child in
+    /// <c>s[0, n)</c>, or <c>s[m]</c>, a least of its children, is not below <paramref name="x"/>.
+    /// </summary>
+    public static bool HeapDownStop<TE, TP>(Seq<(TE, TP)> s, SpecInt n, SpecInt h, (TE, TP) x, SpecInt m,
+        System.Collections.Generic.IComparer<TP>? comparer) => throw Ghost();
+
+    /// <summary>R26.10. Whether <c>s[m]</c> has a least priority of <c>s[first, i)</c>.</summary>
+    public static bool HeapMinChild<TE, TP>(Seq<(TE, TP)> s, SpecInt first, SpecInt i, SpecInt m,
+        System.Collections.Generic.IComparer<TP>? comparer) => throw Ghost();
+
+    /// <summary>
+    /// R26.2. In a loop invariant: whether a <c>return</c> inside the loop has been taken.
+    /// The loop exits as soon as it is.
+    /// </summary>
+    public static bool Returned() => throw Ghost();
+
+    /// <summary>
+    /// R26.10. In a loop invariant: whether a <c>break</c> out of this loop has been taken.
+    /// The loop exits as soon as it is, so the invariant may say what held when it was.
+    /// </summary>
+    public static bool Broke() => throw Ghost();
+
+    /// <summary>R26.2. In a loop invariant: the value that <c>return</c> returned.</summary>
+    public static T ReturnValue<T>() => throw Ghost();
+
+    /// <summary>
     /// The ghost sequence <paramref name="s"/> read starting at <paramref name="offset"/>
     /// and wrapping round: <c>Rotate(s, n)[k] == s[(n + k) % s.Length]</c>. The abstraction
     /// function of anything that stores its elements at a moving origin.

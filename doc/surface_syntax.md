@@ -107,6 +107,15 @@ Both forms lower to the same thing. Mix them freely.
 | `LowerBound(c, s, x)` | the number of elements of `s` less than `x` under `c`: where `x` goes (R25.6) |
 | `KeyIndex(c, s, x)` | the position of `x` in a strictly sorted `s`, else `-1` (R25.6) |
 | `BinarySearch(c, s, i, n, x)` | what `Array.BinarySearch(a, i, n, x, c)` returns on contents `s` (R25.5) |
+| `FindIndex(s, p)`, `FindIndex(s, p, i, n)` | first position whose element `p` holds of (in `[i, i+n)`), else `-1`; `p` a `Predicate<T>` (R26.3) |
+| `FindLastIndex(s, p)`, `FindLastIndex(s, p, index, count)` | last such position, searching back from `index` over `count` elements (R26.3) |
+| `TrueForAll(s, p)` | `p` holds of every element (R26.3) |
+| `FindAll(s, p)`, `RemoveAll(s, p)` | the elements `p` holds / does not hold of, in order (R26.3) |
+| `ConvertAll(s, f)` | `s` mapped through the `Converter<T, TOutput>` `f` (R26.3) |
+| `Permutation(s, t)` | `t` is a rearrangement of `s`, by an explicit bijection (R26.7) |
+| `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
+| `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
+| `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
@@ -138,6 +147,8 @@ while (lo < hi && !found)
 |---|---|
 | `Pal.Invariant(p)` | a loop invariant; repeatable |
 | `Pal.Decreases(m)` | the termination measure |
+| `Pal.Broke()` | in an invariant: a `break` out of this loop was taken (R26.10) |
+| `Pal.Returned()`, `Pal.ReturnValue<T>()` | in an invariant: a `return` inside this loop was taken, and its value (R26.2) |
 | `Pal.Assert(p)` | a proof step |
 | `Pal.Assume(p)` | assume without proof — **unsound**, reported as a warning |
 
@@ -168,11 +179,15 @@ structure needs, and §2.2 is about writing one.
 
 ### 2.1 `break` and `continue`
 
-Both are supported. One limitation is worth stating up front: the flag the translation uses
-is internal, so an invariant cannot mention it, and a postcondition **cannot say that the
-loop ran to completion**. If your contract needs that, carry the exit condition in the
-guard instead — `while (i < n && !done)` rather than `if (…) break;`. `test/compare_elements`
-does exactly this and says why.
+Both are supported. The flag the translation uses is internal, but an invariant may name
+it as `Pal.Broke()`: `Pal.Implies(Pal.Broke(), …)` says what held when the loop was left
+early, which is how a postcondition learns why the loop ended (R26.10, `test/collections_listrest`).
+Carrying the exit condition in the guard — `while (i < n && !done)` rather than
+`if (…) break;` — also works; `test/compare_elements` does that. A `return` inside a loop
+is supported too (R26.2), and `Pal.Returned()`/`Pal.ReturnValue<T>()` name it likewise.
+
+A guard may write a local: `while ((i = f(n)) < size)` or `while (++i < bound)` (R26.11).
+The invariant then describes the state just after the write.
 
 ### 2.2 Cursors
 

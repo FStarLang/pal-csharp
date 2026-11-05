@@ -243,6 +243,26 @@ let range_search_spec (#t: Type) (c: O.comparer t) (s: Seq.seq t) (index length:
     FStar.Classical.move_requires (range_search_miss c s index length) x;
     FStar.Classical.move_requires (range_search_hit c s index length) x
 
+let rec bsearch_prefix (#t: Type) (c: O.comparer t) (s: Seq.seq t) (x: t) (lo hi: int) (m: nat)
+  : Lemma (requires 0 <= lo /\ hi < m /\ m <= Seq.length s)
+          (ensures bsearch c (Seq.slice s 0 m) x lo hi == bsearch c s x lo hi)
+          (decreases (if hi >= lo then hi - lo + 1 else 0))
+  = if lo > hi then ()
+    else
+      let i = lo + (hi - lo) / 2 in
+      let o = O.compare c (Seq.index s i) x in
+      if o = 0 then ()
+      else if o < 0 then bsearch_prefix c s x (i + 1) hi m
+      else bsearch_prefix c s x lo (i - 1) m
+
+/// R26.7. `List<T>.Items` is a prefix of the backing array: `Array.BinarySearch` of a range
+/// inside the prefix (§25's `range_search`) reads only the prefix.
+let range_search_prefix (#t: Type) (c: O.comparer t) (s: Seq.seq t) (index length: int) (x: t) (m: nat)
+  : Lemma (requires 0 <= index /\ 0 <= length /\ index + length <= m /\ m <= Seq.length s)
+          (ensures range_search c (Seq.slice s 0 m) index length x == range_search c s index length x)
+          [SMTPat (range_search c (Seq.slice s 0 m) index length x)]
+  = bsearch_prefix c s x index (index + length - 1) m
+
 (* ---- the program ---- *)
 
 /// `Array.BinarySearch<T>(a, index, length, x, c)` (R25.5). The BCL's argument checks

@@ -599,7 +599,7 @@ public sealed class CodeEmitter(
                 // condition as an array's: it is never observed.
                 case IrUserSpecType { Args: [var cmpElement] } cmp
                     when Frontend.Sorted.IsComparer(cmp) && (assigned is null || assigned.Contains(field.Name)):
-                    value = $"({Frontend.Sorted.Order}.default_comparer {Types.Render(cmpElement)})";
+                    value = $"({Frontend.Sorted.Order}.default_comparer {Types.Atom(cmpElement)})";
                     break;
                 default:
                     diagnostics.Unsupported(method.Loc,
@@ -875,7 +875,7 @@ public sealed class CodeEmitter(
                 var contents = FreshValue(Names.Contents(f.Name));
                 var resource = $"A.pts_to {projection} {receiver.PermArg}{contents}";
                 resources.Add(resource);
-                var stable = !writesRecord && !written.Contains(f.Name);
+                var stable = !writesRecord && !written.Contains(f.Name) && !written.Contains(AnyArray);
                 if (stable)
                 {
                     fixedNames.Add((contents, resource));
@@ -916,6 +916,11 @@ public sealed class CodeEmitter(
     /// that array's contents; handing an owned array to a callee is treated as an element
     /// write, because the callee may write it.
     /// </summary>
+    private const string AnyArray = "*";
+
+    private bool IsArrayCell(string name) =>
+        _slots.TryGetValue(name, out var s) && s.Kind == SlotKind.Cell && s.Type is IrArrayType;
+
     private (bool Record, HashSet<string> Arrays) ReceiverWrites(IrStmt body)
     {
         var arrays = new HashSet<string>(StringComparer.Ordinal);
@@ -934,6 +939,11 @@ public sealed class CodeEmitter(
                     case IrElement { Array: IrField { Receiver: IrVar { Name: Names.This }, Field: var g } }:
                         arrays.Add(g);
                         break;
+                    // R26.10. An element write through a local holding an array may be a
+                    // write through an alias of any of the receiver's arrays.
+                    case IrElement { Array: IrVar v } when IsArrayCell(v.Name):
+                        arrays.Add(AnyArray);
+                        break;
                 }
             }
 
@@ -942,6 +952,7 @@ public sealed class CodeEmitter(
                 if (node is not IrCall call) continue;
                 for (var i = 0; i < call.Args.Length; i++)
                 {
+                    if (call.Args[i] is IrVar av && IsArrayCell(av.Name)) arrays.Add(AnyArray);
                     if (call.Args[i] is not IrField { Receiver: IrVar { Name: Names.This }, Field: var h })
                         continue;
 
@@ -1742,9 +1753,11 @@ public sealed class CodeEmitter(
                     ArrayOpKind.CopyAt => "copy_at",
                     ArrayOpKind.Move => "move",
                     ArrayOpKind.Clear => "clear",
+                    ArrayOpKind.Sort => "sort",
                     _ => "reverse",
                 };
-                Line($"Pulse.Lib.CSharp.Array.{fn} {string.Join(" ", args)};");
+                var module = c.Op == ArrayOpKind.Sort ? "Pulse.Lib.CSharp.Sort" : "Pulse.Lib.CSharp.Array";
+                Line($"{module}.{fn} {string.Join(" ", args)};");
                 return;
             }
             case IrExprStmt e:
@@ -1874,12 +1887,26 @@ public sealed class CodeEmitter(
         var init = d.Init is null ? Default(d.Type) : Expr(d.Init);
         if (d.Immutable)
         {
+            // A value that is already a read's binder is named by it: a second `let` would
+            // be a binder Pulse's prover cannot see through, and a branch that mentions it
+            // could not be joined (R26.4).
+            if (System.Text.RegularExpressions.Regex.IsMatch(init, @"^t[0-9]+$"))
+            {
+                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, init);
+                return;
+            }
             _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, cell);
             Line($"let {cell} = {init};");
             return;
         }
         _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
-        Line($"let mut {cell} = {init};");
+        // A type parameter's default leaves its dictionary to be resolved, and a cell's type
+        // is inferred from its initialiser; the annotation resolves it first (R26.2's cell).
+        // A tuple's universe is likewise inferred, and `let mut` needs it to be zero.
+        Line(init.StartsWith("(Pulse.Lib.CSharp.Inhabited.default_of", StringComparison.Ordinal) ||
+             d.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType }
+            ? $"let mut {cell} : {Types.Render(d.Type)} = {init};"
+            : $"let mut {cell} = {init};");
     }
 
     /// <summary>
@@ -2275,6 +2302,16 @@ public sealed class CodeEmitter(
         Line(tail ? "}" : "}");
     }
 
+    /// <summary>R26.10. Whether the loop assigns the local <paramref name="name"/> itself.</summary>
+    private static bool Rebinds(IrWhile w, string name)
+    {
+        var stmts = Passes.Check.Statements(w.Body).Concat(w.Step.SelectMany(Passes.Check.Statements)).ToList();
+        if (stmts.Any(st => st is IrAssign { Target: IrVar v } && v.Name == name)) return true;
+        var exprs = stmts.SelectMany(Passes.Check.Expressions).Append(w.Cond)
+            .SelectMany(Passes.Check.Subexpressions);
+        return exprs.Any(e => e is IrRefArg { Operand: IrVar v } && v.Name == name);
+    }
+
     /// <summary>R5.6, R5.8, R5.8b, R5.9.</summary>
     private void While(IrWhile w, MethodPlan plan)
     {
@@ -2286,6 +2323,13 @@ public sealed class CodeEmitter(
             .Where(s => !_objects.Any(o => o.Name == s.Name))
             .ToImmutableArray();
         var unassigned = w.Unassigned.ToImmutableHashSet();
+        // R26.10. A local holding an array -- `var nodes = _nodes;` -- is a cell holding a
+        // reference. Writing an element changes the array, which is owned elsewhere, and
+        // not the cell, so the reference stays known to be the one the loop started with.
+        foreach (var slot in live)
+            if (slot.Kind == SlotKind.Cell && slot.Type is IrArrayType &&
+                !unassigned.Contains(slot.Name) && !Rebinds(w, slot.Name))
+                unassigned = unassigned.Add(slot.Name);
 
         // Name the values the loop will *not* change, so the invariant can say they are
         // unchanged rather than merely existentially quantified (R5.8b). Values the loop
@@ -2328,18 +2372,25 @@ public sealed class CodeEmitter(
 
         // R5.10. Flags are allocated only for the forms the body actually uses, so a
         // loop with neither `break` nor `continue` is emitted unchanged.
-        var brkCell = MayEscape(w.Body) && ContainsBreak(w.Body) ? $"var_brk_{_loop}" : null;
+        // R26.2. A loop left only by `return`s breaks on the flag the `return` raises, so
+        // that after the loop the flag alone says why it ended.
+        var returnOnly = MayEscape(w.Body) && ContainsBreak(w.Body) && !ContainsUserBreak(w.Body);
+        var brkCell = returnOnly ? Names.Local(Frontend.StmtLowerer.ReturnedFlag)
+            : MayEscape(w.Body) && ContainsBreak(w.Body) ? $"var_brk_{_loop}" : null;
         var contCell = ContainsContinue(w.Body) ? $"var_cont_{_loop}" : null;
         _loop++;
         var outerEscape = _escape;
         _escape = brkCell is null && contCell is null ? null : new Escape(brkCell, contCell);
 
-        if (brkCell is not null)
+        if (brkCell is not null && !returnOnly)
         {
             Line($"let mut {brkCell} = false;");
             var value = FreshValue("brk");
             existentials.Add(value);
             resources.Add($"R.pts_to {brkCell} {value}");
+            // R26.10. `Pal.Broke()` in this loop's invariant is the flag's value.
+            scope = new SpecScope(scope);
+            scope.Bind(Frontend.StmtLowerer.BrokeFlag, new Term(value, TermKind.Bool, IrPrim.Bool));
         }
 
         var guard = Capture(() => Expr(w.Cond));
@@ -2400,9 +2451,11 @@ public sealed class CodeEmitter(
         // write — is therefore typable in tail position and untypable one statement short of
         // it. Emitting the branch as a tail rather than terminating it with `()` is what
         // closes that gap, and it is the same rule the method case already applies.
-        if (w.Step.IsEmpty && brkCell is null && contCell is null)
+        if (brkCell is null && contCell is null &&
+            (w.Step.IsEmpty || w.Body is IrBlock sb && SplitAt([.. sb.Statements, .. w.Step]) is not null))
         {
-            UnitTail(w.Body, plan);
+            UnitTail(w.Step.IsEmpty ? w.Body
+                : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan);
             _indent--;
             Line("};");
             _escape = outerEscape;
@@ -2694,6 +2747,33 @@ public sealed class CodeEmitter(
                 Line("()");
                 return;
 
+            case IrBlock b when SplitAt(b.Statements) is { } k:
+            {
+                // R26.5. An arm that calls a method on a local object leaves that object's
+                // invariant under a fresh existential, and Pulse's join keeps the other
+                // arm's facts about the old one only under the arm's condition, unrelated
+                // to the new witness. The rest of the block moves into both arms (as
+                // R22.12 does in a method's tail), so the loop invariant is proved per arm.
+                var split = (IrIf)b.Statements[k];
+                var rest = b.Statements.RemoveRange(0, k + 1);
+                ImmutableArray<IrStmt> Arm(IrStmt? arm)
+                {
+                    ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
+                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } }]
+                        ? own : [.. own, .. rest];
+                }
+                Scoped(() =>
+                {
+                    Sequence(b.Statements.RemoveRange(k, b.Statements.Length - k), plan);
+                    UnitTail(split with
+                    {
+                        Then = new IrBlock(split.Then.Loc, Arm(split.Then)),
+                        Else = new IrBlock(split.Else?.Loc ?? split.Loc, Arm(split.Else)),
+                    }, plan);
+                }, dropAtEnd: false);
+                return;
+            }
+
             case IrBlock b:
                 Scoped(() =>
                 {
@@ -2729,11 +2809,40 @@ public sealed class CodeEmitter(
         }
     }
 
+    /// <summary>
+    /// R26.5. The first non-final statement of a loop body that is an <c>if</c> one of
+    /// whose arms calls a method on a local object, if any.
+    /// </summary>
+    private int? SplitAt(ImmutableArray<IrStmt> statements)
+    {
+        if (_escape is not null) return null;
+        for (var k = 0; k < statements.Length - 1; k++)
+            if (statements[k] is IrIf i && NullTest(i.Cond) is null && !MayEscape(i) &&
+                CallsLocalObject(i))
+                return k;
+        return null;
+    }
+
+    private bool CallsLocalObject(IrStmt s) =>
+        Passes.Check.Statements(s).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.Args is [IrVar { Type: IrClassType k } r, ..] &&
+                      r.Name != Names.This && _objects.All(o => o.Name != r.Name) &&
+                      !(classes is not null && classes.TryGetValue(k.Name, out var d) && d.IsPlain));
+
     private static bool ContainsBreak(IrStmt stmt) => stmt switch
     {
         IrBreak => true,
         IrBlock b => b.Statements.Any(ContainsBreak),
         IrIf i => ContainsBreak(i.Then) || (i.Else is not null && ContainsBreak(i.Else)),
+        _ => false,
+    };
+
+    private static bool ContainsUserBreak(IrStmt stmt) => stmt switch
+    {
+        IrBreak { FromReturn: false } => true,
+        IrBlock b => b.Statements.Any(ContainsUserBreak),
+        IrIf i => ContainsUserBreak(i.Then) || (i.Else is not null && ContainsUserBreak(i.Else)),
         _ => false,
     };
 
@@ -2759,7 +2868,9 @@ public sealed class CodeEmitter(
             // Here an array denotes the live array, not its contents: a measure may
             // dereference a mutable local (F3) but may not mention the invariant's
             // existentials, which is where the contents live.
-            var kind = slot.Kind is SlotKind.Array ? TermKind.Array : MethodPlan.KindOf(slot.Type);
+            // A cell holding an array (R26.10) dereferences to the live array too.
+            var kind = slot.Kind is SlotKind.Array || (slot.Kind is SlotKind.Cell && slot.Type is IrArrayType)
+                ? TermKind.Array : MethodPlan.KindOf(slot.Type);
             scope.Bind(name, new Term(text, kind, slot.Type));
         }
         return scope;

@@ -461,6 +461,8 @@ public static class Types
             : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
         IrPulseType p => p.PulseText,
         IrOptionType o => $"option {Atom(o.Inner)}",
+        IrDelegateType { Callable: true } d =>
+            $"Pulse.Lib.CSharp.Delegate.fn{d.Params.Length} {string.Join(" ", d.Params.Select(Atom))} {Atom(d.Return!)}",
         IrDelegateType d => $"Opaque.delegate {StringLiteral(d.Name)}",
         // R19.1. `System.Exception` is any exception; a class of the program the
         // refinement of `exn` to its discriminator.

@@ -65,3 +65,24 @@ val logor_shift_disjoint (x y m: FStar.UInt32.t)
           (ensures FStar.UInt32.v (FStar.UInt32.logor (FStar.UInt32.shift_left x m) y) ==
                    FStar.UInt32.v x * pow2 (FStar.UInt32.v m) + FStar.UInt32.v y)
           [SMTPat (FStar.UInt32.logor (FStar.UInt32.shift_left x m) y)]
+
+/// R26.10. C#'s `>>` on a non-negative `int` is division by a power of two: the value a
+/// 4-ary heap's `GetParentIndex` is written to compute. (`<<` has F*'s own
+/// `FStar.Int.shift_left_value_lemma`; `>>` on a signed integer has no counterpart.)
+val shift_right_nonneg (a: FStar.Int.int_t 32{0 <= a}) (s: nat{s < 32})
+  : Lemma (FStar.Int.shift_right #32 a s == a / pow2 s)
+          [SMTPat (FStar.Int.shift_right #32 a s)]
+
+/// `pow2 k` for the small distances a program writes as literals, as a value the SMT
+/// solver can read off without unfolding `pow2`.
+let small_pow2 (k: nat) : pos =
+  match k with
+  | 0 -> 1 | 1 -> 2 | 2 -> 4 | 3 -> 8 | 4 -> 16 | 5 -> 32 | 6 -> 64 | 7 -> 128 | 8 -> 256
+  | _ -> pow2 k
+
+/// The same for the term R13.5 emits: the distance is an `int` converted to `UInt32`.
+val int32_shift_right_nonneg (a: FStar.Int32.t) (k: FStar.Int32.t)
+  : Lemma (requires 0 <= FStar.Int32.v a /\ 0 <= FStar.Int32.v k /\ FStar.Int32.v k < 32)
+          (ensures FStar.Int32.v (FStar.Int32.shift_right a (FStar.Int.Cast.int32_to_uint32 k)) ==
+                   FStar.Int32.v a / small_pow2 (FStar.Int32.v k))
+          [SMTPat (FStar.Int32.shift_right a (FStar.Int.Cast.int32_to_uint32 k))]
