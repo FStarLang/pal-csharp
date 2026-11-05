@@ -651,7 +651,7 @@ public static partial class FrontendPass
     /// the spec-only types, and no wider: a ghost value still cannot own a resource, so an
     /// array or a class reference is refused here as it is there.
     /// </summary>
-    private static bool IsSpecField(IrType type) => type is IrPrim or IrNamedType or IrSeqType;
+    private static bool IsSpecField(IrType type) => type is IrPrim or IrNamedType or IrSeqType || Sorted.IsComparer(type);
 
     /// <summary>
     /// R3.4: a refinement is bound with the struct's fields in scope as simple names,
@@ -788,6 +788,26 @@ public static partial class FrontendPass
     /// for the invariant to relate the representation to, and every method specification
     /// would collapse to memory safety.
     /// </summary>
+    /// <summary>
+    /// R25.12. A <c>partial</c> class is one class however many declarations it has: it is
+    /// collected at the declaration that holds its <c>[Model]</c> member, or at its first.
+    /// </summary>
+    private static bool IsPrincipalDeclaration(
+        ClassDeclarationSyntax syntax, INamedTypeSymbol symbol, WellKnown known)
+    {
+        var parts = symbol.DeclaringSyntaxReferences;
+        if (parts.Length < 2) return true;
+        var modelSyntax = symbol.GetMembers()
+            .Where(m => Declarations.Has(m, known.ModelAttribute))
+            .SelectMany(m => m.DeclaringSyntaxReferences)
+            .FirstOrDefault();
+        var principal = modelSyntax is null
+            ? parts[0]
+            : parts.FirstOrDefault(p => p.SyntaxTree == modelSyntax.SyntaxTree &&
+                                        p.Span.Contains(modelSyntax.Span)) ?? parts[0];
+        return principal.SyntaxTree == syntax.SyntaxTree && principal.Span == syntax.Span;
+    }
+
     private static ImmutableArray<ClassCandidate> CollectClasses(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics,
         ImmutableHashSet<ISymbol>.Builder attempted)
@@ -800,6 +820,7 @@ public static partial class FrontendPass
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (symbol.IsStatic) continue;
+                if (!IsPrincipalDeclaration(syntax, symbol, known)) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R18.1. Every class the collector *looks at* is one it has spoken about:
@@ -1182,6 +1203,11 @@ public static partial class FrontendPass
             if (name is null || type is null) continue;
 
             var mapped = known.MapType(type);
+            // R25.3. Under `[TranslateAnnotatedOnly]` a field whose type has no translation
+            // -- a cache of an unannotated view object, say -- is left out of the
+            // representation, as an unannotated method is left out of the class. A read or
+            // write of it from translated code finds no field and is refused.
+            if (mapped is null && known.AnnotatedOnly) continue;
             if (mapped is null)
             {
                 // R3.10b makes this the likely first mistake: a class is translated exactly
@@ -1208,7 +1234,9 @@ public static partial class FrontendPass
             // R15.5. A field at a type parameter is a value like any other: it is not an
             // array and not an object, so the invariant owns it by holding it in the
             // record, and its model is itself.
-            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType or IrTypeParamType))
+            // R25.1. A comparer is a value like a type parameter's.
+            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType or IrTypeParamType) &&
+                !Sorted.IsComparer(mapped))
             {
                 diagnostics.Error("PALCS0531",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
@@ -2318,6 +2346,8 @@ public static partial class FrontendPass
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
             Admit = admitted,
+            RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
+                ? factor : null,
             Preserves = specs.Preserves,
             Throws = specs.Throws,
             DeclaringClass = declaringClass,

@@ -65,7 +65,7 @@ translate: $(OUT)/.stamp
 # An [IncludePulseFile] is copied into $(OUT) by the translation, so it is an input too.
 $(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst)
 	@mkdir -p $(OUT)
-	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(SOURCES)
+	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(PAL_CS_FLAGS) $(SOURCES)
 	@touch $@
 
 verify: translate

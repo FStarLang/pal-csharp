@@ -595,6 +595,12 @@ public sealed class CodeEmitter(
                 case IrPrim or IrTypeParamType or IrNamedType:
                     value = Default(field.Type);
                     break;
+                // R25.1. A comparer's stand-in is the default comparer, under the same
+                // condition as an array's: it is never observed.
+                case IrUserSpecType { Args: [var cmpElement] } cmp
+                    when Frontend.Sorted.IsComparer(cmp) && (assigned is null || assigned.Contains(field.Name)):
+                    value = $"({Frontend.Sorted.Order}.default_comparer {Types.Render(cmpElement)})";
+                    break;
                 default:
                     diagnostics.Unsupported(method.Loc,
                         $"A constructor that does not assign `{field.Name}` on every path",
@@ -621,10 +627,22 @@ public sealed class CodeEmitter(
 
     /// <summary>
     /// R22.12. Whether Pulse's join after this <c>if</c> would lose what the method needs:
-    /// an open object's array field replaced, or an array's contents copied into (R22.20).
+    /// an open object's array field replaced, an array's contents copied into (R22.20), or a
+    /// closed receiver's model moved by a call (R25.10).
     /// </summary>
     private bool JoinLoses(IrIf i) =>
-        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i);
+        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i) ||
+        MutatesClosedReceiver(i);
+
+    /// <summary>
+    /// R25.10. Whether an arm calls a method that moves a receiver's model: the call leaves
+    /// the receiver's post-state under an existential, and Pulse's join generalises it afresh,
+    /// losing both what the call ensured about it and, in the other arm, that it is unchanged.
+    /// </summary>
+    private static bool MutatesClosedReceiver(IrStmt s) =>
+        Passes.Check.Statements(s).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.MutatesReceiver && c.Args is [IrVar, ..]);
 
     /// <summary>
     /// R22.15, R22.12. A <c>return</c> or declaration whose value is <c>a &amp;&amp; b</c>,
@@ -3082,6 +3100,18 @@ public sealed class CodeEmitter(
                 var t = Fresh();
                 var fn = se.Last ? "last_index_of" : "index_of";
                 Line($"let {t} = Pulse.Lib.CSharp.Array.{fn} {array} {item} {start} {count};");
+                return t;
+            }
+
+            case IrArrayBinarySearch bs:
+            {
+                var array = Atom(Expr(bs.Array));
+                var start = Atom(Expr(bs.Start));
+                var count = Atom(Expr(bs.Count));
+                var item = Atom(Expr(bs.Item));
+                var comparer = Atom(Expr(bs.Comparer));
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.Sorted.range_search_array {array} {start} {count} {item} {comparer};");
                 return t;
             }
 

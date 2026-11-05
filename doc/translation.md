@@ -6254,6 +6254,12 @@ preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collectio
 contract names its comparer, and how a call to `Compare` lowers, is given with the
 collection families that use it.
 
+
+### R22.31 `[Rlimit(n)]`
+
+On a method, its module is checked with `#set-options "--z3rlimit_factor n"`: the solver
+may take `n` times as long. Nothing about what is proved changes.
+
 ## 23. Queue, Stack and LinkedList
 
 The array-backed `Stack<T>` and `Queue<T>` of dotnet/runtime are verified in place with
@@ -6412,3 +6418,165 @@ that record; `Last` (`head?.prev`) reads the head node and needs only the predic
 
 Beyond §22's: R23.1's (and R23.13's) reading of the shared empty array as fresh, and R23.2's trust that a
 non-nullable reference is not null.
+
+## 25. Sorted collections
+
+dotnet/runtime's `SortedList<TKey,TValue>` is two parallel arrays kept in key order by an
+`IComparer<TKey>`, searched with `Array.BinarySearch`. Its model is a strictly sorted
+`Seq<TKey>` of keys with a `Seq<TValue>` of values position for position, and the comparer
+itself (harness `pal/SortedList` in the runtime checkout). `test/collections_sorted` pins
+each rule below on a smaller sorted key set. §25.2 records why `SortedSet<T>` and
+`SortedDictionary<TKey,TValue>` are not yet within reach.
+
+The library is `pulse/Pulse.Lib.CSharp.Sorted.fst`. Over R22.30's `Order.comparer`, it defines:
+`sorted`, `strictly_sorted`, `lower_bound` (how many elements are less than `x`) and
+`key_index` (`lower_bound` if the element there compares equal, else `-1`); and the
+specification `range_search` of the BCL's `InternalBinarySearch`. It also has a Pulse
+`range_search_array` **proved** to compute `range_search`. Its lemmas, with SMT patterns,
+say what the result means on a sorted range:
+* a hit is `index + lower_bound` of the slice, and compares equal;
+* a miss is `~(index + lower_bound)`.
+
+### R25.1 Comparers
+
+`IComparer<T>` and `Comparer<T>` are the spec type `Pulse.Lib.CSharp.Order.comparer T`: a
+ghost value, which a `[Spec]` struct and a class field may hold (an object's comparer is a
+pure conjunct of its invariant, not a resource). `Comparer<T>.Default` is
+`Order.default_comparer`. `c.Compare(x, y)` in code is `Sorted.compare_i32 c x y`, an
+`int` whose sign is `Order.compare`'s. A constructor that assigns a comparer field on
+every path is given `default_comparer` as the stand-in its representation starts from.
+
+### R25.2 `notnull`
+
+A `where T : notnull` constraint is accepted and has no translation: it is a nullable-flow
+annotation, and the model never relies on it.
+
+### R25.3 Fields that do not translate
+
+Under `[TranslateAnnotatedOnly]`, a field whose type has no translation is left out of the
+representation, as an unannotated member is left out of the class. Examples are a cached
+view object (`SortedList`'s `keyList`/`valueList`) or a serialization temporary. Translated
+code that reads or writes such a field finds no field and is refused.
+
+### R25.4 Null tests
+
+`x == null` and `x != null` on a type parameter or a comparer, which have no `Box` to test,
+are `Sorted.is_null x` (trusted, below). `c ?? d` on a comparer is
+`if is_null c then d else c`. `Pal.IsNull(x)` names the test in a contract.
+
+### R25.5 `Array.BinarySearch`
+
+`Array.BinarySearch<T>(a, index, length, value, comparer)` in code is the proved
+`range_search_array`. Its comparer is wrapped in `or_default` (`null` means
+`Comparer<T>.Default`, as in the BCL) unless the comparer's nullable flow state is
+not-null. Its contract reflects the BCL's: the range must be within the array, and the
+result is `range_search` of the contents. `~r` of a negative result is the insertion point
+(`lognot_negative`, patterned on the idiom). A method whose only use of an array is a
+binary search does not mutate it (as `IndexOf`, R22.25).
+
+### R25.6 Specification intrinsics
+
+`Pal.Compare(c, x, y)`, `Pal.Sorted(c, s)`, `Pal.StrictlySorted(c, s)`,
+`Pal.LowerBound(c, s, x)`, `Pal.KeyIndex(c, s, x)` and `Pal.BinarySearch(c, s, i, n, x)`
+are the library functions of the same names (`doc/surface_syntax.md` §1.3). `KeyIndex` is
+the natural model of a sorted map's `IndexOfKey`, and `LowerBound` of where an insertion
+goes.
+
+### R25.7 Argument guards
+
+`ArgumentNullException.ThrowIfNull(x)` on a type parameter or a comparer is
+`if is_null x then throw`, and `ArgumentOutOfRangeException.ThrowIfNegative(n)` on an
+`int` is `if n < 0 then throw`. Both are throw points like any `throw` (§19).
+
+### R25.8 `Array.Empty<T>()`
+
+is a fresh array of length `0`. The BCL caches it, but a zero-length array has no contents
+for sharing to be observable through. (Implemented by R23.1, in code position; the two rules were written in parallel.)
+
+### R25.9 Exception messages
+
+The arguments of a library exception's constructor that only build its message are
+evaluated for no effect: `SR.*`, `SR.Format(…)`, `nameof`, `ToString()`, a parameter or a
+local. Messages are not modelled (R21.7), so the exception is the throw point alone.
+
+### R25.10 A call that moves a closed receiver ends the join
+
+R22.12 extended: when an arm of a statement-position `if` calls a method that moves a
+receiver's model, the `if` does not join, and the statements after it are emitted in each
+arm. The receiver's post-state is an existential, which Pulse's join generalises afresh.
+Joining would lose what the call ensured, and also the other arm's fact that the receiver
+is unchanged. `SortedList.Remove` (`if (i >= 0) RemoveAt(i); return i >= 0;`) is the case.
+
+### R25.11 Compiling a runtime source as it is built
+
+`palcs --preview` compiles with `LangVersion=preview`, and `palcs --unsafe` allows `unsafe`
+blocks; `verify.mk` passes `$(PAL_CS_FLAGS)` through. dotnet/runtime builds its libraries
+that way (`SortedSet.cs` uses `?.=` and `stackalloc`). The translator still refuses unsafe
+code in any member it translates.
+
+### R25.12 Partial classes
+
+A `partial` class is collected once. It is collected at the declaration that holds its
+`[Model]` member, or else at its first declaration, rather than at every declaration.
+
+### 25.1 Trusted assumptions
+
+* `Sorted.is_null` is an uninterpreted test (R25.4). Nothing is assumed about it except that
+  it is a function.
+* A comparer is a pure, deterministic total preorder (R22.30, shared). `Compare` has no
+  effect and does not throw.
+* `Array.BinarySearch` is the BCL's `InternalBinarySearch`: lower half on a negative
+  comparison, `~lo` on a miss. The Pulse function is proved against that specification.
+  Its agreement with the BCL is trusted.
+* `ThrowIfNull`/`ThrowIfNegative` throw exactly on the stated condition (R25.7).
+* Building an exception message has no effect and does not throw (R25.9).
+
+### 25.2 What blocks `SortedSet<T>` and `SortedDictionary<TKey,TValue>`
+
+`SortedDictionary` is a wrapper over `SortedSet<KeyValuePair<TKey,TValue>>` (`TreeSet`), so
+both wait on `SortedSet`. The harness `pal/SortedSet` in the runtime checkout gets
+through the C# compiler with R25.11 and R25.12, and is then refused. These are the
+obstacles, in the order a verification would meet them, each with what pal-csharp needs:
+
+1. **A generic class hierarchy.** The nested `TreeSubSet : SortedSet<T>` (the view
+   `GetViewBetween` returns) overrides `FindNode`, `MinInternal`, `MaxInternal`,
+   `IsWithinRange` and `VersionCheck`, and `Contains`/`Min`/`Max` dispatch through them.
+   R15.1 refuses a generic base (PALCS0581). Treating `SortedSet<T>` as closed (R22.5) would
+   be unsound, because a `TreeSubSet` receiver runs the overrides. *Needs:* §9's vtables at
+   a type parameter, and contracts on `internal virtual` members that the overrides are
+   checked against.
+2. **Auto-properties as a node's fields.** `Node`'s `Item`, `Left`, `Right` and `Color` are
+   `{ get; set; }`. A read of `current.Left` is taken as a member call (PALCS0523), not as
+   the field R10.5's `[Model]` would be written over. *Needs:* an auto-property of a
+   recursive class read and written as its backing field.
+3. **A recursive structure owned through another object's field.** The tree hangs off
+   `SortedSet.root`. §10 opens a node's window only at an `if` whose whole condition is the
+   null test of a local or a parameter (R10.7). `root == null` on a field, and
+   `FindNode(item) != null` as a value, are refused (PALCS0569, PALCS0593, `IrNull`). A
+   `[Spec]` struct cannot hold a `SpecTree` either (PALCS0511), so the model cannot pair the
+   tree with its comparer. *Needs:* a class field of recursive type owned through
+   `__inv_opt`, with the window opened at a field null test, and `SpecTree` admitted as a
+   ghost struct field.
+4. **Iterative descent.** `FindNode`, `MinInternal`, `MaxInternal` and every mutator walk
+   the tree with a `while` loop over `current`. §10.7: a loop over a derived recursive
+   invariant cannot name the part already passed. §16 (`test/tree_cursor`) does it for a
+   `[Plain]` node with a hand-written one-hole-context predicate and a ghost lemma call per
+   step. That is admissible in place (ghost statements only), but `[Plain]` excludes a
+   `[Model]` owner. *Needs:* a derived path predicate (zipper) for a §10 class, so that
+   a descent loop's invariant can be `Spine(root, cur) ** Holds(cur, sub)`.
+5. **`return` inside a loop.** `FindNode` returns the matching node from inside its loop.
+   R5.5b refuses that rather than invent a flag.
+6. **Returning an interior pointer.** `FindNode` returns a `Node` that the tree still owns.
+   `Contains` only tests it against `null`, but its contract must say what the caller
+   holds. *Needs:* a borrowed (magic-wand) return, or a ghost-only nullness result.
+7. **The order lives outside the nodes.** The BST invariant (`Item`s ascend under the set's
+   comparer) has to be a `[Refine]` on the set's model, over the tree, using a
+   `tree_sorted c t` analogue of `strictly_sorted`. A node's derived invariant cannot
+   mention the comparer. This is a small library addition once 3 holds.
+8. **Insertion and deletion.** These are top-down 2-3-4 algorithms with four simultaneous
+   interior pointers (`current`, `parent`, `grandParent`, `greatGrandParent`) and rotations
+   that re-link them. Beyond the red-black colour invariants, they need simultaneous
+   ownership of several overlapping path segments, which is beyond §16's single cursor.
+
+`comparer = default!` (a field initialiser of `default` at a comparer type) is also refused.
+That is minor: it could be R25.4's null comparer.

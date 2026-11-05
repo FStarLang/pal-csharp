@@ -202,10 +202,10 @@ public static class Declarations
                 // does is the strict direction, and the strict direction costs a caller an
                 // existential; the permissive one would be a lie.
                 // R22.25. Except where R22.25 models the callee as a search, which takes
-                // the array read-only.
+                // the array read-only; and R25.5's binary search.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                     {
-                        Name: "IndexOf" or "LastIndexOf",
+                        Name: "IndexOf" or "LastIndexOf" or "BinarySearch",
                         ContainingType: { Name: "Array", ContainingNamespace.Name: "System" },
                     })
                     continue;

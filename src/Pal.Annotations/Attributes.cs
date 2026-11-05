@@ -264,6 +264,16 @@ public sealed class PulseBodyAttribute(string body) : Attribute
     public string Body { get; } = body;
 }
 
+/// <summary>
+/// R22.31. Multiply the solver budget for this method's proof by <paramref name="factor"/>
+/// (F*'s <c>--z3rlimit_factor</c>). It changes how long the proof may take, not what is proved.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class RlimitAttribute(int factor) : Attribute
+{
+    public int Factor { get; } = factor;
+}
+
 /// <summary>Admit this method's contract without proof. Reported as a diagnostic.</summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AdmitAttribute : Attribute;

@@ -50,6 +50,7 @@ public sealed class WellKnown
         LemmaAttribute = Type("LemmaAttribute");
         PulseBodyAttribute = Type("PulseBodyAttribute");
         AdmitAttribute = Type("AdmitAttribute");
+        RlimitAttribute = Type("RlimitAttribute");
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
@@ -146,6 +147,7 @@ public sealed class WellKnown
     public INamedTypeSymbol LemmaAttribute { get; }
     public INamedTypeSymbol PulseBodyAttribute { get; }
     public INamedTypeSymbol AdmitAttribute { get; }
+    public INamedTypeSymbol RlimitAttribute { get; }
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }
@@ -350,12 +352,13 @@ public sealed class WellKnown
     /// <c>notnull</c> and <c>unmanaged</c>. Each says something about <c>T</c> that the
     /// translation would have to carry, and none has been probed.
     /// </summary>
+    // R25.2. `notnull` is a nullable-analysis hint: it gives `T` no operation, so it is
+    // no typeclass obligation, and a parameter carrying only it is unconstrained.
     public static bool Unconstrained(ITypeParameterSymbol tp) =>
         tp.ConstraintTypes.IsEmpty &&
         !tp.HasReferenceTypeConstraint &&
         !tp.HasValueTypeConstraint &&
         !tp.HasConstructorConstraint &&
-        !tp.HasNotNullConstraint &&
         !tp.HasUnmanagedTypeConstraint;
 
     /// <summary>

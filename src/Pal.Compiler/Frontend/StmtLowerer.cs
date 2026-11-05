@@ -501,6 +501,10 @@ public sealed class StmtLowerer(
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
+        // R23.2, R25.7. The BCL's argument guards are the `if … throw` they abbreviate.
+        if (ArgumentGuard(method, args, loc) is { } guard)
+            return guard;
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -508,10 +512,6 @@ public sealed class StmtLowerer(
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
             ArrayBulkOp(method, args, loc) is { } bulk)
             return bulk;
-
-        // R23.2. The BCL's argument guards are the `if … throw` they abbreviate.
-        if (method is { IsStatic: true } && ArgumentGuard(method, args, loc) is { } guard)
-            return guard;
 
         // R23.4. `Array.Resize(ref a, n)` replaces `a` by a fresh array of length `n`.
         if (method is { IsStatic: true, Name: "Resize", IsGenericMethod: true } &&
@@ -712,7 +712,10 @@ public sealed class StmtLowerer(
     /// is nothing, since such a reference is not null (R10). The parameter-name argument
     /// the compiler supplies is a constant and is not evaluated. Null for any other call.
     /// </summary>
-    private IrStmt? ArgumentGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    private IrStmt? ArgumentGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc) =>
+        IntegerGuard(method, args, loc) ?? OpaqueNullGuard(method, args, loc);
+
+    private IrStmt? IntegerGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         var owner = method.ContainingType?.ToDisplayString();
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
@@ -751,6 +754,33 @@ public sealed class StmtLowerer(
         static bool IsIntegral(SpecialType t) => t is SpecialType.System_Int32 or SpecialType.System_Int64
             or SpecialType.System_UInt32 or SpecialType.System_UInt64 or SpecialType.System_Int16
             or SpecialType.System_UInt16 or SpecialType.System_Byte or SpecialType.System_SByte;
+    }
+
+    /// <summary>
+    /// R25.7. <c>ArgumentNullException.ThrowIfNull(x)</c> at a type parameter or a comparer,
+    /// and <c>ArgumentOutOfRangeException.ThrowIfNegative(n)</c> at <c>int</c>: each is
+    /// <c>if (test) throw new E(...)</c>, where the parameter name the BCL passes is not
+    /// modelled (R21.7). Any other guard is an ordinary call and is refused as one.
+    /// </summary>
+    private IrStmt? OpaqueNullGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        var owner = method.ContainingType?.ToDisplayString();
+        IrExpr test;
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
+        {
+            var value = _code.Lower(args[0].Expression);
+            if (!Sorted.HasOpaqueNull(value.Type)) return null;
+            test = Sorted.IsNull(loc, value);
+        }
+        else if (owner == "System.ArgumentOutOfRangeException" && method.Name == "ThrowIfNegative" &&
+                 model.GetTypeInfo(args[0].Expression).Type?.SpecialType == SpecialType.System_Int32)
+        {
+            test = new IrBinary(loc, BinOp.Lt, _code.Lower(args[0].Expression),
+                new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = IrPrim.Bool };
+        }
+        else return null;
+        return new IrIf(loc, test, new IrThrow(loc, _code.LibraryException(loc, owner)), null);
     }
 
     /// <summary>
