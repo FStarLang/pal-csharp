@@ -57,7 +57,50 @@ public static partial class FrontendPass
         // exactly as if the user had written the two halves out.
         OpenClasses.Desugar(declarations);
         InheritContracts(declarations, diagnostics);
-        return new IrProgram(declarations.ToImmutable());    }
+        PropagateDefaults(declarations);
+        return new IrProgram(declarations.ToImmutable());
+    }
+
+    /// <summary>
+    /// R22.22. A method that calls one needing <c>has_default</c> at a type parameter
+    /// needs it too, at whatever of its own type parameters it passes there: the
+    /// instance is resolved at the call, from the caller's binders. Iterated to a fixed
+    /// point, because the need travels up any chain of calls.
+    /// </summary>
+    private static void PropagateDefaults(ImmutableArray<IrDecl>.Builder declarations)
+    {
+        bool changed;
+        do
+        {
+            changed = false;
+            var byName = declarations.OfType<IrMethod>().GroupBy(m => m.Name)
+                .ToDictionary(g => g.Key, g => g.First());
+            for (var i = 0; i < declarations.Count; i++)
+            {
+                if (declarations[i] is not IrMethod { Body: { } body } m) continue;
+                var needed = new HashSet<string>(m.DefaultedTypeParameters);
+                foreach (var call in Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
+                             .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>())
+                {
+                    if (!byName.TryGetValue(call.Callee, out var callee)) continue;
+                    foreach (var tp in callee.DefaultedTypeParameters)
+                    {
+                        var k = callee.TypeParameters.IndexOf(tp);
+                        if (k >= 0 && k < call.TypeArguments.Length &&
+                            call.TypeArguments[k] is IrTypeParamType { Name: var name } &&
+                            m.TypeParameters.Contains(name))
+                            needed.Add(name);
+                    }
+                }
+                if (needed.Count == m.DefaultedTypeParameters.Length) continue;
+                declarations[i] = m with
+                {
+                    DefaultedTypeParameters = [.. m.TypeParameters.Where(needed.Contains)],
+                };
+                changed = true;
+            }
+        } while (changed);
+    }
 
     /// <summary>
     /// R9.7. A virtual method's contract is written once, on the <c>abstract</c>
@@ -161,6 +204,8 @@ public static partial class FrontendPass
             MethodDeclarationSyntax m => m.Identifier,
             ConstructorDeclarationSyntax c => c.Identifier,
             PropertyDeclarationSyntax p => p.Identifier,
+            AccessorDeclarationSyntax { Parent.Parent: IndexerDeclarationSyntax ix } => ix.ThisKeyword,
+            AccessorDeclarationSyntax { Parent.Parent: PropertyDeclarationSyntax p } => p.Identifier,
             _ => Syntax.GetFirstToken(),
         };
 
@@ -171,6 +216,7 @@ public static partial class FrontendPass
             // `T P => e;` and `T P { get => e; }` are the same declaration with the same
             // body; the accessor form is where an attribute could never have gone.
             PropertyDeclarationSyntax p => p.ExpressionBody ?? Getter(p)?.ExpressionBody,
+            AccessorDeclarationSyntax a => a.ExpressionBody,
             _ => null,
         };
 
@@ -212,6 +258,44 @@ public static partial class FrontendPass
                 if (symbol.GetMethod is not { } getter) continue;
                 if (Declarations.KindOf(getter, known) is not { } kind) continue;
                 result.Add(new Candidate(prop, getter, kind));
+            }
+
+            // R22.13. A property's setter is the method `set_P(value)`, collected from its
+            // accessor, which is where its body and its contract are written. So is the
+            // getter of a property that has a setter too, which R9.20 does not collect.
+            foreach (var prop in tree.GetRoot().DescendantNodes().OfType<PropertyDeclarationSyntax>())
+            {
+                if (prop.AccessorList is null) continue;
+                foreach (var accessor in prop.AccessorList.Accessors)
+                {
+                    if (!accessor.IsKind(SyntaxKind.SetAccessorDeclaration) &&
+                        !accessor.IsKind(SyntaxKind.GetAccessorDeclaration)) continue;
+                    if (accessor.IsKind(SyntaxKind.GetAccessorDeclaration) &&
+                        (model.GetDeclaredSymbol(prop) is not IPropertySymbol { SetMethod: not null } ps ||
+                         IsAuto(ps)))
+                        continue;
+                    if (accessor.Body is null && accessor.ExpressionBody is null) continue;
+                    if (model.GetDeclaredSymbol(accessor) is not IMethodSymbol setter) continue;
+                    if (known.IsSpecTypeDeclaration(setter.ContainingType)) continue;
+                    if (Declarations.KindOf(setter, known) is not { } kind) continue;
+                    result.Add(new Candidate(accessor, setter, kind));
+                }
+            }
+
+            // R22.13. An indexer accessor is the method C# compiles it to (`get_Item`,
+            // `set_Item`), and its contract is written on the accessor: the two accessors
+            // are two methods with two contracts, and an attribute on the indexer itself
+            // could not say which one it meant.
+            foreach (var ix in tree.GetRoot().DescendantNodes().OfType<IndexerDeclarationSyntax>())
+            {
+                if (ix.AccessorList is null) continue;
+                foreach (var accessor in ix.AccessorList.Accessors)
+                {
+                    if (model.GetDeclaredSymbol(accessor) is not IMethodSymbol symbol) continue;
+                    if (known.IsSpecTypeDeclaration(symbol.ContainingType)) continue;
+                    if (Declarations.KindOf(symbol, known) is not { } kind) continue;
+                    result.Add(new Candidate(accessor, symbol, kind));
+                }
             }
         }
         return result.ToImmutable();
@@ -476,7 +560,10 @@ public static partial class FrontendPass
                 // or one of its members says so.
                 if (known.AnnotatedOnly && !Declarations.IsAnnotated(symbol, known) &&
                     !symbol.GetMembers().Any(m => Declarations.IsAnnotated(m, known))) continue;
-                if (RefuseGenericType(symbol, diagnostics)) continue;
+                // R22.6. A `[Spec]` struct is an erased record, never copied or stored at run
+                // time, so R15.1's reason for refusing a generic struct does not apply to it.
+                if (!(Declarations.Has(symbol, known.SpecAttribute) && symbol.TypeParameters.All(WellKnown.Unconstrained))
+                    && RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
                 // it never appears in executable code, and so — unlike R3.4's ordinary
@@ -584,7 +671,10 @@ public static partial class FrontendPass
                     Text: text,
                     Location: location,
                     Parameters: parameters,
-                    Usings: s.Usings));
+                    Usings: s.Usings)
+                {
+                    TypeParameters = [.. s.Symbol.TypeParameters.Select(t => t.Name)],
+                });
         }
         return sites.ToImmutable();
     }
@@ -822,6 +912,19 @@ public static partial class FrontendPass
     }
 
     /// <summary>
+    /// R22.5. Under <c>[TranslateAnnotatedOnly]</c>, a class that is not <c>sealed</c> but
+    /// declares no virtual or abstract member, and that no class in the compilation derives
+    /// from, is a leaf: a subclass elsewhere can add state but cannot change what any of
+    /// this class's methods do, so there is no vtable for R9.21 to split off.
+    /// </summary>
+    private static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+        known.AnnotatedOnly &&
+        !symbol.GetMembers().Any(m => m.IsVirtual || m.IsAbstract || m.IsOverride) &&
+        !known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
+            .OfType<INamedTypeSymbol>()
+            .Any(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition));
+
+    /// <summary>
     /// R12.1. The fields of a <c>[Plain]</c> class. Only the representation is wanted, so
     /// this is the struct field rule (R3.4) and nothing else: every instance field and
     /// auto-property, mapped, with no model, no observations and no invariant to check.
@@ -896,6 +999,9 @@ public static partial class FrontendPass
             if (SymbolEqualityComparer.Default.Equals(member, modelSymbol)) continue;
             if (Declarations.IsAnnotated(member, known)) continue;
             if (member.IsOverride && OverriddenChainHasModel(member, known)) continue;
+            // R22.3. Under `[TranslateAnnotatedOnly]` an unannotated member is outside the
+            // scope, not a construct to refuse; a call to it is refused where it is made.
+            if (known.AnnotatedOnly && member is not IFieldSymbol) continue;
 
             // An accessor is reported through the property it belongs to, once. Reporting
             // it again under its own name (`get_Doubled`) would name a symbol the user
@@ -940,6 +1046,9 @@ public static partial class FrontendPass
                 IPropertySymbol =>
                     ("a property whose accessor pal-csharp cannot read as a method " +
                      "(doc/translation.md R9.20)", $"{symbol.Name}.{member.Name}"),
+                // R22.7. A `const` is folded where it is read (R20.10's reading of a value
+                // the field always denotes), so it needs nothing of its own.
+                IFieldSymbol { IsConst: true } when known.AnnotatedOnly => (null, null),
                 IFieldSymbol { IsConst: true } =>
                     ("a `const` field. It owns nothing, so it needs no invariant, but nothing yet " +
                      "puts its value in scope in a body or a contract (doc/translation.md R18.2)",
@@ -1012,7 +1121,9 @@ public static partial class FrontendPass
         foreach (var member in Inherited(symbol))
         {
             // R4.13: global mutable state is covered by no per-object invariant.
-            if (member is IFieldSymbol { IsStatic: true, IsConst: false } stat)
+            // R22.8: a `static readonly` field is not mutable state; R20.10 reads it as its
+            // initializer.
+            if (member is IFieldSymbol { IsStatic: true, IsConst: false, IsReadOnly: false } stat)
             {
                 diagnostics.Error("PALCS0522",
                     Locations.From(stat.Locations.FirstOrDefault() ?? Location.None),
@@ -1136,7 +1247,10 @@ public static partial class FrontendPass
         // as though the clause were not written, and nothing checked that its members
         // implement anything. §9 has no interfaces (§8.6 says what they wait on), so the
         // clause is refused rather than dropped.
-        foreach (var iface in symbol.Interfaces)
+        // R22.4. Under `[TranslateAnnotatedOnly]` the clause is not refused: no call through
+        // an interface translates (its members have no module), so the class is verified
+        // as itself, and an interface-typed call is refused at the call.
+        foreach (var iface in known.AnnotatedOnly ? [] : symbol.Interfaces)
         {
             diagnostics.Error("PALCS0594", Locations.From(syntax.Identifier),
                 $"`{symbol.Name}` implements `{iface.Name}`, and pal-csharp has no interfaces " +
@@ -1305,7 +1419,7 @@ public static partial class FrontendPass
         {
             BaseSymbol = baseSymbol,
             IsAbstract = symbol.IsAbstract,
-            IsOpen = !symbol.IsAbstract && !symbol.IsSealed,
+            IsOpen = !symbol.IsAbstract && !symbol.IsSealed && !EffectivelySealed(symbol, known),
             ForgetBody = forgetBody,
         };
         return true;
@@ -1405,7 +1519,10 @@ public static partial class FrontendPass
                     Text: text,
                     Location: location,
                     Parameters: fieldParams,
-                    Usings: c.Usings));
+                    Usings: c.Usings)
+                {
+                    TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
+                });
 
             index = 0;
             foreach (var (text, location) in ModelRefinements(c))
@@ -1416,7 +1533,10 @@ public static partial class FrontendPass
                     Parameters: ReturnTypeOf(c.ModelSymbol) is { } mt
                         ? [new SpecParam(SpecBinder.ResultParameter, mt)]
                         : ImmutableArray<SpecParam>.Empty,
-                    Usings: c.Usings));
+                    Usings: c.Usings)
+                {
+                    TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
+                });
         }
         return sites.ToImmutable();
     }
@@ -2080,7 +2200,7 @@ public static partial class FrontendPass
         // through `Result` instead.
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                    or MethodKind.PropertyGet })
+                                    or MethodKind.PropertyGet or MethodKind.PropertySet })
             result.Add(new SpecParam(Names.This, symbol.ContainingType));
 
         foreach (var p in symbol.Parameters)
@@ -2120,7 +2240,7 @@ public static partial class FrontendPass
             parameters = [.. parameters, .. Declarations.ContextFields(symbol.ContainingType, model.Compilation, known)
                 .Select(f => new IrParam(loc, Declarations.ContextName(f), known.MapType(Declarations.ContextType(f))!, ParamMode.Value) { IsContext = true })];
         if (symbol is { IsStatic: false,
-                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet,
+                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet,
                         ContainingType: { } self } &&
             known.HasModel(self))
         {
@@ -2216,8 +2336,7 @@ public static partial class FrontendPass
             // constrained case never reaches here: MapType declines a constrained type
             // parameter, so the signature that mentions it is refused first.
             TypeParameters = MethodTypeParameters(symbol),
-            DefaultedTypeParameters = [.. symbol.TypeParameters.Select(t => t.Name)
-                .Where(lowerer.Defaulted)],
+            DefaultedTypeParameters = [.. MethodTypeParameters(symbol).Where(lowerer.Defaulted)],
             Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
                 ? baseName
                 : null,
@@ -2268,6 +2387,7 @@ public static partial class FrontendPass
     {
         BaseMethodDeclarationSyntax m => m.Body,
         PropertyDeclarationSyntax p => Candidate.Getter(p)?.Body,
+        AccessorDeclarationSyntax a => a.Body,
         _ => null,
     };
 
@@ -2275,6 +2395,7 @@ public static partial class FrontendPass
     {
         BaseMethodDeclarationSyntax m => m.ExpressionBody,
         PropertyDeclarationSyntax p => p.ExpressionBody ?? Candidate.Getter(p)?.ExpressionBody,
+        AccessorDeclarationSyntax a => a.ExpressionBody,
         _ => null,
     };
 

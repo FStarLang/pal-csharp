@@ -809,18 +809,21 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine();
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
-        sb.Append("noeq type ").Append(Names.StructRaw(s.Name)).AppendLine(" = {");
+        // R22.6. A generic `[Spec]` struct's parameters are explicit on the two types and
+        // implicit on the predicate, as R15.2 has them for a class.
+        var binders = new TypeBinders(s.TypeParameters);
+        sb.Append("noeq type ").Append(Names.StructRaw(s.Name)).Append(binders.Explicit).AppendLine(" = {");
         foreach (var f in s.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
         sb.AppendLine("}");
         sb.AppendLine();
         // The refinement predicate is emitted even when trivial: uniform output beats
         // output whose shape depends on whether the user happened to write [Refine].
-        sb.AppendLine($"let {Names.StructPred(s.Name)} (this: {Names.StructRaw(s.Name)}) : prop =");
+        sb.AppendLine($"let {Names.StructPred(s.Name)}{binders.Implicit} (this: {binders.App(Names.StructRaw(s.Name))}) : prop =");
         sb.AppendLine($"  {predicate}");
         sb.AppendLine();
-        sb.AppendLine($"type {Names.StructType(s.Name)} = " +
-                      $"this: {Names.StructRaw(s.Name)} {{ {Names.StructPred(s.Name)} this }}");
+        sb.AppendLine($"type {Names.StructType(s.Name)}{binders.Explicit} = " +
+                      $"this: {binders.App(Names.StructRaw(s.Name))} {{ {Names.StructPred(s.Name)} this }}");
 
         return new EmittedModule(Names.StructModule(s.Name), sb.ToString());
     }
@@ -1407,6 +1410,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     foreach (var c in tr.Catches) { CollectExpr(c.When); Collect(c.Body); }
                     return;
                 case IrExprStmt e: CollectExpr(e.Expr); return;
+                case IrArrayCopy c: CollectExpr(c.Source); CollectExpr(c.Destination); CollectExpr(c.Length); return;
                 case IrGhostStmt g: CollectExpr(g.Prop); return;
                 default: return;
             }

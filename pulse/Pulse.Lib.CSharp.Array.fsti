@@ -95,3 +95,39 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
   requires emp
   returns  a : array t
   ensures  A.pts_to a (Seq.create (I32.v n) init)
+
+/// `new T[0]`, which needs no `default(T)` because it has no cells to fill.
+///
+/// MODELING AXIOM, as `alloc`. It is stated separately because a zero-length
+/// array exists at every element type, inhabited or not -- which is what lets a
+/// generic class read its shared empty array (doc/translation.md R22.8) without
+/// asking its caller for a default value it does not use.
+fn alloc_empty (#t: Type0) (_: unit)
+  requires emp
+  returns  a : array t
+  ensures  A.pts_to a (Seq.empty #t)
+
+/// The contents of `dst` after its first `len` cells are overwritten with `src`'s.
+let copied (#t: Type0) (s d: Seq.seq t) (len: nat { len <= Seq.length s /\ len <= Seq.length d })
+  : Seq.seq t
+  = Seq.append (Seq.slice s 0 len) (Seq.slice d len (Seq.length d))
+
+/// `Array.Copy(src, dst, len)`, between distinct arrays: the first `len` cells of
+/// `dst` become those of `src`, and the rest are unchanged.
+///
+/// The CLR throws when `len` is negative or exceeds either length; here those are
+/// the caller's obligations (doc/translation.md R22.20). That the two arrays are
+/// distinct is what the separate `pts_to`s say; a copy within one array is not
+/// this function.
+fn copy (#t: Type0) (src dst: array t) (len: I32.t)
+        (#p: perm)
+        (#s: Ghost.erased (Seq.seq t))
+        (#d: Ghost.erased (Seq.seq t)
+              { I32.v len >= 0 /\ I32.v len <= Seq.length s /\ I32.v len <= Seq.length d })
+  requires A.pts_to src #p s ** A.pts_to dst d
+  ensures  A.pts_to src #p s **
+           A.pts_to dst (copied s d (I32.v len)) **
+           pure (Seq.length (copied s d (I32.v len)) == Seq.length d /\
+                 Seq.slice (copied s d (I32.v len)) 0 (I32.v len) == Seq.slice s 0 (I32.v len) /\
+                 Seq.slice (copied s d (I32.v len)) (I32.v len) (Seq.length d) ==
+                   Seq.slice d (I32.v len) (Seq.length d))

@@ -527,6 +527,7 @@ public static class Check
         IrLocalDecl d => d.Init is null ? [] : [d.Init],
         IrAssign a => [a.Target, a.Value],
         IrExprStmt e => [e.Expr],
+        IrArrayCopy c => [c.Source, c.Destination, c.Length],
         IrReturn r => r.Value is null ? [] : [r.Value],
         IrIf i => [i.Cond],
         IrWhile w => [w.Cond],

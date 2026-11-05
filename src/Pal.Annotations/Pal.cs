@@ -209,6 +209,15 @@ public static class Pal
     /// <summary>The ghost subsequence <c>[from, to)</c>.</summary>
     public static Seq<T> Slice<T>(Seq<T> s, int from, int to) => throw Ghost();
 
+    /// <summary>R22.16. <paramref name="s"/> with <paramref name="value"/> appended, F*'s <c>Seq.snoc</c>.</summary>
+    public static Seq<T> Snoc<T>(Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>R22.16. Concatenation, F*'s <c>Seq.append</c>.</summary>
+    public static Seq<T> Concat<T>(Seq<T> left, Seq<T> right) => throw Ghost();
+
+    /// <summary>R22.16. The empty sequence, F*'s <c>Seq.empty</c>.</summary>
+    public static Seq<T> EmptySeq<T>() => throw Ghost();
+
     /// <summary>
     /// The ghost sequence <paramref name="s"/> read starting at <paramref name="offset"/>
     /// and wrapping round: <c>Rotate(s, n)[k] == s[(n + k) % s.Length]</c>. The abstraction

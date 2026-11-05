@@ -415,6 +415,7 @@ public static class Normalize
                 return;
             case IrReturn r: Free(r.Value, into); return;
             case IrExprStmt e: Free(e.Expr, into); return;
+            case IrArrayCopy c: Free(c.Source, into); Free(c.Destination, into); Free(c.Length, into); return;
             case IrGhostStmt g: Free(g.Prop, into); return;
             case IrThrow th: Free(th.Value, into); return;
             case IrTry t:
@@ -485,6 +486,11 @@ public static class Normalize
                 return;
             case IrReturn r: MutatedIn(r.Value, into); return;
             case IrExprStmt e: MutatedIn(e.Expr, into); return;
+            case IrArrayCopy c:
+                if (c.Destination is IrVar dv) into.Add(dv.Name);
+                else if (c.Destination is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
+                MutatedIn(c.Source, into); MutatedIn(c.Destination, into); MutatedIn(c.Length, into);
+                return;
             case IrThrow th: MutatedIn(th.Value, into); return;
             case IrTry t:
                 Mutated(t.Body, into);

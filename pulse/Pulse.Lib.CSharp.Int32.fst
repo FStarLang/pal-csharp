@@ -32,3 +32,8 @@ let max_value : int = FStar.Int.max_int I32.n
 /// the mathematical result of `op` on the operands' values is representable.
 let no_overflow (op : int -> int -> int) (vx vy : int) : prop =
   I32.fits (op vx vy)
+
+/// R22.14. Two's-complement wrapping arithmetic: C#'s unchecked `+`, `-` and `*` on `int`.
+let add_wrap (x y: I32.t) : I32.t = I32.int_to_t (FStar.Int.to_int_t 32 (I32.v x + I32.v y))
+let sub_wrap (x y: I32.t) : I32.t = I32.int_to_t (FStar.Int.to_int_t 32 (I32.v x - I32.v y))
+let mul_wrap (x y: I32.t) : I32.t = I32.int_to_t (FStar.Int.to_int_t 32 (I32.v x * I32.v y))

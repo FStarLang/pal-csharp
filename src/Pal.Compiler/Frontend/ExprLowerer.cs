@@ -247,7 +247,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return Unsupported(node, loc);
         }
 
-        return new IrNewArray(loc, array.Element, Lower(size)) { Type = array };
+        var length = Lower(size);
+        // R22.10. `new T[n]` fills with `default(T)`, so at a type parameter it needs the
+        // caller's default exactly as R14.2a's `default(T)` does -- unless the length is
+        // the literal zero, which fills nothing.
+        if (length is not IrLiteral { Value: 0 or 0L } &&
+            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: ITypeParameterSymbol tp })
+        {
+            DefaultedTypeParameters.Add(tp.Name);
+        }
+        return new IrNewArray(loc, array.Element, length) { Type = array };
     }
 
     /// <summary>
@@ -721,6 +730,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             model.Compilation.GetSemanticModel(init.SyntaxTree), known, diagnostics, specPosition: false)
             .Lower(init);
         if (IsPureValue(lowered)) return lowered with { Loc = loc };
+        // R22.8. A shared empty array is read as a fresh one. It has no cells, so no write
+        // through either can be observed through the other, and reference identity, the
+        // one thing that tells them apart, has no translation (R18.1).
+        if (!SpecPosition && lowered is IrNewArray { Length: IrLiteral { Value: 0 } })
+            return lowered with { Loc = loc };
 
         diagnostics.Error("PALCS0626", loc,
             $"`{field.Name}` is a `static readonly` field whose initializer is not a value the " +
@@ -773,7 +787,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         // R14.2a. `default(T)` at an unconstrained `T` is whatever `T`'s default is, which
         // only the caller knows: it is the `has_default` dictionary the caller passes.
-        if (type is ITypeParameterSymbol { TypeParameterKind: TypeParameterKind.Method } tp &&
+        if (type is ITypeParameterSymbol tp &&
             known.MapType(tp) is { } tpType)
         {
             DefaultedTypeParameters.Add(tp.Name);
@@ -855,6 +869,37 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ParamTypes = Declarations.ParamTypes(getter, known, true),
             TypeArguments = known.TypeArguments(getter),
             MutatesReceiver = false,
+        };
+    }
+
+    /// <summary>
+    /// R22.21. <c>P = v</c>, for a property with a translated setter, is the call the
+    /// setter is, as R9.20a's read is the getter's.
+    /// </summary>
+    public IrCall? ComputedWrite(AssignmentExpressionSyntax node, IrLoc loc)
+    {
+        if (SpecPosition || !node.IsKind(SyntaxKind.SimpleAssignmentExpression)) return null;
+        if (model.GetSymbolInfo(node.Left).Symbol is not IPropertySymbol { IsIndexer: false } prop) return null;
+        if (prop.SetMethod is not { } setter) return null;
+        if (Declarations.Has(prop, known.SpecAttribute) || Declarations.Has(prop, known.ModelAttribute)) return null;
+        if (Declarations.KindOf(setter, known) is null) return null;
+        IrExpr receiver = node.Left switch
+        {
+            IdentifierNameSyntax => new IrVar(loc, Names.This) { Type = Enclosing(node) },
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } =>
+                new IrVar(loc, Names.This) { Type = Enclosing(node) },
+            MemberAccessExpressionSyntax m => Lower(m.Expression),
+            _ => new IrLiteral(loc, null),
+        };
+        if (receiver is IrLiteral) return null;
+        return new IrCall(loc, Naming.Of(setter), [receiver, ToDeclared(Lower(node.Right), known.MapType(setter.Parameters[0].Type))])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = known.MapType(setter.ReturnType),
+            HasReceiver = true,
+            ParamTypes = Declarations.ParamTypes(setter, known, true),
+            TypeArguments = known.TypeArguments(setter),
+            MutatesReceiver = !Declarations.IsReadOnly(setter, model.Compilation),
         };
     }
 
@@ -946,6 +991,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (symbol is IFieldSymbol { HasConstantValue: true } konst)
             return new IrLiteral(loc, konst.ConstantValue);
+
+        // R22.18. `Array.MaxLength` is a property only so that the runtime may change it;
+        // the value is documented, 0x7FFFFFC7, and it is that literal.
+        if (symbol is IPropertySymbol { Name: "MaxLength", IsStatic: true } ml &&
+            ml.ContainingType.SpecialType == SpecialType.System_Array)
+            return new IrLiteral(loc, 0x7FFFFFC7);
 
         // R19.1. A field of an exception is a projection out of its payload.
         if (symbol is IFieldSymbol or IPropertySymbol && receiverType is INamedTypeSymbol rt &&
@@ -1128,8 +1179,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             else if (left is IrNull && left.Type is not IrOptionType && right.Type is IrOptionType rt)
                 left = left with { Type = rt };
         }
-        return new IrBinary(loc, op.Value, left, right);
+        return new IrBinary(loc, op.Value, left, right)
+        {
+            Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul && InWrappingMethod(node),
+        };
     }
+
+    /// <summary>R22.14. The node sits in a method marked <c>[Wrapping]</c>.</summary>
+    private bool InWrappingMethod(SyntaxNode node) =>
+        model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol m &&
+        Declarations.Has(m, known.WrappingAttribute);
 
     /// <summary>
     /// R20.11. <c>a ?? b</c> evaluates <c>a</c> once, and <c>b</c> only when <c>a</c> is
@@ -1201,7 +1260,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
 
         var target = LinearizeLValue(Lower(operand), out var hoisted);
-        var stepped = new IrBinary(loc, op, target, new IrLiteral(loc, 1)) { Type = target.Type };
+        var stepped = new IrBinary(loc, op, target, new IrLiteral(loc, 1))
+            { Type = target.Type, Wraps = Wraps(operand) };
         var write = new IrAssign(loc, target, stepped);
         var name = Fresh("step");
         var snapshot = new IrLocalDecl(loc, name, target.Type ?? stepped.Type!, target)
@@ -1217,6 +1277,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             : ImmutableArray.CreateRange<IrStmt>([.. hoisted, write, snapshot]);
         return new IrStmtExpr(loc, prelude, result) { Type = target.Type };
     }
+
+    /// <summary>R22.14. Whether an assignment target is a <c>[Wrapping]</c> field.</summary>
+    public bool Wraps(ExpressionSyntax target) =>
+        (model.GetSymbolInfo(target).Symbol is IFieldSymbol f &&
+         Declarations.Has(f, known.WrappingAttribute)) || InWrappingMethod(target);
 
     /// <summary>
     /// <see cref="LinearizeLValue(IrExpr, ImmutableArray{IrStmt}.Builder)"/>, with the
@@ -1624,6 +1689,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                           .. context.Select(f => (IrType?)known.MapType(Declarations.ContextType(f)))],
             TypeArguments = known.TypeArguments(method),
             MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
+            DoesNotReturn = method.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() ==
+                "System.Diagnostics.CodeAnalysis.DoesNotReturnAttribute"),
         };
     }
 
@@ -1711,6 +1778,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSeqOp(loc, SeqOpKind.SetAt, [Arg(0), Arg(1), Arg(2)]);
             case nameof(PalLang.Pal.Slice):
                 return new IrSeqOp(loc, SeqOpKind.Slice, [Arg(0), Arg(1), Arg(2)]);
+            case nameof(PalLang.Pal.Snoc):
+                return new IrSeqOp(loc, SeqOpKind.Snoc, [Arg(0), Arg(1)]);
+            case nameof(PalLang.Pal.Concat):
+                return new IrSeqOp(loc, SeqOpKind.Concat, [Arg(0), Arg(1)]);
+            case nameof(PalLang.Pal.EmptySeq):
+                return new IrSeqOp(loc, SeqOpKind.Empty, []);
             // R17.8. What a parent holds after a window is given back.
             case nameof(PalLang.Pal.Splice):
                 return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);

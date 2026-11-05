@@ -111,6 +111,16 @@ public sealed class ConsumesAttribute : Attribute;
 public sealed class PlainAttribute : Attribute;
 
 /// <summary>
+/// R22.14. Arithmetic that writes this integer field -- or, on a method, all the integer
+/// arithmetic in its body -- wraps, as C#'s default unchecked context says it does,
+/// rather than carrying R6.4's no-overflow obligation. For a counter nothing else reads
+/// arithmetically -- a version stamp -- the obligation is unprovable, and for a growth
+/// computation that tests for the wrap afterwards the wrap is what the code relies on.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field | AttributeTargets.Method)]
+public sealed class WrappingAttribute : Attribute;
+
+/// <summary>
 /// Hold this parameter at an explicit fractional permission.
 /// <para>
 /// On a <em>method</em> it says the same thing about the receiver, which is the one

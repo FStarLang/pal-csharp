@@ -166,7 +166,11 @@ public sealed record IrUserSpecType(string Name, string FStar, ImmutableArray<Ir
 
 public sealed record IrNamedType(string Name) : IrType
 {
-    protected override string Describe() => Name;
+    protected override string Describe() =>
+        TypeArguments.IsEmpty ? Name : $"{Name}<{string.Join(", ", TypeArguments)}>";
+
+    /// <summary>R22.6. A generic <c>[Spec]</c> struct's type arguments, in declaration order.</summary>
+    public ImmutableArray<IrType> TypeArguments { get; init; } = [];
 }
 
 /// <summary>
@@ -296,7 +300,11 @@ public sealed record IrVar(IrLoc Loc, string Name) : IrExpr(Loc);
 
 public sealed record IrUnary(IrLoc Loc, UnOp Op, IrExpr Operand) : IrExpr(Loc);
 
-public sealed record IrBinary(IrLoc Loc, BinOp Op, IrExpr Left, IrExpr Right) : IrExpr(Loc);
+public sealed record IrBinary(IrLoc Loc, BinOp Op, IrExpr Left, IrExpr Right) : IrExpr(Loc)
+{
+    /// <summary>R22.14. The operation wraps rather than carrying a no-overflow obligation.</summary>
+    public bool Wraps { get; init; }
+}
 
 public sealed record IrConditional(IrLoc Loc, IrExpr Cond, IrExpr Then, IrExpr Else) : IrExpr(Loc);
 
@@ -400,6 +408,12 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
     public ImmutableArray<IrType> TypeArguments { get; init; } = ImmutableArray<IrType>.Empty;
 
     /// <summary>
+    /// R22.11. The callee is <c>[DoesNotReturn]</c>: a call to it is a throw point, so the
+    /// caller hands back what it holds before the call, as it does before a <c>throw</c>.
+    /// </summary>
+    public bool DoesNotReturn { get; init; }
+
+    /// <summary>
     /// R4.13. The callee's declared parameter types, in <see cref="Args"/> order (a
     /// receiver, when present, occupies the first slot with no declared type). An
     /// argument crossing into the mathematical world is C#'s implicit conversion from a
@@ -488,7 +502,7 @@ public sealed record IrOrderBy(IrLoc Loc, IrExpr Source, string Key, IrType KeyT
 /// <summary><c>Pal.Contents(a)</c> — the ghost <c>Seq</c> view of an array.</summary>
 public sealed record IrContents(IrLoc Loc, IrExpr Array) : IrExpr(Loc);
 
-public enum SeqOpKind { Length, Index, SetAt, Slice, Splice, Rotate, IsPermutation }
+public enum SeqOpKind { Length, Index, SetAt, Slice, Splice, Rotate, IsPermutation, Snoc, Concat, Empty }
 
 /// <summary>An operation on ghost sequences.</summary>
 public sealed record IrSeqOp(IrLoc Loc, SeqOpKind Op, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
@@ -600,11 +614,15 @@ public sealed record IrReturn(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
 
 public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 
+/// <summary>R22.20. <c>Array.Copy(src, dst, len)</c>: writes <c>dst</c>'s first <c>len</c> cells.</summary>
+public sealed record IrArrayCopy(IrLoc Loc, IrExpr Source, IrExpr Destination, IrExpr Length) : IrStmt(Loc);
+
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore }
+/// <summary><c>DebugAssert</c> is R22.19's <c>Debug.Assert(c)</c>: <c>Prop</c> is an executable expression.</summary>
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);

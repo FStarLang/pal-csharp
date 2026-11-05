@@ -342,7 +342,8 @@ public sealed class StmtLowerer(
         // R5.3 expands `x++` into `x = x + 1`, which names the L-value twice. C# evaluates
         // it once, so anything effectful in it is hoisted first and both copies share it.
         var lowered = _code.LinearizeLValue(_code.Lower(target), out var prelude);
-        var assign = new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, new IrLiteral(loc, 1)));
+        var assign = new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, new IrLiteral(loc, 1))
+            { Wraps = _code.Wraps(target) });
         return prelude.IsEmpty ? assign : new IrBlock(loc, [.. prelude, assign]);
     }
 
@@ -375,6 +376,7 @@ public sealed class StmtLowerer(
         }
 
         if (_code.SpecIndexerWrite(node, loc) is { } indexerWrite) return indexerWrite;
+        if (_code.ComputedWrite(node, loc) is { } setterCall) return new IrExprStmt(loc, setterCall);
 
         var target = _code.Lower(node.Left);
         var value = _code.Lower(node.Right);
@@ -382,7 +384,8 @@ public sealed class StmtLowerer(
         if (op is null) return new IrAssign(loc, target, _code.ToDeclared(value, target.Type));
 
         var linear = _code.LinearizeLValue(target, out var prelude);
-        var assign = new IrAssign(loc, linear, new IrBinary(loc, op.Value, linear, value));
+        var assign = new IrAssign(loc, linear, new IrBinary(loc, op.Value, linear, value)
+            { Wraps = _code.Wraps(node.Left) });
         return prelude.IsEmpty ? assign : new IrBlock(loc, [.. prelude, assign]);
     }
 
@@ -432,6 +435,25 @@ public sealed class StmtLowerer(
                     return new IrBlock(loc, []);
             }
         }
+
+        // R22.19. `Debug.Assert(c)` fails fast when `c` is false, in the builds that keep
+        // it; that it never fails is a proof obligation, so `c` is evaluated and asserted.
+        // A message argument is accepted only as a constant, whose evaluation is no effect.
+        if (method is { Name: "Assert", IsStatic: true } &&
+            method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
+            args.Count >= 1 && method.Parameters[0].Type.SpecialType == SpecialType.System_Boolean &&
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
+            return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
+
+        // R22.20. `Array.Copy(src, dst, len)` between arrays of one element type.
+        if (method is { Name: "Copy", IsStatic: true, Parameters.Length: 3 } &&
+            method.ContainingType.SpecialType == SpecialType.System_Array &&
+            method.Parameters[2].Type.SpecialType == SpecialType.System_Int32 &&
+            model.GetTypeInfo(args[0].Expression).Type is IArrayTypeSymbol st &&
+            model.GetTypeInfo(args[1].Expression).Type is IArrayTypeSymbol dt &&
+            SymbolEqualityComparer.Default.Equals(st.ElementType, dt.ElementType))
+            return new IrArrayCopy(loc, _code.Lower(args[0].Expression),
+                _code.Lower(args[1].Expression), _code.Lower(args[2].Expression));
 
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)

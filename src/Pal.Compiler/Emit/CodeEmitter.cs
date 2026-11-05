@@ -90,6 +90,9 @@ public sealed class CodeEmitter(
     /// </summary>
     private int _closingBlocks;
 
+    /// <summary>R6.11a. Array locals declared in a nested block, which must be moved out of it.</summary>
+    private readonly Dictionary<Slot, IrLoc> _nestedArrays = [];
+
     private string Fresh() => "t" + _temp++;
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
@@ -177,7 +180,7 @@ public sealed class CodeEmitter(
         // The comment above has always said the bracket goes where the field accesses are;
         // this is what makes it true.
         if (!TouchesFields(method)) _objects = [];
-        else if (_objects.Length > 0 && SelfCall(method) is { } selfCall)
+        else if (_objects is [{ ViewBase: not null }] && SelfCall(method) is { } selfCall)
         {
             // R4.10c, the other half. The bracket has one shape, and the two demands are
             // opposite: a field access needs the invariant *unfolded* and a call on `this`
@@ -219,6 +222,22 @@ public sealed class CodeEmitter(
     {
         for (var i = 0; i < statements.Length - 1; i++)
         {
+            // R22.12. Pulse joins the arms of an unannotated `if` resource by resource, so
+            // an arm that replaces an open object's array field leaves the join holding the
+            // box and the new array under unrelated existentials. The rest of the block is
+            // moved into both arms instead, so that no join is needed.
+            if (statements[i] is IrIf split && JoinLoses(split))
+            {
+                var rest = statements.RemoveRange(0, i + 1);
+                ImmutableArray<IrStmt> Arm(IrStmt? arm) =>
+                    [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest];
+                Tail(split with
+                {
+                    Then = new IrBlock(split.Then.Loc, Arm(split.Then)),
+                    Else = new IrBlock(split.Else?.Loc ?? split.Loc, Arm(split.Else)),
+                }, method, plan);
+                return;
+            }
             if (statements[i] is IrReturn early)
             {
                 diagnostics.Unsupported(early.Loc, "A `return` that is not the last statement",
@@ -294,6 +313,12 @@ public sealed class CodeEmitter(
                 Throw(th, plan, tail: true);
                 return;
 
+            // R22.12. An `if` with no `else` in tail position is split as one with an empty
+            // `else`, so that each arm closes the method itself and no join is needed.
+            case IrIf { Else: null } bare when JoinLoses(bare):
+                Tail(bare with { Else = new IrBlock(bare.Loc, []) }, method, plan);
+                return;
+
             case IrIf { Else: not null } i:
             {
                 if (NullTest(i.Cond) is { } window)
@@ -309,7 +334,12 @@ public sealed class CodeEmitter(
                 var cond = Expr(i.Cond);
                 Line($"if ({cond}) {{");
                 _indent++;
+                // Each arm ends the method, so what one arm moves out of a local (R22.12)
+                // is still owned by that local in the other.
+                var owned = _objectLocals.ToList();
                 Tail(i.Then, method, plan);
+                _objectLocals.Clear();
+                _objectLocals.AddRange(owned);
                 _indent--;
                 Line("} else {");
                 _indent++;
@@ -415,6 +445,16 @@ public sealed class CodeEmitter(
             return;
         }
 
+        // R22.9. A body that is more than field initialisations runs as C# runs it: the
+        // object is allocated with every field at its default, and the body is then an
+        // ordinary method body over the open representation.
+        if (alloc.Name == built.Name && decl.Recursion is null &&
+            statements.Any(st => !IsInitialiser(st)))
+        {
+            ConstructOpen(method, decl, alloc, statements);
+            return;
+        }
+
         var initialisers = new Dictionary<string, string>();
         foreach (var stmt in statements)
         {
@@ -444,7 +484,12 @@ public sealed class CodeEmitter(
         var fields = new List<string>();
         foreach (var (field, i) in decl.Fields.Select((f, i) => (f, i)))
         {
-            if (!initialisers.TryGetValue(field.Name, out var value))
+            // R22.9. C# zero-initialises a field the constructor does not assign; a field
+            // with no default value (an array, an object) is still refused.
+            if (!initialisers.TryGetValue(field.Name, out var value) &&
+                field.Type is IrPrim or IrTypeParamType or IrNamedType)
+                value = Default(field.Type);
+            if (value is null)
             {
                 diagnostics.Unsupported(method.Loc,
                     $"A constructor that leaves `{field.Name}` uninitialised",
@@ -498,6 +543,147 @@ public sealed class CodeEmitter(
         Line(Names.Result);
     }
 
+
+    private static bool IsInitialiser(IrStmt stmt) => stmt is
+        IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This } } } or
+        IrLocalDecl { Init: not null } or
+        IrBlock { Statements.IsEmpty: true };
+
+    /// <summary>
+    /// R22.9. The constructor of C#'s own semantics: allocate with every field at its
+    /// default, then run the body over the open object, and fold at the end.
+    ///
+    /// <para>The CLR's default for an array field is <c>null</c>, which the scheme's
+    /// non-null array type has no value for. The allocation stands in a fresh empty
+    /// array, and the stand-in is sound only because it is never observed: a body that
+    /// does not assign such a field on every path that completes is refused.</para>
+    /// </summary>
+    private void ConstructOpen(IrMethod method, IrClass decl, IrClassType alloc, ImmutableArray<IrStmt> statements)
+    {
+        if (statements.Any(ContainsReturn))
+        {
+            diagnostics.Unsupported(method.Loc, "A `return` in a constructor");
+            return;
+        }
+        var assigned = Assigned(statements);
+        var fields = new List<string>();
+        foreach (var (field, i) in decl.Fields.Select((f, i) => (f, i)))
+        {
+            string value;
+            switch (field.Type)
+            {
+                case IrArrayType at when assigned is null || assigned.Contains(field.Name):
+                    value = Fresh();
+                    Line($"let {value} = alloc_empty #({Types.Render(at.Element)}) ();");
+                    break;
+                case IrPrim or IrTypeParamType or IrNamedType:
+                    value = Default(field.Type);
+                    break;
+                default:
+                    diagnostics.Unsupported(method.Loc,
+                        $"A constructor that does not assign `{field.Name}` on every path",
+                        "C# leaves the field `null`, which its type has no value for " +
+                        "(doc/translation.md R22.9).");
+                    return;
+            }
+            fields.Add((i == 0 ? Names.ClassProjection(decl.Name, field.Name) : Names.Field(field.Name))
+                       + " = " + value);
+        }
+        Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
+        Line($"B.pts_to_not_null {Names.Result};");
+
+        var slot = new Slot(Names.This, alloc, SlotKind.Object, Names.Result)
+        {
+            PreModel = null,
+            PostModel = "post_" + Names.This,
+        };
+        _slots[Names.This] = slot;
+        _objects = [slot];
+        var self = new IrVar(method.Loc, Names.This) { Type = alloc };
+        EmitSequence([.. statements, new IrReturn(method.Loc, self)], method, _plan!);
+    }
+
+    /// <summary>
+    /// R22.12. Whether Pulse's join after this <c>if</c> would lose what the method needs:
+    /// an open object's array field replaced, or an array's contents copied into (R22.20).
+    /// </summary>
+    private bool JoinLoses(IrIf i) =>
+        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i);
+
+    /// <summary>R22.15. Whether an arm calls a method on an open receiver, which reopens it afresh.</summary>
+    private bool CallsOpenReceiver(IrStmt s) =>
+        Passes.Check.Statements(s).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.Args is [IrVar r, ..] &&
+                      _objects.Any(o => o.Name == r.Name && o.ViewBase is null));
+
+    private static bool CopiesArray(IrStmt s) => s switch
+    {
+        IrArrayCopy => true,
+        IrBlock b => b.Statements.Any(CopiesArray),
+        IrIf i => CopiesArray(i.Then) || i.Else is { } e && CopiesArray(e),
+        _ => false,
+    };
+
+    /// <summary>R22.12. Whether a statement assigns an array-typed field of an object.</summary>
+    private bool ReplacesArrayField(IrStmt s) => s switch
+    {
+        IrAssign { Target: IrField { Receiver: IrVar rv } f } =>
+            _slots.TryGetValue(rv.Name, out var o) && o.Type is IrClassType k &&
+            FieldType(k, f.Field) is IrArrayType,
+        IrBlock b => b.Statements.Any(ReplacesArrayField),
+        IrIf i => ReplacesArrayField(i.Then) || i.Else is { } e && ReplacesArrayField(e),
+        _ => false,
+    };
+
+    private static bool ContainsReturn(IrStmt s) => s switch
+    {
+        IrReturn => true,
+        IrBlock b => b.Statements.Any(ContainsReturn),
+        IrIf i => ContainsReturn(i.Then) || i.Else is { } e && ContainsReturn(e),
+        IrTry t => ContainsReturn(t.Body) || t.Catches.Any(c => ContainsReturn(c.Body)),
+        _ => false,
+    };
+
+    /// <summary>
+    /// R22.9. The fields assigned on every path through <paramref name="statements"/> that
+    /// completes normally; <c>null</c> when no path does.
+    /// </summary>
+    private static HashSet<string>? Assigned(IEnumerable<IrStmt> statements)
+    {
+        var acc = new HashSet<string>();
+        foreach (var s in statements)
+        {
+            var one = Assigned(s);
+            if (one is null) return null;
+            acc.UnionWith(one);
+        }
+        return acc;
+    }
+
+    private static HashSet<string>? Assigned(IrStmt s)
+    {
+        switch (s)
+        {
+            case IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This } } f }:
+                return [f.Field];
+            case IrBlock b:
+                return Assigned(b.Statements);
+            case IrThrow:
+                return null;
+            case IrIf { Else: { } e } i:
+            {
+                var t = Assigned(i.Then);
+                var f = Assigned(e);
+                if (t is null) return f;
+                if (f is null) return t;
+                t.IntersectWith(f);
+                return t;
+            }
+            default:
+                return [];
+        }
+    }
 
     /// <summary>Resolves <c>$&amp;(x)</c> to the Pulse name holding <c>x</c>.</summary>
     private string? Binder(string name) =>
@@ -1102,8 +1288,19 @@ public sealed class CodeEmitter(
         var declared = new HashSet<string>(_slots.Keys);
         if (dropAtEnd) _closingBlocks++;
         emit();
-        if (dropAtEnd) { _closingBlocks--; DropLocals(null, mark); }
-        _objectLocals.RemoveRange(mark, _objectLocals.Count - mark);
+        if (dropAtEnd)
+        {
+            _closingBlocks--;
+            foreach (var local in _objectLocals.Skip(mark).Where(_nestedArrays.ContainsKey))
+                diagnostics.Error("PALCS0623", _nestedArrays[local],
+                    $"`{local.Name}` is initialised with a fresh array in a nested block and " +
+                    "still owns it where the block closes. The array would be discarded there, " +
+                    "and a block in statement position has no postcondition for the discard to " +
+                    "be checked against (F19). Move it into a field before the block ends, or " +
+                    "declare it in the method's own block (doc/translation.md R6.11a).");
+            DropLocals(null, mark);
+        }
+        if (_objectLocals.Count > mark) _objectLocals.RemoveRange(mark, _objectLocals.Count - mark);
         foreach (var name in _slots.Keys.Where(n => !declared.Contains(n)).ToList())
             _slots.Remove(name);
     }
@@ -1127,7 +1324,12 @@ public sealed class CodeEmitter(
         // re-establishes is a conjunct of what the one outside it re-establishes.
         for (var i = _windows.Count - 1; i >= 0; i--) Line(_windows[i]);
 
-        foreach (var obj in _objects)
+        foreach (var obj in _objects) CloseObject(method, obj);
+    }
+
+    /// <summary>R4.11a. Re-establishes one open object's invariant.</summary>
+    private void CloseObject(IrMethod method, Slot obj)
+    {
         {
             var klass = (IrClassType)obj.Type;
             // R4.11a. A read-only method re-folds at the binder it was handed; under a
@@ -1138,21 +1340,21 @@ public sealed class CodeEmitter(
                 var own = obj.ViewBase is null ? obj.PreModel : obj.OwnModel;
                 Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{own};");
                 CloseView(obj, obj.PreModel!);
-                continue;
+                return;
             }
 
             if (classes is null || !classes.TryGetValue(klass.Name, out var decl))
             {
                 diagnostics.Unsupported(method.Loc,
                     $"Mutating an object of class `{klass.Name}` whose model is not in this translation unit");
-                continue;
+                return;
             }
 
             var witness = ModelWitness(decl, obj);
             if (obj.ViewBase is null)
             {
                 Line($"fold {Inv(klass)} {obj.Binder} {witness};");
-                continue;
+                return;
             }
 
             // A mutator under a view re-folds twice, and the outer index is the inner one
@@ -1427,6 +1629,22 @@ public sealed class CodeEmitter(
                 Ghost(g, plan);
                 return;
 
+            case IrExprStmt { Expr: IrCall { DoesNotReturn: true } dnr }:
+                // R22.11. The call raises or diverges, so what this method holds goes back
+                // first, exactly as at a `throw`; the callee's `ensures false` then makes
+                // the rest of the block unreachable, whatever it expects to hold.
+                ReleaseForThrow(plan);
+                Line(Expr(dnr) + ";");
+                Line("unreachable ();");
+                return;
+
+            case IrArrayCopy c:
+            {
+                var src = Expr(c.Source);
+                var dst = Expr(c.Destination);
+                Line($"Pulse.Lib.CSharp.Array.copy {src} {dst} {Expr(c.Length)};");
+                return;
+            }
             case IrExprStmt e:
                 Line(Expr(e.Expr) + ";");
                 return;
@@ -1529,20 +1747,11 @@ public sealed class CodeEmitter(
     /// </summary>
     private void ArrayLocal(IrLocalDecl d)
     {
-        if (_closingBlocks > 0)
-        {
-            diagnostics.Error("PALCS0623", d.Loc,
-                $"`{d.Name}` is initialised with a fresh array in a nested block. The array " +
-                "would be discarded where the block closes, and a block in statement position " +
-                "has no postcondition for the discard to be checked against (F19). Declare it " +
-                "in the method's own block (doc/translation.md R6.11a).");
-            return;
-        }
         var binder = Names.Local(d.Name);
         switch (d.Init)
         {
             case IrNewArray na:
-                Line($"let {binder} = alloc {Expr(na.Length)} {Default(na.Element)};");
+                Line($"let {binder} = {NewArray(na)};");
                 break;
             case IrOrderBy ob:
                 Line($"let {binder} = Linq.order_by_to_list {Expr(ob.Source)} {ob.Key} {OrderOf(ob.KeyType)};");
@@ -1551,6 +1760,9 @@ public sealed class CodeEmitter(
         var local = new Slot(d.Name, d.Type, SlotKind.Array, binder);
         _slots[d.Name] = local;
         _objectLocals.Add(local);
+        // R22.17. In a nested block the array must have been moved into a field (R22.12)
+        // by the time the block closes; Scoped checks that it was.
+        if (_closingBlocks > 0) _nestedArrays[local] = d.Loc;
     }
 
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
@@ -1568,11 +1780,20 @@ public sealed class CodeEmitter(
         Line($"let mut {cell} = {init};");
     }
 
+    /// <summary>
+    /// R22.10. <c>new T[n]</c>. A literal zero length needs no element to fill with, so it
+    /// is <c>alloc_empty</c>: a generic class's empty array is then no reason to ask the
+    /// caller for a <c>default(T)</c>.
+    /// </summary>
+    private string NewArray(IrNewArray na) => na.Length is IrLiteral { Value: 0 or 0L }
+        ? $"alloc_empty #({Types.Render(na.Element)}) ()"
+        : $"alloc {Expr(na.Length)} {Default(na.Element)}";
+
     private static string Default(IrType type) => type switch
     {
         IrPrim { Kind: PrimKind.Bool } => "false",
         IrPrim p when p.IsMachineInt => Types.Literal(0, p),
-        _ => "(default_of _)",
+        _ => $"(Pulse.Lib.CSharp.Inhabited.default_of ({Types.Render(type)}))",
     };
 
     /// <summary>R5.3.</summary>
@@ -1636,6 +1857,18 @@ public sealed class CodeEmitter(
                 var value = Inject(FieldType(oc, field.Field), a.Value, Expr(a.Value));
                 var current = Fresh();
                 Line($"let {current} = B.op_Bang {obj.NonNull};");
+                if (FieldType(oc, field.Field) is IrArrayType)
+                {
+                    // R22.12. The object owns the array a field holds, so replacing the
+                    // array discards the old one's contents -- it is garbage to the CLR --
+                    // and the new one's ownership moves from the local into the object.
+                    var projection = $"{current}.{Names.ClassProjection(oc.Name, field.Field)}";
+                    var old = FreshValue(field.Field);
+                    Line($"with {old}. assert (A.pts_to {projection} {old});");
+                    Line($"drop_ (A.pts_to {projection} {old});");
+                    if (a.Value is IrVar moved)
+                        _objectLocals.RemoveAll(l => l.Name == moved.Name && l.Kind == SlotKind.Array);
+                }
                 Line($"B.op_Colon_Equals {obj.NonNull} " +
                      $"({{ {current} with {Names.ClassProjection(oc.Name, field.Field)} = {value} }});");
                 return;
@@ -2127,15 +2360,53 @@ public sealed class CodeEmitter(
             return;
         }
 
-        if (_tryMarks.Count == 0)
-        {
-            if (NeedsEpilogue) CloseObjects(_method!, plan);
-        }
-        else
+        ReleaseForThrow(plan);
+        Line(tail ? $"raise {exn}" : $"raise {exn};");
+    }
+
+    /// <summary>
+    /// What a throw point gives back. Outside a <c>try</c>, the method's <c>raises</c>
+    /// clause owns what its postcondition does, so objects are closed as at a return —
+    /// except the object a constructor is building (R22.11), which the <c>raises</c> does
+    /// not mention because the caller never receives it, and which may be thrown out of
+    /// before its invariant holds: its representation is discarded as it stands.
+    /// </summary>
+    private void ReleaseForThrow(MethodPlan plan)
+    {
+        if (_tryMarks.Count > 0)
         {
             DropLocals(null, _tryMarks[^1]);
+            return;
         }
-        Line(tail ? $"raise {exn}" : $"raise {exn};");
+        if (!NeedsEpilogue) return;
+        if (_method is { IsConstructor: true } &&
+            _objects.FirstOrDefault(o => o.Binder == Names.Result) is { } built)
+        {
+            var saved = _objects;
+            _objects = [.. _objects.Where(o => o != built)];
+            CloseObjects(_method, plan);
+            _objects = saved;
+            DropRepresentation(built);
+            return;
+        }
+        CloseObjects(_method!, plan);
+    }
+
+    /// <summary>R22.11. Discards an open object's box and the arrays its fields own.</summary>
+    private void DropRepresentation(Slot obj)
+    {
+        var klass = (IrClassType)obj.Type;
+        if (classes is null || !classes.TryGetValue(klass.Name, out var decl)) return;
+        var raw = Fresh();
+        Line($"let {raw} = B.op_Bang {obj.Binder};");
+        foreach (var field in decl.Fields.Where(f => f.Type is IrArrayType))
+        {
+            var projection = $"{raw}.{Names.ClassProjection(decl.Name, field.Name)}";
+            var contents = FreshValue(field.Name);
+            Line($"with {contents}. assert (A.pts_to {projection} {contents});");
+            Line($"drop_ (A.pts_to {projection} {contents});");
+        }
+        Line($"drop_ (B.pts_to {obj.Binder} {raw});");
     }
 
     /// <summary>
@@ -2431,6 +2702,13 @@ public sealed class CodeEmitter(
             case GhostKind.Assert:
                 Line($"assert (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
+            case GhostKind.DebugAssert:
+            {
+                var c = Fresh();
+                Line($"let {c} = {Expr(g.Prop!)};");
+                Line($"assert (pure ({c} == true));");
+                return;
+            }
             case GhostKind.Assume:
                 Line($"assume (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
@@ -2716,9 +2994,9 @@ public sealed class CodeEmitter(
 
             case IrNewArray na:
             {
-                var length = Expr(na.Length);
+                var alloc = NewArray(na);
                 var t = Fresh();
-                Line($"let {t} = alloc {length} {Default(na.Element)};");
+                Line($"let {t} = {alloc};");
                 return t;
             }
 
@@ -2935,7 +3213,27 @@ public sealed class CodeEmitter(
             ? "()"
             : string.Join(" ", tyArgs.Concat(args));
 
+        // R22.15. A call on the receiver from inside one of its own methods, with the
+        // receiver open: the callee's contract asks for the invariant, so the bracket is
+        // closed around the call and reopened after it. The fold is checked like any
+        // other -- an invariant that does not hold at the call is Pulse's error, not an
+        // assumption -- and the reopening names whatever model the callee left.
+        var self = call.HasReceiver && raw.Length > 0 && _windows.Count == 0
+            ? _objects.FirstOrDefault(o => o.Binder == raw[0] && o.ViewBase is null)
+            : null;
+        if (self is not null) CloseObject(_method!, self);
         Line($"let {binder} = {callee} {applied};");
+        if (self is not null)
+        {
+            if (self.PostModel == self.PreModel) Line(Unfold(self) + ";");
+            else
+            {
+                var klass = (IrClassType)self.Type;
+                var m = FreshValue(klass.Name);
+                Line($"with {m}. assert ({Inv(klass)} {self.Binder} {self.PermArg}{m});");
+                Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{m};");
+            }
+        }
         Close(view);
         // R10.6c. The binder a call produced an object under is the name the context holds
         // that object's invariant under, exactly as for a `new` (R10.2b) or a parameter
@@ -3111,6 +3409,18 @@ public sealed class CodeEmitter(
         if (op is null)
         {
             diagnostics.Unsupported(b.Loc, $"The operator `{b.Op}` in executable code");
+            return "()";
+        }
+
+        // R22.14. A wrapping add/sub/mul: `_mod` for an unsigned width, which F* provides,
+        // and the library's `_wrap` for `int`, which F* does not.
+        if (b.Wraps && b.Op is BinOp.Add or BinOp.Sub or BinOp.Mul &&
+            b.Left.Type is IrPrim { IsMachineInt: true } wp)
+        {
+            if (wp.Kind is PrimKind.Int) return $"(Pulse.Lib.CSharp.Int32.{op}_wrap {l} {r})";
+            if (wp.Kind is PrimKind.UInt or PrimKind.ULong or PrimKind.UShort or PrimKind.Byte)
+                return $"({module}.{op}_mod {l} {r})";
+            diagnostics.Unsupported(b.Loc, $"`[Wrapping]` arithmetic at `{wp.Kind}`");
             return "()";
         }
 

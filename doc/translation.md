@@ -1196,7 +1196,8 @@ and nothing else does.
 The `unfold`/`fold` bracket is the window in which R3.10's invariant may be broken.
 
 **R4.10c — the bracket is opened if and only if the body names a field of the receiver,
-and a body that names one may not also call a method on it (`PALCS0597`).** The bracket
+and a body that names one may not also call a method on it (`PALCS0597`).** (R22.15 has since lifted the second half for a receiver that is not a view: the
+receiver is folded around the call.) The bracket
 used to be emitted unconditionally, on the §0 rule 2 argument that a uniform shape is
 better than a conditional one. That argument was wrong here, because the two things a body
 can do with its receiver want *opposite* states:
@@ -5560,6 +5561,8 @@ feature has to reach before it can be designed.
   Not a dropped construct but the same mistake one level down: the bracket was emitted
   unconditionally, so the ill-typed case was emitted too. R4.10c says why the two halves
   cannot be reconciled without the emitter inventing a fold.
+  R22.15 has since reconciled them for an object, with a fold that F\* checks; the
+  refusal remains for a view.
 * **A `record`** (PALCS0530). A record's primary constructor, its generated `Equals`,
   `GetHashCode`, `ToString` and `Deconstruct`, and its `with` expression are five features
   at once. An *annotated* record now says so; an unannotated one is ignored, like any
@@ -5717,7 +5720,7 @@ pal-csharp attribute (`[Requires]`, `[Ensures]`, `[Throws]`, `[Admit]`, …), or
 getter of a property that does, or belongs to a class with a model; and a struct that, or
 one of whose members, carries one. Everything else in the compilation is ignored: it is
 not lowered, and the "specified class without a model" diagnostic (PALCS0524) is not
-raised. A call from translated code to an
+raised (R22.3: a class with a model is likewise verified member by member). A call from translated code to an
 untranslated method is still refused, as before, so the scope narrows what is *looked at*
 and never what is *trusted*.
 
@@ -5790,8 +5793,8 @@ between it and the CLR's `OrderBy`, is assumed. Any other LINQ is PALCS0622.
 **R6.11a (array-owning locals).** A local initialised with `new T[n]` (R6.11) or with
 R20.6's `ToList` owns its array. Its declaration is `let var_x = …` (no reference cell),
 and it is dropped, like an object local (R4.14), at every `return` and `raise` and at the
-end of the method. It must be declared in the method's outermost block and not be
-reassigned (PALCS0623), so that a single drop point covers every exit.
+end of the method. It must be declared in the method's outermost block (or moved into a
+field before its block closes, R22.17) and not be reassigned (PALCS0623), so that a single drop point covers every exit.
 
 ### R20.7 `[SpecOp]` members in code
 
@@ -6023,3 +6026,158 @@ the images differ, `M.t` and `option M.t`, and the conversion is `Some`.
 
 The postcondition's binder is `var_result`, so a C# parameter or local named `result` is
 `var_result'` (R4.4).
+
+## 22. Collections verified in place
+
+dotnet/runtime's `System.Collections.Generic` is library code written for speed: a class
+that is not `sealed` but has no subclass, a `[DoesNotReturn]` throw helper, a version
+stamp that wraps, a property setter that reallocates, `Array.Copy`, `Debug.Assert`. It is
+verified where it stands, as §20 verifies a plugin, with `[TranslateAnnotatedOnly]` and
+contracts added to the file and nothing else. `List<T>` is the motivating case (its harness
+is `pal/List` in the runtime checkout); `test/collections_foundation` pins each rule below
+on a smaller list.
+
+### R22.1 The list being verified is a class
+
+R20.4 reads `List<T>` as an array. That reading is for a *client* of the BCL's list; in a
+compilation that declares `List<T>` itself, it is translated as the class it is.
+
+### R22.2 An enum without `[SpecType]`
+
+is its underlying integer type, as its constants already are (R20.9): a tag that is passed
+along and compared, and never matched on. R21.8 is the reading with the attribute.
+
+### R22.3 Membership of a class is not a request
+
+Under R20.1's scope a class with a model is verified member by member: an unannotated
+member is outside the scope, not a construct to refuse, and a call to it from translated
+code is refused where it is made (amending R20.1, which brought in every member of such a
+class).
+
+### R22.4 Implements clauses are ignored in scope
+
+Under `[TranslateAnnotatedOnly]` an implements clause is not PALCS0594: no call through an
+interface translates, since its members have no module, so the class is verified as itself
+and an interface-typed call is refused at the call.
+
+### R22.5 An effectively sealed class
+
+Under `[TranslateAnnotatedOnly]` a class that is not `sealed`, but declares no virtual or
+abstract member and has no subclass in the compilation, is a leaf. A subclass elsewhere
+can add state, but cannot change what any of this class's methods do, so there is no
+vtable for R9.21 to split off.
+
+### R22.6 Generic `[Spec]` structs
+
+A `[Spec]` struct may have type parameters (`ListModel<T>` with a `Seq<T>` field). They are
+explicit parameters of its F\* record type and of its constructor, in declaration order.
+
+### R22.7 `const` fields
+
+are folded where they are read, like R20.10's `static readonly` constants.
+
+### R22.8 A shared empty array is fresh
+
+`private static readonly T[] s_emptyArray = new T[0]` is read, in code, as a fresh
+`new T[0]`. It has no cells, so no write through one alias can be observed through the
+other; reference identity, the only thing that tells them apart, has no translation
+(R18.1). *Trusted*: that nothing compares the array by reference.
+
+### R22.9 Constructors with control flow
+
+A constructor body that is more than field initialisations runs as C# runs it: the object
+is allocated with every field at its default (C# zero-initialises a field nothing
+assigns), and the body is then an ordinary method body over the open representation, which
+is folded into the invariant at each `return`.
+
+### R22.10 `new T[n]` at a type parameter
+
+fills with `default(T)`, so it needs the caller's `has_default` exactly as R14.2a's
+`default(T)` does, unless the length is the literal zero. `new T[0]` is
+`Pulse.Lib.CSharp.Array.alloc_empty`, whose ownership of zero cells is a MODELING AXIOM.
+
+### R22.11 `[DoesNotReturn]` helpers
+
+A call to a method carrying `[DoesNotReturn]` is a throw point: the caller hands back what
+it holds before the call, as before a `throw` (R19), and discards the box of an object a
+constructor is building, with the arrays its fields own. The callee's own contract is
+`[Ensures("false")]` with its `[Throws]`.
+
+### R22.12 Joins that would lose facts
+
+Pulse joins the two arms of an unannotated `if` resource by resource, generalising each,
+so the facts that tie an open object's fields to the arrays it owns are lost. When an arm
+replaces an array field of an open object, calls a method on an open receiver (R22.15), or
+copies into an array (R22.20), the `if` does not join: the statements after it are emitted
+in each arm. An `if` with no `else` in tail position is split as one with an empty `else`.
+
+### R22.13 Properties and indexers
+
+A property's setter is the method `set_P(value)`, and an indexer's accessors are
+`get_Item`/`set_Item`, as C# compiles them, each with its own contracts. The getter of a
+property that also has a setter, and is not an auto-property, is collected as a method
+too; an `init` accessor is not.
+
+### R22.14 `[Wrapping]`
+
+On an integer field, the arithmetic that writes it, and on a method, all the integer
+arithmetic in its body, is two's-complement: C#'s unchecked `+`, `-` and `*`, with no
+overflow obligation (`*_wrap` in `Pulse.Lib.CSharp.Int32`, `_mod` for an unsigned width).
+
+### R22.15 A self-call with the receiver open
+
+A method that reads a field of `this` and then calls a method on `this` (once PALCS0597)
+folds its receiver before the call, so the callee is given the invariant its contract
+demands, and reopens it after: by `unfold` when the callee is read-only, and otherwise by
+`with m. assert (inv this m); unfold inv this m` for the model the callee left. The fold
+is checked by F\*, not assumed. PALCS0597 remains for a receiver that is a view (R17).
+
+### R22.16 Sequence builders
+
+`Pal.Snoc(s, x)`, `Pal.Append(s, t)` and `Pal.Empty<T>()` are `Seq.snoc`, `Seq.append`
+and `Seq.empty`.
+
+### R22.17 A fresh array in a nested block
+
+R6.11a's array-owning local may be declared in a nested block if, by the end of the block,
+it has been moved into a field (R22.12); one that still owns its array there is PALCS0623.
+
+### R22.18 `Array.MaxLength`
+
+is the literal `0x7FFFFFC7`. It is a property only so that the runtime may change it;
+*trusted*: that the runtime being verified uses that value.
+
+### R22.19 `Debug.Assert(c)`
+
+fails fast when `c` is false in the builds that keep it, so it is a proof obligation:
+`let b = ⟦c⟧; assert (pure (b == true))`. A message argument must be a constant.
+
+### R22.20 `Array.Copy(src, dst, len)`
+
+between two distinct arrays of one element type is `Pulse.Lib.CSharp.Array.copy`, proved
+from `memcpy`: the caller shows `0 <= len <= length` of both, and `dst`'s contents become
+`Seq.append (Seq.slice s 0 len) (Seq.slice d len (length d))`.
+
+### R22.21 Assigning a property
+
+`P = v` (or `o.P = v`), for a property with a translated setter, is the call `set_P(v)`,
+and a method that does it mutates its receiver.
+
+### R22.22 `has_default` propagates
+
+A method that calls one needing `has_default` at a type parameter (R22.10, R14.2a) needs
+it too, at the type parameter the call instantiates it with; this is computed to a fixed
+point over the calls.
+
+### R22.23 Sequence equality
+
+`==` between two sequences, one of which is built by an operation (R22.16, `Pal.SetAt`,
+`Pal.Slice`), is `Seq.equal`: they agree pointwise, and the SMT pattern of
+`Seq.lemma_eq_elim` turns that into equality. Between two names, `Seq.equal` would only
+cost the solver a quantifier, so `==` stays.
+
+### R22.24 What is trusted
+
+Beyond R20.8: `alloc_empty` (R22.10), the sharing of the empty array (R22.8), the value of
+`Array.MaxLength` (R22.18). Out-of-memory is not modelled: an allocation succeeds, so a
+capacity is not proved to be at most `Array.MaxLength`.

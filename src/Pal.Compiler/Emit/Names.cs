@@ -445,7 +445,7 @@ public static class Types
         IrSpanType s => $"S.slice {Atom(s.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
-        IrNamedType n => $"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}",
+        IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments),
         // R14.4. A type parameter is a type like any other; only its name changes.
         IrTypeParamType t => Names.TypeParam(t.Name),
         // R10.2. A nullable reference is `class_C__opt`, named through the class's own

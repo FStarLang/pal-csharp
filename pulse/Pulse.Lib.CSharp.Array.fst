@@ -71,3 +71,36 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
      zero-fills, and imposes no deallocation obligation. *)
   admit()
 }
+
+fn alloc_empty (#t: Type0) (_: unit)
+  requires emp
+  returns  a : array t
+  ensures  A.pts_to a (Seq.empty #t)
+{
+  (* MODELING AXIOM: a zero-length array exists at every element type. *)
+  admit()
+}
+
+fn copy (#t: Type0) (src dst: array t) (len: I32.t)
+        (#p: perm)
+        (#s: Ghost.erased (Seq.seq t))
+        (#d: Ghost.erased (Seq.seq t)
+              { I32.v len >= 0 /\ I32.v len <= Seq.length s /\ I32.v len <= Seq.length d })
+  requires A.pts_to src #p s ** A.pts_to dst d
+  ensures  A.pts_to src #p s **
+           A.pts_to dst (copied s d (I32.v len)) **
+           pure (Seq.length (copied s d (I32.v len)) == Seq.length d /\
+                 Seq.slice (copied s d (I32.v len)) 0 (I32.v len) == Seq.slice s 0 (I32.v len) /\
+                 Seq.slice (copied s d (I32.v len)) (I32.v len) (Seq.length d) ==
+                   Seq.slice d (I32.v len) (Seq.length d))
+{
+  A.pts_to_len src;
+  A.pts_to_len dst;
+  let _ = A.memcpy_l (int32_to_sizet len) src dst;
+  let n = Ghost.hide (I32.v len);
+  assert (pure (Seq.equal (Seq.slice (copied s d n) 0 n) (Seq.slice s 0 n)));
+  assert (pure (Seq.equal (Seq.slice (copied s d n) n (Seq.length d)) (Seq.slice d n (Seq.length d))));
+  rewrite (A.pts_to dst (Seq.append (Seq.slice s 0 (I32.v len)) (Seq.slice d (I32.v len) (A.length dst))))
+       as (A.pts_to dst (copied s d (I32.v len)));
+  ()
+}

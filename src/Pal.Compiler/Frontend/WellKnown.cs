@@ -16,6 +16,7 @@ public sealed class WellKnown
 
     private WellKnown(Compilation c)
     {
+        Compilation = c;
         obliviousStrings = c.Options.NullableContextOptions == NullableContextOptions.Disable;
         INamedTypeSymbol Type(string name) =>
             c.GetTypeByMetadataName($"{Namespace}.{name}")
@@ -38,6 +39,7 @@ public sealed class WellKnown
         DecreasesAttribute = Type("DecreasesAttribute");
         ConsumesAttribute = Type("ConsumesAttribute");
         PlainAttribute = Type("PlainAttribute");
+        WrappingAttribute = Type("WrappingAttribute");
         FracAttribute = Type("FracAttribute");
         NonNullAttribute = Type("NonNullAttribute");
         RefineAttribute = Type("RefineAttribute");
@@ -80,6 +82,8 @@ public sealed class WellKnown
     private readonly bool obliviousStrings;
 
     public static WellKnown For(Compilation compilation) => new(compilation);
+
+    public Compilation Compilation { get; }
 
     public INamedTypeSymbol Pal { get; }
     public INamedTypeSymbol Ghost { get; }
@@ -133,6 +137,7 @@ public sealed class WellKnown
     public INamedTypeSymbol DecreasesAttribute { get; }
     public INamedTypeSymbol ConsumesAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
+    public INamedTypeSymbol WrappingAttribute { get; }
     public INamedTypeSymbol FracAttribute { get; }
     public INamedTypeSymbol NonNullAttribute { get; }
     public INamedTypeSymbol RefineAttribute { get; }
@@ -380,6 +385,9 @@ public sealed class WellKnown
     /// <summary>R20.4. <c>List&lt;T&gt;</c>, <c>IList&lt;T&gt;</c> or <c>IReadOnlyList&lt;T&gt;</c>.</summary>
     public static bool IsListLike(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeArguments.Length: 1 } named &&
+        // R22.1. Not when the compilation declares the list: that is the list itself,
+        // being verified, and it is translated as the class it is.
+        !named.OriginalDefinition.Locations.Any(l => l.IsInSource) &&
         named.OriginalDefinition.ToDisplayString() is
             "System.Collections.Generic.List<T>" or
             "System.Collections.Generic.IList<T>" or
@@ -486,6 +494,11 @@ public sealed class WellKnown
             }
         }
 
+        // R22.2. An enum without a `[SpecType]` is its underlying integer type, as its
+        // constants already are (R20.9): a tag passed along, compared, never matched on.
+        if (type is INamedTypeSymbol { TypeKind: TypeKind.Enum, EnumUnderlyingType: { } underlying })
+            return MapType(underlying);
+
         if (SymbolEqualityComparer.Default.Equals(type, SpecInt)) return new IrPrim(PrimKind.SpecInt);
         if (SymbolEqualityComparer.Default.Equals(type, SpecNat)) return new IrPrim(PrimKind.SpecNat);
         if (SymbolEqualityComparer.Default.Equals(type, SlProp)) return new IrPrim(PrimKind.SlProp);
@@ -511,7 +524,21 @@ public sealed class WellKnown
                                           type.NullableAnnotation == NullableAnnotation.None
                 ? new IrOptionType(new IrPrim(PrimKind.String))
                 : new IrPrim(PrimKind.String),
-            _ => type.TypeKind == TypeKind.Struct ? new IrNamedType(type.Name) : null,
+            _ => type.TypeKind == TypeKind.Struct ? NamedStruct(type) : null,
         };
+    }
+
+    /// <summary>R3.4, and R22.6 for a generic <c>[Spec]</c> struct.</summary>
+    private IrNamedType? NamedStruct(ITypeSymbol type)
+    {
+        if (type is not INamedTypeSymbol { TypeArguments.IsEmpty: false } named)
+            return new IrNamedType(type.Name);
+        var args = ImmutableArray.CreateBuilder<IrType>();
+        foreach (var a in named.TypeArguments)
+        {
+            if (MapType(a) is not { } mapped) return null;
+            args.Add(mapped);
+        }
+        return new IrNamedType(type.Name) { TypeArguments = args.ToImmutable() };
     }
 }

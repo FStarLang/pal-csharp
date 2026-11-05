@@ -64,7 +64,8 @@ public static class Naming
     private static string Mangle(ISymbol symbol) => symbol switch
     {
         IMethodSymbol { MethodKind: MethodKind.Constructor } => "_ctor",
-        IMethodSymbol { MethodKind: MethodKind.PropertyGet, AssociatedSymbol: { } p } => p.Name,
+        // R22.13. An indexer's C# name is `this[]`; its accessors keep `get_Item`/`set_Item`.
+        IMethodSymbol { MethodKind: MethodKind.PropertyGet, AssociatedSymbol: IPropertySymbol { IsIndexer: false } p } => p.Name,
         _ => symbol.Name,
     };
 

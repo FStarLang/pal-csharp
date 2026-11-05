@@ -92,17 +92,18 @@ public static class Declarations
         // differently; every rule downstream of here already speaks about it.
         return method is { IsStatic: false,
                            MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                       or MethodKind.PropertyGet }
+                                       or MethodKind.PropertyGet or MethodKind.PropertySet }
                && method.ContainingType is { TypeKind: TypeKind.Class } owner
                && known.HasModel(owner)
             ? CalleeKind.Method
             : null;
     }
 
+    // R22.3. Membership of a class with a model is not itself a request: a class verified
+    // in place is verified member by member, and an unannotated member is outside the scope.
     private static bool InAnnotatedScope(IMethodSymbol method, WellKnown known) =>
         IsAnnotated(method, known)
-        || method.AssociatedSymbol is { } property && IsAnnotated(property, known)
-        || method.ContainingType is { TypeKind: TypeKind.Class } owner && known.HasModel(owner);
+        || method.AssociatedSymbol is { } property && IsAnnotated(property, known);
 
     /// <summary>
     /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the
@@ -182,6 +183,12 @@ public static class Declarations
             // distinguishes it from a write into an unrelated local array.
             if (target is not null &&
                 model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
+                return true;
+
+            // R22.21. Assigning an instance property is a call of its setter.
+            if (target is not null &&
+                model.GetSymbolInfo(target).Symbol is IPropertySymbol { IsStatic: false, SetMethod: { } setter } &&
+                !IsReadOnly(setter, model.Compilation, visiting))
                 return true;
 
             if (node is InvocationExpressionSyntax call)

@@ -585,7 +585,15 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // R10.2b, at an equality. C# lets a `C` be compared with a `C?`, and R10.2 makes
         // the two one type, so the comparison needs no widening.
         var comparable = left.Kind is TermKind.Seq or TermKind.Bool or TermKind.Prop or TermKind.Other;
-        var text = comparable
+        // R22.23. Two sequences are equal when they agree pointwise, and `Seq.equal` is
+        // the form of that the solver can prove; `lemma_eq_elim`'s pattern turns it back
+        // into `==` wherever it is assumed.
+        // Only a sequence *built* by an operation is compared so: between two names the
+        // quantifier `Seq.equal` unfolds to buys nothing and costs the solver.
+        var text = left.Kind is TermKind.Seq && right.Kind is TermKind.Seq &&
+                   (b.Left is IrSeqOp || b.Right is IrSeqOp)
+            ? $"(Seq.equal {left.Text} {right.Text})"
+            : comparable
             ? $"({left.Text} == {right.Text})"
             : $"({AsMath(left)} == {AsMath(right)})";
         return negated ? $"(~ {text})" : text;
@@ -610,6 +618,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         SeqOpKind.Rotate => new Term(
             $"(CS.rotate {Emit(s.Args[0], scope).Text} {Math(s.Args[1], scope)})",
             TermKind.Seq),
+        SeqOpKind.Snoc => new Term(
+            $"(Seq.snoc {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})", TermKind.Seq),
+        SeqOpKind.Concat => new Term(
+            $"(Seq.append {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})", TermKind.Seq),
+        SeqOpKind.Empty => new Term("Seq.empty", TermKind.Seq),
         SeqOpKind.IsPermutation => new Term(
             $"(CS.is_permutation {Emit(s.Args[0], scope).Text} {Emit(s.Args[1], scope).Text})",
             TermKind.Prop),

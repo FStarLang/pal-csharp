@@ -1268,13 +1268,16 @@ user-written struct constructors, static mutable fields, a class that is neither
 nor `abstract`, a `return` that is not in tail position **inside a loop**, an increment or
 decrement written in a specification, a `switch` label that is a pattern or carries a
 `when` guard, and a `break` that leaves a `switch` before the end of its section, and a method body that both
-reads a field of its receiver and calls a method on that same receiver (R4.10c).
+reads a field of a *view* receiver and calls a method on that same receiver (R4.10c; for an
+object, R22.15 admits it).
 
 A computed property — a property whose getter has a body, as opposed to an auto-property or
 a `[Spec]` property — **is** inside the subset: R9.20 translates it as the method its getter
 is, and it emits the same Pulse a method with the same body emits. A `set` accessor is not,
 because C# names its parameter `value` rather than the author naming it, and no
-specification can be written over a name the author did not choose.
+specification can be written over a name the author did not choose. (Under
+`[TranslateAnnotatedOnly]`, translation.md §22 admits setters, indexers and `const` fields
+for verifying library code in place, with `value` named in the setter's contracts.)
 
 Also outside the subset, and until §18 each of these was *silently dropped* rather than
 reported: a property with a `set` accessor, an indexer, a `const` field, an explicit interface
