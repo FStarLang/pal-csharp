@@ -47,6 +47,7 @@ public sealed class StmtLowerer(
             WhileStatementSyntax w => LowerWhile(w, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
+            ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
                     known.MapType(ReturnType(r)))),
@@ -141,7 +142,97 @@ public sealed class StmtLowerer(
     }
 
     private IrBlock LowerBlock(BlockSyntax block) =>
-        new(Locations.From(block), [.. block.Statements.Select(Lower)]);
+        new(Locations.From(block), [.. block.Statements.Select(Lower)
+            .SelectMany(s => s is IrBlock { Splice: true } b ? b.Statements : [s])]);
+
+    // -----------------------------------------------------------------------
+    // R26.2. `return` inside a loop
+    // -----------------------------------------------------------------------
+
+    public const string ReturnedFlag = "__pal_returned";
+    public const string ReturnedValue = "__pal_result";
+    /// <summary>R26.10. What <c>Pal.Broke()</c> names: the innermost loop's break flag.</summary>
+    public const string BrokeFlag = "__pal_broke";
+
+    private int _loopDepth;
+    private int _discards;
+    private ITypeSymbol? _loopReturnType;
+    private bool _loopReturnVoid;
+
+    /// <summary>Whether a <c>return</c> inside a loop was rewritten, so the body needs its cells.</summary>
+    public bool ReturnsInLoop => _loopReturnType is not null || _loopReturnVoid;
+
+    /// <summary>
+    /// R26.2. <c>return e;</c> inside a loop leaves its value in a cell, raises the flag,
+    /// and leaves the loop: <c>{ __pal_result = e; __pal_returned = true; break; }</c>.
+    /// </summary>
+    private IrStmt LowerReturnInLoop(ReturnStatementSyntax r, IrLoc loc)
+    {
+        var stmts = ImmutableArray.CreateBuilder<IrStmt>();
+        if (r.Expression is not null && ReturnType(r) is { } rt && known.MapType(rt) is { } mapped)
+        {
+            _loopReturnType = rt;
+            stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedValue) { Type = mapped },
+                _code.ToDeclared(_code.Lower(r.Expression), mapped)));
+        }
+        else if (r.Expression is null) _loopReturnVoid = true;
+        else return UnsupportedStatement(r, loc);
+        stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedFlag) { Type = IrPrim.Bool },
+            new IrLiteral(loc, true) { Type = IrPrim.Bool }));
+        stmts.Add(new IrBreak(loc) { FromReturn = true });
+        return new IrBlock(loc, stmts.ToImmutable());
+    }
+
+    /// <summary>
+    /// R26.2. Lowers a loop's body one level deeper, and follows a loop a <c>return</c>
+    /// left with what the <c>return</c> still owes: leaving the enclosing loop too, or
+    /// returning the value.
+    /// </summary>
+    private IrStmt AfterLoop(Func<IrStmt> loop, IrLoc loc)
+    {
+        _loopDepth++;
+        IrStmt lowered;
+        try { lowered = loop(); }
+        finally { _loopDepth--; }
+        if (!ReturnsFrom(lowered)) return lowered;
+
+        var flag = new IrVar(loc, ReturnedFlag) { Type = IrPrim.Bool };
+        IrStmt owed = _loopDepth > 0
+            ? new IrBreak(loc) { FromReturn = true }
+            : new IrReturn(loc, _loopReturnType is { } rt
+                ? new IrVar(loc, ReturnedValue) { Type = known.MapType(rt) }
+                : null);
+        return new IrBlock(loc, [lowered, new IrIf(loc, flag, owed, null)]) { Splice = true };
+    }
+
+    private static bool ReturnsFrom(IrStmt s) => s switch
+    {
+        IrBreak { FromReturn: true } => true,
+        IrBlock b => b.Statements.Any(ReturnsFrom),
+        IrIf i => ReturnsFrom(i.Then) || (i.Else is not null && ReturnsFrom(i.Else)),
+        IrWhile w => ReturnsFrom(w.Body),
+        IrFor f => ReturnsFrom(f.Body),
+        _ => false,
+    };
+
+    /// <summary>R26.2. The cells, declared ahead of the body: no return yet, and a default value.</summary>
+    public ImmutableArray<IrStmt> ReturnCells(IrLoc loc)
+    {
+        if (!ReturnsInLoop) return [];
+        var cells = ImmutableArray.CreateBuilder<IrStmt>();
+        cells.Add(new IrLocalDecl(loc, ReturnedFlag, IrPrim.Bool, new IrLiteral(loc, false) { Type = IrPrim.Bool }));
+        if (_loopReturnType is { } rt && known.MapType(rt) is { } mapped)
+        {
+            if (_code.DefaultValue(rt, loc) is { } init)
+                cells.Add(new IrLocalDecl(loc, ReturnedValue, mapped, init));
+            else
+                diagnostics.Error("PALCS0686", loc,
+                    $"A `return` inside a loop of a method returning `{rt}`: the cell its value is " +
+                    "kept in needs a `default`, and this type has none in the translation " +
+                    "(doc/translation.md R26.2).");
+        }
+        return cells.ToImmutable();
+    }
 
     // -----------------------------------------------------------------------
     // R5.14. `switch`
@@ -375,6 +466,22 @@ public sealed class StmtLowerer(
             return new IrBlock(loc, []);
         }
 
+        // R26.8. `(a, b) = e` reads `e` once and assigns its components left to right.
+        if (op is null && node.Left is TupleExpressionSyntax { Arguments.Count: 2 } targets &&
+            _code.Lower(node.Right) is { Type: IrUserSpecType { FStar: WellKnown.TupleType } pairType } pairValue)
+        {
+            var name = Fresh("pair");
+            var pair = new IrVar(loc, name) { Type = pairType };
+            return new IrBlock(loc,
+            [
+                new IrLocalDecl(loc, name, pairType, pairValue) { Immutable = true },
+                new IrAssign(loc, _code.Lower(targets.Arguments[0].Expression),
+                    new IrSpecOp(loc, "fst", [pair]) { MachineArgs = true, Type = pairType.Args[0] }),
+                new IrAssign(loc, _code.Lower(targets.Arguments[1].Expression),
+                    new IrSpecOp(loc, "snd", [pair]) { MachineArgs = true, Type = pairType.Args[1] }),
+            ]);
+        }
+
         if (_code.SpecIndexerWrite(node, loc) is { } indexerWrite) return indexerWrite;
         if (_code.ComputedWrite(node, loc) is { } setterCall) return new IrExprStmt(loc, setterCall);
 
@@ -520,13 +627,20 @@ public sealed class StmtLowerer(
             model.GetTypeInfo(args[0].Expression).Type is IArrayTypeSymbol { Rank: 1 } resized &&
             known.MapType(resized) is IrArrayType resizedType)
         {
-            if (resized.ElementType is ITypeParameterSymbol rtp)
+            // R26.8. A tuple's components are defaulted too.
+            foreach (var rtp in WellKnown.DefaultedIn(resized.ElementType))
                 _code.DefaultedTypeParameters.Add(rtp.Name);
             var target = _code.Lower(args[0].Expression);
             return new IrAssign(loc, target,
                 new IrNewArray(loc, resizedType.Element, _code.Lower(args[1].Expression))
                 { Source = target, Type = resizedType });
         }
+        // R26.1. A callable delegate is a pure function (trusted), so a call evaluated only
+        // for its effect has none the proof can see: its arguments are evaluated, and the
+        // result, `()` for an `Action`, is dropped.
+        if (method.MethodKind == MethodKind.DelegateInvoke &&
+            known.MapType(method.ContainingType) is IrDelegateType { Callable: true } dlg)
+            return new IrLocalDecl(loc, $"__pal_discard_{_discards++}", dlg.Return!, _code.Lower(node)) { Immutable = true };
 
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)
@@ -549,13 +663,62 @@ public sealed class StmtLowerer(
         return new IrBlock(loc, []);
     }
 
-    private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc)
+    private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc) => AfterLoop(() =>
     {
         var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
-        return new IrWhile(loc, _code.Lower(node.Condition), invariants, decreases, body);
+        var cond = _code.Lower(node.Condition);
+        // R26.11. A guard that writes -- `(i = f(n)) < size`, `++i < bound` -- is a `for`
+        // whose init and step are the write: the guard's effect runs before each test, the
+        // loop specification describes the state just after it, and a `continue` still
+        // runs it (R5.7).
+        if (HoistGuardEffect(cond) is var (effect, test))
+            return new IrFor(loc, effect, test, effect, invariants, decreases, body);
+        return new IrWhile(loc, cond, invariants, decreases, body);
+    }, loc);
+
+    /// <summary>
+    /// R26.11. Splits a guard whose leftmost operand is an effectful expression ending in
+    /// a snapshot of the value it wrote into the writes and the effect-free test. Only the
+    /// shapes in which that is exact are split: the snapshot is the last thing the prelude
+    /// does, so it equals the cell it copies; and the rest of the guard reads nothing the
+    /// prelude could change before the test would have.
+    /// </summary>
+    private static (ImmutableArray<IrStmt> Effect, IrExpr Test)? HoistGuardEffect(IrExpr cond)
+    {
+        static (ImmutableArray<IrStmt>, IrExpr)? Split(IrExpr e) =>
+            e is IrStmtExpr { Prelude: [.. var writes, IrLocalDecl { Init: { } copied } snap], Value: IrVar v } &&
+            v.Name == snap.Name && copied is IrVar &&
+            writes.All(w => w is IrAssign { Target: IrVar })
+                ? ([.. writes], copied)
+                : null;
+
+        // An effect-free operand that reads none of the written locals: a literal, another
+        // local, an array's length, arithmetic over those.
+        static bool Untouched(IrExpr e, ImmutableHashSet<string> written) => e switch
+        {
+            IrLiteral => true,
+            IrVar v => !written.Contains(v.Name),
+            IrLength l => Untouched(l.Array, written),
+            IrConvert c => Untouched(c.Operand, written),
+            IrUnary u => Untouched(u.Operand, written),
+            IrBinary b => Untouched(b.Left, written) && Untouched(b.Right, written),
+            _ => false,
+        };
+
+        switch (cond)
+        {
+            case IrBinary { Op: BinOp.Lt or BinOp.Le or BinOp.Gt or BinOp.Ge or BinOp.Eq or BinOp.Ne } b
+                when Split(b.Left) is var (effect, value) &&
+                     Untouched(b.Right, [.. effect.Select(w => ((IrVar)((IrAssign)w).Target).Name)]):
+                return (effect, b with { Left = value });
+            default:
+                return Split(cond) is var (e2, v2) ? (e2, v2) : null;
+        }
     }
 
-    private IrStmt LowerFor(ForStatementSyntax node, IrLoc loc)
+    private IrStmt LowerFor(ForStatementSyntax node, IrLoc loc) => AfterLoop(() => LowerForInner(node, loc), loc);
+
+    private IrStmt LowerForInner(ForStatementSyntax node, IrLoc loc)
     {
         var init = ImmutableArray.CreateBuilder<IrStmt>();
         if (node.Declaration is { } decl)
@@ -593,7 +756,9 @@ public sealed class StmtLowerer(
     /// <c>for (int x__index = 0; x__index &lt; c.Length; x__index++) { var x = c[x__index]; body }</c>.
     /// The counter's range is an invariant of its own, and <c>Pal.Index(x)</c> names it.
     /// </summary>
-    private IrStmt LowerForEach(ForEachStatementSyntax node, IrLoc loc)
+    private IrStmt LowerForEach(ForEachStatementSyntax node, IrLoc loc) => AfterLoop(() => LowerForEachInner(node, loc), loc);
+
+    private IrStmt LowerForEachInner(ForEachStatementSyntax node, IrLoc loc)
     {
         var collectionType = model.GetTypeInfo(node.Expression).Type;
         var symbol = model.GetSymbolInfo(node.Expression).Symbol;
@@ -675,7 +840,8 @@ public sealed class StmtLowerer(
             leading++;
         }
 
-        var rest = statements.Skip(leading).Select(Lower).ToImmutableArray();
+        var rest = statements.Skip(leading).Select(Lower)
+            .SelectMany(s => s is IrBlock { Splice: true } b ? b.Statements : [s]).ToImmutableArray();
         return (invariants.ToImmutable(), decreases,
             new IrBlock(Locations.From(bodySyntax), rest));
     }
@@ -822,12 +988,17 @@ public sealed class StmtLowerer(
                     : new IrArrayOp(loc, ArrayOpKind.CopyAt, [L(0), L(1), L(2), L(3), L(4)]);
 
             case ("Clear", 3) when IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } ct:
-                if (ct.ElementType is ITypeParameterSymbol tp)
+                foreach (var tp in WellKnown.DefaultedIn(ct.ElementType))
                     _code.DefaultedTypeParameters.Add(tp.Name);
                 return new IrArrayOp(loc, ArrayOpKind.Clear, [L(0), L(1), L(2)]);
 
             case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
                 return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);
+
+            // R26.7. `Array.Sort<T>(a, index, length, comparer)`.
+            case ("Sort", 4) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } &&
+                known.MapType(method.Parameters[3].Type) is IrUserSpecType { FStar: Sorted.ComparerType }:
+                return new IrArrayOp(loc, ArrayOpKind.Sort, [L(0), L(1), L(2), L(3)]);
         }
         return null;
     }

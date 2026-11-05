@@ -201,9 +201,15 @@ public sealed record IrOptionType(IrType Inner) : IrType
 
 /// <summary>
 /// R20.3. A delegate type, held opaquely: <c>Pulse.Lib.CSharp.Opaque.delegate "name"</c>.
+/// R26.1. One of the BCL's callable delegates (<c>Predicate&lt;T&gt;</c>, <c>Action&lt;T&gt;</c>,
+/// <c>Converter&lt;TIn, TOut&gt;</c>, <c>Comparison&lt;T&gt;</c>) carries its signature, and is
+/// <c>Pulse.Lib.CSharp.Delegate.fn1 a r</c> or <c>fn2 a b r</c>.
 /// </summary>
 public sealed record IrDelegateType(string Name) : IrType
 {
+    public ImmutableArray<IrType> Params { get; init; } = [];
+    public IrType? Return { get; init; }
+    public bool Callable => Return is not null;
     protected override string Describe() => Name;
 }
 
@@ -293,6 +299,11 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// method, applied explicitly ahead of its value arguments.
     /// </summary>
     public ImmutableArray<IrType> TypeArgs { get; init; } = [];
+
+    /// <summary>
+    /// R26.3. The operation builds a sequence, so `==` with it is `Seq.equal` (R22.23).
+    /// </summary>
+    public bool Built { get; init; }
 }
 
 /// <summary>A read of a local, parameter, or ghost binder.</summary>
@@ -531,7 +542,11 @@ public sealed record IrInlinePulse(IrLoc Loc, string Text) : IrExpr(Loc);
 
 public abstract record IrStmt(IrLoc Loc);
 
-public sealed record IrBlock(IrLoc Loc, ImmutableArray<IrStmt> Statements) : IrStmt(Loc);
+public sealed record IrBlock(IrLoc Loc, ImmutableArray<IrStmt> Statements) : IrStmt(Loc)
+{
+    /// <summary>R26.2. Statements the lowerer produced for one, spliced into the enclosing block.</summary>
+    public bool Splice { get; init; }
+}
 
 public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? Init) : IrStmt(Loc)
 {
@@ -627,8 +642,9 @@ public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 /// <item><c>CopyAt</c>: <c>src, si, dst, di, len</c>, between distinct arrays.</item>
 /// <item><c>Move</c>: <c>a, si, di, len</c> -- the same, within one array.</item>
 /// <item><c>Clear</c>, <c>Reverse</c>: <c>a, i, n</c>.</item>
+/// <item><c>Sort</c>: <c>a, i, n, comparer</c> (R26.7).</item>
 /// </list>
-public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse }
+public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort }
 
 public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr> Args) : IrStmt(Loc)
 {
@@ -655,7 +671,11 @@ public sealed record IrArraySearch(IrLoc Loc, bool Last, IrExpr Array, IrExpr It
 public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, IrExpr Count, IrExpr Item, IrExpr Comparer)
     : IrExpr(Loc);
 
-public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
+public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
+{
+    /// <summary>R26.2. The <c>break</c> a <c>return</c> inside a loop was rewritten to.</summary>
+    public bool FromReturn { get; init; }
+}
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 

@@ -486,13 +486,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             switch (p.Type)
             {
                 case IrArrayType a:
-                    binders.Add($"({name}: Seq.seq {Types.Render(a.Element)})");
+                    binders.Add($"({name}: Seq.seq {Types.Atom(a.Element)})");
                     scope.Bind(p.Name, new Term(name, TermKind.Seq, p.Type));
                     break;
                 // R17.6. A span parameter of a [Spec] method is its contents, exactly
                 // as an array parameter is: a pure function has no resources to hold.
                 case IrSpanType a:
-                    binders.Add($"({name}: Seq.seq {Types.Render(a.Element)})");
+                    binders.Add($"({name}: Seq.seq {Types.Atom(a.Element)})");
                     scope.Bind(p.Name, new Term(name, TermKind.Seq, p.Type));
                     break;
                 case IrPrim { IsMachineInt: true }:
@@ -579,9 +579,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             var name = Names.Local(p.Name);
             var (rendered, kind) = p.Type switch
             {
-                IrArrayType a => ($"Seq.seq {Types.Render(a.Element)}", TermKind.Seq),
-                IrSpanType a => ($"Seq.seq {Types.Render(a.Element)}", TermKind.Seq),
-                IrSeqType s => ($"Seq.seq {Types.Render(s.Element)}", TermKind.Seq),
+                IrArrayType a => ($"Seq.seq {Types.Atom(a.Element)}", TermKind.Seq),
+                IrSpanType a => ($"Seq.seq {Types.Atom(a.Element)}", TermKind.Seq),
+                IrSeqType s => ($"Seq.seq {Types.Atom(s.Element)}", TermKind.Seq),
                 IrGhostType g => (Types.Render(g.Inner), MethodPlan.KindOf(g.Inner)),
                 _ => (Types.Render(p.Type), MethodPlan.KindOf(p.Type)),
             };
@@ -1042,7 +1042,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                       $"(#[T.exact (`1.0R)] p: perm) (m: {tb.App(Names.ClassModel(c.Name))}) : slprop =");
         var existentials = new List<string> { $"(r: {tb.App(Names.ClassRaw(c.Name))})" };
         existentials.AddRange(arrays.Select(f =>
-            $"({Names.Contents(f.Name)}: Seq.seq {Types.Render(((IrArrayType)f.Type).Element)})"));
+            $"({Names.Contents(f.Name)}: Seq.seq {Types.Atom(((IrArrayType)f.Type).Element)})"));
         existentials.AddRange(objects.Select(f =>
             $"({Names.SubModel(f.Name)}: {SubModelType(f.Type)})"));
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");

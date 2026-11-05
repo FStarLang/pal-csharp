@@ -6580,3 +6580,210 @@ obstacles, in the order a verification would meet them, each with what pal-cshar
 
 `comparer = default!` (a field initialiser of `default` at a comparer type) is also refused.
 That is minor: it could be R25.4's null comparer.
+
+## 26. The rest of `List<T>`, and `PriorityQueue<TElement,TPriority>`
+
+The rest of dotnet/runtime's `List<T>` comes after §22's core:
+* the delegate-taking members (`Find*`, `Exists`, `TrueForAll`, `RemoveAll`, `ForEach`);
+* `Sort` and `BinarySearch` with a comparer;
+* the capacity heuristics.
+
+`PriorityQueue<TElement,TPriority>` (System.Collections) is an array-backed 4-ary min-heap
+of `(element, priority)` pairs ordered by an `IComparer<TPriority>`. Its model is the
+`Seq<(TElement, TPriority)>` of live nodes, the comparer, and the capacity. The heap
+property is a contract (`Pal.IsHeap`) on the members that need it rather than a class
+invariant, so that `Clear`, `EnsureCapacity` and `TrimExcess` need not re-establish it.
+
+The harnesses are `pal/List` and `pal/PriorityQueue` in the runtime checkout.
+`test/collections_listrest` pins each rule on smaller code. The libraries are:
+* `pulse/Pulse.Lib.CSharp.Delegate.fsti`: the delegate model, trusted;
+* `Find.fst`: the search, filter and map functions, proved;
+* `Sort.fst`: a Pulse insertion sort proved to meet `sorted_range`;
+* `Heap.fst`: the 4-ary heap theory and the sift-loop lemmas, proved;
+* `Scale.fsti`: trusted;
+* `Comparer.fsti`: the `null` comparer, trusted.
+
+### R26.1 Callable delegates
+
+`Predicate<T>`, `Action<T>`, `Converter<TIn,TOut>` and `Comparison<T>` are
+`Delegate.fn1`/`fn2`. A call `d(x)` or `d.Invoke(x)` is `apply1 d x`, in code and in a
+contract alike, so `[Ensures("Result == Pal.FindIndex(@this.Items, match)")]` means what
+the loop computes. `d == null` is `is_null1 d`. Verified code calls a delegate but never
+creates one, so a method group converted to such a type is refused (PALCS0685). A delegate
+is a pure function (R26.12), so `Action<T>` has no observable effect and `ForEach`'s
+contract is only that the list is unchanged.
+
+### R26.2 `return` inside a loop
+
+`return e;` inside a loop is `{ __pal_result = e; __pal_returned = true; break; }`. Each
+enclosing loop that a `return` leaves breaks on the flag, and after the outermost one the
+method returns the value if the flag is set. The value cell starts at the type's `default`,
+so a return type with no `default` in the translation is refused (PALCS0686). In an
+invariant, `Pal.Returned()` and `Pal.ReturnValue<T>()` name the two cells.
+
+### R26.3 Search and filter specifications
+
+`Pal.FindIndex`, `FindLastIndex`, `TrueForAll`, `FindAll`, `RemoveAll` and `ConvertAll`
+are `Find.fst`'s functions over a delegate. The windowed forms take the BCL's
+`(startIndex, count)` and `(startIndex, count)`-backwards conventions.
+
+### R26.4 A read's binder is not rebound
+
+An immutable local whose initialiser is already a read's binder (`tN`) is that binder,
+not a second `let`. A second `let` is opaque to Pulse's prover, and an `if` that mentions
+it could not be joined. Parenthesisation of atoms in the emitter was also corrected.
+
+### R26.5 A loop body's `if` that calls a local object's method
+
+In a loop body, an `if` one of whose arms calls a method on a local object is split: the
+statements after it move into both arms (as R22.12 does in a method's tail). Otherwise
+Pulse's join keeps the other arm's facts about the object only under that arm's condition.
+`FindAll` adding to its result list is the case.
+
+### R26.6 Scaled integers
+
+`(int)(n * c)` and `(int)((double)n * c)`, for a literal `0 <= c <= 1`, is
+`Scale.scale_unit n`: between `0` and `n`, on the side of `n`'s sign. The translation has
+no floating point. This is the BCL's capacity threshold (`TrimExcess`'s
+`(int)(_items.Length * 0.9)`).
+
+### R26.7 Sorting with a comparer
+
+`Array.Sort<T>(a, index, count, comparer)` is `Sort.sort`, a Pulse insertion sort
+**proved** to establish `Pal.SortedRange(old, new, index, count, comparer)`:
+* the range ascends under `comparer ?? Comparer<T>.Default`;
+* the range is a permutation of what it held;
+* everything outside the range is unchanged.
+
+The BCL's introsort is not translated. Only its specification is assumed to be the one the
+proved sort meets, and a caller cannot distinguish the two except by stability, which
+neither promises. A `null` comparer is `Comparer.null_comparer`, the comparer that
+`Sorted.is_null` holds of. `Pal.Permutation(s, t)` is the bijection-based permutation.
+`List.BinarySearch` uses §25's proved `Array.BinarySearch`.
+
+### R26.8 Value tuples
+
+`(T1, T2)` is F*'s `tuple2`:
+* `(a, b)` is `Mktuple2`;
+* `.Item1`/`.Item2`, or a named component, is a projection;
+* `default` is the pair of defaults;
+* `(a, b) = e` reads `e` once.
+
+A tuple-typed local's `let mut` carries its type, because Pulse needs the pair's universe
+to be 0. This is `PriorityQueue`'s node type.
+
+### R26.9 Retired
+
+It was `Array.Resize`, which is now R23.4.
+
+### R26.10 Heaps, `Pal.Broke()`, and array aliases in loops
+
+* **Heap specifications.** `Pal.IsHeap(s, c)` says that every node's priority is at least
+  its parent's, the parent of `i` being `(i - 1) / 4`. `Pal.HeapMin(s, x, c)` says that no
+  node of `s` is below `x`. `HeapUp`/`HeapDown` are the sift loops' invariants: a hole `h`,
+  the node `x` on its way to it, every edge not touching the hole in order, and `s` with
+  `x` in the hole a permutation of the original. `HeapUpStop`, `HeapDownStop` and
+  `HeapMinChild` are the exit conditions and the inner min-child scan. `Heap.fst` proves a
+  lemma per step (init, step, stop, finish, remove-root, replace-root), which the C# calls
+  as `[Lemma]`s.
+* **`Pal.Broke()`.** In an invariant, `Pal.Broke()` is the loop's break flag. The loop
+  exits as soon as the flag is raised, so `Pal.Implies(Pal.Broke(), P)` records what held
+  at the `break`. A `break` skips a `for`'s step.
+* **Array aliases in loops.** An array-typed local that the loop does not rebind keeps its
+  equality with the array it aliases across the loop (`var nodes = _nodes;`). An element
+  write through such a local, or passing it to a call, counts as a write to every array
+  field of the receiver, so those fields' contents are not carried across the loop as
+  unchanged.
+  * A `decreases` measure reads such a local's length as `arr_length`.
+
+### R26.11 Assignment expressions and guards that write
+
+`(x = e)` in expression position, for a local `x`, is the write followed by a snapshot of
+`x`. A `while` guard that begins with such an expression, or with `++x`/`--x`, compared
+against an operand that reads none of the written locals, becomes a `for` whose init and
+step are the write and whose test is the comparison:
+* the guard's effect runs before each test;
+* a `continue` still runs it;
+* the invariant describes the state just after it.
+
+Examples are `while ((i = GetFirstChildIndex(nodeIndex)) < size)` and `while (++i < bound)`.
+
+### R26.12 Delegate purity (trusted)
+
+R26.1's model is an axiom. See §26.1.
+
+### R26.13 `is null` on a comparer
+
+The pattern `c is null`, on a type whose null test is R25.4's opaque `is_null`, is
+`Sorted.is_null c`, as `c == null` is. Before this rule, it lowered to `false`.
+
+### 26.1 Trusted assumptions
+
+* **Delegates (R26.12).** A delegate is a pure, total, deterministic function. Invoking it
+  does not throw and touches no state that verified code owns, in particular not the list
+  that calls it. `fn1 a r = bool & (a -> r)` is a model, so the axioms are consistent. A
+  BCL caller may pass an impure delegate. What the specification then promises is only
+  what holds for a pure one, and `List`'s `_version` check, which catches a delegate that
+  mutates the list, is not modelled.
+* **Scaling (R26.6).** `scale_unit`'s range is exact for every `int` and every literal in
+  `[0, 1]`, but it is not proved.
+* **Comparers.** They are R22.30's total preorder. The existence of a `null` comparer is
+  `Comparer.null_comparer`.
+* **`Array.Sort` (R26.7).** Its result is assumed to meet the specification that the proved
+  insertion sort meets.
+
+### 26.2 Specification findings
+
+* **`PriorityQueue` child-index overflow.** `GetFirstChildIndex` computes
+  `(index << 2) + 1`, which wraps once `index >= 2^29`.
+  * `MoveDown` is entered with `nodeIndex = 0`, and it descends while a child exists.
+  * In a queue of more than `2^29 + 1` nodes, a node at `index >= 2^29` would compute a
+    negative first child. The guard `i < size` would then hold and the read would throw
+    `IndexOutOfRangeException`.
+  * `Array.MaxLength` (`0x7FFFFFC7`) allows that many 16-byte nodes, given enough memory.
+  * Contracts therefore require `Count <= 2^29` on `MoveDown`, `RemoveRootNode`,
+    `Dequeue`, `TryDequeue`, `DequeueEnqueue` and `EnqueueDequeue`.
+  * `GetFirstChildIndex` requires `0 <= index < 2^29`.
+* **`PriorityQueue.Enqueue`** requires `Count < int.MaxValue`, so that `_size + 1` cannot
+  wrap. In practice `Grow` throws first, at `Array.MaxLength`.
+* **`List.FindIndex`/`FindLastIndex` with a window.** The BCL checks the window before it
+  checks `match`, so a bad window with a `null` `match` throws
+  `ArgumentOutOfRangeException`, not `ArgumentNullException`. The `[Throws]` clauses are
+  stated in that order. `FindLastIndex` on an empty list accepts `startIndex == -1` (and
+  only that), with `count == 0`. Its ensures say so.
+* The heap property is a precondition, not an invariant. Every member that needs it
+  (`Peek`, `Dequeue`, `Enqueue`, …) requires it, and every member that changes the nodes
+  re-establishes it.
+* `_version` is not modelled, for either collection.
+
+### 26.3 What is verified, and what is not
+
+* **`List<T>`.**
+  * Every member in §22 is verified.
+  * The delegate members are verified: `Exists`, `Find`, `FindAll`, `FindIndex`×3,
+    `FindLast`, `FindLastIndex`×3, `ForEach`, `RemoveAll` and `TrueForAll`.
+  * So are `BinarySearch`×3, `Sort()`, `Sort(IComparer)` and
+    `Sort(int, int, IComparer)`.
+  * These are not annotated:
+    * `ConvertAll`, `GetRange` and `Slice` build a second `List` by writing its private
+      fields (PALCS0523, another object's field);
+    * `AddRange` and `InsertRange` take an `IEnumerable<T>` and dispatch on
+      `ICollection<T>` through interface calls that the translation does not have;
+    * `Sort(Comparison<T>)` goes through `ArraySortHelper` over a `Span<T>`;
+    * the enumerators.
+* **`PriorityQueue<TElement,TPriority>`.**
+  * These are verified: `Count`, `Capacity`, `Peek`, `TryPeek`, `Clear`, `EnsureCapacity`,
+    `TrimExcess`, `Grow`, `Enqueue`, `Dequeue`, `TryDequeue`, `DequeueEnqueue`,
+    `EnqueueDequeue`, `RemoveRootNode`, `GetParentIndex`, `GetFirstChildIndex`,
+    `MoveUpDefaultComparer`, `MoveUpCustomComparer`, `MoveDownDefaultComparer` and
+    `MoveDownCustomComparer`.
+  * These are not annotated:
+    * the constructors, because `InitializeComparer` tests `typeof(TPriority).IsValueType`
+      and the `IEnumerable` constructors enumerate;
+    * `EnqueueRange` and `Heapify`, which use `IEnumerable` and `ICollection` dispatch;
+    * `Remove`, which uses an `IEqualityComparer<TElement>` and a `Span` copy;
+    * `UnorderedItems` and the enumerator;
+    * the `Comparer` property, which returns `Comparer<T>.Default` for a null comparer;
+      that is a value the model has only as a ghost.
+  * The default-comparer and custom-comparer sift loops are verified separately. Both are
+    specified at `comparer ?? Comparer<TPriority>.Default`.

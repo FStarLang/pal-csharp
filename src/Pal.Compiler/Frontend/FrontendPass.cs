@@ -2455,7 +2455,14 @@ public static partial class FrontendPass
             return new IrBlock(Locations.From(c), stmts.ToImmutable());
         }
 
-        if (BlockOf(syntax) is { } block) return lowerer.Lower(block);
+        if (BlockOf(syntax) is { } block)
+        {
+            var lowered = lowerer.Lower(block);
+            // R26.2. The cells a `return` inside a loop is kept in, ahead of everything.
+            if (lowerer.ReturnsInLoop && lowered is IrBlock b)
+                return b with { Statements = [.. lowerer.ReturnCells(b.Loc), .. b.Statements] };
+            return lowered;
+        }
         if (ArrowOf(syntax) is { } arrow)
             return lowerer.LowerArrow(arrow);
         return null;

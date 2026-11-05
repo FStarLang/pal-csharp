@@ -396,6 +396,46 @@ public sealed class WellKnown
             "System.Collections.Generic.IList<T>" or
             "System.Collections.Generic.IReadOnlyList<T>";
 
+    /// <summary>R26.8. The F* type of a value tuple <c>(T1, T2)</c>.</summary>
+    public const string TupleType = "tuple2";
+
+    private static bool IsPlainValue(IrType t) =>
+        t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
+
+    /// <summary>
+    /// R26.8. The type parameters whose <c>default</c> a <c>default</c> of
+    /// <paramref name="type"/> takes: the parameter itself, or a tuple's.
+    /// </summary>
+    public static IEnumerable<ITypeParameterSymbol> DefaultedIn(ITypeSymbol? type) => type switch
+    {
+        ITypeParameterSymbol tp => [tp],
+        INamedTypeSymbol { IsTupleType: true } t => t.TupleElements.SelectMany(e => DefaultedIn(e.Type)),
+        _ => [],
+    };
+
+    /// <summary>
+    /// R26.1. The BCL delegates a collection calls: a pure function of its arguments
+    /// (trusted, R26.12), so that a call and a contract can both say what it returns.
+    /// </summary>
+    private IrType? CallableDelegate(INamedTypeSymbol del)
+    {
+        if (del.ContainingNamespace?.ToDisplayString() != "System" ||
+            del.MetadataName is not ("Predicate`1" or "Action`1" or "Converter`2" or "Comparison`1"))
+            return null;
+        if (del.DelegateInvokeMethod is not { } invoke ||
+            invoke.Parameters.Any(p => p.RefKind != RefKind.None))
+            return null;
+        var ps = ImmutableArray.CreateBuilder<IrType>();
+        foreach (var p in invoke.Parameters)
+        {
+            if (MapType(p.Type) is not { } pt) return null;
+            ps.Add(pt);
+        }
+        var ret = invoke.ReturnsVoid ? new IrPulseType("unit", "unit") : MapType(invoke.ReturnType);
+        if (ret is null) return null;
+        return new IrDelegateType(del.ToDisplayString()) { Params = ps.ToImmutable(), Return = ret };
+    }
+
     public IrType? MapType(ITypeSymbol? type)
     {
         switch (type)
@@ -417,7 +457,15 @@ public sealed class WellKnown
             // R20.10. The BCL value types with a pure model.
             case INamedTypeSymbol named when Bcl.MapType(named, MapType) is { } bcl:
                 return bcl;
+            // R26.8. A pair `(T1, T2)` of values is F*'s `T1 & T2`. A component that is an
+            // object or an array would make the pair a second owner of it, so it is refused.
+            case INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } tuple
+                when MapType(tuple.TupleElements[0].Type) is { } t1 && IsPlainValue(t1) &&
+                     MapType(tuple.TupleElements[1].Type) is { } t2 && IsPlainValue(t2):
+                return new IrUserSpecType("ValueTuple", TupleType, [t1, t2]);
             // R20.3. A delegate is held, passed on, and nothing else.
+            case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del when CallableDelegate(del) is { } callable:
+                return callable;
             case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del:
                 return new IrDelegateType(del.ToDisplayString());
             // R14.1/R14.4. An *unconstrained* type parameter is a type like any other. A

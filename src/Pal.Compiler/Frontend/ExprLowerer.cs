@@ -89,8 +89,26 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (info.ConvertedType is { TypeKind: TypeKind.Delegate } &&
             node is IdentifierNameSyntax or MemberAccessExpressionSyntax &&
             model.GetSymbolInfo(node).Symbol is IMethodSymbol group)
+        {
+            // R26.1. A callable delegate is a function the model can apply, and a method
+            // group is not translated as one.
+            if (known.MapType(info.ConvertedType) is IrDelegateType { Callable: true })
+            {
+                diagnostics.Error("PALCS0685", loc,
+                    $"The method group `{node}` is converted to `{info.ConvertedType}`, a delegate " +
+                    "verified code calls. Such a delegate is a parameter of the code being " +
+                    "verified, never created by it (doc/translation.md R26.1).");
+                return new IrLiteral(loc, null);
+            }
             return new IrMethodGroup(loc, $"{group.ContainingType.Name}.{group.Name}")
             { Type = known.MapType(info.ConvertedType) };
+        }
+
+        // R26.7. A `null` comparer, which every BCL sort and search replaces by the default.
+        if (node.IsKind(SyntaxKind.NullLiteralExpression) &&
+            type is IrUserSpecType { FStar: Sorted.ComparerType } nullCmp)
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", [])
+                { TypeArgs = nullCmp.Args, Type = nullCmp };
 
         IrExpr result = node switch
         {
@@ -122,6 +140,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             LiteralExpressionSyntax l when l.IsKind(SyntaxKind.DefaultLiteralExpression) =>
                 Default(node, loc),
             LiteralExpressionSyntax l => LowerLiteral(l, loc),
+            // R26.8. A pair is built by F*'s constructor; its components keep their types.
+            TupleExpressionSyntax t when t.Arguments.Count == 2 &&
+                known.MapType(info.ConvertedType ?? info.Type) is IrUserSpecType { FStar: WellKnown.TupleType } pair =>
+                new IrSpecOp(loc, "Mktuple2",
+                    [ToDeclared(Lower(t.Arguments[0].Expression), pair.Args[0]),
+                     ToDeclared(Lower(t.Arguments[1].Expression), pair.Args[1])])
+                    { MachineArgs = true, Type = pair },
             ThisExpressionSyntax => new IrVar(loc, Names.This),
             // R23.13. The empty collection expression at a one-dimensional array type is
             // `Array.Empty<T>()` (R23.1).
@@ -135,6 +160,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             BinaryExpressionSyntax b when b.IsKind(SyntaxKind.AsExpression) => LowerAs(b, loc),
             BinaryExpressionSyntax b => LowerBinary(b, loc),
             PrefixUnaryExpressionSyntax u => LowerPrefixUnary(u, loc),
+            AssignmentExpressionSyntax a when !SpecPosition && a.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+                                              a.Left is IdentifierNameSyntax &&
+                                              model.GetSymbolInfo(a.Left).Symbol is ILocalSymbol =>
+                LowerAssignmentValue(a, loc),
             ConditionalExpressionSyntax c =>
                 new IrConditional(loc, Lower(c.Condition), Lower(c.WhenTrue), Lower(c.WhenFalse)),
             ConditionalAccessExpressionSyntax ca => LowerConditionalAccess(ca, loc),
@@ -146,6 +175,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             CastExpressionSyntax c when model.GetTypeInfo(c.Expression).Type is { TypeKind: TypeKind.Enum } &&
                                         model.GetConstantValue(c) is { HasValue: true, Value: { } folded } =>
                 new IrLiteral(loc, folded),
+            CastExpressionSyntax c when ScaledInt(c) is { } scaled =>
+                new IrSpecOp(loc, "Pulse.Lib.CSharp.Scale.scale_unit", [Lower(scaled)]) { Type = IrPrim.Int },
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -262,9 +293,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // caller's default exactly as R14.2a's `default(T)` does -- unless the length is
         // the literal zero, which fills nothing.
         if (length is not IrLiteral { Value: 0 or 0L } &&
-            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: ITypeParameterSymbol tp })
+            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: var elementType })
         {
-            DefaultedTypeParameters.Add(tp.Name);
+            foreach (var tp in WellKnown.DefaultedIn(elementType)) DefaultedTypeParameters.Add(tp.Name);
         }
         return new IrNewArray(loc, array.Element, length) { Type = array };
     }
@@ -538,6 +569,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     yield return (p.Name, p.Type); break;
             }
         }
+    }
+
+    /// <summary>
+    /// R26.2. <c>default(type)</c>, for a cell the translation declares itself: a zero, or
+    /// the caller's default at a type parameter (R14.2a); null when there is none.
+    /// </summary>
+    public IrExpr? DefaultValue(ITypeSymbol type, IrLoc loc)
+    {
+        if (Zero(loc, type) is { } zero) return zero;
+        if (type is ITypeParameterSymbol or INamedTypeSymbol { IsTupleType: true } &&
+            known.MapType(type) is { } tpType)
+        {
+            foreach (var tp in WellKnown.DefaultedIn(type)) DefaultedTypeParameters.Add(tp.Name);
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Inhabited.default_of", [])
+                { TypeArgs = [tpType], Type = tpType };
+        }
+        return null;
     }
 
     private IrExpr? Zero(IrLoc loc, ITypeSymbol type)
@@ -835,13 +883,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         // R14.2a. `default(T)` at an unconstrained `T` is whatever `T`'s default is, which
         // only the caller knows: it is the `has_default` dictionary the caller passes.
-        if (type is ITypeParameterSymbol tp &&
-            known.MapType(tp) is { } tpType)
-        {
-            DefaultedTypeParameters.Add(tp.Name);
-            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Inhabited.default_of", [])
-                { TypeArgs = [tpType], Type = tpType };
-        }
+        // R26.8. A tuple's default is the pair of its components' defaults.
+        if (DefaultValue(type, loc) is { } value) return value;
         diagnostics.Unsupported(loc, $"`default` at type `{type}`");
         return new IrLiteral(loc, null);
     }
@@ -963,6 +1006,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             known.MapType(dp.ContainingType.TypeArguments[0]) is { } dt)
             return new IrSpecOp(loc, Sorted.Order + ".default_comparer", [])
                 { TypeArgs = [dt], Type = known.MapType(dp.Type) };
+        // R26.8. A component of a pair, by name or as `Item1`/`Item2`, is a projection.
+        if (symbol is IFieldSymbol { ContainingType.IsTupleType: true } component &&
+            (component.CorrespondingTupleField ?? component).Name is "Item1" or "Item2" &&
+            known.MapType(component.Type) is { } componentType)
+            return new IrSpecOp(loc, (component.CorrespondingTupleField ?? component).Name == "Item1" ? "fst" : "snd",
+                [Lower(node.Expression)]) { MachineArgs = true, Type = componentType };
         // R21.8. A constant of a `[SpecType]` enum is its constructor.
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []);
@@ -1190,6 +1239,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerBinary(BinaryExpressionSyntax node, IrLoc loc)
     {
+        // R26.1. `d == null` / `d != null` on a callable delegate asks the model whether the
+        // reference is null.
+        if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
+            (node.Right.IsKind(SyntaxKind.NullLiteralExpression) ? node.Left
+             : node.Left.IsKind(SyntaxKind.NullLiteralExpression) ? node.Right : null) is { } tested &&
+            known.MapType(model.GetTypeInfo(tested).Type) is IrDelegateType { Callable: true } dt)
+        {
+            IrExpr isNull = new IrSpecOp(loc, $"Pulse.Lib.CSharp.Delegate.is_null{dt.Params.Length}", [Lower(tested)])
+                { Type = IrPrim.Bool, MachineArgs = true };
+            return node.IsKind(SyntaxKind.EqualsExpression)
+                ? isNull
+                : new IrUnary(loc, UnOp.Not, isNull) { Type = IrPrim.Bool };
+        }
+
         var op = node.Kind() switch
         {
             SyntaxKind.AddExpression => BinOp.Add,
@@ -1341,6 +1404,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ? ImmutableArray.CreateRange<IrStmt>([.. hoisted, snapshot, write])
             : ImmutableArray.CreateRange<IrStmt>([.. hoisted, write, snapshot]);
         return new IrStmtExpr(loc, prelude, result) { Type = target.Type };
+    }
+
+    /// <summary>
+    /// R26.11. <c>(x = e)</c> in expression position, for a local <c>x</c>: the write,
+    /// then the value written, which is <c>x</c>'s new contents. This is the form a loop
+    /// guard such as <c>while ((i = f(n)) &lt; size)</c> takes.
+    /// </summary>
+    private IrExpr LowerAssignmentValue(AssignmentExpressionSyntax node, IrLoc loc)
+    {
+        var target = Lower(node.Left);
+        var write = new IrAssign(loc, target, Lower(node.Right));
+        var name = Fresh("assigned");
+        var snapshot = new IrLocalDecl(loc, name, target.Type!, target) { Immutable = true };
+        return new IrStmtExpr(loc, [write, snapshot], new IrVar(loc, name) { Type = target.Type })
+            { Type = target.Type };
     }
 
     /// <summary>R22.14. Whether an assignment target is a <c>[Wrapping]</c> field.</summary>
@@ -1600,6 +1678,34 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrAssign(loc, receiver, update);
     }
 
+    /// <summary>
+    /// R26.6. <c>(int)((double)n * c)</c>, or <c>(int)(n * c)</c>, with <c>n</c> an <c>int</c> and <c>c</c> a literal
+    /// in <c>[0, 1]</c>: the one floating-point idiom in the collections (a capacity
+    /// threshold), translated without floating point to a trusted bound on its result.
+    /// </summary>
+    private ExpressionSyntax? ScaledInt(CastExpressionSyntax c)
+    {
+        static ExpressionSyntax Strip(ExpressionSyntax e) =>
+            e is ParenthesizedExpressionSyntax p ? Strip(p.Expression) : e;
+        if (model.GetTypeInfo(c.Type).Type?.SpecialType != SpecialType.System_Int32) return null;
+        if (Strip(c.Expression) is not BinaryExpressionSyntax { RawKind: (int)SyntaxKind.MultiplyExpression } m)
+            return null;
+        // `n` is converted to `double` either by a cast or implicitly.
+        ExpressionSyntax n;
+        if (Strip(m.Left) is CastExpressionSyntax inner &&
+            model.GetTypeInfo(inner.Type).Type?.SpecialType == SpecialType.System_Double &&
+            model.GetTypeInfo(inner.Expression).Type?.SpecialType == SpecialType.System_Int32)
+            n = inner.Expression;
+        else if (model.GetTypeInfo(m.Left) is { Type.SpecialType: SpecialType.System_Int32,
+                     ConvertedType.SpecialType: SpecialType.System_Double })
+            n = m.Left;
+        else
+            return null;
+        if (model.GetConstantValue(m.Right) is not { HasValue: true, Value: double k } || k < 0 || k > 1)
+            return null;
+        return n;
+    }
+
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return Unsupported(node, loc);
@@ -1608,6 +1714,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+
+        // R26.1. Calling a callable delegate, `d(x)` or `d.Invoke(x)`, is applying the pure
+        // function that models it, in code and in a contract alike.
+        if (method.MethodKind == MethodKind.DelegateInvoke &&
+            known.MapType(method.ContainingType) is IrDelegateType { Callable: true } dlg &&
+            args.Count == dlg.Params.Length)
+        {
+            var target = node.Expression is MemberAccessExpressionSyntax { Name.Identifier.ValueText: "Invoke" } inv
+                ? inv.Expression : node.Expression;
+            return new IrSpecOp(loc, $"Pulse.Lib.CSharp.Delegate.apply{dlg.Params.Length}",
+                [Lower(target), .. args.Select((a, i) => ToDeclared(Lower(a.Expression), dlg.Params[i]))])
+                { Type = dlg.Return, MachineArgs = true };
+        }
 
         if (method.ContainingType?.ToDisplayString() == "System.Linq.Enumerable")
             return LowerLinq(method, node, loc);
@@ -1938,6 +2057,45 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSpecOp(loc, "CS.last_index_of_at", [Arg(0), Arg(1), Arg(2), Arg(3)]) { Type = IrPrim.SpecIntType };
             case nameof(PalLang.Pal.LastIndexOf):
                 return new IrSpecOp(loc, "CS.last_index_of_all", [Arg(0), Arg(1)]) { Type = IrPrim.SpecIntType };
+            // R26.3. The searches, filters and maps a delegate drives.
+            case nameof(PalLang.Pal.FindIndex) when args.Count == 4:
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Find.find_index", [Arg(0), Arg(1), Arg(2), Arg(3)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.FindIndex):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Find.find_index_all", [Arg(0), Arg(1)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.FindLastIndex) when args.Count == 4:
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Find.find_last_index", [Arg(0), Arg(1), Arg(2), Arg(3)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.FindLastIndex):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Find.find_last_index_all", [Arg(0), Arg(1)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.TrueForAll):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Find.true_for_all", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.FindAll) or nameof(PalLang.Pal.RemoveAll) or nameof(PalLang.Pal.ConvertAll):
+                return new IrSpecOp(loc, method.Name switch
+                    {
+                        nameof(PalLang.Pal.FindAll) => "Pulse.Lib.CSharp.Find.find_all",
+                        nameof(PalLang.Pal.RemoveAll) => "Pulse.Lib.CSharp.Find.remove_all",
+                        _ => "Pulse.Lib.CSharp.Find.map",
+                    }, [Arg(0), Arg(1)]) { Type = known.MapType(method.ReturnType), Built = true };
+            // R26.7. Permutation, and what a sort guarantees.
+            case nameof(PalLang.Pal.Permutation):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.permutation", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.SortedRange):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.sorted_range",
+                    [Arg(0), Arg(1), Arg(2), Arg(3), Arg(4)]) { Type = IrPrim.Bool };
+            // R26.10. A 4-ary min-heap of (element, priority) nodes.
+            case nameof(PalLang.Pal.IsHeap) or nameof(PalLang.Pal.HeapMin) or nameof(PalLang.Pal.HeapUp)
+                or nameof(PalLang.Pal.HeapDown) or nameof(PalLang.Pal.HeapMinChild)
+                or nameof(PalLang.Pal.HeapUpStop) or nameof(PalLang.Pal.HeapDownStop):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Heap." + method.Name switch
+                    {
+                        nameof(PalLang.Pal.IsHeap) => "is_heap",
+                        nameof(PalLang.Pal.HeapMin) => "is_min",
+                        nameof(PalLang.Pal.HeapUp) => "up_inv",
+                        nameof(PalLang.Pal.HeapDown) => "down_inv",
+                        nameof(PalLang.Pal.HeapUpStop) => "up_stop",
+                        nameof(PalLang.Pal.HeapDownStop) => "down_stop",
+                        _ => "min_child",
+                    }, [.. args.Select((_, i) => Arg(i))])
+                    { TypeArgs = [.. method.TypeArguments.Select(t => known.MapType(t)!)], Type = IrPrim.Bool };
             // R17.8. What a parent holds after a window is given back.
             case nameof(PalLang.Pal.Splice):
                 return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);
@@ -1969,6 +2127,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     { Type = IrPrim.SpecIntType };
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
+            // R26.2. The cells a `return` inside a loop leaves its outcome in.
+            case nameof(PalLang.Pal.Broke):
+                return new IrVar(loc, StmtLowerer.BrokeFlag) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.Returned):
+                return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.ReturnValue):
+                return new IrVar(loc, StmtLowerer.ReturnedValue) { Type = known.MapType(method.TypeArguments[0]) };
             case nameof(PalLang.Pal.InlinePulse) when ConstantString(args[0].Expression) is { } text:
                 return new IrInlinePulse(loc, text);
             default:

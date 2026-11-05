@@ -117,8 +117,8 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: array {Types.Render(array.Element)})");
-                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Render(array.Element)}))");
+                    binders.Add($"({name}: array {Types.Atom(array.Element)})");
+                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(array.Element)}))");
 
                     // R4.9. `[Frac("p")]` introduces a permission variable and makes the
                     // parameter read-only: the contents cannot change, so the same binder
@@ -162,8 +162,8 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: S.slice {Types.Render(span.Element)})");
-                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Render(span.Element)}))");
+                    binders.Add($"({name}: S.slice {Types.Atom(span.Element)})");
+                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(span.Element)}))");
 
                     var perm = p.Fraction is null ? "" : $"#{p.Fraction} ";
                     if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");
