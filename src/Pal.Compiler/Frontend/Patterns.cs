@@ -341,7 +341,7 @@ public sealed partial class ExprLowerer
     /// class's name and nothing else: the message and the parameter name a program passes
     /// are not modelled, since no verified code can observe them.
     /// </summary>
-    private IrExpr LibraryException(IrLoc loc, string type) =>
+    internal IrExpr LibraryException(IrLoc loc, string type) =>
         new IrSpecOp(loc, "Pulse.Lib.CSharp.Exn.BclException",
             [new IrLiteral(loc, type) { Type = new IrPrim(PrimKind.String) }]) { Type = new IrExnType(null) };
 }

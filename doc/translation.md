@@ -6254,6 +6254,171 @@ preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collectio
 contract names its comparer, and how a call to `Compare` lowers, is given with the
 collection families that use it.
 
+
+### R22.31 `[Rlimit(n)]`
+
+On a method, its module is checked with `#set-options "--z3rlimit_factor n"`: the solver
+may take `n` times as long. Nothing about what is proved changes.
+
+## 23. Queue, Stack and LinkedList
+
+The array-backed `Stack<T>` and `Queue<T>` of dotnet/runtime are verified in place with
+§22's machinery; the rules below are what they needed in addition. Library support is in
+`Pulse.Lib.CSharp.QueueStack` (proved; nothing assumed) and `Pulse.Lib.CSharp.Seq`.
+`test/collections_queuestack` exercises each rule.
+
+### R23.1 `Array.Empty<T>()`
+
+is a fresh array of length 0, as `new T[0]` (and trusted in the same way as R22.8: the
+CLR shares one instance per `T`, and a zero-length array has no cells to alias).
+
+### R23.2 Argument guards
+
+`ArgumentOutOfRangeException.ThrowIfNegative(x)`, `ThrowIfNegativeOrZero`, `ThrowIfZero`,
+`ThrowIfLessThan(x, y)`, `ThrowIfLessThanOrEqual`, `ThrowIfGreaterThan`,
+`ThrowIfGreaterThanOrEqual`, `ThrowIfEqual` and `ThrowIfNotEqual`, at an integral type, are
+the `if (cmp) throw new ArgumentOutOfRangeException(...)` they abbreviate, so the
+contract states the throw with `[Throws]`. `ArgumentNullException.ThrowIfNull(a)` of a
+non-nullable array or class reference is nothing: such a reference is non-null (R10.2
+for a class; an array is translated as owned and so live), so the guard never fires.
+
+### R23.3 Exception arguments
+
+A BCL exception's constructor arguments (R21.7) may be constants or reads of a local or
+parameter, as in `new ArgumentOutOfRangeException(nameof(i), i, SR.Message)`: they have no
+effect, and the exception is modelled by its type alone, so they are not evaluated.
+
+### R23.4 `Array.Resize(ref a, n)`
+
+is `a = resize a n`: a fresh array of length `n` whose first `min(len a, n)` cells are
+`a`'s and whose rest are `default(T)` (`resized`, with `resized_length` and
+`resized_prefix` patterned). The old array is kept rather than consumed, because a field
+replaced in an open object drops what it held (R22.12).
+
+### R23.5 `Array.LastIndexOf(a, x, start)`
+
+with an effect-free `start` is R22.25's search over `[0, start]` from the top.
+`last_index_of_found_iff` (patterned) states that a search from either end of a range
+finds something exactly when the other does, so `Contains` may be specified by
+`Pal.IndexOf` and implemented by `LastIndexOf`.
+
+### R23.6 Array distinctness in `Debug.Assert`
+
+`Debug.Assert(a != b)` for two arrays is the ghost step `distinct a b`, which proves
+`a =!= b` from both being owned, when one of them has a cell (the gathered permission
+would exceed 1). Two empty arrays may be the same object — `Array.Empty<T>()` is shared —
+so the step needs `length a > 0 \/ length b > 0` of its context.
+
+### R23.7 `[DoesNotReturn]` on the open receiver
+
+A call to a `[DoesNotReturn]` instance method on the receiver (R22.11) closes the receiver
+once, as at a `throw`, and calls it closed; R22.15's bracket around a self-call is not
+added, since nothing follows the call to reopen it for.
+
+### R23.8 Split guards
+
+`if (a || b) throw …;` with no `else` is `if (a) throw …; else if (b) throw …;`. Lowered as
+one `if`, a `b` that needs statements (an array's length, a field read) leaves the
+condition a bound `bool` Pulse knows nothing about, and what follows cannot use the
+guard's failure; split, each disjunct's failure is a path condition of its own. The throw
+is duplicated, which is harmless: it is reached on exactly the paths it was.
+
+### R23.9 Writes in an element target
+
+The index of an element assignment is evaluated too, so `a[--j] = x` assigns `j` for
+R5.8b: a loop containing it quantifies `j` in its invariant.
+
+### R23.10 `Pal.Ring(s, h, n)`
+
+⟶ `CS.ring ⟦s⟧ ⟦h⟧ ⟦n⟧`: the `n` live elements of a circular buffer whose head is at
+`h`, wrapping once — `s[h + k]` when `h + k < len s`, else `s[h + k - len s]` — for
+`0 <= h <= len s` and `0 <= n <= len s` (else empty). Stated by that index equation
+(`ring_index`, patterned) rather than with a modulus, so that a head or tail moving by
+one is index arithmetic. `ring_length` is patterned on the ring itself, so that two
+states whose rings are equal (R22.15's model equality across a self-call) have equal
+counts. `ring_index_of` reads a search of a ring as one search of the store, or two when
+the live range wraps: `Queue<T>.Contains`' two `Array.IndexOf` calls.
+
+### R23.11 A field passed by `ref`
+
+A call `M(ref _f)` on the receiver, where `_f` is a scalar field of the class and `M`'s
+body names neither `_f` nor any method, is `{ var t = _f; M(ref t); _f = t; }` (R6.10 needs
+a `ref` argument to be a cell). The copy is exact: `M` cannot observe `_f` while it runs.
+
+### R23.12 `Math.Min` and `Math.Max`
+
+at `int`, of effect-free arguments, are the conditional `a <= b ? a : b` (`a >= b ? a : b`).
+
+### R23.13 `[]`
+
+An empty collection expression at an array type is `new T[0]` (and trusted as R23.1 is:
+the compiler may share `Array.Empty<T>()`).
+
+### R23.14 Two-state sequence equality
+
+R22.23's `Seq.equal` is used also when an abstraction of one state is compared with one
+of the other (`Items == Old(Items)`), and when a conditional's arm is built or old: what
+the method did to the representation lies between the two sides, so the solver must
+compare them pointwise; the patterned `lemma_eq_elim` restores `==` at a caller. An
+array's contents are a name in either state, so a frame `Contents(a) == Old(Contents(a))`
+stays `==` (as a loop invariant, `Seq.equal` there costs the solver an extensionality
+quantifier per iteration for nothing).
+
+### Queue<T>
+
+`Queue<T>`'s model is `Items = Ring(Contents(_array), _head, _size)` with the store and
+head alongside, so that a model equality across a read-only self-call (`MoveNext`)
+determines the raw state. The invariant states `_tail` as `_head + _size` wrapped once.
+`CopyTo`'s second destination index `arrayIndex + _array.Length - _head` can overflow in
+its first addition and is correct only because unchecked arithmetic wraps back; the
+method is verified as `[Wrapping]` for that reason.
+
+### LinkedList<T>: not verified
+
+`LinkedList<T>` (System.Collections) is a *circular* doubly linked list of
+`LinkedListNode<T>` objects, each of which also points back at its list. Marking both
+classes `[Plain]` (§12) and translating `LinkedList.cs` in place stops at four distinct
+obstacles, each confirmed by a probe:
+
+1. **An untranslatable field.** `LinkedList<T>._siInfo : SerializationInfo?` (binary
+   serialization state) has no translation, so `LinkedList<T>`'s record cannot be emitted
+   at all (PALCS0500). Needed: an *opaque field* — a field no translated member reads,
+   emitted as an abstract placeholder type.
+2. **Mutually referencing classes.** `LinkedList<T>.head : LinkedListNode<T>?` and
+   `LinkedListNode<T>.list : LinkedList<T>?` make `Class_LinkedList` and
+   `Class_LinkedListNode` depend on each other, and F\* refuses the module cycle (Error
+   308). Needed: the classes of a reference cycle emitted as one module of mutually
+   recursive types (`type … and …`), with per-class modules re-exporting it by `include`.
+3. **Constructors of a `[Plain]` class.** `AddFirst(T)`/`AddLast(T)` allocate with
+   `new LinkedListNode<T>(this, value)`; R12.4 accepts only object-initializer syntax.
+   Needed: a `[Plain]` constructor given an explicit contract (`[Ensures]` an `SlProp`
+   cell), translated like any method rather than read for field assignments.
+4. **Aliasing inside one statement.** `InternalInsertNodeBefore` (behind every `Add*`)
+   executes `node.prev!.next = newNode`, which reads `node` and writes `node.prev` in a
+   single statement. On a one-element list `node.prev == node`; otherwise they are
+   distinct boxes. A per-node `pts_to` encoding needs *one* resource in the first case and
+   *two* in the second, but the statement is one straight-line Pulse step with no branch
+   to split on, and Pulse matches a box by unification, not by an SMT equality, so no
+   ghost step placed between C# statements can serve both. Needed: either a *region*
+   encoding of `[Plain]` objects (all nodes owned by one ghost map, a field access proving
+   membership, so aliasing is a pure fact), or an emitter rule that, at a statement whose
+   two box accesses may alias, case-splits on the reference equality and emits the
+   statement in each branch.
+
+Removal (`RemoveFirst`/`RemoveLast` via `InternalRemoveNode`) does not meet obstacle 4 —
+the code itself branches on `node.next == node` before touching a second node, and in
+the two-element case the two writes are separate statements between which a ghost
+lemma can re-open the segment — so with 1 and 2 removed it is within the §12 method:
+a circular-segment predicate over `head` (closed through `head.prev`) and a `[Plain]`
+receiver whose record the user's predicate owns. `Count` and `First` are field reads of
+that record; `Last` (`head?.prev`) reads the head node and needs only the predicate's
+"open first node" lemma.
+
+### Trusted
+
+Beyond §22's: R23.1's (and R23.13's) reading of the shared empty array as fresh, and R23.2's trust that a
+non-nullable reference is not null.
+
 ## 24. Hashing
 
 `HashSet<T>` and `Dictionary<TKey,TValue>` keep their elements in an `Entry[]` of
@@ -6272,8 +6437,9 @@ not verified.
 
 ### R24.1 `unsafe` members compile
 
-The compilation allows `unsafe` code, since production sources contain some; such a member
-is refused only if something asks for it to be translated.
+Production sources contain some `unsafe` code. The harness passes `PAL_CS_FLAGS = --unsafe`
+(R25.11) so that it compiles; such a member is refused only if something asks for it to be
+translated.
 
 ### R24.2 A comparer is a value field
 
@@ -6352,3 +6518,165 @@ for hashing:
 The R21.5 bindings that attach these to the BCL's members live in the harness
 (`pal/HashCommon/Bindings.cs`). `Pulse.Lib.CSharp.NullableArray` and
 `Pulse.Lib.CSharp.HashChain` are proved, and assume nothing.
+
+## 25. Sorted collections
+
+dotnet/runtime's `SortedList<TKey,TValue>` is two parallel arrays kept in key order by an
+`IComparer<TKey>`, searched with `Array.BinarySearch`. Its model is a strictly sorted
+`Seq<TKey>` of keys with a `Seq<TValue>` of values position for position, and the comparer
+itself (harness `pal/SortedList` in the runtime checkout). `test/collections_sorted` pins
+each rule below on a smaller sorted key set. §25.2 records why `SortedSet<T>` and
+`SortedDictionary<TKey,TValue>` are not yet within reach.
+
+The library is `pulse/Pulse.Lib.CSharp.Sorted.fst`. Over R22.30's `Order.comparer`, it defines:
+`sorted`, `strictly_sorted`, `lower_bound` (how many elements are less than `x`) and
+`key_index` (`lower_bound` if the element there compares equal, else `-1`); and the
+specification `range_search` of the BCL's `InternalBinarySearch`. It also has a Pulse
+`range_search_array` **proved** to compute `range_search`. Its lemmas, with SMT patterns,
+say what the result means on a sorted range:
+* a hit is `index + lower_bound` of the slice, and compares equal;
+* a miss is `~(index + lower_bound)`.
+
+### R25.1 Comparers
+
+`IComparer<T>` and `Comparer<T>` are the spec type `Pulse.Lib.CSharp.Order.comparer T`: a
+ghost value, which a `[Spec]` struct and a class field may hold (an object's comparer is a
+pure conjunct of its invariant, not a resource). `Comparer<T>.Default` is
+`Order.default_comparer`. `c.Compare(x, y)` in code is `Sorted.compare_i32 c x y`, an
+`int` whose sign is `Order.compare`'s. A constructor that assigns a comparer field on
+every path is given `default_comparer` as the stand-in its representation starts from.
+
+### R25.2 `notnull`
+
+A `where T : notnull` constraint is accepted and has no translation: it is a nullable-flow
+annotation, and the model never relies on it.
+
+### R25.3 Fields that do not translate
+
+Under `[TranslateAnnotatedOnly]`, a field whose type has no translation is left out of the
+representation, as an unannotated member is left out of the class. Examples are a cached
+view object (`SortedList`'s `keyList`/`valueList`) or a serialization temporary. Translated
+code that reads or writes such a field finds no field and is refused.
+
+### R25.4 Null tests
+
+`x == null` and `x != null` on a type parameter or a comparer, which have no `Box` to test,
+are `Sorted.is_null x` (trusted, below). `c ?? d` on a comparer is
+`if is_null c then d else c`. `Pal.IsNull(x)` names the test in a contract.
+
+### R25.5 `Array.BinarySearch`
+
+`Array.BinarySearch<T>(a, index, length, value, comparer)` in code is the proved
+`range_search_array`. Its comparer is wrapped in `or_default` (`null` means
+`Comparer<T>.Default`, as in the BCL) unless the comparer's nullable flow state is
+not-null. Its contract reflects the BCL's: the range must be within the array, and the
+result is `range_search` of the contents. `~r` of a negative result is the insertion point
+(`lognot_negative`, patterned on the idiom). A method whose only use of an array is a
+binary search does not mutate it (as `IndexOf`, R22.25).
+
+### R25.6 Specification intrinsics
+
+`Pal.Compare(c, x, y)`, `Pal.Sorted(c, s)`, `Pal.StrictlySorted(c, s)`,
+`Pal.LowerBound(c, s, x)`, `Pal.KeyIndex(c, s, x)` and `Pal.BinarySearch(c, s, i, n, x)`
+are the library functions of the same names (`doc/surface_syntax.md` §1.3). `KeyIndex` is
+the natural model of a sorted map's `IndexOfKey`, and `LowerBound` of where an insertion
+goes.
+
+### R25.7 Argument guards
+
+`ArgumentNullException.ThrowIfNull(x)` on a type parameter or a comparer is
+`if is_null x then throw`, and `ArgumentOutOfRangeException.ThrowIfNegative(n)` on an
+`int` is `if n < 0 then throw`. Both are throw points like any `throw` (§19).
+
+### R25.8 `Array.Empty<T>()`
+
+is a fresh array of length `0`. The BCL caches it, but a zero-length array has no contents
+for sharing to be observable through. (Implemented by R23.1, in code position; the two rules were written in parallel.)
+
+### R25.9 Exception messages
+
+The arguments of a library exception's constructor that only build its message are
+evaluated for no effect: `SR.*`, `SR.Format(…)`, `nameof`, `ToString()`, a parameter or a
+local. Messages are not modelled (R21.7), so the exception is the throw point alone.
+
+### R25.10 A call that moves a closed receiver ends the join
+
+R22.12 extended: when an arm of a statement-position `if` calls a method that moves a
+receiver's model, the `if` does not join, and the statements after it are emitted in each
+arm. The receiver's post-state is an existential, which Pulse's join generalises afresh.
+Joining would lose what the call ensured, and also the other arm's fact that the receiver
+is unchanged. `SortedList.Remove` (`if (i >= 0) RemoveAt(i); return i >= 0;`) is the case.
+
+### R25.11 Compiling a runtime source as it is built
+
+`palcs --preview` compiles with `LangVersion=preview`, and `palcs --unsafe` allows `unsafe`
+blocks; `verify.mk` passes `$(PAL_CS_FLAGS)` through. dotnet/runtime builds its libraries
+that way (`SortedSet.cs` uses `?.=` and `stackalloc`). The translator still refuses unsafe
+code in any member it translates.
+
+### R25.12 Partial classes
+
+A `partial` class is collected once. It is collected at the declaration that holds its
+`[Model]` member, or else at its first declaration, rather than at every declaration.
+
+### 25.1 Trusted assumptions
+
+* `Sorted.is_null` is an uninterpreted test (R25.4). Nothing is assumed about it except that
+  it is a function.
+* A comparer is a pure, deterministic total preorder (R22.30, shared). `Compare` has no
+  effect and does not throw.
+* `Array.BinarySearch` is the BCL's `InternalBinarySearch`: lower half on a negative
+  comparison, `~lo` on a miss. The Pulse function is proved against that specification.
+  Its agreement with the BCL is trusted.
+* `ThrowIfNull`/`ThrowIfNegative` throw exactly on the stated condition (R25.7).
+* Building an exception message has no effect and does not throw (R25.9).
+
+### 25.2 What blocks `SortedSet<T>` and `SortedDictionary<TKey,TValue>`
+
+`SortedDictionary` is a wrapper over `SortedSet<KeyValuePair<TKey,TValue>>` (`TreeSet`), so
+both wait on `SortedSet`. The harness `pal/SortedSet` in the runtime checkout gets
+through the C# compiler with R25.11 and R25.12, and is then refused. These are the
+obstacles, in the order a verification would meet them, each with what pal-csharp needs:
+
+1. **A generic class hierarchy.** The nested `TreeSubSet : SortedSet<T>` (the view
+   `GetViewBetween` returns) overrides `FindNode`, `MinInternal`, `MaxInternal`,
+   `IsWithinRange` and `VersionCheck`, and `Contains`/`Min`/`Max` dispatch through them.
+   R15.1 refuses a generic base (PALCS0581). Treating `SortedSet<T>` as closed (R22.5) would
+   be unsound, because a `TreeSubSet` receiver runs the overrides. *Needs:* §9's vtables at
+   a type parameter, and contracts on `internal virtual` members that the overrides are
+   checked against.
+2. **Auto-properties as a node's fields.** `Node`'s `Item`, `Left`, `Right` and `Color` are
+   `{ get; set; }`. A read of `current.Left` is taken as a member call (PALCS0523), not as
+   the field R10.5's `[Model]` would be written over. *Needs:* an auto-property of a
+   recursive class read and written as its backing field.
+3. **A recursive structure owned through another object's field.** The tree hangs off
+   `SortedSet.root`. §10 opens a node's window only at an `if` whose whole condition is the
+   null test of a local or a parameter (R10.7). `root == null` on a field, and
+   `FindNode(item) != null` as a value, are refused (PALCS0569, PALCS0593, `IrNull`). A
+   `[Spec]` struct cannot hold a `SpecTree` either (PALCS0511), so the model cannot pair the
+   tree with its comparer. *Needs:* a class field of recursive type owned through
+   `__inv_opt`, with the window opened at a field null test, and `SpecTree` admitted as a
+   ghost struct field.
+4. **Iterative descent.** `FindNode`, `MinInternal`, `MaxInternal` and every mutator walk
+   the tree with a `while` loop over `current`. §10.7: a loop over a derived recursive
+   invariant cannot name the part already passed. §16 (`test/tree_cursor`) does it for a
+   `[Plain]` node with a hand-written one-hole-context predicate and a ghost lemma call per
+   step. That is admissible in place (ghost statements only), but `[Plain]` excludes a
+   `[Model]` owner. *Needs:* a derived path predicate (zipper) for a §10 class, so that
+   a descent loop's invariant can be `Spine(root, cur) ** Holds(cur, sub)`.
+5. **`return` inside a loop.** `FindNode` returns the matching node from inside its loop.
+   R5.5b refuses that rather than invent a flag.
+6. **Returning an interior pointer.** `FindNode` returns a `Node` that the tree still owns.
+   `Contains` only tests it against `null`, but its contract must say what the caller
+   holds. *Needs:* a borrowed (magic-wand) return, or a ghost-only nullness result.
+7. **The order lives outside the nodes.** The BST invariant (`Item`s ascend under the set's
+   comparer) has to be a `[Refine]` on the set's model, over the tree, using a
+   `tree_sorted c t` analogue of `strictly_sorted`. A node's derived invariant cannot
+   mention the comparer. This is a small library addition once 3 holds.
+8. **Insertion and deletion.** These are top-down 2-3-4 algorithms with four simultaneous
+   interior pointers (`current`, `parent`, `grandParent`, `greatGrandParent`) and rotations
+   that re-link them. Beyond the red-black colour invariants, they need simultaneous
+   ownership of several overlapping path segments, which is beyond §16's single cursor.
+
+`comparer = default!` (a field initialiser of `default` at a comparer type) is also refused.
+That is minor: it could be R25.4's null comparer.

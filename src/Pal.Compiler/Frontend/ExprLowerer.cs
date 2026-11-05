@@ -123,6 +123,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 Default(node, loc),
             LiteralExpressionSyntax l => LowerLiteral(l, loc),
             ThisExpressionSyntax => new IrVar(loc, Names.This),
+            // R23.13. The empty collection expression at a one-dimensional array type is
+            // `Array.Empty<T>()` (R23.1).
+            CollectionExpressionSyntax { Elements.Count: 0 } ce when !SpecPosition &&
+                model.GetTypeInfo(ce).ConvertedType is IArrayTypeSymbol { Rank: 1 } emptyArray &&
+                known.MapType(emptyArray) is IrArrayType emptyType =>
+                new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType },
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
@@ -303,6 +309,36 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         };
     }
 
+    /// <summary>
+    /// R25.9. An argument of a BCL exception's constructor that only builds its message: a
+    /// constant, a `nameof`, a parameter or local read, a resource string `SR.X`, and
+    /// `SR.Format` or `ToString()` over such. Messages are not modelled (R21.7), so these
+    /// are not evaluated; that evaluating one has no effect and does not throw is trusted.
+    /// </summary>
+    private bool IsMessageArgument(ExpressionSyntax e)
+    {
+        if (model.GetConstantValue(e).HasValue) return true;
+        switch (e)
+        {
+            case ParenthesizedExpressionSyntax p: return IsMessageArgument(p.Expression);
+            case CastExpressionSyntax c: return IsMessageArgument(c.Expression);
+            case IdentifierNameSyntax:
+                return model.GetSymbolInfo(e).Symbol is IParameterSymbol or ILocalSymbol;
+            case MemberAccessExpressionSyntax:
+                return model.GetSymbolInfo(e).Symbol is IPropertySymbol { IsStatic: true } sr &&
+                       sr.ContainingType.Name == "SR";
+            case InvocationExpressionSyntax inv when model.GetSymbolInfo(inv).Symbol is IMethodSymbol m:
+                if (m is { IsStatic: true, Name: "Format" } && m.ContainingType.Name == "SR")
+                    return inv.ArgumentList.Arguments.All(a => IsMessageArgument(a.Expression));
+                if (m is { IsStatic: false, Name: "ToString", Parameters.Length: 0 } &&
+                    inv.Expression is MemberAccessExpressionSyntax ts)
+                    return IsMessageArgument(ts.Expression);
+                return false;
+            default:
+                return false;
+        }
+    }
+
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
         // R21.1. A case record is built by its F* constructor.
@@ -325,7 +361,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             var args = node.ArgumentList?.Arguments ?? default;
             if (node.Initializer is not null ||
-                args.Any(a => !model.GetConstantValue(a.Expression).HasValue))
+                args.Any(a => !IsMessageArgument(a.Expression)))
             {
                 diagnostics.Error("PALCS0628", loc,
                     $"`{Trim(node)}`. An exception the BCL declares translates when it is built " +
@@ -758,6 +794,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrLiteral(loc, null);
     }
 
+    /// <summary>
+    /// R21.7, R23.3. An argument of a BCL exception's constructor is not modelled, so it is
+    /// not evaluated: a constant, or a read of a local or parameter, which has no effect to lose.
+    /// </summary>
+    private bool UnevaluatedExceptionArgument(ExpressionSyntax e) =>
+        model.GetConstantValue(e).HasValue ||
+        (e is IdentifierNameSyntax && model.GetSymbolInfo(e).Symbol is ILocalSymbol or IParameterSymbol);
+
     private static bool IsPureValue(IrExpr e) => e switch
     {
         IrLiteral { Value: not null } or IrNull => true,
@@ -924,6 +968,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var receiverType = model.GetTypeInfo(node.Expression).Type;
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        // R25.1. `Comparer<T>.Default` is the default comparer at `T`.
+        if (symbol is IPropertySymbol { IsStatic: true, Name: "Default" } dp &&
+            Sorted.IsComparerSymbol(dp.ContainingType) &&
+            known.MapType(dp.ContainingType.TypeArguments[0]) is { } dt)
+            return new IrSpecOp(loc, Sorted.Order + ".default_comparer", [])
+                { TypeArgs = [dt], Type = known.MapType(dp.Type) };
         // R21.8. A constant of a `[SpecType]` enum is its constructor.
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []);
@@ -1189,6 +1239,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // the `null` of a reference comparison as `object`, which has no translation.
         if (op is BinOp.Eq or BinOp.Ne)
         {
+            // R25.4. A type parameter or a comparer is null when `is_null` says so.
+            if ((right is IrNull && Sorted.HasOpaqueNull(left.Type)) ||
+                (left is IrNull && Sorted.HasOpaqueNull(right.Type)))
+            {
+                var test = Sorted.IsNull(loc, right is IrNull ? left : right);
+                return op is BinOp.Eq ? test : new IrUnary(loc, UnOp.Not, test) { Type = IrPrim.Bool };
+            }
             if (right is IrNull && right.Type is not IrOptionType && left.Type is IrOptionType lt)
                 right = right with { Type = lt };
             else if (left is IrNull && left.Type is not IrOptionType && right.Type is IrOptionType rt)
@@ -1215,6 +1272,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var tested = Lower(node.Left);
         var fallback = Lower(node.Right);
+        // R25.4. A comparer that may be null, with a fallback: `if is_null c then d else c`.
+        if (Sorted.IsComparer(tested.Type) && !HasEffect(tested))
+            return new IrConditional(loc, Sorted.IsNull(loc, tested), fallback, tested) { Type = tested.Type };
         if (tested.Type is not IrOptionType inner) return Unsupported(node, loc);
 
         var prelude = ImmutableArray.CreateBuilder<IrStmt>();
@@ -1486,7 +1546,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],
-            IrNewArray n => [n.Length],
+            IrNewArray n => n.Source is { } src ? [n.Length, src] : [n.Length],
             IrContents c => [c.Array],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
@@ -1571,6 +1631,64 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrArraySearch(loc, method.Name == "LastIndexOf",
                 Lower(args[0].Expression), Lower(args[1].Expression),
                 Lower(args[2].Expression), Lower(args[3].Expression)) { Type = IrPrim.Int };
+
+        // R23.5. `Array.LastIndexOf(a, x, startIndex)` searches `[0, startIndex]`: it is the
+        // four-argument search with `count = startIndex + 1`, the index evaluated once.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "LastIndexOf", IsGenericMethod: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 3 &&
+            method.Parameters[2].Type.SpecialType == SpecialType.System_Int32 &&
+            Lower(args[2].Expression) is var lastStart && !HasEffect(lastStart))
+            return new IrArraySearch(loc, true,
+                Lower(args[0].Expression), Lower(args[1].Expression), lastStart,
+                new IrBinary(loc, BinOp.Add, lastStart, new IrLiteral(loc, 1) { Type = IrPrim.Int }) { Type = IrPrim.Int })
+                { Type = IrPrim.Int };
+
+        // R23.1. `Array.Empty<T>()` is read, in code, as a fresh `new T[0]`, as R22.8 reads
+        // a class's own shared empty array.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "Empty", IsGenericMethod: true, Parameters.Length: 0 } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array &&
+            known.MapType(method.ReturnType) is IrArrayType emptyType)
+            return new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType };
+
+        // R23.12. `Math.Min(a, b)` and `Math.Max(a, b)` at `int`, with effect-free arguments,
+        // are the conditionals they compute.
+        if (method is { IsStatic: true, Name: "Min" or "Max", Parameters.Length: 2 } &&
+            method.ContainingType?.ToDisplayString() == "System.Math" &&
+            method.Parameters.All(p => p.Type.SpecialType == SpecialType.System_Int32))
+        {
+            var a = Lower(node.ArgumentList.Arguments[0].Expression);
+            var b = Lower(node.ArgumentList.Arguments[1].Expression);
+            if (!HasEffect(a) && !HasEffect(b))
+            {
+                var op = method.Name == "Min" ? BinOp.Le : BinOp.Ge;
+                return new IrConditional(loc, new IrBinary(loc, op, a, b) { Type = IrPrim.Bool }, a, b)
+                    { Type = IrPrim.Int };
+            }
+        }
+
+        // R25.1. `c.Compare(x, y)` on a comparer is the comparison the model gives it.
+        if (method is { IsStatic: false, Name: "Compare", Parameters.Length: 2 } &&
+            Sorted.IsComparerSymbol(method.ContainingType) &&
+            node.Expression is MemberAccessExpressionSyntax cmp)
+            return new IrSpecOp(loc, Sorted.Module + ".compare_i32",
+                [Lower(cmp.Expression), Lower(args[0].Expression), Lower(args[1].Expression)])
+                { Type = IrPrim.Int, MachineArgs = true };
+
+        // R25.5. `Array.BinarySearch<T>(a, index, length, value, comparer)` reads `a`.
+        if (!SpecPosition &&
+            method is { IsStatic: true, Name: "BinarySearch", IsGenericMethod: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 5 &&
+            args.All(a => a.NameColon is null))
+        {
+            var comparer = Lower(args[4].Expression);
+            if (model.GetTypeInfo(args[4].Expression).Nullability.FlowState != NullableFlowState.NotNull)
+                comparer = Sorted.OrDefault(loc, comparer);
+            return new IrArrayBinarySearch(loc,
+                Lower(args[0].Expression), Lower(args[1].Expression), Lower(args[2].Expression),
+                Lower(args[3].Expression), comparer) { Type = IrPrim.Int };
+        }
 
         // R22.26. `RuntimeHelpers.IsReferenceOrContainsReferences<T>()` is a constant per
         // type that the JIT folds; to the proof it is an unknown one.
@@ -1836,6 +1954,30 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSeqOp(loc, SeqOpKind.Splice, [Arg(0), Arg(1), Arg(2), Arg(3)]);
             case nameof(PalLang.Pal.Rotate):
                 return new IrSeqOp(loc, SeqOpKind.Rotate, [Arg(0), Arg(1)]);
+            // R23.10. A circular buffer's live elements.
+            case nameof(PalLang.Pal.Ring):
+                return new IrSpecOp(loc, "CS.ring", [Arg(0), Arg(1), Arg(2)])
+                    { Type = known.MapType(method.ReturnType) };
+            // §25. Comparers and sorted sequences.
+            case nameof(PalLang.Pal.Compare):
+                return new IrSpecOp(loc, "Pulse.Lib.CSharp.Order.compare", [Arg(0), Arg(1), Arg(2)])
+                    { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.IsNull):
+                return new IrSpecOp(loc, Sorted.Module + ".is_null", [Arg(0)])
+                    { Type = IrPrim.Bool, MachineArgs = true };
+            case nameof(PalLang.Pal.Sorted):
+                return new IrSpecOp(loc, Sorted.Module + ".sorted", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.StrictlySorted):
+                return new IrSpecOp(loc, Sorted.Module + ".strictly_sorted", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.BinarySearch):
+                return new IrSpecOp(loc, Sorted.Module + ".range_search",
+                    [Arg(0), Arg(1), Arg(2), Arg(3), Arg(4)]) { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.KeyIndex):
+                return new IrSpecOp(loc, Sorted.Module + ".key_index", [Arg(0), Arg(1), Arg(2)])
+                    { Type = IrPrim.SpecIntType };
+            case nameof(PalLang.Pal.LowerBound):
+                return new IrSpecOp(loc, Sorted.Module + ".lower_bound", [Arg(0), Arg(1), Arg(2)])
+                    { Type = IrPrim.SpecIntType };
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             case nameof(PalLang.Pal.InlinePulse) when ConstantString(args[0].Expression) is { } text:

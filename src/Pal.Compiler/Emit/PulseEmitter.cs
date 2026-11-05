@@ -1289,6 +1289,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine();
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
+        if (method.RlimitFactor is { } factor)
+        {
+            sb.AppendLine($"#set-options \"--z3rlimit_factor {factor}\"");
+            sb.AppendLine();
+        }
 
         var origins = ImmutableArray.CreateBuilder<LineOrigin>();
 
@@ -1470,8 +1475,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrElement el: CollectExpr(el.Array); CollectExpr(el.Index); return;
                 case IrLength l: CollectExpr(l.Array); return;
                 case IrOld o: CollectExpr(o.Operand); return;
-                case IrNewArray na: CollectExpr(na.Length); return;
+                case IrNewArray na: CollectExpr(na.Length); if (na.Source is { } nas) CollectExpr(nas); return;
                 case IrArraySearch se: CollectExpr(se.Array); CollectExpr(se.Item); CollectExpr(se.Start); CollectExpr(se.Count); return;
+                case IrArrayBinarySearch bs: CollectExpr(bs.Array); CollectExpr(bs.Start); CollectExpr(bs.Count); CollectExpr(bs.Item); CollectExpr(bs.Comparer); return;
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
                 case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;

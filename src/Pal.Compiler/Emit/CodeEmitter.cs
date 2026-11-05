@@ -361,8 +361,7 @@ public sealed class CodeEmitter(
             // R22.11, in tail position. `unreachable ()` has every type, so it is the
             // block's value, and no epilogue follows it: behind it nothing is held.
             case IrExprStmt { Expr: IrCall { DoesNotReturn: true } dnr }:
-                ReleaseForThrow(plan);
-                Line(Expr(dnr) + ";");
+                DoesNotReturnCall(dnr, plan);
                 Line("unreachable ()");
                 return;
 
@@ -604,6 +603,12 @@ public sealed class CodeEmitter(
                 case IrPrim or IrTypeParamType or IrNamedType:
                     value = Default(field.Type);
                     break;
+                // R25.1. A comparer's stand-in is the default comparer, under the same
+                // condition as an array's: it is never observed.
+                case IrUserSpecType { Args: [var cmpElement] } cmp
+                    when Frontend.Sorted.IsComparer(cmp) && (assigned is null || assigned.Contains(field.Name)):
+                    value = $"({Frontend.Sorted.Order}.default_comparer {Types.Render(cmpElement)})";
+                    break;
                 default:
                     diagnostics.Unsupported(method.Loc,
                         $"A constructor that does not assign `{field.Name}` on every path",
@@ -630,10 +635,22 @@ public sealed class CodeEmitter(
 
     /// <summary>
     /// R22.12. Whether Pulse's join after this <c>if</c> would lose what the method needs:
-    /// an open object's array field replaced, or an array's contents copied into (R22.20).
+    /// an open object's array field replaced, an array's contents copied into (R22.20), or a
+    /// closed receiver's model moved by a call (R25.10).
     /// </summary>
     private bool JoinLoses(IrIf i) =>
-        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i);
+        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i) ||
+        MutatesClosedReceiver(i);
+
+    /// <summary>
+    /// R25.10. Whether an arm calls a method that moves a receiver's model: the call leaves
+    /// the receiver's post-state under an existential, and Pulse's join generalises it afresh,
+    /// losing both what the call ensured about it and, in the other arm, that it is unchanged.
+    /// </summary>
+    private static bool MutatesClosedReceiver(IrStmt s) =>
+        Passes.Check.Statements(s).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.MutatesReceiver && c.Args is [IrVar, ..]);
 
     /// <summary>
     /// R22.15, R22.12. A <c>return</c> or declaration whose value is <c>a &amp;&amp; b</c>,
@@ -643,6 +660,8 @@ public sealed class CodeEmitter(
     /// </summary>
     private IrStmt SplitShortCircuit(IrStmt s)
     {
+        if (s is IrIf { Else: null, Cond: IrBinary { Op: BinOp.Or } or } guard && IsThrowBlock(guard.Then))
+            return SplitGuard(guard, or);
         if (_objects.Length == 0) return s;
         var value = s switch { IrReturn r => r.Value, IrLocalDecl d => d.Init, _ => null };
         (IrExpr Cond, IrExpr Then, IrExpr Else)? arms = value switch
@@ -664,6 +683,36 @@ public sealed class CodeEmitter(
         };
         return new IrIf(s.Loc, a.Cond, With(a.Then), With(a.Else));
     }
+
+    /// <summary>
+    /// R23.8. A guard <c>if (a || b) throw ...;</c> is <c>if (a) throw ...; else if (b) throw ...;</c>.
+    /// Emitted as one <c>if</c>, a <c>b</c> that needs statements (an array's length, a
+    /// field read) makes the condition a bound <c>bool</c> that Pulse knows nothing about,
+    /// and what follows the guard cannot use its failure; split, each disjunct's failure
+    /// is a path condition of its own. The throw is duplicated, which is harmless: it is
+    /// reached on exactly the paths it was.
+    /// </summary>
+    private static IrIf SplitGuard(IrIf guard, IrBinary or)
+    {
+        IrIf Part(IrExpr cond) => cond is IrBinary { Op: BinOp.Or } inner
+            ? SplitGuard(guard with { Cond = inner }, inner)
+            : guard with { Cond = cond };
+        var right = Part(or.Right);
+        var left = Part(or.Left);
+        return Attach(left, right);
+
+        static IrIf Attach(IrIf chain, IrStmt tail) => chain.Else is IrIf next
+            ? chain with { Else = Attach(next, tail) }
+            : chain with { Else = tail };
+    }
+
+    private static bool IsThrowBlock(IrStmt s) => s switch
+    {
+        IrThrow => true,
+        IrExprStmt { Expr: IrCall { DoesNotReturn: true } } => true,
+        IrBlock { Statements: [.., var last] } => IsThrowBlock(last),
+        _ => false,
+    };
 
     /// <summary>R22.15. Whether an arm calls a method on an open receiver, which reopens it afresh.</summary>
     private bool CallsOpenReceiver(IrStmt s) =>
@@ -1691,8 +1740,7 @@ public sealed class CodeEmitter(
                 // R22.11. The call raises or diverges, so what this method holds goes back
                 // first, exactly as at a `throw`; the callee's `ensures false` then makes
                 // the rest of the block unreachable, whatever it expects to hold.
-                ReleaseForThrow(plan);
-                Line(Expr(dnr) + ";");
+                DoesNotReturnCall(dnr, plan);
                 Line("unreachable ();");
                 return;
 
@@ -1858,9 +1906,13 @@ public sealed class CodeEmitter(
     /// is <c>alloc_empty</c>: a generic class's empty array is then no reason to ask the
     /// caller for a <c>default(T)</c>.
     /// </summary>
-    private string NewArray(IrNewArray na) => na.Length is IrLiteral { Value: 0 or 0L }
-        ? $"alloc_empty #({Types.Render(na.Element)}) ()"
-        : $"alloc {Expr(na.Length)} {Default(na.Element)}";
+    private string NewArray(IrNewArray na) => na switch
+    {
+        // R23.4. `Array.Resize(ref a, n)`: a fresh array holding `a`'s first cells.
+        { Source: { } src } => $"Pulse.Lib.CSharp.QueueStack.resize {Expr(src)} {Expr(na.Length)}",
+        { Length: IrLiteral { Value: 0 or 0L } } => $"alloc_empty #({Types.Render(na.Element)}) ()",
+        _ => $"alloc {Expr(na.Length)} {Default(na.Element)}",
+    };
 
     private static string Default(IrType type) => type switch
     {
@@ -2491,14 +2543,14 @@ public sealed class CodeEmitter(
     /// not mention because the caller never receives it, and which may be thrown out of
     /// before its invariant holds: its representation is discarded as it stands.
     /// </summary>
-    private void ReleaseForThrow(MethodPlan plan)
+    private bool ReleaseForThrow(MethodPlan plan)
     {
         if (_tryMarks.Count > 0)
         {
             DropLocals(null, _tryMarks[^1]);
-            return;
+            return false;
         }
-        if (!NeedsEpilogue) return;
+        if (!NeedsEpilogue) return false;
         if (_method is { IsConstructor: true } &&
             _objects.FirstOrDefault(o => o.Binder == Names.Result) is { } built)
         {
@@ -2507,10 +2559,25 @@ public sealed class CodeEmitter(
             CloseObjects(_method, plan);
             _objects = saved;
             DropRepresentation(built);
-            return;
+            return false;
         }
         CloseObjects(_method!, plan);
+        return true;
     }
+
+    /// <summary>
+    /// R22.11 with R23.7. A call to a <c>[DoesNotReturn]</c> method: what this method holds goes
+    /// back first, as at a <c>throw</c>. When that closed the receiver, a call on it is
+    /// made on the closed receiver as it stands: R22.15's bracket would close it twice.
+    /// </summary>
+    private void DoesNotReturnCall(IrCall dnr, MethodPlan plan)
+    {
+        _receiverClosedForThrow = ReleaseForThrow(plan);
+        try { Line(Expr(dnr) + ";"); }
+        finally { _receiverClosedForThrow = false; }
+    }
+
+    private bool _receiverClosedForThrow;
 
     /// <summary>R22.11. Discards an open object's box and the arrays its fields own.</summary>
     private void DropRepresentation(Slot obj)
@@ -2822,6 +2889,12 @@ public sealed class CodeEmitter(
             case GhostKind.Assert:
                 Line($"assert (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
+            // R23.6. Two arrays this method holds are distinct when one of them has a cell:
+            // whole permission to each could not otherwise be held at once.
+            case GhostKind.DebugAssert when g.Prop is IrBinary
+                { Op: BinOp.Ne, Left.Type: IrArrayType, Right.Type: IrArrayType } distinct:
+                Line($"Pulse.Lib.CSharp.QueueStack.distinct {Expr(distinct.Left)} {Expr(distinct.Right)};");
+                return;
             case GhostKind.DebugAssert:
             {
                 var c = Fresh();
@@ -3098,6 +3171,18 @@ public sealed class CodeEmitter(
                 return t;
             }
 
+            case IrArrayBinarySearch bs:
+            {
+                var array = Atom(Expr(bs.Array));
+                var start = Atom(Expr(bs.Start));
+                var count = Atom(Expr(bs.Count));
+                var item = Atom(Expr(bs.Item));
+                var comparer = Atom(Expr(bs.Comparer));
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.Sorted.range_search_array {array} {start} {count} {item} {comparer};");
+                return t;
+            }
+
             case IrOrderBy ob:
             {
                 var source = Expr(ob.Source);
@@ -3353,7 +3438,7 @@ public sealed class CodeEmitter(
         // closed around the call and reopened after it. The fold is checked like any
         // other -- an invariant that does not hold at the call is Pulse's error, not an
         // assumption -- and the reopening names whatever model the callee left.
-        var self = call.HasReceiver && raw.Length > 0 && _windows.Count == 0
+        var self = call.HasReceiver && raw.Length > 0 && _windows.Count == 0 && !_receiverClosedForThrow
             ? _objects.FirstOrDefault(o => o.Binder == raw[0] && o.ViewBase is null)
             : null;
         if (self is not null) CloseObject(_method!, self);

@@ -97,9 +97,16 @@ Both forms lower to the same thing. Mix them freely.
 | `IsPermutation(s, t)` | `s` is a rearrangement of `t` |
 | `SetAt(s, i, v)`, `Slice(s, i, j)` | ghost sequence update and subsequence |
 | `Splice(s, i, j, t)`, `Reverse(s)` | `s` with `[i, j)` replaced by `t`; `s` reversed |
+| `Ring(s, h, n)` | the `n` elements of a circular buffer `s` from `h`, wrapping once (`0 <= h <= s.Length`, `0 <= n <= s.Length`; else empty) |
 | `IndexOf(s, x)`, `IndexOf(s, x, i, n)` | first match of `x` in `s` (or in `[i, i+n)`), else `-1` |
 | `LastIndexOf(s, x)`, `LastIndexOf(s, x, index, count)` | last match, searching back from `index` over `count` elements |
 | `DefaultEquals(a, b)` | `EqualityComparer<T>.Default.Equals(a, b)` |
+| `Compare(c, x, y)` | `c.Compare(x, y)` for a ghost comparer `c` (an `IComparer<T>`), up to sign (R25.6) |
+| `IsNull(x)` | `x` is `null`, for a type parameter or a comparer (R25.4) |
+| `Sorted(c, s)`, `StrictlySorted(c, s)` | `s` ascends under `c`, allowing / forbidding equal neighbours (R25.6) |
+| `LowerBound(c, s, x)` | the number of elements of `s` less than `x` under `c`: where `x` goes (R25.6) |
+| `KeyIndex(c, s, x)` | the position of `x` in a strictly sorted `s`, else `-1` (R25.6) |
+| `BinarySearch(c, s, i, n, x)` | what `Array.BinarySearch(a, i, n, x, c)` returns on contents `s` (R25.5) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
@@ -750,6 +757,7 @@ admitted lemma is assumed rather than proved.
 | `[Lemma]` | this method is a proof step; must return `void` |
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
+| `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 
 Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**

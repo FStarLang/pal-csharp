@@ -255,6 +255,52 @@ public static class Pal
     /// </summary>
     public static Seq<T> Rotate<T>(Seq<T> s, int offset) => throw Ghost();
 
+    /// <summary>
+    /// R23.10. The <paramref name="count"/> elements of the circular buffer
+    /// <paramref name="s"/> read from <paramref name="start"/>, wrapping round once:
+    /// <c>Ring(s, h, n)[k] == s[h + k &lt; s.Length ? h + k : h + k - s.Length]</c>. Meaningful when
+    /// <c>0 &lt;= h &lt;= s.Length</c> and <c>0 &lt;= n &lt;= s.Length</c>; empty otherwise.
+    /// </summary>
+    public static Seq<T> Ring<T>(Seq<T> s, SpecInt start, SpecInt count) => throw Ghost();
+
+    // -- Comparers and sorted sequences (doc/translation.md §25) ---------------
+
+    /// <summary>
+    /// R25.6. <c>comparer.Compare(x, y)</c>, up to sign: negative, zero or positive as
+    /// <paramref name="x"/> is below, equivalent to, or above <paramref name="y"/>.
+    /// </summary>
+    public static SpecInt Compare<T>(System.Collections.Generic.IComparer<T> comparer, T x, T y) => throw Ghost();
+
+    /// <summary>R25.4. <paramref name="value"/> is the null reference.</summary>
+    public static bool IsNull<T>(T value) => throw Ghost();
+
+    /// <summary>R25.6. Each element of <paramref name="s"/> is at most every later one.</summary>
+    public static bool Sorted<T>(System.Collections.Generic.IComparer<T> comparer, Seq<T> s) => throw Ghost();
+
+    /// <summary>R25.6. Each element of <paramref name="s"/> is below every later one.</summary>
+    public static bool StrictlySorted<T>(System.Collections.Generic.IComparer<T> comparer, Seq<T> s) => throw Ghost();
+
+    /// <summary>
+    /// R25.5. What <c>Array.BinarySearch(s, index, count, value, comparer)</c> returns: the
+    /// position of an element equivalent to <paramref name="value"/>, or the complement of
+    /// where it would go.
+    /// </summary>
+    public static SpecInt BinarySearch<T>(System.Collections.Generic.IComparer<T> comparer, Seq<T> s,
+        SpecInt index, SpecInt count, T value) => throw Ghost();
+
+    /// <summary>
+    /// R25.6. The number of elements of <paramref name="s"/> below <paramref name="value"/>:
+    /// where it goes in a sorted <paramref name="s"/>.
+    /// </summary>
+    public static SpecInt LowerBound<T>(System.Collections.Generic.IComparer<T> comparer, Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>
+    /// R25.6. In a strictly sorted <paramref name="s"/>, the position of the element
+    /// equivalent to <paramref name="value"/>, or -1: <c>LowerBound</c> when what is there
+    /// compares equal.
+    /// </summary>
+    public static SpecInt KeyIndex<T>(System.Collections.Generic.IComparer<T> comparer, Seq<T> s, T value) => throw Ghost();
+
     // -- Separation-logic propositions -------------------------------------
 
     /// <summary>The points-to resource for a location, Pulse's <c>pts_to</c>.</summary>

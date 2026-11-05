@@ -330,7 +330,7 @@ public sealed class StmtLowerer(
                 return Step(p.Operand, BinOp.Sub, loc);
 
             case InvocationExpressionSyntax call:
-                return LowerCallStatement(call, loc);
+                return RefFieldCopy(call, loc) ?? LowerCallStatement(call, loc);
 
             default:
                 return UnsupportedStatement(expression, loc);
@@ -393,6 +393,62 @@ public sealed class StmtLowerer(
     /// A call in statement position is either a proof-annotation intrinsic, a
     /// <c>[Lemma]</c> application, or an ordinary method call.
     /// </summary>
+    /// <summary>
+    /// R23.11. <c>M(ref f)</c>, where <c>f</c> is a scalar field of the receiver and <c>M</c> an
+    /// instance method of the same class called on it, whose body neither names <c>f</c> nor
+    /// calls anything: the call is <c>{ var t = f; M(ref t); f = t; }</c>. A by-reference
+    /// argument is a cell (R6.10) and a field is not one; copying in and out is the same
+    /// program because <c>M</c> can observe <c>f</c> only through its parameter.
+    /// </summary>
+    private IrStmt? RefFieldCopy(InvocationExpressionSyntax node, IrLoc loc)
+    {
+        if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol { IsStatic: false, MethodKind: MethodKind.Ordinary } method)
+            return null;
+        if (node.Expression is not (IdentifierNameSyntax or
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }))
+            return null;
+        var refs = node.ArgumentList.Arguments
+            .Select((a, i) => (Arg: a, Index: i))
+            .Where(x => x.Arg.RefKindKeyword.IsKind(SyntaxKind.RefKeyword))
+            .ToList();
+        if (refs is not [var (arg, _)]) return null;
+        if (arg.Expression is not (IdentifierNameSyntax or
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }))
+            return null;
+        if (model.GetSymbolInfo(arg.Expression).Symbol is not IFieldSymbol { IsStatic: false } field ||
+            !SymbolEqualityComparer.Default.Equals(field.ContainingType.OriginalDefinition,
+                method.ContainingType.OriginalDefinition) ||
+            !field.Type.IsValueType || known.MapType(field.Type) is not IrPrim fieldType)
+            return null;
+        if (method.DeclaringSyntaxReferences is not [var decl]) return null;
+        var body = decl.GetSyntax();
+        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        foreach (var n in body.DescendantNodes())
+        {
+            if (n is InvocationExpressionSyntax inv &&
+                !(inv.Expression is IdentifierNameSyntax { Identifier.ValueText: "nameof" }))
+                return null;
+            if (n is IdentifierNameSyntax id &&
+                SymbolEqualityComparer.Default.Equals(calleeModel.GetSymbolInfo(id).Symbol?.OriginalDefinition,
+                    field.OriginalDefinition))
+                return null;
+        }
+
+        var lowered = LowerCallStatement(node, loc);
+        if (lowered is not IrExprStmt { Expr: IrCall call }) return lowered;
+        var temp = Fresh("ref");
+        var cell = new IrVar(loc, temp) { Type = fieldType };
+        var target = _code.Lower(arg.Expression);
+        var args = call.Args.Select(a => a is IrRefArg { Operand: IrField } r ? r with { Operand = cell } : a)
+            .ToImmutableArray();
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(loc, temp, fieldType, target),
+            new IrExprStmt(loc, call with { Args = args }),
+            new IrAssign(loc, target, cell),
+        ]);
+    }
+
     private IrStmt LowerCallStatement(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method)
@@ -445,6 +501,10 @@ public sealed class StmtLowerer(
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
+        // R23.2, R25.7. The BCL's argument guards are the `if … throw` they abbreviate.
+        if (ArgumentGuard(method, args, loc) is { } guard)
+            return guard;
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -452,6 +512,21 @@ public sealed class StmtLowerer(
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
             ArrayBulkOp(method, args, loc) is { } bulk)
             return bulk;
+
+        // R23.4. `Array.Resize(ref a, n)` replaces `a` by a fresh array of length `n`.
+        if (method is { IsStatic: true, Name: "Resize", IsGenericMethod: true } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 2 &&
+            args[0].RefKindKeyword.IsKind(SyntaxKind.RefKeyword) &&
+            model.GetTypeInfo(args[0].Expression).Type is IArrayTypeSymbol { Rank: 1 } resized &&
+            known.MapType(resized) is IrArrayType resizedType)
+        {
+            if (resized.ElementType is ITypeParameterSymbol rtp)
+                _code.DefaultedTypeParameters.Add(rtp.Name);
+            var target = _code.Lower(args[0].Expression);
+            return new IrAssign(loc, target,
+                new IrNewArray(loc, resizedType.Element, _code.Lower(args[1].Expression))
+                { Source = target, Type = resizedType });
+        }
 
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)
@@ -629,6 +704,84 @@ public sealed class StmtLowerer(
             IMethodSymbol m => m.ReturnType,
             _ => null,
         };
+
+    /// <summary>
+    /// R23.2. <c>ArgumentOutOfRangeException.ThrowIfNegative(v)</c> and its siblings, at an
+    /// integer type, are <c>if (v &lt; 0) throw new ArgumentOutOfRangeException();</c> and so
+    /// on; <c>ArgumentNullException.ThrowIfNull(x)</c> at a non-nullable array or class type
+    /// is nothing, since such a reference is not null (R10). The parameter-name argument
+    /// the compiler supplies is a constant and is not evaluated. Null for any other call.
+    /// </summary>
+    private IrStmt? ArgumentGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc) =>
+        IntegerGuard(method, args, loc) ?? OpaqueNullGuard(method, args, loc);
+
+    private IrStmt? IntegerGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        var owner = method.ContainingType?.ToDisplayString();
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
+            model.GetTypeInfo(args[0].Expression) is { Type: IArrayTypeSymbol or { TypeKind: TypeKind.Class } } nt &&
+            nt.Nullability.FlowState == NullableFlowState.NotNull &&
+            nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
+            return new IrBlock(loc, []);
+
+        if (owner != "System.ArgumentOutOfRangeException" || !method.IsGenericMethod ||
+            method.TypeArguments is not [var ty] || !IsIntegral(ty.SpecialType))
+            return null;
+        (BinOp op, bool unary)? shape = method.Name switch
+        {
+            "ThrowIfNegative" => (BinOp.Lt, true),
+            "ThrowIfNegativeOrZero" => (BinOp.Le, true),
+            "ThrowIfZero" => (BinOp.Eq, true),
+            "ThrowIfLessThan" => (BinOp.Lt, false),
+            "ThrowIfLessThanOrEqual" => (BinOp.Le, false),
+            "ThrowIfGreaterThan" => (BinOp.Gt, false),
+            "ThrowIfGreaterThanOrEqual" => (BinOp.Ge, false),
+            "ThrowIfEqual" => (BinOp.Eq, false),
+            "ThrowIfNotEqual" => (BinOp.Ne, false),
+            _ => null,
+        };
+        int operands = shape is { unary: true } ? 1 : 2;
+        if (shape is not { } s || args.Count < operands ||
+            args.Skip(operands).Any(a => !model.GetConstantValue(a.Expression).HasValue))
+            return null;
+        var type = known.MapType(ty);
+        var left = _code.Lower(args[0].Expression);
+        var right = s.unary ? new IrLiteral(loc, 0) { Type = type } : _code.Lower(args[1].Expression);
+        return new IrIf(loc, new IrBinary(loc, s.op, left, right) { Type = IrPrim.Bool },
+            new IrThrow(loc, _code.LibraryException(loc, "System.ArgumentOutOfRangeException")), null);
+
+        static bool IsIntegral(SpecialType t) => t is SpecialType.System_Int32 or SpecialType.System_Int64
+            or SpecialType.System_UInt32 or SpecialType.System_UInt64 or SpecialType.System_Int16
+            or SpecialType.System_UInt16 or SpecialType.System_Byte or SpecialType.System_SByte;
+    }
+
+    /// <summary>
+    /// R25.7. <c>ArgumentNullException.ThrowIfNull(x)</c> at a type parameter or a comparer,
+    /// and <c>ArgumentOutOfRangeException.ThrowIfNegative(n)</c> at <c>int</c>: each is
+    /// <c>if (test) throw new E(...)</c>, where the parameter name the BCL passes is not
+    /// modelled (R21.7). Any other guard is an ordinary call and is refused as one.
+    /// </summary>
+    private IrStmt? OpaqueNullGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        var owner = method.ContainingType?.ToDisplayString();
+        IrExpr test;
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
+        {
+            var value = _code.Lower(args[0].Expression);
+            if (!Sorted.HasOpaqueNull(value.Type)) return null;
+            test = Sorted.IsNull(loc, value);
+        }
+        else if (owner == "System.ArgumentOutOfRangeException" && method.Name == "ThrowIfNegative" &&
+                 model.GetTypeInfo(args[0].Expression).Type?.SpecialType == SpecialType.System_Int32)
+        {
+            test = new IrBinary(loc, BinOp.Lt, _code.Lower(args[0].Expression),
+                new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = IrPrim.Bool };
+        }
+        else return null;
+        return new IrIf(loc, test, new IrThrow(loc, _code.LibraryException(loc, owner)), null);
+    }
 
     /// <summary>
     /// R22.20, R22.25. <c>Array.Copy</c> (3- and 5-argument), <c>Array.Clear(a, i, n)</c>
