@@ -30,7 +30,7 @@ public static class Bcl
                     ? new IrUserSpecType("HashSet", F("hash_set"), [element])
                     : null;
             default:
-                return null;
+                return Sorted.MapType(type, map);
         }
     }
 

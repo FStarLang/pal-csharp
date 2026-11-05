@@ -1437,6 +1437,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrOld o: CollectExpr(o.Operand); return;
                 case IrNewArray na: CollectExpr(na.Length); return;
                 case IrArraySearch se: CollectExpr(se.Array); CollectExpr(se.Item); CollectExpr(se.Start); CollectExpr(se.Count); return;
+                case IrArrayBinarySearch bs: CollectExpr(bs.Array); CollectExpr(bs.Start); CollectExpr(bs.Count); CollectExpr(bs.Item); CollectExpr(bs.Comparer); return;
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
                 case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;

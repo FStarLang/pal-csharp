@@ -34,6 +34,8 @@ public static class Program
         var timePasses = false;
         var quiet = false;
         var nullable = true;
+        var preview = false;
+        var allowUnsafe = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -54,6 +56,10 @@ public static class Program
                     }
                     nullable = mode == "enable";
                     break;
+                // R25.11. dotnet/runtime builds with `LangVersion=preview` and
+                // `AllowUnsafeBlocks`; a file from it compiles only as it is built.
+                case "--preview": preview = true; break;
+                case "--unsafe": allowUnsafe = true; break;
                 case "-h" or "--help": Usage(); return 0;
                 default:
                     if (args[i].StartsWith('-')) { Console.Error.WriteLine($"palcs: unknown option `{args[i]}`"); return 2; }
@@ -69,7 +75,7 @@ public static class Program
         var diagnostics = new DiagnosticBag();
         var watch = Stopwatch.StartNew();
 
-        var compilation = Loader.Create(sources, nullable: nullable);
+        var compilation = Loader.Create(sources, nullable: nullable, preview: preview, allowUnsafe: allowUnsafe);
         var csharpErrors = compilation.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
@@ -263,6 +269,8 @@ public static class Program
               --time-passes  report per-stage timings
           -q, --quiet        suppress the summary line
               --nullable M   compile with nullable reference types `enable`d (default) or `disable`d
+              --preview      compile with `LangVersion=preview`, as dotnet/runtime does
+              --unsafe       allow `unsafe` blocks in members that are not translated
           -h, --help         show this message
         """);
 }

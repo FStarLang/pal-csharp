@@ -372,6 +372,7 @@ public static class Normalize
             case IrLive lv: Free(lv.Operand, into); return;
             case IrNewArray na: Free(na.Length, into); return;
             case IrArraySearch se: Free(se.Array, into); Free(se.Item, into); Free(se.Start, into); Free(se.Count, into); return;
+            case IrArrayBinarySearch bs: Free(bs.Array, into); Free(bs.Start, into); Free(bs.Count, into); Free(bs.Item, into); Free(bs.Comparer, into); return;
             case IrContents ct: Free(ct.Array, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
             case IrListOp lo: foreach (var a in lo.Args) Free(a, into); return;

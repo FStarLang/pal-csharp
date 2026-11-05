@@ -641,6 +641,13 @@ public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr>
 public sealed record IrArraySearch(IrLoc Loc, bool Last, IrExpr Array, IrExpr Item, IrExpr Start, IrExpr Count)
     : IrExpr(Loc);
 
+/// <summary>
+/// R25.5. <c>Array.BinarySearch(a, index, length, value, comparer)</c>: a read of <c>a</c>
+/// that yields a position, or the complement of one.
+/// </summary>
+public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, IrExpr Count, IrExpr Item, IrExpr Comparer)
+    : IrExpr(Loc);
+
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc);
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);

@@ -445,6 +445,10 @@ public sealed class StmtLowerer(
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
+        // R25.7. The BCL's argument guards are the `if` and `throw` they stand for.
+        if (ArgumentGuard(method, args, loc) is { } guard)
+            return guard;
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -634,6 +638,33 @@ public sealed class StmtLowerer(
     /// R22.20, R22.25. <c>Array.Copy</c> (3- and 5-argument), <c>Array.Clear(a, i, n)</c>
     /// and <c>Array.Reverse(a, i, n)</c>, or null when the call is not one of them.
     /// </summary>
+    /// <summary>
+    /// R25.7. <c>ArgumentNullException.ThrowIfNull(x)</c> at a type parameter or a comparer,
+    /// and <c>ArgumentOutOfRangeException.ThrowIfNegative(n)</c> at <c>int</c>: each is
+    /// <c>if (test) throw new E(...)</c>, where the parameter name the BCL passes is not
+    /// modelled (R21.7). Any other guard is an ordinary call and is refused as one.
+    /// </summary>
+    private IrStmt? ArgumentGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        var owner = method.ContainingType?.ToDisplayString();
+        IrExpr test;
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
+        {
+            var value = _code.Lower(args[0].Expression);
+            if (!Sorted.HasOpaqueNull(value.Type)) return null;
+            test = Sorted.IsNull(loc, value);
+        }
+        else if (owner == "System.ArgumentOutOfRangeException" && method.Name == "ThrowIfNegative" &&
+                 model.GetTypeInfo(args[0].Expression).Type?.SpecialType == SpecialType.System_Int32)
+        {
+            test = new IrBinary(loc, BinOp.Lt, _code.Lower(args[0].Expression),
+                new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = IrPrim.Bool };
+        }
+        else return null;
+        return new IrIf(loc, test, new IrThrow(loc, _code.LibraryException(loc, owner)), null);
+    }
+
     private IrStmt? ArrayBulkOp(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         if (args.Count != method.Parameters.Length) return null;

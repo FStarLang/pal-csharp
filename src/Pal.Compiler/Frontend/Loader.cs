@@ -16,10 +16,11 @@ public static class Loader
     public const string PalSymbol = "PAL";
 
     public static CSharpCompilation Create(
-        IEnumerable<string> sourcePaths, string assemblyName = "PalInput", bool nullable = true)
+        IEnumerable<string> sourcePaths, string assemblyName = "PalInput", bool nullable = true,
+        bool preview = false, bool allowUnsafe = false)
     {
         var parseOptions = new CSharpParseOptions(
-            LanguageVersion.Latest,
+            preview ? LanguageVersion.Preview : LanguageVersion.Latest,
             preprocessorSymbols: [PalSymbol]);
 
         var trees = sourcePaths.Select(p =>
@@ -34,7 +35,8 @@ public static class Loader
                 OutputKind.DynamicallyLinkedLibrary,
                 nullableContextOptions: nullable
                     ? NullableContextOptions.Enable
-                    : NullableContextOptions.Disable));
+                    : NullableContextOptions.Disable,
+                allowUnsafe: allowUnsafe));
     }
 
     private static Microsoft.CodeAnalysis.Text.SourceText SourceText(string path) =>
