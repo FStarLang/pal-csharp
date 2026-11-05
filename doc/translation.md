@@ -6244,3 +6244,12 @@ for an object), so Pulse's matcher sees it by name.
 An `=>` body is lowered as code, as the block `{ return e; }` (or `{ e; }` for a void
 member, `{ throw … }` for a throw expression), so that code-only forms such as R22.25's
 searches are available in it.
+
+### R22.30 Comparers
+
+`Pulse.Lib.CSharp.Order` (trusted, R22.24) models a comparer as a ghost value of type
+`comparer t`, with `default_comparer t` for `Comparer<T>.Default` and `compare c x y`
+for `c.Compare(x, y)`, up to sign. A comparer is assumed to be a deterministic total
+preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collection's
+contract names its comparer, and how a call to `Compare` lowers, is given with the
+collection families that use it.
