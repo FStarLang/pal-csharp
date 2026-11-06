@@ -26,7 +26,8 @@ public sealed class MethodPlan
 
     private readonly SpecEmitter _spec;
 
-    public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics)
+    public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
+        ImmutableArray<IrClassType> heaps = default)
     {
         _spec = spec;
 
@@ -253,11 +254,37 @@ public sealed class MethodPlan
                     // R10.3. A *nullable* reference is owned through the recursive
                     // `__inv_opt`, whose permission is positional (F36c). One local
                     // function keeps that difference out of every line below.
+                    // R27.13. A receiver whose contract names its regions is held with the
+                    // heaps as indices, so the contract can say what they hold.
+                    var heapIndexed = p.Name == Names.This && !heaps.IsDefaultOrEmpty &&
+                                      view == klass.Name && !klass.Nullable;
+                    var moves0 = mutatedObjects.Contains(p.Name) && fraction is null;
+                    var heapSlots = heapIndexed
+                        ? heaps.Select(k => (Region: k,
+                                Pre: "pre_" + Frontend.Region.HeapBinder(k.Name),
+                                Post: moves0 ? "post_" + Frontend.Region.HeapBinder(k.Name)
+                                             : "pre_" + Frontend.Region.HeapBinder(k.Name)))
+                            .ToImmutableArray()
+                        : [];
+                    foreach (var h in heapSlots)
+                    {
+                        ghostBinders.Add($"(#{h.Pre}: erased ({Frontend.Region.Module}.heap {PulseEmitter.RegionRaw(h.Region)}))");
+                        pre.Bind(Frontend.Region.HeapName(h.Region.Name),
+                            new Term($"(reveal {h.Pre})", TermKind.Other));
+                        post.Bind(Frontend.Region.HeapName(h.Region.Name),
+                            new Term(moves0 ? h.Post : $"(reveal {h.Pre})", TermKind.Other));
+                    }
+
                     string Owned(string model) =>
                         klass.Nullable
                             ? $"{Names.ClassModule(klass.Name)}.{Names.ClassInvOpt(klass.Name)} " +
                               $"{name} {(fraction ?? "1.0R")} {model}"
-                            : $"{inv} {name} {perm}{model}";
+                            : heapIndexed
+                                ? $"{Names.ClassModule(klass.Name)}.{Names.ClassInvHeap(klass.Name)} " +
+                                  $"{name} {perm}{model} " +
+                                  string.Join(" ", heapSlots.Select(h =>
+                                      model.StartsWith("post_") ? h.Post : h.Pre))
+                                : $"{inv} {name} {perm}{model}";
 
                     // An observed object contributes no existential: its permission is
                     // precisely the right to read, so the model cannot move and the one
@@ -292,6 +319,7 @@ public sealed class MethodPlan
                     {
                         postResources.Add(Owned(postModel));
                         postExistentials.Add(postModel);
+                        foreach (var h in heapSlots) postExistentials.Add(h.Post);
                         post.Bind(p.Name, new Term(postModel, TermKind.Math, seen));
                     }
                     else
@@ -308,6 +336,7 @@ public sealed class MethodPlan
                         PostModel = moves ? postModel : preModel,
                         ViewBase = view == klass.Name ? null : view,
                         Consumed = consumed,
+                        Heaps = heapSlots,
                     };
                     break;
                 }

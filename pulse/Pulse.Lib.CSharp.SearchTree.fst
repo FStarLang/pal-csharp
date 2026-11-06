@@ -26,6 +26,12 @@ let rec find (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (x: a) (d: a)
       let o = O.compare c x v in
       if o = 0 then v else if o < 0 then find c l x d else find c r x d
 
+/// The key at the root, or `d` in the empty tree (R27.13).
+let root_key (#a #b: Type0) (t: T.tree (a & b)) (d: a) : a =
+  match t with
+  | T.Leaf -> d
+  | T.Branch _ (v, _) _ -> v
+
 /// The leftmost key, or `d` in the empty tree.
 let rec leftmost (#a #b: Type0) (t: T.tree (a & b)) (d: a) : Tot a (decreases t) =
   match t with
@@ -224,6 +230,13 @@ let contains_keys (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (x: a)
           [SMTPat (contains c t x); SMTPat (S.strictly_sorted c (keys t))]
   = find_keys c t x x
 
+let find_keys_pat (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (x d: a)
+  : Lemma (requires S.strictly_sorted c (keys t))
+          (ensures find c t x d ==
+                   (let i = S.key_index c (keys t) x in if i >= 0 then Seq.index (keys t) i else d))
+          [SMTPat (find c t x d); SMTPat (S.strictly_sorted c (keys t))]
+  = find_keys c t x d
+
 let rec leftmost_keys (#a #b: Type0) (t: T.tree (a & b)) (d: a)
   : Lemma (ensures leftmost t d == (if T.size t = 0 then d else Seq.index (keys t) 0))
           (decreases t)
@@ -241,3 +254,151 @@ let rec rightmost_keys (#a #b: Type0) (t: T.tree (a & b)) (d: a)
     | T.Leaf -> ()
     | T.Branch _ _ T.Leaf -> ()
     | T.Branch l (v, _) r -> rightmost_keys r d
+
+(* ---------------------------------------------------------------------------------- *)
+(* R27.14. The bound on a breadth-first position: `InternalIndexOf`'s true range.        *)
+
+/// `2^height`: one more than the number of breadth-first positions the tree's depth admits.
+let breadth (#a: Type0) (t: T.tree a) : pos = pow2 (T.height t)
+
+/// The search for a position starting at `k` in `t`, inside a tree of height `h`: every
+/// position it reaches, and the next one it computes, is at most `2^(h+1) - 2`.
+let index_room (#a: Type0) (k: int) (t: T.tree a) (h: int) : bool =
+  0 <= k && 0 <= h && (k + 2) * pow2 (T.height t) <= pow2 (h + 1)
+
+let index_room_init (#a: Type0) (t: T.tree a)
+  : Lemma (index_room 0 t (T.height t))
+          [SMTPat (index_room 0 t (T.height t))]
+  = FStar.Math.Lemmas.pow2_double_mult (T.height t)
+
+/// Below height 31 every position, and the next one computed from it, fits an `int`.
+let index_room_int (#a: Type0) (k: int) (t: T.tree a) (h: int)
+  : Lemma (requires index_room k t h /\ h <= 30)
+          (ensures (T.Branch? t ==> 2 * k + 2 <= 2147483646) /\ pow2 h <= 1073741824)
+          [SMTPat (index_room k t h)]
+  = FStar.Math.Lemmas.pow2_le_compat 30 h;
+    FStar.Math.Lemmas.pow2_le_compat 31 (h + 1);
+    assert_norm (pow2 31 == 2147483648);
+    assert_norm (pow2 30 == 1073741824);
+    if T.Branch? t then begin
+      FStar.Math.Lemmas.pow2_le_compat (T.height t) 1;
+      FStar.Math.Lemmas.lemma_mult_le_left (k + 2) 2 (pow2 (T.height t))
+    end
+
+let index_room_step (#a: Type0) (k: int) (l: T.tree a) (v: a) (r: T.tree a) (h: int)
+  : Lemma (requires index_room k (T.Branch l v r) h)
+          (ensures index_room (2 * k + 1) l h /\ index_room (2 * k + 2) r h /\
+                   k <= pow2 h - 2 /\ 2 * k + 2 <= pow2 (h + 1) - 2)
+          [SMTPat (index_room k (T.Branch l v r) h)]
+  = let n = T.height (T.Branch l v r) in
+    FStar.Math.Lemmas.pow2_double_mult (n - 1);
+    FStar.Math.Lemmas.pow2_le_compat (n - 1) (T.height l);
+    FStar.Math.Lemmas.pow2_le_compat (n - 1) (T.height r);
+    FStar.Math.Lemmas.pow2_le_compat n 1;
+    FStar.Math.Lemmas.pow2_double_mult h;
+    assert ((k + 2) * pow2 n == (2 * k + 4) * pow2 (n - 1));
+    FStar.Math.Lemmas.lemma_mult_le_left (2 * k + 3) (pow2 (T.height l)) (pow2 (n - 1));
+    FStar.Math.Lemmas.lemma_mult_le_left (2 * k + 4) (pow2 (T.height r)) (pow2 (n - 1));
+    FStar.Math.Lemmas.lemma_mult_le_left (k + 2) 2 (pow2 n)
+
+let rec heap_index_room (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (x: a) (k h: int)
+  : Lemma (requires index_room k t h)
+          (ensures (let i = heap_index c t x k in
+                    (i >= 0 <==> contains c t x) /\ i <= pow2 h - 2))
+          (decreases t)
+          [SMTPat (heap_index c t x k); SMTPat (index_room k t h)]
+  = match t with
+    | T.Leaf -> ()
+    | T.Branch l (v, w) r ->
+      index_room_step k l (v, w) r h;
+      let o = O.compare c x v in
+      if o = 0 then ()
+      else if o < 0 then heap_index_room c l x (2 * k + 1) h
+      else heap_index_room c r x (2 * k + 2) h
+
+let heap_index_bound (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (x: a)
+  : Lemma (let i = heap_index c t x 0 in
+           (i >= 0 <==> contains c t x) /\ i <= breadth t - 2)
+          [SMTPat (heap_index c t x 0)]
+  = index_room_init t;
+    heap_index_room c t x 0 (T.height t)
+
+(* ---------------------------------------------------------------------------------- *)
+(* R27.14. Range search: `FindRange` stops at the first node, top-down, inside the bounds. *)
+
+/// `x` is within the bounds that are active.
+let in_range (#a: Type0) (c: O.comparer a) (lo hi: a) (la ua: bool) (x: a) : bool =
+  (not la || O.compare c lo x <= 0) && (not ua || O.compare c hi x >= 0)
+
+let rec any_in_range_from (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (lo hi: a) (la ua: bool) (i: nat)
+  : Tot bool (decreases (Seq.length s - i))
+  = if i >= Seq.length s then false
+    else in_range c lo hi la ua (Seq.index s i) || any_in_range_from c s lo hi la ua (i + 1)
+
+/// Some item of `s` is within the bounds.
+let any_in_range (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (lo hi: a) (la ua: bool) : bool =
+  any_in_range_from c s lo hi la ua 0
+
+let rec any_in_range_from_exists (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (lo hi: a) (la ua: bool) (i: nat)
+  : Lemma (ensures any_in_range_from c s lo hi la ua i <==>
+                   (exists (j: nat). i <= j /\ j < Seq.length s /\ in_range c lo hi la ua (Seq.index s j)))
+          (decreases (Seq.length s - i))
+  = if i >= Seq.length s then () else any_in_range_from_exists c s lo hi la ua (i + 1)
+
+/// Whether the top-down range search finds a node, and the key it stops at.
+let rec range_hit (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Tot bool (decreases t)
+  = match t with
+    | T.Leaf -> false
+    | T.Branch l (v, _) r ->
+      if la && O.compare c lo v > 0 then range_hit c r lo hi la ua
+      else if ua && O.compare c hi v < 0 then range_hit c l lo hi la ua
+      else true
+
+let rec range_hit_keys (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Lemma (requires S.strictly_sorted c (keys t))
+          (ensures range_hit c t lo hi la ua <==>
+                   (exists (j: nat). j < Seq.length (keys t) /\ in_range c lo hi la ua (Seq.index (keys t) j)))
+          (decreases t)
+  = match t with
+    | T.Leaf -> ()
+    | T.Branch l (v, g) r ->
+      let sl = keys l in
+      let sr = keys r in
+      let n = Seq.length sl in
+      sorted_pivot c sl v sr;
+      FStar.Classical.forall_intro (index_pivot sl v sr);
+      let s = keys t in
+      assert (forall (j: nat). j < n ==> Seq.index s j == Seq.index sl j);
+      assert (forall (j: nat). j < Seq.length sr ==> Seq.index s (n + 1 + j) == Seq.index sr j);
+      assert (Seq.index s n == v);
+      if la && O.compare c lo v > 0 then begin
+        range_hit_keys c r lo hi la ua;
+        let left_out (j: nat)
+          : Lemma (j <= n ==> not (in_range c lo hi la ua (Seq.index s j)))
+          = if j < n then O.compare_trans c (Seq.index sl j) v lo else ()
+        in
+        FStar.Classical.forall_intro left_out;
+        let move (j: nat)
+          : Lemma (n < j /\ j < Seq.length s ==> Seq.index s j == Seq.index sr (j - n - 1))
+          = ()
+        in
+        FStar.Classical.forall_intro move
+      end
+      else if ua && O.compare c hi v < 0 then begin
+        range_hit_keys c l lo hi la ua;
+        let right_out (j: nat)
+          : Lemma (n <= j /\ j < Seq.length s ==> not (in_range c lo hi la ua (Seq.index s j)))
+          = if n < j && j < Seq.length s then O.compare_trans c hi v (Seq.index sr (j - n - 1)) else ()
+        in
+        FStar.Classical.forall_intro right_out
+      end
+      else assert (in_range c lo hi la ua (Seq.index s n))
+
+/// Under the search-tree invariant the search finds a node exactly when some item is in range.
+let range_hit_any (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Lemma (requires S.strictly_sorted c (keys t))
+          (ensures range_hit c t lo hi la ua == any_in_range c (keys t) lo hi la ua)
+          [SMTPat (range_hit c t lo hi la ua); SMTPat (S.strictly_sorted c (keys t))]
+  = range_hit_keys c t lo hi la ua;
+    any_in_range_from_exists c (keys t) lo hi la ua 0

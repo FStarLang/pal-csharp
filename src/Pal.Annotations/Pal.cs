@@ -410,6 +410,11 @@ public static class Pal
     /// </summary>
     public static bool WellFormed(object? node) => throw Ghost();
 
+    /// <summary>
+    /// R27.13. The reference is a cell of the region the enclosing method holds.
+    /// </summary>
+    public static bool InRegion(object? node) => throw Ghost();
+
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 
     /// <summary>Lift a pure proposition into a resource, Pulse's <c>pure</c>.</summary>

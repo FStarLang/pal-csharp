@@ -23,7 +23,8 @@ public sealed class CodeEmitter(
     IReadOnlyDictionary<string, IrClass>? classes = null,
     IReadOnlyDictionary<string, string>? overrides = null,
     HashSet<string>? slots = null,
-    IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null)
+    IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null,
+    IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -1367,12 +1368,17 @@ public sealed class CodeEmitter(
     /// A constructor is excluded: it builds the representation rather than reading one,
     /// and <see cref="Construct"/> handles it before this point is reached.
     /// </remarks>
-    private static bool TouchesFields(IrMethod method) =>
+    private bool TouchesFields(IrMethod method) =>
         method.Body is not null
         && Check.Statements(method.Body)
             .SelectMany(Check.Expressions)
             .SelectMany(Check.Subexpressions)
-            .Any(e => e is IrField { Receiver: IrVar { Name: var n } } && n == Names.This);
+            .Any(e => e is IrField { Receiver: IrVar { Name: var n } } && n == Names.This ||
+                      // R27.13. A node of the receiver's region is read in the receiver's
+                      // region, which only the opened invariant holds.
+                      e is IrField { Receiver.Type: IrClassType k } && IsRegionType(k) &&
+                      method.DeclaringClass is { } dc && classes is not null &&
+                      classes.TryGetValue(dc, out var owner) && RegionsOf(owner).Any(r => r.Name == k.Name));
 
     /// <summary>R2.1's type qualifier removed, so a diagnostic names what the user wrote.</summary>
     private static string Unqualify(string name, string? klass) =>
@@ -1392,8 +1398,16 @@ public sealed class CodeEmitter(
             .FirstOrDefault(c => c is { HasReceiver: true, Args: [IrVar { Name: var n }, ..] }
                                  && n == Names.This);
 
-    private static string Unfold(Slot obj) =>
-        $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel}";
+    private static string Unfold(Slot obj) => obj.Heaps.IsEmpty
+        ? $"unfold {Inv((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel}"
+        : $"unfold {InvHeap((IrClassType)obj.Type)} {obj.Binder} {obj.PermArg}{obj.PreModel} " +
+          string.Join(" ", obj.Heaps.Select(h => h.Pre));
+
+    private static string InvHeap(IrClassType c) =>
+        $"{Names.ClassModule(c.Name)}.{Names.ClassInvHeap(c.Name)}";
+
+    /// <summary>R27.13. The heaps the last <see cref="ModelWitness"/> read the regions at.</summary>
+    private ImmutableArray<string> _witnessHeaps = [];
 
     /// <summary>
     /// R4.10's fold/unfold bracket, opened. R9.14: an <c>override</c> is handed its
@@ -1498,6 +1512,12 @@ public sealed class CodeEmitter(
             if (obj.PostModel == obj.PreModel)
             {
                 var own = obj.ViewBase is null ? obj.PreModel : obj.OwnModel;
+                if (!obj.Heaps.IsEmpty)
+                {
+                    Line($"fold {InvHeap(klass)} {obj.Binder} {obj.PermArg}{own} " +
+                         $"{string.Join(" ", obj.Heaps.Select(h => h.Pre))};");
+                    return;
+                }
                 Line($"fold {Inv(klass)} {obj.Binder} {obj.PermArg}{own};");
                 CloseView(obj, obj.PreModel!);
                 return;
@@ -1513,7 +1533,9 @@ public sealed class CodeEmitter(
             var witness = ModelWitness(decl, obj);
             if (obj.ViewBase is null)
             {
-                Line($"fold {Inv(klass)} {obj.Binder} {witness};");
+                Line(obj.Heaps.IsEmpty
+                    ? $"fold {Inv(klass)} {obj.Binder} {witness};"
+                    : $"fold {InvHeap(klass)} {obj.Binder} {witness} {string.Join(" ", _witnessHeaps)};");
                 return;
             }
 
@@ -1585,12 +1607,15 @@ public sealed class CodeEmitter(
         }
 
         // R27.4. The model reads the region as the context now holds it.
+        var heaps = ImmutableArray.CreateBuilder<string>();
         foreach (var k in RegionsOf(decl))
         {
             var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            heaps.Add(heap);
             Line($"with {heap}. assert ({PulseEmitter.RegionAt(k, obj.Fraction ?? "1.0R", heap)});");
             scope.Bind(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other));
         }
+        _witnessHeaps = heaps.ToImmutable();
 
         // R9.2: only a class with a representation has an abstraction function, and only
         // such a class reaches here — an abstract class's model is supplied by its leaves.
@@ -2610,9 +2635,16 @@ public sealed class CodeEmitter(
         // write — is therefore typable in tail position and untypable one statement short of
         // it. Emitting the branch as a tail rather than terminating it with `()` is what
         // closes that gap, and it is the same rule the method case already applies.
+        //
+        // R27.15. A body that may escape by `return` or `break` is a tail as well when there
+        // is no step to run after it: the escape guard of R5.8d keeps what follows an
+        // escaping statement under the flag, so each arm still meets the invariant. As a
+        // non-tail its arms would be joined first, and Pulse cannot join arms that write
+        // different locals once one of them has bound an `if`-expression's refined result.
         if (brkCell is null && contCell is null &&
             (w.Step.IsEmpty || w.Body is IrBlock sb && SplitAt([.. sb.Statements, .. w.Step]) is not null) ||
-            w.Step.IsEmpty && SplitsRecordWrite(w.Body))
+            w.Step.IsEmpty && SplitsRecordWrite(w.Body) ||
+            w.Step.IsEmpty && contCell is null && brkCell is not null)
         {
             UnitTail(w.Step.IsEmpty ? w.Body
                 : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan);
@@ -3707,14 +3739,41 @@ public sealed class CodeEmitter(
         var self = call.HasReceiver && raw.Length > 0 && _windows.Count == 0 && !_receiverClosedForThrow
             ? _objects.FirstOrDefault(o => o.Binder == raw[0] && o.ViewBase is null)
             : null;
+        // R27.13. The callee's contract may hold the receiver at its heaps, and the caller
+        // may hold it the other way: the two forms are converted around the call.
+        var wantsHeap = call.HasReceiver && raw.Length > 0 && heapIndexed is not null &&
+                        heapIndexed.ContainsKey(call.Callee);
+        var closedRecv = self is null && call.HasReceiver && raw.Length > 0 &&
+                         SlotByBinder(raw[0]) is { Kind: SlotKind.Object, ViewBase: null, Type: IrClassType { Nullable: false } } cr &&
+                         !_objects.Any(o => o.Binder == cr.Binder) && owner is null
+            ? cr : null;
+        var haveHeap = (self ?? closedRecv)?.Heaps.IsEmpty == false;
+        var convert = (self ?? closedRecv) is { } recvSlot && haveHeap != wantsHeap
+            ? $"{Names.ClassModule(((IrClassType)recvSlot.Type).Name)}."
+            : null;
+        var recvClass = (self ?? closedRecv)?.Type is IrClassType rcls ? rcls.Name : null;
         if (self is not null) CloseObject(_method!, self);
+        if (convert is not null)
+            Line($"{convert}{(wantsHeap ? Names.ClassToHeap(recvClass!) : Names.ClassOfHeap(recvClass!))} {raw[0]};");
         Line($"let {binder} = {callee} {applied};");
+        if (convert is not null && closedRecv is not null)
+            Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");
         if (self is not null)
         {
-            if (self.PostModel == self.PreModel) Line(Unfold(self) + ";");
+            var klass = (IrClassType)self.Type;
+            if (wantsHeap)
+            {
+                var m = FreshValue(klass.Name);
+                var hs = heapIndexed![call.Callee]
+                    .Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
+                var args2 = $"{self.Binder} {self.PermArg}{m} {string.Join(" ", hs)}";
+                Line($"with {m} {string.Join(" ", hs)}. assert ({InvHeap(klass)} {args2});");
+                Line($"unfold {InvHeap(klass)} {args2};");
+            }
+            else if (self.PostModel == self.PreModel)
+                Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{self.PreModel};");
             else
             {
-                var klass = (IrClassType)self.Type;
                 var m = FreshValue(klass.Name);
                 Line($"with {m}. assert ({Inv(klass)} {self.Binder} {self.PermArg}{m});");
                 Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{m};");

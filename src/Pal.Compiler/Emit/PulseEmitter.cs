@@ -74,6 +74,12 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
 
     private string Perm => Fraction is null ? "" : $"#{Fraction} ";
 
+    /// <summary>
+    /// R27.13. For a receiver held at <c>class_C__inv_heap</c>: each region it owns, with
+    /// the ghost binders naming its heap on entry and on exit. Empty for the plain invariant.
+    /// </summary>
+    public ImmutableArray<(IrClassType Region, string Pre, string Post)> Heaps { get; init; } = [];
+
     /// <summary>For an object slot: the ghost binder holding its model on entry.</summary>
     public string? PreModel { get; init; }
 
@@ -231,6 +237,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// <summary>R4.9c, R4.12b. The argument positions each method takes ownership at.</summary>
     private Dictionary<string, ImmutableHashSet<int>> _consumed = [];
 
+    /// <summary>
+    /// R27.13. The methods whose contract speaks of their receiver's regions, each with the
+    /// region classes its receiver is held at the heaps of.
+    /// </summary>
+    private Dictionary<string, ImmutableArray<IrClassType>> _heapIndexed = [];
+
     /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
     private ILookup<string, IrMethod> _virtuals =
         Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
@@ -274,6 +286,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 g => Enumerable.Range(0, g.First().Parameters.Length)
                     .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i]))
                     .ToImmutableHashSet());
+        _heapIndexed = program.Declarations.OfType<IrMethod>()
+            .Select(m => (m, HeapRegions(m)))
+            .Where(x => !x.Item2.IsEmpty)
+            .GroupBy(x => x.m.Name)
+            .ToDictionary(g => g.Key, g => g.First().Item2);
         var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
         if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
 
@@ -383,6 +400,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvShare(cl.Name), decl.Loc),
                     new Provenance(Names.ClassInvGatherGen(cl.Name), decl.Loc),
                     new Provenance(Names.ClassInvGather(cl.Name), decl.Loc),
+                    // R27.13. An owner's invariant at named heaps, and the two conversions.
+                    new Provenance(Names.ClassInvHeap(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassToHeap(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassOfHeap(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
                     // §10. A recursive class states its invariant at the option (R10.3) and
@@ -1018,6 +1039,23 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("}");
     }
 
+    /// <summary>
+    /// R27.13. The regions of an instance method's receiver, when its contract names one of
+    /// their heaps; otherwise none, and the receiver is held at the plain invariant.
+    /// </summary>
+    private ImmutableArray<IrClassType> HeapRegions(IrMethod m)
+    {
+        if (m.DeclaringClass is null || m.IsConstructor || m.Overrides is not null) return [];
+        if (!_classes.TryGetValue(m.DeclaringClass, out var c) || c.IsPlain) return [];
+        var regions = c.Fields.Where(IsRegionField).Select(f => (IrClassType)f.Type)
+            .GroupBy(t => t.Name).Select(g => g.First()).ToImmutableArray();
+        if (regions.IsEmpty) return [];
+        var names = m.Requires.Concat(m.Ensures).Concat(m.Preserves)
+            .SelectMany(Passes.Check.Subexpressions)
+            .OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
+        return regions.Any(k => names.Contains(Frontend.Region.HeapName(k.Name))) ? regions : [];
+    }
+
     private bool IsRegionField(IrFieldDecl f) =>
         f.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var d) && d.IsRegion;
 
@@ -1174,21 +1212,62 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             $"({Names.SubModel(f.Name)}: {SubModelType(f.Type)})"));
         existentials.AddRange(regions.Select(k =>
             $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)})"));
+        void Body()
+        {
+            sb.AppendLine("    B.pts_to this #p r **");
+            // R27.4. The owner holds the whole region, at the fraction it is itself held at.
+            foreach (var k in regions)
+                sb.AppendLine($"    {RegionAt(k, "p", Frontend.Region.HeapBinder(k.Name))} **");
+            foreach (var f in arrays)
+                sb.AppendLine($"    {ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
+            // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
+            // conjunct: the outer invariant does not restate the inner one, it *contains* it,
+            // so an inner class's [Invariant] clauses are proved once, where they were written.
+            // R3.10c hands it the *same* fraction: an object held at `p` is one every part of
+            // which is held at `p`, and there is no other coherent reading.
+            foreach (var f in objects)
+                sb.AppendLine($"    {SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))} **");
+            sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
+        }
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
-        sb.AppendLine("    B.pts_to this #p r **");
-        // R27.4. The owner holds the whole region, at the fraction it is itself held at.
-        foreach (var k in regions)
-            sb.AppendLine($"    {RegionAt(k, "p", Frontend.Region.HeapBinder(k.Name))} **");
-        foreach (var f in arrays)
-            sb.AppendLine($"    {ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
-        // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
-        // conjunct: the outer invariant does not restate the inner one, it *contains* it,
-        // so an inner class's [Invariant] clauses are proved once, where they were written.
-        // R3.10c hands it the *same* fraction: an object held at `p` is one every part of
-        // which is held at `p`, and there is no other coherent reading.
-        foreach (var f in objects)
-            sb.AppendLine($"    {SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))} **");
-        sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
+        Body();
+
+        // R27.13. The same invariant with its heaps as indices rather than existentials, so
+        // a contract can speak of the region the owner holds, and two conversions between
+        // the forms.
+        if (!regions.IsEmpty)
+        {
+            var heapBinders = regions.Select(k =>
+                $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)})").ToList();
+            var heapNames = string.Join(" ", regions.Select(k => Frontend.Region.HeapBinder(k.Name)));
+            var invHeap = Names.ClassInvHeap(c.Name);
+            var ty = tb.App(Names.ClassType(c.Name));
+            var model = tb.App(Names.ClassModel(c.Name));
+            sb.AppendLine();
+            sb.AppendLine($"let {invHeap}{tb.Implicit} (this: {ty}) (#[T.exact (`1.0R)] p: perm) " +
+                          $"(m: {model}) {string.Join(" ", heapBinders)} : slprop =");
+            sb.AppendLine($"  exists* {string.Join(" ", existentials.Take(existentials.Count - regions.Length))}.");
+            Body();
+            sb.AppendLine();
+            sb.AppendLine($"ghost fn {Names.ClassToHeap(c.Name)}{tb.Implicit} (this: {ty}) (#p: perm) (#m: {model})");
+            sb.AppendLine($"  requires {Names.ClassInv(c.Name)} this #p m");
+            sb.AppendLine($"  ensures exists* {heapNames}. {invHeap} this #p m {heapNames}");
+            sb.AppendLine("{");
+            sb.AppendLine($"  unfold ({Names.ClassInv(c.Name)} this #p m);");
+            foreach (var k in regions)
+                sb.AppendLine($"  with {Frontend.Region.HeapBinder(k.Name)}. assert ({RegionAt(k, "p", Frontend.Region.HeapBinder(k.Name))});");
+            sb.AppendLine($"  fold ({invHeap} this #p m {heapNames})");
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.AppendLine($"ghost fn {Names.ClassOfHeap(c.Name)}{tb.Implicit} (this: {ty}) (#p: perm) (#m: {model}) " +
+                          string.Join(" ", heapBinders.Select(b => "(#" + b[1..])));
+            sb.AppendLine($"  requires {invHeap} this #p m {heapNames}");
+            sb.AppendLine($"  ensures {Names.ClassInv(c.Name)} this #p m");
+            sb.AppendLine("{");
+            sb.AppendLine($"  unfold ({invHeap} this #p m {heapNames});");
+            sb.AppendLine($"  fold ({Names.ClassInv(c.Name)} this #p m)");
+            sb.AppendLine("}");
+        }
 
         // R27.4. Two halves of an owner hold two heaps that nothing proves equal, so an
         // owner of a region is held whole and has no share or gather.
@@ -1381,8 +1460,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     private EmittedModule EmitMethod(IrMethod method)
     {
-        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed);
-        var plan = new MethodPlan(method, _spec, diagnostics);
+        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed);
+        var plan = new MethodPlan(method, _spec, diagnostics,
+            _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : []);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");

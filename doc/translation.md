@@ -7253,6 +7253,65 @@ For a property with a setter, R22.13 already read the accessors.
 This was not hypothetical. In the `SortedList` sample, the contracts on the `Comparer` and
 `Count` accessors had been dropped. Both are now proved.
 
+### R27.13 Contracts that name the owner's heap
+
+A method of a region owner may need to promise something about a region pointer it returns or
+receives. `FindNode`, for example, returns a node a caller then reads. Such a promise is a fact
+about the owner's *current heap*, which R27.4 keeps existentially quantified inside the owner's
+invariant. R27.13 makes that heap nameable.
+
+* `Pal.Tree<V>(x)`, `Pal.WellFormed(x)` and `Pal.InRegion(x)` inside a contract of an
+  instance method of the owner resolve to `$heap_K` of `this`: the owner's heap for region
+  class `K`. `Pal.InRegion(x)` is `Region.mem $heap_K x`.
+* A method whose contract mentions `$heap_K` is *heap-indexed*. Its receiver is owned through
+  `class_C__inv_heap this m heap_K…`, which has the same body as `class_C__inv` with the heaps
+  as parameters. The method takes ghost binders `#pre_heap_K`. If the receiver is mutated,
+  its post also binds `post_heap_K`. The contract's `$heap_K` is the pre heap in `requires`
+  and the post heap in `ensures`.
+* The class module emits ghost `class_C__to_heap` (`inv` to `exists* h. inv_heap … h`) and
+  `class_C__of_heap` (back). At a call site the caller's form of the receiver is converted to
+  the callee's form, and converted back afterwards. When the receiver is open (R22.15), it is
+  closed, called and reopened at the heap the callee returns. So the facts the callee ensures
+  about that heap reach the caller's opened region.
+* A read of a field of a region object, inside a method of its owner, opens the receiver, as
+  a read of the receiver's own field does.
+
+Two `SearchTree` helpers serve the searches. `root_key t d` (`SpecSearchTree.RootKey`) is the
+key at a tree's root. `find_keys_pat` gives `find` on a sorted tree as `keys t` at `key_index`
+under an `SMTPat`.
+
+### R27.14 Breadth-first positions and range search
+
+`InternalIndexOf` computes a breadth-first position: the root is 0, and the children of `k`
+are `2k+1` and `2k+2`. `SearchTree.heap_index` is that search, and its true bound is stated
+through the tree's height:
+
+| function / lemma | meaning |
+|---|---|
+| `breadth t` (`SpecSearchTree.Breadth`) | `2^height t` |
+| `index_room k t h` (`IndexRoom`) | `(k + 2) * 2^height t <= 2^(h+1)`: positions below `k` in `t` stay at most `2^(h+1) - 2` |
+| `index_room_step` | descending to a child preserves `index_room` with the child's position, and bounds `2k+2` |
+| `index_room_int` | for `h <= 30`, the next position `2k+2` of a non-empty subtree fits an `int` |
+| `heap_index_bound` | `heap_index c t x 0 >= 0 <==> contains c t x`, and it is at most `breadth t - 2` |
+
+`FindRange` is a top-down search that stops at the first node inside the active bounds.
+`SearchTree.range_hit` (`RangeHit`) is that search's outcome, and `in_range` (`InRange`) is the
+bounds test. `any_in_range c s lo hi la ua` (`AnyInRange`) says some item of `s` is in range.
+`range_hit_any` proves, on a strictly sorted tree, `range_hit c t … == any_in_range c (keys t) …`.
+The proof uses only the comparer's transitivity, and the lemma is `SMTPat`-triggered.
+
+### R27.15 A returning loop body is in tail position
+
+R5.8d emits a loop body as a *tail* when the loop has no `break`, `continue` or `return`. Each
+arm of a final `if` is then checked against the invariant, instead of being joined first. A
+loop that may `return` (or `break`) and has no `for` step is now a tail as well. The escape
+guard of R5.8d already keeps the statements after an escaping one under the flag.
+
+The case that needed it is `FindRange`. Its arms write different locals: one writes `current`,
+the other the result and the return flag. They do so after an `&&` whose right operand reads
+a node, which is an `if`-expression whose result carries a refinement. Pulse could not join
+those arms ("cannot find witness"). In tail position no join is needed.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7278,8 +7337,11 @@ ensures that the tree and the comparer are unchanged.
 | `IsWithinRange` | `Result` (the set has no range) |
 | `Clear` | empty, comparer unchanged |
 | `VersionCheck`, `UpdateVersion` | model unchanged |
-| `FindNode` | `(Result != null) == (Pal.KeyIndex(SpecComparer, SpecItems, item) >= 0)` |
+| `FindNode` | `(Result != null) == (Pal.KeyIndex(SpecComparer, SpecItems, item) >= 0)`, and a found node is well-formed at the owner's heap with the found key at its root (R27.13) |
 | `Contains` | `Result == (Pal.KeyIndex(SpecComparer, SpecItems, item) >= 0)` |
+| `TryGetValue` | `Result == (KeyIndex >= 0)`, and then `actualValue` is `SpecItems[KeyIndex]` |
+| `InternalIndexOf` | requires `SpecNodes.Height <= 30`; `Result == HeapIndex(SpecComparer, SpecNodes, item, 0)`, `(Result >= 0) == (KeyIndex >= 0)`, `Result <= Breadth(SpecNodes) - 2` (R27.14) |
+| `FindRange` (both overloads) | `(Result != null) == AnyInRange(SpecComparer, SpecItems, from, to, …)`, and a result is well-formed with its root key in range |
 | `MinInternal`, `Min` | `SpecItems[0]`, or `default(T)` when empty |
 | `MaxInternal`, `Max` | `SpecItems[SpecItems.Length - 1]`, or `default(T)` when empty |
 
@@ -7288,13 +7350,7 @@ are on the properties.
 
 **Not annotated:**
 
-* **`TryGetValue`.** It reads `node.Item` from the node that `FindNode` returns. A caller
-  can read a returned region pointer only knowing that it is `mem` of the heap. A contract
-  cannot name the heap, so `FindNode` cannot promise that.
-* **`FindRange` and `TreeSubSet`.** They return or construct a view over the tree, which is
-  the same obstacle, plus a second object sharing the region.
-* **`InternalIndexOf`.** See §27.3. Its result is not bounded by any quantity the code
-  checks.
+* **`TreeSubSet`.** It constructs a second object that shares the region.
 * **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.**
   * They allocate with `new Node(item, color)`, which R12.4 refuses.
   * They re-link through mutable locals, and the plain write path takes only value slots.
@@ -7321,7 +7377,9 @@ are on the properties.
 
   Separately, `2 * index + 2` overflows `int` in a tree deeper than about 30 levels. A
   red-black tree reaches that depth only past about 2^15 nodes, but nothing bounds the
-  arithmetic.
+  arithmetic. The verified contract (R27.14) makes both facts explicit. `InternalIndexOf`
+  *requires* `Height <= 30`, which is the precondition that rules out the overflow. Its
+  result is bounded by `2^Height - 2`, not by `Count`.
 * **Contracts on accessors were silently ignored.** An earlier version of this section
   moved `Count`, `Comparer`, `Min` and `Max` contracts onto `get` accessors. R9.20 never
   read them, so those members were "verified" against `true`. The `SortedList` sample had

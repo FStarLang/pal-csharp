@@ -2257,7 +2257,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     { Type = IrPrim.SpecIntType };
             // R27.7. The tree a region pointer reaches, and the region's well-formedness at
             // it: functions of the heap the enclosing method holds, named `$heap_<class>`.
-            case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed):
+            case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion):
             {
                 if (model.GetTypeInfo(args[0].Expression).Type is not INamedTypeSymbol
                         { TypeKind: TypeKind.Class } rc ||
@@ -2269,6 +2269,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     return new IrLiteral(loc, null);
                 }
                 var heap = new IrVar(loc, Region.HeapName(rc.Name)) { Type = IrPrim.SpecIntType };
+                if (method.Name == nameof(PalLang.Pal.InRegion))
+                    return new IrSpecOp(loc, $"{Region.Module}.mem", [heap, Arg(0)])
+                        { Type = IrPrim.Bool, MachineArgs = true };
                 return method.Name == nameof(PalLang.Pal.Tree)
                     ? new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.TreeOf(rc.Name)}", [heap, Arg(0)])
                         { Type = known.MapType(method.ReturnType), MachineArgs = true }
