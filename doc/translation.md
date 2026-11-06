@@ -8222,9 +8222,31 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   and on `TreeSubSet`.
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
-* **The copy constructor.** `DeepClone` is verified (R27.43). The copy constructor also
-  needs the clone moved into a second owner's region, and reaches it only through
-  `collection as SortedSet<T>`, a type test on an interface.
+* **The copy constructor** (`SortedSet(IEnumerable<T>, IComparer<T>?)` on a `SortedSet`).
+  `DeepClone` is verified (R27.43); the constructor around it is not. It needs these
+  features, none of which the translation has:
+  * **A second object of the owner class.** It reads `sortedSet.count` and
+    `sortedSet.root`. Only the receiver's fields are readable (R4.10, PALCS0523), and a
+    method has one heap per region class (`$heap_K`), so a second region of the same class
+    cannot be named.
+  * **Moving a tree between regions.** `sortedSet.root.DeepClone(count)` allocates in
+    `sortedSet`'s region, and the result becomes `this.root`. A sound route is: hold
+    `sortedSet` at full permission; after the call, split the clone's boxes, which are
+    fresh and unshared (`Reshaped(null, Result)`), out of that region into this one. The
+    source's tree is unchanged, since its boxes are not fresh. This is a ghost split and
+    join over `Region.cells`.
+  * **A body after `: this(comparer)`.** This is refused (PALCS0598).
+  * **`collection as SortedSet<T>` on an interface parameter.** One sound reading
+    specialises the constructor to callers whose argument is exactly a `SortedSet<T>`
+    (R27.1's exact-type argument). Under it, `as` is the identity and
+    `sortedSet is TreeSubSet` is false. Every other caller is refused.
+  * **The fallback branch.** It enumerates an arbitrary `IEnumerable<T>`
+    (`EnumerableHelpers.ToArray`). It is dead only when `HasEqualComparer` holds, which
+    takes `IComparer<T>.Equals(object)`, and that has no model (27.3).
+
+  The set operations (`SetEquals`, `IsSubsetOf`, …) and `TreeSubSet` meet the first and
+  fourth of these as well. `TreeSubSet` is in addition a subclass that overrides the
+  virtual members R27.1 verifies at the exact type.
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).
@@ -8293,6 +8315,15 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   (R27.42), under which the check never fails. What a client that writes the set mid-way
   sees — an `InvalidOperationException` at the next step — is the dynamic check of R28.8,
   and is not stated.
+* **`HasEqualComparer` trusts `IComparer<T>.Equals`.** The copy constructor and the set
+  operations take `other`'s tree as sorted under `this.Comparer` when
+  `Comparer == other.Comparer || Comparer.Equals(other.Comparer)`. If a user's comparer
+  overrides `Equals` to return true for a comparer that orders differently, the
+  constructor builds a set whose tree is not sorted under its own comparer, which breaks
+  the owner invariant R27.11 states. A sound model needs `Equals` on comparers to imply the
+  same order. That would be a trusted law, like R22.30's. `==` on comparers is reference
+  equality, which R22.30's `comparer t` (the comparison function) cannot express either:
+  two distinct objects may compare alike.
 
 ## 28. Enumerators: structs that borrow their collection
 
