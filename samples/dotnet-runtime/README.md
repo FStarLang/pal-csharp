@@ -19,6 +19,7 @@ those files to Pulse and checks them with F*. The files keep their upstream path
 | `PriorityQueue<TElement,TPriority>` | `System.Collections/.../Generic/PriorityQueue.cs` | 20 members: `Enqueue`, `Dequeue`, `Peek`, the `Try*` forms, `DequeueEnqueue`, `EnqueueDequeue`, `Clear`, capacity management, and sift up/down for both comparer paths |
 | `SortedList<TKey,TValue>` | `System.Collections/.../Generic/SortedList.cs` | 22 members and the class invariant (keys strictly sorted) |
 | `HashSet<T>` | `System.Private.CoreLib/.../Generic/HashSet.cs` | `Clear`, `Count`, `Contains`, `FindItemIndex`, `Remove`, against an invariant that the hash chains are well formed |
+| `SortedSet<T>` | `System.Collections/.../Generic/SortedSet.cs` | the red-black tree: constructors, `Count`, `Comparer`, `Clear`, `Contains`, `TryGetValue`, `Min`/`Max`, `FindNode`, `FindRange`, `InternalIndexOf`, `Add` and `Remove` (top-down insertion and deletion), `ConstructRootFromSortedArray`, and every `Node` helper (rotations, `Split4Node`, `Merge2Nodes`, …). The invariant: items strictly sorted under the comparer, red-black colouring, `Count` equal to the size |
 
 **Enumerators and views.** Every collection's enumerator is verified as well:
 `GetEnumerator`, `MoveNext`, `Current`, `Reset` and `Dispose`, plus the boxing
@@ -29,6 +30,10 @@ collection's version is unchanged, `MoveNext` steps through the model; when it h
 and view members are verified (`doc/translation.md` §28–§29).
 
 Members that are not annotated, and why, are recorded in `doc/translation.md` §22–§29.
+
+`SortedSet<T>` is verified at its exact type (R27.1): its subclass `TreeSubSet` (the view
+`GetViewBetween` returns) is not annotated, so verified code only ever holds a
+`SortedSet<T>` it constructed.
 The other `.cs` files under `src/` are unmodified upstream files that the annotated ones
 need in order to compile.
 
@@ -64,5 +69,5 @@ make -C samples/dotnet-runtime/pal/List     # one
 
 `make test` at the repository root runs them too.
 
-Not included: `SortedSet<T>`, `SortedDictionary<TKey,TValue>`, `LinkedList<T>` and
-`Dictionary<TKey,TValue>`, which still need translator support (see §23 and §25).
+Not included: `SortedDictionary<TKey,TValue>`, `LinkedList<T>` and
+`Dictionary<TKey,TValue>`, which still need translator support (see §23, §25 and §27).
