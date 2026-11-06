@@ -39,4 +39,15 @@ public static class SpecSearchTree
     [SpecOp("Pulse.Lib.CSharp.SearchTree.heap_index")]
     public static SpecInt HeapIndex<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T item, SpecInt start) =>
         throw Ghost();
+
+    /// <summary>R27.11. The keys in order: the set a search tree holds once they are strictly sorted.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.keys")]
+    public static Seq<T> Keys<T, TTag>(SpecTree<(T, TTag)> tree) => throw Ghost();
+
+    /// <summary>
+    /// R27.11. A red-black tree, each node tagged with whether it is red: no red node has a
+    /// red child, every path has the same number of black nodes, and the root is black.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.red_black")]
+    public static bool IsRedBlack<T>(SpecTree<(T, bool)> tree) => throw Ghost();
 }

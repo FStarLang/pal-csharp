@@ -20,7 +20,7 @@ public static partial class FrontendPass
     {
         var known = WellKnown.For(compilation);
         ValidateSpecTypes(compilation, known, diagnostics);
-        var candidates = Collect(compilation, known);
+        var candidates = Collect(compilation, known, diagnostics);
         var structs = CollectStructs(compilation, known, diagnostics);
         var attempted = ImmutableHashSet.CreateBuilder<ISymbol>(SymbolEqualityComparer.Default);
         var classes = CollectClasses(compilation, known, diagnostics, attempted);
@@ -222,15 +222,40 @@ public static partial class FrontendPass
 
         /// <summary>The declaration the contract is read from: R9.20c's property, or the
         /// method itself.</summary>
-        public ISymbol Declaration =>
-            Syntax is PropertyDeclarationSyntax && Symbol.AssociatedSymbol is { } p ? p : Symbol;
+        public ISymbol Declaration => ContractOverride ??
+            (Syntax is PropertyDeclarationSyntax && Symbol.AssociatedSymbol is { } p ? p : Symbol);
+
+        /// <summary>R27.12. The `get` accessor, when the contract was written there.</summary>
+        public ISymbol? ContractOverride { get; init; }
 
         public static AccessorDeclarationSyntax? Getter(PropertyDeclarationSyntax p) =>
             p.AccessorList?.Accessors.FirstOrDefault(
                 a => a.Kind() == SyntaxKind.GetAccessorDeclaration);
     }
 
-    private static ImmutableArray<Candidate> Collect(CSharpCompilation compilation, WellKnown known)
+    /// <summary>
+    /// R27.12. A computed property's contract may be written on the property or on its
+    /// `get` accessor, but not on both: the accessor is the contract's source exactly when
+    /// it carries one.
+    /// </summary>
+    private static ISymbol? AccessorContract(
+        IPropertySymbol property, IMethodSymbol getter, WellKnown known, DiagnosticBag diagnostics)
+    {
+        bool HasContract(ISymbol s) =>
+            SpecAttributes(s, known).Any() || ThrowsAttributes(s, known).Any();
+        if (!HasContract(getter)) return null;
+        if (HasContract(property))
+        {
+            diagnostics.Error("PALCS0704",
+                Locations.From(getter.Locations.FirstOrDefault() ?? Location.None),
+                $"`{property.Name}` has a contract on both the property and its `get` accessor. " +
+                "Write it in one place (doc/translation.md R27.12).");
+            return null;
+        }
+        return getter;
+    }
+
+    private static ImmutableArray<Candidate> Collect(CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
         var result = ImmutableArray.CreateBuilder<Candidate>();
         foreach (var tree in compilation.SyntaxTrees)
@@ -257,7 +282,8 @@ public static partial class FrontendPass
                 if (!IsComputed(symbol, known)) continue;
                 if (symbol.GetMethod is not { } getter) continue;
                 if (Declarations.KindOf(getter, known) is not { } kind) continue;
-                result.Add(new Candidate(prop, getter, kind));
+                result.Add(new Candidate(prop, getter, kind)
+                    { ContractOverride = AccessorContract(symbol, getter, known, diagnostics) });
             }
 
             // R22.13. A property's setter is the method `set_P(value)`, collected from its

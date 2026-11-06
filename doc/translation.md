@@ -7196,9 +7196,8 @@ and that is the only fact it states.
 * `HeapIndex`, the breadth-first position `2k+1` / `2k+2` that `InternalIndexOf` computes.
 
 Each one follows the path the code follows, so it needs no ordering hypothesis. A search is
-specified as *what this search returns*, whatever the tree. Equating that with set
-membership needs a BST invariant, and that invariant belongs to the insertion code (§27.3
-below).
+specified as *what this search returns*, whatever the tree. R27.11's model invariant
+equates that with set membership.
 
 ### R27.10 The measure of a loop that returns
 
@@ -7211,6 +7210,48 @@ the join the cursor of a returning iteration is unconstrained. Two consequences 
   before. So the returning iteration decreases the measure whatever the cursor's state.
 * An invariant about the cursor is guarded by `!Pal.Returned()`:
   `Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) && …))`.
+
+### R27.11 The set-level model
+
+A `SortedSet` is a set, not a search tree. The model therefore states what makes the tree a
+set, as `[Refine]`s on the `[Model]`:
+
+```csharp
+[Refine("Pal.StrictlySorted(@this.Comparer, SpecSearchTree.Keys(@this.Tree))")]
+[Refine("SpecSearchTree.IsRedBlack(@this.Tree)")]
+[Refine("@this.Count == @this.Tree.Size")]
+```
+
+`SpecSearchTree.Keys` (`SearchTree.keys`) is the in-order sequence of the tree's items, and
+`IsRedBlack` (`SearchTree.red_black`) is the red-black shape: a black root, no red node with
+a red child, and equal black height on every path. The spec property
+`SpecItems => SpecSearchTree.Keys(Model.Tree)` names the set. Every contract is stated over
+it and over `Pal.KeyIndex`, so a client never sees the tree.
+
+The bridge between the path-following searches of R27.9 and the set is proved in
+`Pulse.Lib.CSharp.SearchTree`, without admits:
+
+| lemma | statement |
+|---|---|
+| `sorted_branch` | a strictly sorted in-order sequence sorts both subtrees, with the pivot between them |
+| `lower_bound_pivot` | `lower_bound` of `keys (Node l v r)` is that of `l`, `|keys l|`, or `|keys l| + 1 +` that of `r` |
+| `find_keys` / `contains_keys` | on a sorted tree, `contains c t x <==> key_index c (keys t) x >= 0`, and `find` returns that key |
+| `leftmost_keys` / `rightmost_keys` | `leftmost t` is `keys t` at `0`; `rightmost t` is at `|keys t| - 1` |
+
+Several are `SMTPat`-triggered, so a method's proof needs no explicit lemma calls.
+
+### R27.12 A contract on a `get` accessor
+
+R9.20 read a computed property's contract only from the property. An attribute on its `get`
+accessor was ignored without any message, and that contract was then never proved. Now:
+
+* a contract written on the `get` accessor is read from the accessor;
+* a contract written on both the property and its accessor is refused with PALCS0704.
+
+For a property with a setter, R22.13 already read the accessors.
+
+This was not hypothetical. In the `SortedList` sample, the contracts on the `Comparer` and
+`Count` accessors had been dropped. Both are now proved.
 
 ### 27.1 Trusted assumptions
 
@@ -7225,24 +7266,25 @@ the join the cursor of a returning iteration is unconstrained. Two consequences 
 The model is `SortedSetModel<T> { Tree: SpecTree<(T, bool)>; Comparer; Count }`. Each node
 contributes `(Item, Color == Red)`.
 
-**Verified:**
+**Verified.** Every ensures is stated over `SpecItems` (R27.11). Each read-only member also
+ensures that the tree and the comparer are unchanged.
 
 | member | ensures |
 |---|---|
-| `SortedSet()` | count 0, empty tree, comparer `Comparer<T>.Default` |
-| `SortedSet(IComparer<T>?)` | count 0, empty tree |
-| `Count` | `Result == SpecCount` |
+| `SortedSet()` | empty, comparer `Comparer<T>.Default` |
+| `SortedSet(IComparer<T>?)` | empty |
+| `Count`, `TotalCount` | `Result == SpecItems.Length` |
 | `Comparer` | `Result == SpecComparer` |
-| `Clear` | count 0, empty tree, comparer unchanged |
-| `VersionCheck` | count unchanged |
-| `UpdateVersion` | model unchanged |
-| `FindNode` | the result is non-null exactly when `SearchTree.contains comparer tree item` |
-| `Contains` | `Result == SearchTree.contains comparer tree item` |
-| `MinInternal`, `Min` | on a non-empty tree, `Result` is `SearchTree.leftmost tree` |
-| `MaxInternal`, `Max` | on a non-empty tree, `Result` is `SearchTree.rightmost tree` |
+| `IsWithinRange` | `Result` (the set has no range) |
+| `Clear` | empty, comparer unchanged |
+| `VersionCheck`, `UpdateVersion` | model unchanged |
+| `FindNode` | `(Result != null) == (Pal.KeyIndex(SpecComparer, SpecItems, item) >= 0)` |
+| `Contains` | `Result == (Pal.KeyIndex(SpecComparer, SpecItems, item) >= 0)` |
+| `MinInternal`, `Min` | `SpecItems[0]`, or `default(T)` when empty |
+| `MaxInternal`, `Max` | `SpecItems[SpecItems.Length - 1]`, or `default(T)` when empty |
 
-`Comparer`, `Min` and `Max` were expression-bodied properties. Each became a property with
-a `get` accessor that carries the contract. The body is unchanged.
+The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
+are on the properties.
 
 **Not annotated:**
 
@@ -7256,8 +7298,8 @@ a `get` accessor that carries the contract. The body is unchanged.
 * **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.**
   * They allocate with `new Node(item, color)`, which R12.4 refuses.
   * They re-link through mutable locals, and the plain write path takes only value slots.
-  * Their specification needs the red-black and BST invariants over the region's tree.
-    The model states neither; the colour is in the view so that a later invariant can.
+  * Their loop invariants must relate the region's heap to the model while it is being
+    re-linked.
 * **The enumerator, serialization and `IEnumerable` constructors.** These are out of
   scope.
 
@@ -7280,6 +7322,8 @@ a `get` accessor that carries the contract. The body is unchanged.
   Separately, `2 * index + 2` overflows `int` in a tree deeper than about 30 levels. A
   red-black tree reaches that depth only past about 2^15 nodes, but nothing bounds the
   arithmetic.
-* **Searches are specified by their path.** `Contains` is verified to be "the search finds
-  it", not "the set holds it". The two agree under the BST invariant, which only the
-  unverified insertion code maintains.
+* **Contracts on accessors were silently ignored.** An earlier version of this section
+  moved `Count`, `Comparer`, `Min` and `Max` contracts onto `get` accessors. R9.20 never
+  read them, so those members were "verified" against `true`. The `SortedList` sample had
+  the same problem. R27.12 fixes the compiler. The runtime source keeps its original
+  property syntax, with the attributes on the properties.
