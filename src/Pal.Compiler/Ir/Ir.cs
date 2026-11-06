@@ -476,6 +476,12 @@ public sealed record IrOld(IrLoc Loc, IrExpr Operand) : IrExpr(Loc);
 /// <summary><c>Pal.Result&lt;T&gt;()</c> / bare <c>return</c> in an <c>[Ensures]</c>.</summary>
 public sealed record IrResult(IrLoc Loc) : IrExpr(Loc);
 
+/// <summary>
+/// R28.3. The reference a class-typed parameter holds, where a specification otherwise
+/// reads the parameter as its model: <c>ReferenceEquals(Result._list, @this)</c>.
+/// </summary>
+public sealed record IrRefOf(IrLoc Loc, string Parameter) : IrExpr(Loc);
+
 /// <summary><c>Pal.Live(x)</c> — an explicit ownership assertion.</summary>
 public sealed record IrLive(IrLoc Loc, IrExpr Operand) : IrExpr(Loc);
 

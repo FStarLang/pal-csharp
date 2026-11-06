@@ -52,6 +52,9 @@ public static int Count(int[] a, int n) { … }
 | `[Decreases(m)]` | termination measure of a recursive method |
 | `[Throws(typeof(E), p)]` | the method may throw an `E`, and then `p` holds; repeatable, disjoined (§2.3) |
 
+On a property, the attributes may go on the property or on its `get` accessor
+(`get` with a block body included). The two placements mean the same (R28.9).
+
 **The strings are not opaque.** Each is parsed with `SyntaxFactory.ParseExpression` and
 bound by Roslyn *in the scope of the annotated member*, so parameters, locals, `[Spec]`
 functions, sibling classes and `this` all resolve and are type-checked. A mistake inside a
@@ -116,6 +119,7 @@ Both forms lower to the same thing. Mix them freely.
 | `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
+| `ReferenceEquals(a, b)` | `a` and `b` are the same reference; each is a class-typed parameter (or `@this`) or an enumerator's borrowing field (R28.3) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
@@ -709,6 +713,35 @@ last one is not owned but *constrained*, and while the Pulse shape for it is ver
 predecessor is not, and pal-csharp does not guess.
 
 ---
+
+### Enumerators: a struct that borrows its collection
+
+A struct nested in a modelled class, with one `readonly` field of that class's type, is
+*borrowing*. An enumerator is the usual example. The struct does not own the object that
+field refers to. Each annotated member is verified as a read-only method of the borrowed
+object, so the object's invariant holds for the duration of the call. Contracts name the
+struct's own fields and the object's spec members:
+
+```csharp
+[Ensures("ReferenceEquals(Result._list, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
+public Enumerator GetEnumerator() => new Enumerator(this);
+
+public struct Enumerator
+{
+    private readonly List<T> _list;
+    private readonly int _version;
+    private int _index;
+    private T? _current;
+
+    [Throws(typeof(InvalidOperationException), "@this._version != @this._list.SpecVersion")]
+    [Ensures("Result == (0 <= Old(@this._index) && Old(@this._index) < @this._list.SpecCount)")]
+    [Ensures("Implies(Result, Same(@this._current, @this._list.Items[Old(@this._index)]))")]
+    public bool MoveNext() { … }
+}
+```
+
+Members may write the struct's fields but not the borrowed object (PALCS0734). Verified
+code cannot call them yet (PALCS0731). The rules are in `translation.md` §28.
 
 ## 4. Specification functions
 

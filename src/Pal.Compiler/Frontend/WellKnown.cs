@@ -594,17 +594,25 @@ public sealed class WellKnown
     /// R24.6. A struct nested in a generic type (`HashSet&lt;T&gt;.Entry`) is implicitly
     /// generic in the outer parameters, so they lead its own; and two such structs may
     /// share a simple name (`HashSet&lt;T&gt;.Entry`, `Dictionary&lt;K,V&gt;.Entry`), so its
-    /// name is qualified by the outer type's.
+    /// name is qualified by the outer type's. A class between the struct and the generic type
+    /// (`PriorityQueue&lt;E, P&gt;.UnorderedItemsCollection.Enumerator`, R28) passes the
+    /// outer parameters through, after adding its own.
     /// </summary>
     public static ImmutableArray<ITypeSymbol> AllTypeArguments(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)
-            ? [.. AllTypeArguments(outer), .. named.TypeArguments]
+            ? [.. EnclosingArguments(outer), .. named.TypeArguments]
             : named.TypeArguments;
 
     public static ImmutableArray<ITypeParameterSymbol> AllTypeParameters(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)
-            ? [.. AllTypeParameters(outer), .. named.TypeParameters]
+            ? [.. EnclosingParameters(outer), .. named.TypeParameters]
             : named.TypeParameters;
+
+    private static ImmutableArray<ITypeSymbol> EnclosingArguments(INamedTypeSymbol t) =>
+        t.ContainingType is { } o ? [.. EnclosingArguments(o), .. t.TypeArguments] : t.TypeArguments;
+
+    private static ImmutableArray<ITypeParameterSymbol> EnclosingParameters(INamedTypeSymbol t) =>
+        t.ContainingType is { } o ? [.. EnclosingParameters(o), .. t.TypeParameters] : t.TypeParameters;
 
     public static string StructName(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)

@@ -221,9 +221,15 @@ public static partial class FrontendPass
         };
 
         /// <summary>The declaration the contract is read from: R9.20c's property, or the
-        /// method itself.</summary>
+        /// method itself — which for a property is its getter when the attributes are
+        /// written on the <c>get</c>.</summary>
         public ISymbol Declaration =>
-            Syntax is PropertyDeclarationSyntax && Symbol.AssociatedSymbol is { } p ? p : Symbol;
+            Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
+            !(Getter(pd) is { } g && g.AttributeLists.SelectMany(l => l.Attributes).Any(IsContractAttribute)) ? p : Symbol;
+
+        private static bool IsContractAttribute(AttributeSyntax a) =>
+            a.Name.ToString().Split('.')[^1].Replace("Attribute", "") is
+                "Requires" or "Ensures" or "Preserves" or "PreservesValue" or "Throws" or "Decreases";
 
         public static AccessorDeclarationSyntax? Getter(PropertyDeclarationSyntax p) =>
             p.AccessorList?.Accessors.FirstOrDefault(
@@ -600,7 +606,11 @@ public static partial class FrontendPass
                     if (name is null || type is null) continue;
 
                     var mapped = known.MapType(type);
-                    if (mapped is null || !(specOnly ? IsSpecField(mapped) : IsValueField(mapped)))
+                    // R28.1. The one readonly field typed at an enclosing class is a
+                    // borrowed reference: the record holds the box and owns nothing.
+                    var borrowed = mapped is IrClassType &&
+                        SymbolEqualityComparer.Default.Equals(Borrowing.OwnerField(symbol, known), member);
+                    if (mapped is null || !(borrowed || (specOnly ? IsSpecField(mapped) : IsValueField(mapped))))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
                         // predicate discipline this rule exists to avoid.
@@ -643,15 +653,18 @@ public static partial class FrontendPass
         // overrides. It is a spec-level definition, not code over the representation, so
         // reading it as a method would translate a specification as a program.
         && !(p.IsOverride && OverriddenChainHasModel(p, known))
-        && p.ContainingType is { TypeKind: TypeKind.Class } owner
-        && known.HasModel(owner);
+        && (p.ContainingType is { TypeKind: TypeKind.Class } owner && known.HasModel(owner)
+            // R28.2. A borrowing struct's getter is a member of the borrowed object's class.
+            || Borrowing.IsBorrowing(p.ContainingType, known) && p.ExplicitInterfaceImplementations.IsEmpty);
 
     private static bool IsAuto(IPropertySymbol p) =>
         p.ContainingType.GetMembers().OfType<IFieldSymbol>()
             .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p));
 
     /// <summary>R3.4: the field types a struct may hold.</summary>
-    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType or IrTypeParamType;
+    /// <summary>R3.4; and a pair of such values (R26.10), which an enumerator's <c>Current</c> may be (R28).</summary>
+    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType or IrTypeParamType ||
+        type is IrUserSpecType { FStar: WellKnown.TupleType, Args: var args } && args.All(IsValueField);
 
     /// <summary>
     /// R3.9a: the field types a <c>[Spec]</c> struct may hold. Wider than R3.4 by exactly
@@ -1995,8 +2008,11 @@ public static partial class FrontendPass
                     Parameters: ShimParameters(candidate.Symbol, compilation, known, wantsResult),
                     Usings: usings)
                 {
-                    TypeParameters = MethodTypeParameters(candidate.Symbol),
-                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private,
+                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    // R28.3. A contract about a borrowing struct names its private state.
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              Borrowing.IsMember(candidate.Symbol, known) ||
+                              Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known),
                 });
             }
 
@@ -2013,7 +2029,9 @@ public static partial class FrontendPass
                                  new SpecParam(ThrownParameter, thrown)],
                     Usings: usings)
                 {
-                    TypeParameters = MethodTypeParameters(candidate.Symbol),
+                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              Borrowing.IsMember(candidate.Symbol, known),
                 });
             }
         }
@@ -2032,7 +2050,7 @@ public static partial class FrontendPass
         // R15.1. A generic declaring type cannot be `using static`-imported: the
         // directive names a closed type and there is nothing to close it with. The
         // members it would have imported are reached through a receiver instead.
-        var own = candidate.Symbol.ContainingType.TypeParameters.Length > 0
+        var own = candidate.Symbol.ContainingType.IsGenericType
             ? null
             : $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
 
@@ -2236,6 +2254,13 @@ public static partial class FrontendPass
         .. symbol.TypeParameters.Select(t => t.Name),
     ];
 
+    /// <summary>R28.2. A borrowing struct's member is generic in its enclosing types' parameters.</summary>
+    private static ImmutableArray<string> SiteTypeParameters(IMethodSymbol symbol, WellKnown known) =>
+        Borrowing.IsMember(symbol, known)
+            ? [.. WellKnown.AllTypeParameters(symbol.ContainingType).Select(t => t.Name),
+               .. symbol.TypeParameters.Select(t => t.Name)]
+            : MethodTypeParameters(symbol);
+
     private static bool Same(ISymbol? a, ISymbol b) => SymbolEqualityComparer.Default.Equals(a, b);
 
     /// <summary>
@@ -2257,7 +2282,8 @@ public static partial class FrontendPass
         // through `Result` instead.
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                    or MethodKind.PropertyGet or MethodKind.PropertySet })
+                                    or MethodKind.PropertyGet or MethodKind.PropertySet } ||
+            Borrowing.IsMember(symbol, known))
             result.Add(new SpecParam(Names.This, symbol.ContainingType));
 
         foreach (var p in symbol.Parameters)
@@ -2289,6 +2315,10 @@ public static partial class FrontendPass
     {
         var symbol = candidate.Symbol;
         var loc = Locations.From(candidate.Identifier);
+
+        // §28. A member of a borrowing struct is a member of the borrowed object's class.
+        if (Borrowing.IsMember(symbol, known))
+            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc);
 
         var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, model, known, diagnostics);
@@ -2550,7 +2580,8 @@ public static partial class FrontendPass
 
     private static Specs ReadSpecs(
         IMethodSymbol symbol, ISymbol declaration, WellKnown known,
-        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics)
+        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
+        BorrowContext? borrow = null)
     {
         var requires = ImmutableArray.CreateBuilder<IrExpr>();
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
@@ -2563,7 +2594,7 @@ public static partial class FrontendPass
             if (!bound.TryGetValue(key, out var spec)) continue;
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) };
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;
@@ -2592,7 +2623,7 @@ public static partial class FrontendPass
             }
             if (!bound.TryGetValue($"{Naming.Of(symbol)}_throws_{k}", out var spec)) continue;
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) }
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow }
                 .Lower(spec.Expression);
             throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
         }

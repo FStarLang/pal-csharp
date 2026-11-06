@@ -232,6 +232,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrSpecOp o:
                 return SpecOp(o, scope);
 
+            // R28.3. The reference itself: the parameter's Pulse binder, in scope in the
+            // pre- and the postcondition alike.
+            case IrRefOf r:
+                return new Term(Names.Local(r.Parameter), TermKind.Other);
+
             // R10.2. `null` is `B.null`. The type annotation is what lets F* infer the
             // box's parameter in `pure (x == B.null)` positions where nothing else
             // determines it — and it is the *representation* the box is of, since

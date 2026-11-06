@@ -29,7 +29,13 @@ public static class Naming
         // `Func_C_P` — injective, because C# forbids a property and a method of one name
         // in one type.
         var name = Mangle(symbol);
-        var qualified = symbol.ContainingType is { } type ? $"{type.Name}_{name}" : name;
+        // R28.2. A member of a struct nested in a class is qualified by both: every
+        // collection declares its own `Enumerator`.
+        var qualified = symbol.ContainingType is { } type
+            ? type is { TypeKind: TypeKind.Struct, ContainingType: { } outer }
+                ? $"{outer.Name}_{type.Name}_{name}"
+                : $"{type.Name}_{name}"
+            : name;
         return qualified + Overload(symbol, name);
     }
 
@@ -66,6 +72,9 @@ public static class Naming
         IMethodSymbol { MethodKind: MethodKind.Constructor } => "_ctor",
         // R22.13. An indexer's C# name is `this[]`; its accessors keep `get_Item`/`set_Item`.
         IMethodSymbol { MethodKind: MethodKind.PropertyGet, AssociatedSymbol: IPropertySymbol { IsIndexer: false } p } => p.Name,
+        // R28.2. `void IEnumerator.Reset()` is named `System.Collections.IEnumerator.Reset`.
+        IMethodSymbol { MethodKind: MethodKind.ExplicitInterfaceImplementation } e =>
+            e.Name[(e.Name.LastIndexOf('.') + 1)..],
         _ => symbol.Name,
     };
 

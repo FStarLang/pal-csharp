@@ -86,6 +86,10 @@ public static class Declarations
             !known.HasModel(plainOwner))
             return CalleeKind.Method;
 
+        // R28.2. A member of a struct that borrows an enclosing object is a member of that
+        // object's class: it carries the class's invariant, read-only.
+        if (Borrowing.IsMember(method, known)) return CalleeKind.Method;
+
         // §4.5. An instance method or constructor of a translated class: it carries the
         // object's invariant, which is what makes it translatable at all. R9.20 adds the
         // getter of a computed property, which is a nullary instance method that C# spells

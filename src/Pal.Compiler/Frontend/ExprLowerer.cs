@@ -201,7 +201,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     [ToDeclared(Lower(t.Arguments[0].Expression), pair.Args[0]),
                      ToDeclared(Lower(t.Arguments[1].Expression), pair.Args[1])])
                     { MachineArgs = true, Type = pair },
-            ThisExpressionSyntax => new IrVar(loc, Names.This),
+            ThisExpressionSyntax => Borrow is not null ? SelfExpr(loc) : new IrVar(loc, Names.This),
             // R23.13. The empty collection expression at a one-dimensional array type is
             // `Array.Empty<T>()` (R23.1).
             CollectionExpressionSyntax { Elements.Count: 0 } ce when !SpecPosition &&
@@ -418,7 +418,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case CastExpressionSyntax c: return IsMessageArgument(c.Expression);
             case IdentifierNameSyntax:
                 return model.GetSymbolInfo(e).Symbol is IParameterSymbol or ILocalSymbol;
-            case MemberAccessExpressionSyntax:
+            case MemberAccessExpressionSyntax ma:
+                // Bound ignoring accessibility (R24.3), `SR` may name the program's and a
+                // framework assembly's internal class at once, and then binds to neither:
+                // a member of every candidate class `SR` is a resource string.
+                if (model.GetSymbolInfo(ma.Expression) is { Symbol: null, CandidateReason: CandidateReason.Ambiguous } amb &&
+                    amb.CandidateSymbols.All(x => x is INamedTypeSymbol { Name: "SR" }))
+                    return true;
                 return model.GetSymbolInfo(e).Symbol is IPropertySymbol { IsStatic: true } sr &&
                        sr.ContainingType.Name == "SR";
             case InvocationExpressionSyntax inv when model.GetSymbolInfo(inv).Symbol is IMethodSymbol m:
@@ -568,6 +574,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
             return Unsupported(node, loc);
 
+        // R28.4. `new Enumerator(this)`: the constructor of a borrowing struct is a method
+        // of the borrowed object's class, which returns the struct.
+        if (model.GetSymbolInfo(node).Symbol is IMethodSymbol bctor && Borrowing.IsMember(bctor, known))
+            return BorrowingConstruction(node, bctor, named, loc);
+
         if (node.ArgumentList is { Arguments.Count: > 0 })
         {
             diagnostics.Unsupported(loc, $"A constructor call on `{named.Name}`",
@@ -613,7 +624,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 fields.Add(supplied with { FieldType = declared });
                 continue;
             }
-            if (Zero(loc, type) is not { } zero)
+            // R28.5. A borrowing struct's constructor leaves a field of type `T` at the
+            // caller's default (R14.2a).
+            if ((Borrow is not null ? DefaultValue(type, loc) : Zero(loc, type)) is not { } zero)
             {
                 diagnostics.Unsupported(loc, $"The default value of `{name}.{field}`");
                 return new IrLiteral(loc, null);
@@ -973,6 +986,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal))
             return new IrResult(loc);
 
+        // R28.2. Inside a borrowing struct's member.
+        if (BorrowedIdentifier(symbol, node, loc) is { } borrowed) return borrowed;
+
         // R21.3. A pattern variable is the expression it was bound to.
         // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
         if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
@@ -1075,6 +1091,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var receiverType = model.GetTypeInfo(node.Expression).Type;
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
+        if (BorrowedMember(node, symbol, loc) is { } borrowedMember) return borrowedMember;
         // R25.1. `Comparer<T>.Default` is the default comparer at `T`.
         if (symbol is IPropertySymbol { IsStatic: true, Name: "Default" } dp &&
             Sorted.IsComparerSymbol(dp.ContainingType) &&
@@ -1815,6 +1833,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+
+        // R28.3. Reference identity, in a contract.
+        if (SpecPosition && method is { IsStatic: true, Name: "ReferenceEquals", Parameters.Length: 2 } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Object)
+            return LowerReferenceEquals(node, loc);
+
+        // R28.6. A borrowing struct's member is translated, and called from nowhere: what a
+        // call would pass for the borrowed object is not designed.
+        if (Borrowing.IsMember(method, known) && method.MethodKind != MethodKind.Constructor)
+        {
+            diagnostics.Error("PALCS0731", loc,
+                $"A call to `{method.ContainingType!.Name}.{method.Name}`, a member of a struct that " +
+                "borrows its collection. Such members are verified, but calling one from verified code " +
+                "is not supported (doc/translation.md R28.6).");
+            return new IrLiteral(loc, null);
+        }
 
         // R26.1. Calling a callable delegate, `d(x)` or `d.Invoke(x)`, is applying the pure
         // function that models it, in code and in a contract alike.

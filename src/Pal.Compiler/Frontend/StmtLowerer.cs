@@ -16,12 +16,16 @@ public sealed class StmtLowerer(
     SemanticModel model,
     WellKnown known,
     DiagnosticBag diagnostics,
-    ImmutableHashSet<string>? objectFields = null)
+    ImmutableHashSet<string>? objectFields = null,
+    BorrowContext? borrow = null)
 {
     private readonly ExprLowerer _code =
-        new(model, known, diagnostics, specPosition: false) { ObjectFields = objectFields ?? [] };
+        new(model, known, diagnostics, specPosition: false) { ObjectFields = objectFields ?? [], Borrow = borrow };
     private readonly ExprLowerer _spec =
-        new(model, known, diagnostics, specPosition: true) { ObjectFields = objectFields ?? [] };
+        new(model, known, diagnostics, specPosition: true)
+        {
+            ObjectFields = objectFields ?? [], Borrow = borrow, BorrowBody = borrow is not null,
+        };
 
     /// <summary>
     /// R4.12c. A constructor initializer is an expression that is not inside any statement,
@@ -102,7 +106,7 @@ public sealed class StmtLowerer(
             catches.Add(new IrCatch(cloc, type, name, when, LowerBlock(c.Block)));
         }
         // R19.5. A try states its invariant the way a loop does, at the head of its body.
-        var (invariants, decreases, body) = ExtractLoopSpecs(node.Block);
+        var (invariants, decreases, body) = ExtractLoopSpecs(node.Block, loop: false);
         if (decreases is not null)
             diagnostics.Error("PALCS0614", decreases.Loc,
                 "`Pal.Decreases` in a `try`. A `try` runs its body once; only a loop has a " +
@@ -351,6 +355,26 @@ public sealed class StmtLowerer(
                         "local or an unwritten field, and never rebound, are supported (doc/translation.md R24.8).");
                 continue;
             }
+            // R28.2. `C list = _list;`, never written, in a borrowing struct's member is
+            // another name for the borrowed object.
+            if (borrow is not null && symbol is not null && v.Initializer?.Value is { } bi &&
+                model.GetSymbolInfo(bi).Symbol is IFieldSymbol bf && borrow.IsOwner(bf) &&
+                NeverWritten(symbol, node.Parent ?? node))
+            {
+                _code.Alias(symbol, _code.Lower(bi));
+                _spec.Alias(symbol, _spec.Lower(bi));
+                continue;
+            }
+            // R28.2. So is `T[] a = list._items;`, never written, for the borrowed object's
+            // array: the object is only read, so the field holds that array throughout.
+            if (borrow is not null && symbol is { Type: IArrayTypeSymbol } && v.Initializer?.Value is { } ai &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                _code.Lower(ai) is IrField { Receiver: IrVar { Name: Pal.Compiler.Emit.Names.This } } arrayField)
+            {
+                _code.Alias(symbol, arrayField);
+                _spec.Alias(symbol, arrayField);
+                continue;
+            }
             // R24.19. `T[] a = _field;`, never written, is another name for the field.
             if (symbol is not null && FieldAlias(v, symbol, node) is { } aliased)
             {
@@ -484,8 +508,10 @@ public sealed class StmtLowerer(
         statements.Add(new IrLocalDecl(Locations.From(v), index, indexType, element.Index));
         var alias = element with { Index = new IrVar(element.Loc, index) { Type = indexType } };
         _code.Alias(symbol, alias);
-        _spec.Alias(symbol, _spec.Lower(v.Initializer.Value) is IrElement se
-            ? se with { Index = alias.Index } : alias);
+        // An index that steps a variable (`a[i++]`) is no specification; the alias is
+        // already in the terms a specification uses.
+        _spec.Alias(symbol, !v.Initializer.Value.DescendantNodes().Any(Borrowing.IsStep) &&
+            _spec.Lower(v.Initializer.Value) is IrElement se ? se with { Index = alias.Index } : alias);
         return alias;
     }
 
@@ -954,9 +980,11 @@ public sealed class StmtLowerer(
     /// so anything before it in the body would already have run under no specification.
     /// </summary>
     private (ImmutableArray<IrExpr> Invariants, IrExpr? Decreases, IrStmt Body) ExtractLoopSpecs(
-        StatementSyntax bodySyntax)
+        StatementSyntax bodySyntax, bool loop = true)
     {
         var invariants = ImmutableArray.CreateBuilder<IrExpr>();
+        if (loop && borrow is { Constructor: false })
+            invariants.AddRange(BorrowFacts.Invariants(borrow, known, Locations.From(bodySyntax)));
         IrExpr? decreases = null;
 
         var statements = bodySyntax is BlockSyntax block
