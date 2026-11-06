@@ -7335,6 +7335,10 @@ and it holds the region `this` lives in: the heap is a ghost binder `$heap_K`.
   are `null` or the default. Any other constructor body is PALCS0705.
 * `x.P = v` on an auto-property `P` of a region class is the field write, as R3.4 reads `P`
   as its backing field. Its setter has no body, so there is no method to call.
+* `Pal.Heap<K>()` in a ghost statement of a member that writes the region is the heap as it
+  stands at that statement: the region is re-read there, as a `[Open]` owner method's ghost
+  statements re-read the record (R27.23). It used to be the heap on entry, so a lemma called
+  after `ColorRed()` was told about the wrong heap.
 
 Two predicates describe a re-linking, both from `Pulse.Lib.CSharp.RegionTree`:
 
@@ -7444,6 +7448,8 @@ applied to `class_K__view`, `class_K__left` and `class_K__right`, then to the ty
 and the arguments. So a library predicate can walk a region's heap without knowing the class.
 
 A `void` `[RegionOp]` is a lemma. Called as a statement, it is a ghost call of the F\* lemma.
+A `bool` literal passed for a `bool` parameter is the F\* boolean `true`/`false`, not the
+proposition `True`/`False`. A comparison passed for one (`order < 0`) is its F\* boolean.
 A first type argument that is not a region class is PALCS0706. `Pal.Heap<K>()` at a `K` that
 is not a region class is PALCS0707.
 
@@ -7552,6 +7558,74 @@ mutable cell, initialised from the argument (`let mut var_x = arg_x`). Only a di
 assignment `x = e` counts: passing `x` to a call or writing `x.F` does not make it a cell.
 The contract still names the argument.
 
+### R27.30 Top-down red-black removal
+
+`SortedSet<T>.DoRemove` removes in one pass down the tree. It makes every node it reaches
+not a 2-node, before it steps below it:
+* the root is turned red;
+* a red sibling is rotated up;
+* two 2-node siblings are merged;
+* a 2-node next to a 3- or 4-node borrows from it by a single or double rotation.
+
+Once it meets `item`, it goes on to the match's in-order successor (the leftmost node of the
+right subtree). At the bottom, `ReplaceNode` puts the successor in the match's place. Four
+library modules prove it, with no admits:
+
+* **`Pulse.Lib.CSharp.TopDownRemove`** is the pure half, over `TopDown`'s boxed trees.
+  * `rinv` is the loop invariant. The tree is a focus whose path is the search for `item`,
+    going right at a key equivalent to it. `match`/`parentOfMatch` are where the search met
+    `item`. The node above `current` is not a 2-node.
+  * `rmid` is the state after a red sibling is lifted, and `rfx` the state after the
+    fix-up, when `current` is not a 2-node.
+  * `removed c s k` is `s` without the element at `Pal.KeyIndex(c, s, k)`, or `s` when there
+    is none.
+* **`Pulse.Lib.CSharp.TopDownSucc`** is the end of the descent. `rdel` replaces the match by
+  its successor, and `end_found` proves that the result is `removed` and is red-black.
+* **`Pulse.Lib.CSharp.TopDownRemoveHeap`** reads the two through the heap.
+  * `rinvh`, `rmidh` and `rfxh` are the invariants at a heap.
+  * `rmeasure` is the size of `current`'s subtree.
+  * The lemmas are the loop's ghost steps: `r_start`, `r_at_cur`, `r_fix_root`, the
+    sibling cases `a_*` (red sibling) and `b_*` (borrow), `r_merge`, `r_step` and `r_after`.
+  * `rn_*` prove `ReplaceNode`, and `rot_single`/`rot_double` prove `Node.Rotate`.
+  * The `SMTPat` lemmas `rn_writes_ne`, `rn_writes_eq`, `rn_color_upd` and `b_s2_upd` see
+    through the nested `upd`s that a node's successive writes leave.
+* **`PalLang.SpecTopDownRemove`** is the C# surface. Each member is a `[RegionOp]` over
+  `TopDownRemoveHeap`.
+
+`DoRemove`'s loop carries `SpecTopDownRemove.RInv(comparer, k0, item, Pal.Heap<Node>(), root,
+current, parent, grandParent, match, parentOfMatch, foundMatch)`. It decreases
+`SpecTopDownRemove.Measure(Pal.Heap<Node>(), root, current)`. The body calls one ghost step
+per program step.
+
+`r_step` states the next node in two forms:
+* as `if lt then left … else right …`, for the invariant;
+* as `toward … o`, for the measure.
+
+The `?:` the loop ends with is matched by the second form, and the `if (order == 0)` join by
+the first.
+
+`ReplaceNode` is `[Open]` (R27.23). It requires `SpecTopDownRemove.RnPre` (the match, its
+parent, the successor and the successor's parent, as the descent leaves them). It ensures
+`RnPost`: the root's tree is `TopDownSucc.rdel` of the old one at the match, which is the
+match taken out and the successor moved into its place.
+
+### R27.31 Discarded results; region-moving `if`s in a loop body
+
+* An expression statement whose value is not `void` (`parent.RotateLeft();`) is
+  `let _ = e;`. Pulse rejects a statement whose value is not `unit`.
+* In a loop body (R27.15), an `if` whose arm moves a region (R27.16) is split as well. The
+  rest of the body moves into both arms, as for an arm that writes the owner's record. The
+  heap each arm leaves would otherwise be a fresh existential at the join, and what the arm
+  proved about it would be lost. `DoRemove`'s `if (parent.Right == sibling)
+  parent.RotateLeft(); else parent.RotateRight();` is the case. An escaping `if` keeps
+  R27.27's treatment.
+* A loop in a member that holds a region itself (a `[Region]` class's member, R27.16) or in
+  an `[Open]` method (R27.23) carries that region's heap in its invariant, as an owner's
+  loop does (R27.4). It is named once when the body writes no node, and is existential
+  otherwise. In an `[Open]` method, `this.f` in the invariant is the field of the record
+  the loop holds. Before this, such a loop dropped the region from its invariant, and the
+  body could not touch a node.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7587,6 +7661,8 @@ ensures that the tree and the comparer are unchanged.
 | `AddIfNotPresent`, `Add` (require `SpecItems.Length < int.MaxValue`) | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) < 0)`; when added, `SpecItems == SpecTopDown.Inserted(…)` (inserted at its `LowerBound`); otherwise unchanged; comparer unchanged. The owner's invariants (sorted, red-black, `Count == Size`) are re-established (R27.26) |
 | `InsertionBalance` (`[Open]`, R27.23) | `SpecTopDown.Balanced`: the rotation that repairs a red parent, re-linked under `greatGrandParent` or at the root; fields other than `root` unchanged |
 | `ReplaceChildOrRoot` (`[Open]`) | `SpecTopDown.Replaced`: `parent`'s link, or `root` when `parent` is null, now `newChild` |
+| `DoRemove`, `Remove` | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) >= 0)`; `SpecItems == SpecTopDownRemove.Removed(…)` (the element at `KeyIndex` taken out, or unchanged); comparer unchanged. The owner's invariants are re-established (R27.30) |
+| `ReplaceNode` (`[Open]`) | `SpecTopDownRemove.RnPost` under `RnPre` (R27.30) |
 
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
@@ -7606,6 +7682,8 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
 | `Rotate(rotation)` (requires `CanRotate`) | `Rotate(rotation, t)`, non-null |
 | `GetSibling(node)` | the other child link (`Pal.LeftOf`/`Pal.RightOf`, R27.18) |
 | `GetRotation(current, sibling)` | the rotation its two tests choose, and `CanRotate` of it |
+| `Merge2Nodes` (removal) | also `SpecTopDownRemove.Merged`: every box where it was |
+| `Rotate(rotation)` (removal) | also `SpecTopDownRemove.RotatedN`, the heap-level rotation |
 | `Node(item, color)` | `Region.alloc` of a leaf (R27.16) |
 | `ReplaceChild(child, newChild)` | `SpecTopDown.Relinked` |
 
@@ -7615,9 +7693,8 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **`Remove`/`DoRemove` and the set operations.** Their loop invariants must relate the
-  region's heap to the model while the tree is being re-linked; R27.26's insertion theory
-  is the pattern a removal theory would follow.
+* **The set operations.** `RemoveWhere`, `UnionWith`, `IntersectWith` and the rest build
+  on enumeration and on `TreeSubSet`.
 * **The enumerator, serialization and `IEnumerable` constructors.** These are out of
   scope.
 
@@ -7652,6 +7729,12 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   `greatGrandParent` is `null` whenever the red parent is a child of the root. The callee
   handles it (`ReplaceChildOrRoot` takes a `Node?`), but its parameter is declared
   non-nullable. The verified source marks it `[AllowNull]` (R27.28).
+* **More `!`s that are not true in `DoRemove` and `ReplaceNode`.** `DoRemove` calls
+  `ReplaceNode(match, parentOfMatch!, parent!, grandParent!)`. `parentOfMatch` is `null`
+  when the match is the root, and `grandParent`, the successor's parent, is `null` when the
+  descent ends at the root's child. In `ReplaceNode`, `successor = match.Left!` is `null` when the match is a leaf, and
+  `ReplaceChild`/`ReplaceChildOrRoot` are called with a `null` `newChild`. Each callee
+  handles `null`. The verified source marks those parameters `[AllowNull]` (R27.28).
 * **`++count` can overflow.** `AddIfNotPresent` increments `count` unchecked. The verified
   contract requires `SpecItems.Length < int.MaxValue`. A tree of 2^31 - 1 nodes is out of
   reach in practice, but nothing in the code rules it out.

@@ -1905,7 +1905,11 @@ public sealed class CodeEmitter(
                 return;
             }
             case IrExprStmt e:
-                Line(Expr(e.Expr) + ";");
+                // R27.31. A discarded result is bound to `_`: Pulse rejects a statement
+                // whose value is not `unit`.
+                Line(e.Expr.Type is null or IrPrim { Kind: PrimKind.Void }
+                    ? Expr(e.Expr) + ";"
+                    : $"let _ = {Expr(e.Expr)};");
                 return;
 
             case IrReturn r:
@@ -2649,6 +2653,34 @@ public sealed class CodeEmitter(
         foreach (var receiver in _objects)
             Representation(receiver, w.Body, scope, measureScope, resources, existentials, pure, repFixed);
 
+        // R27.31. A region the method holds itself (R27.16) and an `[Open]` receiver's
+        // heaps (R27.23) are carried across the loop as an owner's region is (R27.4), and
+        // an `[Open]` receiver's fields are read from its record as the loop holds it.
+        var carried = plan.Held
+            .Select(u => (Region: u.Region,
+                          Perm: u.Mutates ? "1.0R" : "p_" + Frontend.Region.HeapBinder(u.Region.Name)))
+            .Concat(live.Where(s => s.Open).SelectMany(s => s.OpenHeaps.Select(k => (Region: k, Perm: "1.0R"))));
+        foreach (var (k, perm) in carried)
+        {
+            var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            var regionResource = PulseEmitter.RegionAt(k, perm, heap);
+            resources.Add(regionResource);
+            var still = !WritesRegion(w.Body, k.Name);
+            if (still) repFixed.Add((heap, regionResource));
+            else existentials.Add(heap);
+            scope.Bind(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other));
+            measureScope.Bind(Frontend.Region.HeapName(k.Name), still
+                ? new Term(heap, TermKind.Other)
+                : new Term($"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(k)}) ())", TermKind.Other));
+        }
+        foreach (var slot in live.Where(s => s is { Open: true, Type: IrClassType }))
+        {
+            var oc = (IrClassType)slot.Type;
+            foreach (var f in slot.OpenFields)
+                scope.Bind($"{Names.This}.{f.Name}", new Term(
+                    $"{fixedNames[slot.Name]}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+        }
+
         // R5.8b, and R5.12 with it: a binder the loop cannot change is *named* before the
         // loop rather than existentially quantified inside it, so that what comes out is
         // known to be what went in. For the receiver that is not an optimisation — a
@@ -3056,7 +3088,10 @@ public sealed class CodeEmitter(
         {
             var rest = statements.RemoveRange(0, k + 1);
             if (rest.IsEmpty) { UnitTail(statements[k], plan); return; }
-            if (statements[k] is IrIf i && WritesRecordInArm(i) && NullTest(i.Cond) is null)
+            // R27.31. So does one whose arm moves a region (R22.12): the heap each arm leaves
+            // is a fresh existential at the join, and what the arm proved about it is lost.
+            if (statements[k] is IrIf i && (WritesRecordInArm(i) || _escape is null && MovesRegion(i)) &&
+                NullTest(i.Cond) is null)
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc) =>
                     new(loc, [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest]);
@@ -3288,6 +3323,15 @@ public sealed class CodeEmitter(
                     scope.Bind(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other));
                 }
             }
+        }
+
+        // R27.16. A region the method holds and writes is named as it is now, so that
+        // `Pal.Heap<K>()` in a ghost statement is the current heap, not the one at entry.
+        foreach (var use in plan.Held.Where(u => u.Mutates))
+        {
+            var heap = FreshValue(Frontend.Region.HeapBinder(use.Region.Name));
+            named.Add((heap, PulseEmitter.RegionAt(use.Region, "1.0R", heap)));
+            scope.Bind(Frontend.Region.HeapName(use.Region.Name), new Term(heap, TermKind.Other));
         }
 
         if (named.Count > 0)

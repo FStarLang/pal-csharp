@@ -26,11 +26,15 @@ public sealed class MethodPlan
 
     private readonly SpecEmitter _spec;
 
+    /// <summary>R27.16. The regions a non-owner method holds itself.</summary>
+    public ImmutableArray<RegionUse> Held { get; }
+
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
         ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
         ImmutableArray<IrFieldDecl> openFields = default)
     {
         _spec = spec;
+        Held = held.IsDefault ? [] : held;
 
         var assigned = new HashSet<string>();
         Passes.Normalize.Assigned(method.Body, assigned);

@@ -748,6 +748,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             .Concat(op.Args.Select((a, i) =>
                 i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
                     ? Argument(a, op.ParamTypes[i], scope)
+                    // R27.22. A `bool` literal passed as a `bool` is the boolean, not the
+                    // proposition `True`/`False`.
+                    : i < op.ParamTypes.Length && op.ParamTypes[i] is IrPrim { Kind: PrimKind.Bool } &&
+                      a is IrLiteral { Value: bool pb }
+                        ? (pb ? "true" : "false")
                     : op.MachineArgs
                         ? a is IrLiteral { Value: not (null or string or decimal) } l
                             ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)

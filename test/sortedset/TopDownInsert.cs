@@ -245,6 +245,32 @@ public sealed class RbSet<T>
         return RbNode.IsNonNullRed(x);
     }
 
+    // R27.31. The same loop in an `[Open]` method, which carries the owner's heap and reads
+    // its fields from the record the loop holds.
+    [Open]
+    [Requires("Pal.Unshared(x)")]
+    [Ensures("Pal.Unshared(x)")]
+    [Ensures("@this.comparer == Pal.Old(@this.comparer) && @this.count == Pal.Old(@this.count) && @this.version == Pal.Old(@this.version)")]
+    private void RepaintOpen(RbNode x, int n, bool red)
+    {
+        int i = 0;
+        while (i < n)
+        {
+            Pal.Decreases(n - i);
+            Pal.Invariant(Pal.Unshared(x));
+            Pal.Invariant(comparer == Pal.Old(this.comparer) && count == Pal.Old(this.count) && version == Pal.Old(this.version));
+            if (red)
+            {
+                x.ColorRed();
+            }
+            else
+            {
+                x.ColorBlack();
+            }
+            i++;
+        }
+    }
+
     [Region]
     internal sealed class RbNode
     {
@@ -280,6 +306,42 @@ public sealed class RbSet<T>
         [Requires("Pal.WellFormed(@this)")]
         [Ensures("Result == (SpecSearchTree.IsRed(Pal.Tree<(T, bool)>(@this).Left) && SpecSearchTree.IsRed(Pal.Tree<(T, bool)>(@this).Right))")]
         public bool Is4Node => IsNonNullRed(Left) && IsNonNullRed(Right);
+
+        // R27.31. A loop body whose `if` moves the region: each arm carries the rest of the
+        // body, so what the arm proves about the heap it leaves reaches the invariant.
+        [Requires("Pal.Unshared(@this)")]
+        [Ensures("Pal.Unshared(@this)")]
+        public void Repaint(int n, bool red)
+        {
+            int i = 0;
+            while (i < n)
+            {
+                Pal.Decreases(n - i);
+                Pal.Invariant(Pal.Unshared(this));
+                if (red)
+                {
+                    ColorRed();
+                }
+                else
+                {
+                    ColorBlack();
+                }
+                i++;
+            }
+        }
+
+        // R27.16: `Pal.Heap` in a ghost statement is the heap as it stands, not as it was on
+        // entry. R27.31: a discarded non-`void` result.
+        [Requires("Pal.Unshared(@this)")]
+        [Ensures("Pal.Unshared(@this) && Pal.Reshaped(@this, @this)")]
+        public void Blacken()
+        {
+            Ghost<SpecHeap<RbNode>> h0 = Pal.Heap<RbNode>();
+            ColorBlack();
+            Ghost<SpecHeap<RbNode>> h1 = Pal.Heap<RbNode>();
+            Pal.Assert(SpecTopDown.Recolored<RbSet<T>.RbNode, T>(h0.Value, h1.Value, this, false));
+            IsNonNullRed(null);
+        }
 
         [Requires("Pal.Unshared(@this)")]
         [Ensures("Pal.Unshared(@this) && Pal.Reshaped(@this, @this)")]
