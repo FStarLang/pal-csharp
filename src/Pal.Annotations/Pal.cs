@@ -397,6 +397,19 @@ public static class Pal
     // -- Separation-logic propositions -------------------------------------
 
     /// <summary>The points-to resource for a location, Pulse's <c>pts_to</c>.</summary>
+    /// <summary>
+    /// R27.7. The tree a reference to a <c>[Region]</c> object reaches through its two child
+    /// fields, each node seen through the class's <c>[Model]</c> view <typeparamref name="TV"/>.
+    /// Read in the region the enclosing method holds.
+    /// </summary>
+    public static SpecTree<TV> Tree<TV>(object? node) => throw Ghost();
+
+    /// <summary>
+    /// R27.7. The reference reaches only objects of the region the enclosing method holds, and
+    /// every path from it ends in <c>null</c>: the region's well-formedness at that pointer.
+    /// </summary>
+    public static bool WellFormed(object? node) => throw Ghost();
+
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 
     /// <summary>Lift a pure proposition into a resource, Pulse's <c>pure</c>.</summary>

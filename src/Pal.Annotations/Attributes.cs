@@ -111,6 +111,17 @@ public sealed class ConsumesAttribute : Attribute;
 public sealed class PlainAttribute : Attribute;
 
 /// <summary>
+/// R27.3. The objects of this class are owned as one <em>region</em> by whichever
+/// translated class holds a field of it: a ghost heap of every node, read and written through
+/// <c>Pulse.Lib.CSharp.Region</c>, so nodes may alias and be re-linked freely. The class must
+/// be <c>sealed</c> and declare exactly two fields of its own type (the children, in
+/// declaration order); an optional <c>[Model]</c> member is the <em>view</em> of one node,
+/// which <c>Pal.Tree</c> maps over the tree a pointer reaches.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class RegionAttribute : Attribute;
+
+/// <summary>
 /// R22.14. Arithmetic that writes this integer field -- or, on a method, all the integer
 /// arithmetic in its body -- wraps, as C#'s default unchecked context says it does,
 /// rather than carrying R6.4's no-overflow obligation. For a counter nothing else reads

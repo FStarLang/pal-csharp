@@ -449,7 +449,8 @@ public static class Declarations
         Has(symbol, known.ModelAttribute)
         || Has(symbol, known.SpecAttribute)
         || Has(symbol, known.LemmaAttribute)
-        || Has(symbol, known.PlainAttribute);
+        || Has(symbol, known.PlainAttribute)
+        || Has(symbol, known.RegionAttribute);
 
     /// <summary>
     /// The syntactic location an attribute's argument occupies, so that a diagnostic

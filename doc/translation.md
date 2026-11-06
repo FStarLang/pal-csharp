@@ -1691,7 +1691,7 @@ emitted exactly as R5.6 describes.
 | `continue;` | `var_cont_n := true;` |
 | guard `c` | `⟦c⟧ && not !var_brk_n` |
 | invariant | additionally `exists* v. pts_to var_brk_n v` |
-| measure `m` | `⟦m⟧ + (if !var_brk_n then 0 else 1)` |
+| measure `m` | `CA.until_set !var_brk_n (⟦m⟧)`, i.e. `if brk then 0 else ⟦m⟧ + 1` (R27.10) |
 | `S₁; S₂` in a loop body, where `S₁` may escape | `⟦S₁⟧; if (not !var_brk_n && not !var_cont_n) { ⟦S₂⟧ } else { () };` |
 | the `for` step of R5.7 | emitted after the body, under `not !var_brk_n` only |
 
@@ -1701,11 +1701,12 @@ Four points are worth stating because each is forced, not chosen:
   dereferences stay visible to the loop body, so appending the flag rather than prepending
   it is what keeps R5.6 loops unchanged.
 * **The measure needs the flag.** The iteration that breaks need not decrease the user's
-  measure — it exits instead. Adding one while the flag is still clear restores the
-  decrease on every path, uniformly. It stays *linear*, which matters: multiplication in a
+  measure — it exits instead. `until_set` is `m + 1` while the flag is clear and `0` once
+  it is set, so the breaking iteration decreases it whatever state it leaves behind
+  (R27.10 says why that matters). It stays *linear*, which matters: multiplication in a
   measure puts Z3 into nonlinear mode and destabilises unrelated obligations in the same
-  definition. It also stays inside F9, which forbids a dereference in a *branch* of an
-  `if` in a measure but not in its condition.
+  definition. And it stays inside F9, which forbids a dereference in a *branch* of an
+  `if` in a measure: the flag and the measure are a function's arguments, not an `if`'s.
 * **`var_cont_n` needs no invariant** because it is allocated inside the body and so does
   not cross the loop's boundary.
 * **The guard is a syntactic test.** "May escape" is a walk over the statement that stops
@@ -6799,6 +6800,18 @@ A `partial` class is collected once. It is collected at the declaration that hol
 
 ### 25.2 What blocks `SortedSet<T>` and `SortedDictionary<TKey,TValue>`
 
+*Update:* §27 removes obstacles 1 to 6 for `SortedSet<T>`'s read-only members, by other means than
+the ones proposed below:
+
+* exact-type verification (R27.1);
+* a `[Region]` node class, whose auto-properties are its fields (R27.3);
+* the owner holding the whole region (R27.4);
+* loops over `Pal.Tree` (R27.7);
+* R26.2's `return` inside a loop;
+* a returned pointer that the caller only tests against `null`.
+
+Obstacles 7 and 8 still stand. §27.2 lists what is verified.
+
 `SortedDictionary` is a wrapper over `SortedSet<KeyValuePair<TKey,TValue>>` (`TreeSet`), so
 both wait on `SortedSet`. The harness `pal/SortedSet` in the runtime checkout gets
 through the C# compiler with R25.11 and R25.12, and is then refused. These are the
@@ -7053,3 +7066,220 @@ The pattern `c is null`, on a type whose null test is R25.4's opaque `is_null`, 
       that is a value the model has only as a ghost.
   * The default-comparer and custom-comparer sift loops are verified separately. Both are
     specified at `comparer ?? Comparer<TPriority>.Default`.
+
+## 27. `SortedSet<T>`: regions of tree nodes
+
+`SortedSet<T>` is a red-black tree. Its `Node` class is linked by `Left` and `Right`, and
+insertion and removal re-link nodes top-down, through pointers held in several locals at
+once (`parent`, `grandParent`, `greatGrandParent`, `sibling`). Owning each node through its
+parent, as R10 does for a recursive class, cannot follow that: a node is reachable from two
+locals at the moment it is re-linked. This section therefore owns all the nodes of one
+structure as one *region*. The nodes are cells of a ghost heap that the owner holds. The tree
+a pointer reaches is a pure function of that heap.
+
+Its library is `Pulse.Lib.CSharp.Region`. Its searches are in `Pulse.Lib.CSharp.SearchTree`.
+The tests are `test/sortedset` and the `Region*` cases in `test/diagnostics`.
+
+### R27.1 Verification at the exact type
+
+Under `[TranslateAnnotatedOnly]`, a concrete generic class that is not `sealed`, and whose
+every subclass in the compilation is untranslated, is translated as a leaf. This holds even
+when it declares virtual members. (`SortedSet<T>` has `TreeSubSet` as a subclass, which
+nothing annotates.) The untranslated subclass is not collected at all.
+
+Why this is sound:
+
+* The invariant is produced only by the class's own translated constructor.
+* That constructor runs only for a translated `new C(...)`. A subclass's constructor chains
+  to the CLR's constructor, never to the translation.
+* So every receiver that verified code holds has dynamic type exactly `C`. Every virtual
+  call on it binds to `C`'s own body.
+
+What verified code cannot do is accept a `C` from unverified code. That code could hand it a
+`TreeSubSet`. The contracts are claims about `SortedSet` objects only.
+
+### R27.2 The null comparer
+
+`IComparer<T>` is a reference type, so `default` at a comparer type is `null`. The model has
+one value for it: `Comparer.null_comparer`, of which `Sorted.is_null` holds.
+
+*Trusted:* `Pulse.Lib.CSharp.NullComparer.null_comparer` asserts that such a value exists.
+
+### R27.3 `[Region]` classes
+
+A `[Region]` class must have this shape:
+
+* It is `sealed` and derives from `object`. Otherwise PALCS0700 is reported. A region holds
+  one record type.
+* It declares exactly two nullable fields (or auto-properties) of its own type. In declaration order, these are
+  the left and right children. Otherwise PALCS0701 is reported.
+* It has at most one `[Model]`, which must be an expression-bodied property. This is the
+  *view* of one node. Otherwise PALCS0702 is reported.
+
+It is emitted like a `[Plain]` class (R12): the record, `class_K__opt`, and the field
+projections. It also gets the following:
+
+| Pulse | meaning |
+|---|---|
+| `class_K__left r`, `class_K__right r` | the two child fields of a record |
+| `class_K__view x r` | the `[Model]` of the node `x` holding `r` |
+| `class_K__tree h x` | `Region.tree_of view left right h x`, the `Tree.tree` reached from `x` |
+| `class_K__wf h x` | `Region.wf left right h x`: every path from `x` ends at `null` within the heap |
+| `fn class_K__read x` | reads a node of the region (R27.5) |
+
+The class has no methods of its own. Its constructor and members are not translated, and
+`HasModel` is false for it. Nested in a generic class, it takes the outer type parameters as
+well.
+
+### R27.4 The owner holds the region
+
+A class with a field of a `[Region]` type `K` is an owner. Its invariant gains three things:
+
+* an existential heap `heap_K`;
+* the resource `Region.region #raw #p heap_K`;
+* for each such field `f`, the conjunct `class_K__wf heap_K r.f`.
+
+In the owner's `[Model]` and in its contracts, `Pal.Tree<V>(f)` is `class_K__tree heap_K f`.
+
+An owner is never split. `Pal.Share` and `Pal.Gather` are not emitted for it, because two
+halves would hold two heaps that nothing proves equal.
+
+### R27.5 Reading and writing a node
+
+* **Reading.** A field read `x.f`, where `x` is of a region type, is
+  `(class_K__read x).fld_f`. `read` requires `mem h x`, or `wf h x` and a non-null `x`. It
+  ensures `mem h x` and that the record is `get h x`. When `wf h x` holds, it also ensures
+  `Region.wf_step`: both children are well formed, and the tree at `x` is
+  `Branch (tree left) (view x r) (tree right)`.
+* **Writing.** `x.f = e` reads the record and then writes `{ r with f = e }` back through
+  `Region.write`.
+* **In a loop.** A loop's frame holds the region:
+  * If the body writes no region field, allocates nothing and calls nothing, the heap is
+    fixed across the loop, and the invariant may speak of `Pal.Tree` at that heap.
+  * Otherwise the heap is existential.
+
+### R27.6 Allocation, the empty region, and `default`
+
+* `IrAlloc` of a region class is `Region.alloc`. It returns a fresh box, and the heap gains
+  one cell.
+* An owner's constructor creates the empty region (`Region.empty`) before it folds the
+  invariant. An unassigned region field starts at `B.null`.
+* `default` at a region type is `B.null`, typed so that a mutable local initialised with it
+  can be allocated.
+* A `new Node(...)` constructor call is still refused (R12.4).
+
+### R27.7 `Pal.Tree` and `Pal.WellFormed`
+
+`Pal.Tree<V>(x)` is the `SpecTree<V>` that `x` reaches. `Pal.WellFormed(x)` says that `x`
+is closed in the heap. Both are functions of the heap that the method holds, which is
+`$heap_K` in scope. Their argument must be of a `[Region]` type; otherwise PALCS0703 is
+reported.
+
+A loop over a region names the tree at the cursor: `Pal.Decreases(Pal.Tree<V>(c).Size)`,
+with `Pal.Invariant(Pal.WellFormed(c))`.
+
+### R27.8 Reference equality
+
+The heap is an association list from boxes to records. Looking up a box needs equality of
+boxes to be decidable.
+
+*Trusted:* `Pulse.Lib.CSharp.RefEq.ref_eq` is C#'s reference `==`. It decides box equality,
+and that is the only fact it states.
+
+### R27.9 Search specifications
+
+`PalLang.SpecSearchTree` (`Pulse.Lib.CSharp.SearchTree`) specifies searches over a
+`SpecTree<(T, TTag)>`:
+
+* `Contains` and `Find` are the comparer-directed search;
+* `Leftmost` and `Rightmost`;
+* `HeapIndex`, the breadth-first position `2k+1` / `2k+2` that `InternalIndexOf` computes.
+
+Each one follows the path the code follows, so it needs no ordering hypothesis. A search is
+specified as *what this search returns*, whatever the tree. Equating that with set
+membership needs a BST invariant, and that invariant belongs to the insertion code (§27.3
+below).
+
+### R27.10 The measure of a loop that returns
+
+R26.2's `return` inside a loop sets a flag, and the rest of the body runs under
+`if (not returned) { … } else { () }`. When Pulse joins the two arms, the skipped arm
+contributes no fact. In particular it does not say that the cursor is unchanged, so after
+the join the cursor of a returning iteration is unconstrained. Two consequences follow:
+
+* R5.10's measure is `CA.until_set !brk m`, which is `0` once the flag is set and `m + 1`
+  before. So the returning iteration decreases the measure whatever the cursor's state.
+* An invariant about the cursor is guarded by `!Pal.Returned()`:
+  `Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) && …))`.
+
+### 27.1 Trusted assumptions
+
+* `RefEq.ref_eq` (R27.8).
+* `NullComparer.null_comparer` (R27.2).
+* Exact-type verification (R27.1) is a soundness argument rather than an axiom. It holds as
+  long as verified code obtains every `SortedSet` it holds from a translated constructor.
+* Comparers are R22.30's total preorder.
+
+### 27.2 What is verified in `SortedSet<T>`
+
+The model is `SortedSetModel<T> { Tree: SpecTree<(T, bool)>; Comparer; Count }`. Each node
+contributes `(Item, Color == Red)`.
+
+**Verified:**
+
+| member | ensures |
+|---|---|
+| `SortedSet()` | count 0, empty tree, comparer `Comparer<T>.Default` |
+| `SortedSet(IComparer<T>?)` | count 0, empty tree |
+| `Count` | `Result == SpecCount` |
+| `Comparer` | `Result == SpecComparer` |
+| `Clear` | count 0, empty tree, comparer unchanged |
+| `VersionCheck` | count unchanged |
+| `UpdateVersion` | model unchanged |
+| `FindNode` | the result is non-null exactly when `SearchTree.contains comparer tree item` |
+| `Contains` | `Result == SearchTree.contains comparer tree item` |
+| `MinInternal`, `Min` | on a non-empty tree, `Result` is `SearchTree.leftmost tree` |
+| `MaxInternal`, `Max` | on a non-empty tree, `Result` is `SearchTree.rightmost tree` |
+
+`Comparer`, `Min` and `Max` were expression-bodied properties. Each became a property with
+a `get` accessor that carries the contract. The body is unchanged.
+
+**Not annotated:**
+
+* **`TryGetValue`.** It reads `node.Item` from the node that `FindNode` returns. A caller
+  can read a returned region pointer only knowing that it is `mem` of the heap. A contract
+  cannot name the heap, so `FindNode` cannot promise that.
+* **`FindRange` and `TreeSubSet`.** They return or construct a view over the tree, which is
+  the same obstacle, plus a second object sharing the region.
+* **`InternalIndexOf`.** See §27.3. Its result is not bounded by any quantity the code
+  checks.
+* **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.**
+  * They allocate with `new Node(item, color)`, which R12.4 refuses.
+  * They re-link through mutable locals, and the plain write path takes only value slots.
+  * Their specification needs the red-black and BST invariants over the region's tree.
+    The model states neither; the colour is in the view so that a later invariant can.
+* **The enumerator, serialization and `IEnumerable` constructors.** These are out of
+  scope.
+
+### 27.3 Specification findings
+
+* **`InternalIndexOf` and `BitHelper`.** `InternalIndexOf` returns a node's *breadth-first*
+  index. The root is 0, and the children of `k` are `2k+1` and `2k+2`. That index is bounded
+  by `2^height`, not by `Count`. `CheckUniqueAndUnfoundElements` sizes its `BitHelper` from
+  `Count`, and `BitHelper.MarkBit` silently ignores an index past its capacity. So an
+  element whose index falls outside is never marked, and a repeated occurrence of it is
+  counted as unique again.
+
+  Reproduced on .NET 10:
+  * `new SortedSet<int>(0..39).SetEquals(xs)` returns `false` when `xs` lists every element
+    twice.
+  * `IsSubsetOf` is likewise wrong.
+  * n = 4 and n = 10 happen to fit. n = 40, 100, 1000 and 100000 all fail.
+  * Sequential inserts of 0..39 give indices up to 254, against 64 bits of capacity.
+
+  Separately, `2 * index + 2` overflows `int` in a tree deeper than about 30 levels. A
+  red-black tree reaches that depth only past about 2^15 nodes, but nothing bounds the
+  arithmetic.
+* **Searches are specified by their path.** `Contains` is verified to be "the search finds
+  it", not "the set holds it". The two agree under the BST invariant, which only the
+  unverified insertion code maintains.

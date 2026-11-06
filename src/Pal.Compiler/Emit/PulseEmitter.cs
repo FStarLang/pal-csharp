@@ -403,6 +403,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                         new Provenance(Names.ClassInvOptShare(cl.Name), decl.Loc),
                         new Provenance(Names.ClassInvOptGather(cl.Name), decl.Loc),
                     ],
+                    // R27.3. A `[Region]` class adds its children, its view, the tree and
+                    // well-formedness over a heap, and the read that knows both.
+                    .. !cl.IsRegion ? ImmutableArray<Provenance>.Empty :
+                    [
+                        new Provenance(Frontend.Region.LeftOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.RightOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.ViewOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.TreeOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.WfOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.ReadOf(cl.Name), decl.Loc),
+                    ],
                     // R9.14. A leaf adds the forgetting function R9.6 read off its
                     // `[Model]` override, its own invariant at the base's model, and the
                     // two lemmas that lift R3.10d's sharing to that model.
@@ -953,8 +964,70 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("}");
         sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = B.box {raw}");
         sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = b: {opt} {{ not (B.is_null b) }}");
+        if (c.IsRegion) EmitRegionShape(sb, c, tb, raw, opt);
         return sb.ToString();
     }
+
+    /// <summary>
+    /// R27.7. What a <c>[Region]</c> class adds to its representation: the two child
+    /// projections, the view of one node, and the tree and well-formedness a pointer has in
+    /// a heap, both instances of <c>Pulse.Lib.CSharp.Region</c>'s generic definitions.
+    /// </summary>
+    private void EmitRegionShape(StringBuilder sb, IrClass c, TypeBinders tb, string raw, string opt)
+    {
+        var children = c.Fields
+            .Where(f => f.Type is IrClassType { Nullable: true } ct && ct.Name == c.Name)
+            .Take(2).ToArray();
+        var viewType = c.ModelBody is null ? "unit" : Types.Render(c.ModelType);
+        var scope = new SpecScope { DefiningClass = c.Name };
+        foreach (var f in c.Fields)
+            scope.Bind(f.Name, new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+        var view = c.ModelBody is null ? "()" : _spec.Emit(c.ModelBody, scope).Text;
+        var R = Frontend.Region.Module;
+        var heap = $"{R}.heap {raw}";
+        string App(string f) => tb.Explicit.Length == 0 ? f : $"({f}{string.Concat(c.TypeParameters.Select(t => " #" + Names.TypeParam(t)))})";
+        sb.AppendLine();
+        sb.AppendLine($"let {Frontend.Region.LeftOf(c.Name)}{tb.Implicit} (r: {raw}) : {opt} = r.{Names.Field(children[0].Name)}");
+        sb.AppendLine($"let {Frontend.Region.RightOf(c.Name)}{tb.Implicit} (r: {raw}) : {opt} = r.{Names.Field(children[1].Name)}");
+        sb.AppendLine($"let {Frontend.Region.ViewOf(c.Name)}{tb.Implicit} (this: {opt}) (r: {raw}) : {viewType} = {view}");
+        var shape = $"{App(Frontend.Region.ViewOf(c.Name))} {App(Frontend.Region.LeftOf(c.Name))} {App(Frontend.Region.RightOf(c.Name))}";
+        var lr = $"{App(Frontend.Region.LeftOf(c.Name))} {App(Frontend.Region.RightOf(c.Name))}";
+        sb.AppendLine($"let {Frontend.Region.TreeOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) " +
+                      $": GTot (Pulse.Lib.CSharp.Tree.tree ({viewType})) = {R}.tree_of {shape} h x");
+        sb.AppendLine($"let {Frontend.Region.WfOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) : prop = {R}.wf {lr} h x");
+        sb.AppendLine();
+        // R27.5. A read through the region, with the step a descent takes for free.
+        sb.AppendLine($"inline_for_extraction noextract");
+        sb.AppendLine($"fn {Frontend.Region.ReadOf(c.Name)}{tb.Implicit} (x: {opt}) (#p: perm) (#h: erased ({heap}))");
+        sb.AppendLine($"  preserves {R}.region #{Types.Atom(new IrPulseType(raw, raw))} #p h");
+        sb.AppendLine($"  requires pure ({R}.mem h x \\/ ({Frontend.Region.WfOf(c.Name)} h x /\\ not (B.is_null x)))");
+        sb.AppendLine($"  returns v: {raw}");
+        sb.AppendLine($"  ensures pure ({R}.mem h x /\\ v == {R}.get h x /\\");
+        sb.AppendLine($"                ({Frontend.Region.WfOf(c.Name)} h x ==>");
+        sb.AppendLine($"                  ({Frontend.Region.WfOf(c.Name)} h ({Frontend.Region.LeftOf(c.Name)} v) /\\");
+        sb.AppendLine($"                   {Frontend.Region.WfOf(c.Name)} h ({Frontend.Region.RightOf(c.Name)} v) /\\");
+        sb.AppendLine($"                   {Frontend.Region.TreeOf(c.Name)} h x == Pulse.Lib.CSharp.Tree.Branch");
+        sb.AppendLine($"                     ({Frontend.Region.TreeOf(c.Name)} h ({Frontend.Region.LeftOf(c.Name)} v))");
+        sb.AppendLine($"                     ({Frontend.Region.ViewOf(c.Name)} x v)");
+        sb.AppendLine($"                     ({Frontend.Region.TreeOf(c.Name)} h ({Frontend.Region.RightOf(c.Name)} v)))))");
+        sb.AppendLine("{");
+        sb.AppendLine($"  {R}.mem_of_wf {lr} h x;");
+        sb.AppendLine($"  let v = {R}.read x;");
+        sb.AppendLine($"  {R}.wf_step_if {shape} h x;");
+        sb.AppendLine("  v");
+        sb.AppendLine("}");
+    }
+
+    private bool IsRegionField(IrFieldDecl f) =>
+        f.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var d) && d.IsRegion;
+
+    /// <summary>R27.4. The record type a region class's heap maps its boxes to.</summary>
+    internal static string RegionRaw(IrClassType k) =>
+        Types.Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments);
+
+    /// <summary>R27.4. The region resource, at a permission and a heap.</summary>
+    internal static string RegionAt(IrClassType k, string perm, string heap) =>
+        $"{Frontend.Region.Module}.region #{RegionRaw(k)} #{perm} {heap}";
 
     /// <summary>A field of a <c>[Plain]</c> class; a self-reference is the nullable form.</summary>
     private static string PlainFieldType(IrClass c, IrType t, string opt, string self) =>
@@ -994,6 +1067,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             // about an object parameter — one reading of a member access, everywhere.
             var term = f.Type switch
             {
+                // R27.4. A pointer into a region is a value; the region is beside it.
+                _ when IsRegionField(f) => new Term($"r.{Names.Field(f.Name)}", TermKind.Other, f.Type),
                 IrArrayType => new Term(Names.Contents(f.Name), TermKind.Seq, f.Type),
                 IrClassType => new Term(Names.SubModel(f.Name), TermKind.Math, f.Type),
                 _ => new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type),
@@ -1003,7 +1078,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 repScope.Bind(SpecEmitter.ArrayRefKey(f.Name), new Term($"r.{Names.Field(f.Name)}", TermKind.Other, f.Type));
         }
         var arrays = c.Fields.Where(f => f.Type is IrArrayType).ToImmutableArray();
-        var objects = c.Fields.Where(f => f.Type is IrClassType).ToImmutableArray();
+        var objects = c.Fields.Where(f => f.Type is IrClassType && !IsRegionField(f)).ToImmutableArray();
+        var regionFields = c.Fields.Where(IsRegionField).ToImmutableArray();
+        var regions = regionFields.Select(f => (IrClassType)f.Type)
+            .GroupBy(t => t.Name).Select(g => g.First()).ToImmutableArray();
+        foreach (var k in regions)
+            repScope.Bind(Frontend.Region.HeapName(k.Name),
+                new Term(Frontend.Region.HeapBinder(k.Name), TermKind.Other));
 
         // R3.9d: the model refinement is stated over the model value, which a [Refine]
         // on the [Model] member names `Result`, as an [Ensures] does.
@@ -1028,6 +1109,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // provably non-overflowing.
         foreach (var f in arrays)
             conjuncts.Add($"Seq.length {Names.Contents(f.Name)} <= 2147483647");
+        // R27.4. Every pointer the owner holds into a region is well-formed in it.
+        foreach (var f in regionFields)
+        {
+            var k = (IrClassType)f.Type;
+            conjuncts.Add($"{Names.ClassModule(k.Name)}.{Frontend.Region.WfOf(k.Name)} " +
+                          $"{Frontend.Region.HeapBinder(k.Name)} r.{Names.Field(f.Name)}");
+        }
         conjuncts.AddRange(c.Invariants.Select(i => _spec.AsProp(_spec.Emit(i, repScope))));
         conjuncts.Add($"m == {abstraction}");
 
@@ -1084,8 +1172,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             $"({Names.Contents(f.Name)}: Seq.seq {Types.Atom(((IrArrayType)f.Type).Element)})"));
         existentials.AddRange(objects.Select(f =>
             $"({Names.SubModel(f.Name)}: {SubModelType(f.Type)})"));
+        existentials.AddRange(regions.Select(k =>
+            $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)})"));
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
         sb.AppendLine("    B.pts_to this #p r **");
+        // R27.4. The owner holds the whole region, at the fraction it is itself held at.
+        foreach (var k in regions)
+            sb.AppendLine($"    {RegionAt(k, "p", Frontend.Region.HeapBinder(k.Name))} **");
         foreach (var f in arrays)
             sb.AppendLine($"    {ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
         // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
@@ -1097,7 +1190,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"    {SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))} **");
         sb.AppendLine($"    pure ({SpecEmitter.Conjunction(conjuncts)})");
 
-        EmitShareAndGather(sb, c, arrays, objects);
+        // R27.4. Two halves of an owner hold two heaps that nothing proves equal, so an
+        // owner of a region is held whole and has no share or gather.
+        if (regions.IsEmpty) EmitShareAndGather(sb, c, arrays, objects);
 
         // R3.9c: each [Spec] member is a pure function of the model, never of the
         // representation — a caller holds only the model, so an observation it cannot

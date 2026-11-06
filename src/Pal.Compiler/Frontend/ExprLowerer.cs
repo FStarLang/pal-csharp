@@ -538,7 +538,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // The initializer says it outright, so the record is built the way R3.5 builds a
         // struct's and then boxed.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } plain
-            && Declarations.Has(plain.OriginalDefinition, known.PlainAttribute))
+            && known.IsPlainLike(plain.OriginalDefinition))
         {
             if (node.ArgumentList is { Arguments.Count: > 0 })
             {
@@ -672,6 +672,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 new IrLiteral(loc, 0) { Type = mapped },
             IrNamedType n when type is INamedTypeSymbol named =>
                 Construct(loc, n.Name, named, []) is IrNew nested ? nested with { Type = mapped } : null,
+            // R27.6. A reference to a `[Region]` class is a value, and its default is null.
+            IrClassType k when type is INamedTypeSymbol rn && known.IsPlainLike(rn.OriginalDefinition) &&
+                               Declarations.Has(rn.OriginalDefinition, known.RegionAttribute) =>
+                new IrNull(loc) { Type = k with { Nullable = true } },
             _ => null,
         };
     }
@@ -959,6 +963,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // only the caller knows: it is the `has_default` dictionary the caller passes.
         // R26.8. A tuple's default is the pair of its components' defaults.
         if (DefaultValue(type, loc) is { } value) return value;
+        // R27.2. A comparer is a reference: its default is the null comparer.
+        if (known.MapType(type) is { } ct && Sorted.IsComparer(ct))
+            return new IrSpecOp(loc, Sorted.NullComparer, []) { Type = ct, MachineArgs = true };
         diagnostics.Unsupported(loc, $"`default` at type `{type}`");
         return new IrLiteral(loc, null);
     }
@@ -1219,9 +1226,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // there is, so a field read is the only thing this can mean. Whether the read is
         // *owned* is settled by the user's predicate when the emitter checks the window,
         // not here.
+        // R27.3. A `[Region]` class's auto-property is a field like any other (R12.1).
         if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } plain
-            && Declarations.Has(plain.OriginalDefinition, known.PlainAttribute)
-            && symbol is IFieldSymbol { IsStatic: false })
+            && known.IsPlainLike(plain.OriginalDefinition)
+            && (symbol is IFieldSymbol { IsStatic: false } ||
+                symbol is IPropertySymbol { IsStatic: false } autoProp &&
+                autoProp.ContainingType.GetMembers().OfType<IFieldSymbol>()
+                    .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, autoProp.OriginalDefinition))))
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
 
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
@@ -2244,6 +2255,26 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case nameof(PalLang.Pal.LowerBound):
                 return new IrSpecOp(loc, Sorted.Module + ".lower_bound", [Arg(0), Arg(1), Arg(2)])
                     { Type = IrPrim.SpecIntType };
+            // R27.7. The tree a region pointer reaches, and the region's well-formedness at
+            // it: functions of the heap the enclosing method holds, named `$heap_<class>`.
+            case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed):
+            {
+                if (model.GetTypeInfo(args[0].Expression).Type is not INamedTypeSymbol
+                        { TypeKind: TypeKind.Class } rc ||
+                    !Declarations.Has(rc.OriginalDefinition, known.RegionAttribute))
+                {
+                    diagnostics.Error("PALCS0703", loc,
+                        $"`Pal.{method.Name}` takes a reference to a `[Region]` class " +
+                        "(doc/translation.md R27.7).");
+                    return new IrLiteral(loc, null);
+                }
+                var heap = new IrVar(loc, Region.HeapName(rc.Name)) { Type = IrPrim.SpecIntType };
+                return method.Name == nameof(PalLang.Pal.Tree)
+                    ? new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.TreeOf(rc.Name)}", [heap, Arg(0)])
+                        { Type = known.MapType(method.ReturnType), MachineArgs = true }
+                    : new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.WfOf(rc.Name)}", [heap, Arg(0)])
+                        { Type = IrPrim.Bool, MachineArgs = true };
+            }
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             // R26.2. The cells a `return` inside a loop leaves its outcome in.

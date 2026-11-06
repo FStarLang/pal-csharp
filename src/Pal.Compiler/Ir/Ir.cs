@@ -970,6 +970,13 @@ public sealed record IrClass(
     public bool IsPlain { get; init; }
 
     /// <summary>
+    /// R27.3. <c>[Region]</c>: a plain class whose objects an owner holds as one region.
+    /// <see cref="ModelBody"/>, when present, is the view of one node (R27.7), and the
+    /// first two nullable fields of the class's own type are the children.
+    /// </summary>
+    public bool IsRegion { get; init; }
+
+    /// <summary>
     /// R9.1. The translated class this one derives from, if any. Non-null and
     /// <see cref="IsAbstract"/> false is a leaf; null and abstract is a root.
     /// </summary>

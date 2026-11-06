@@ -27,6 +27,9 @@ public static class Sorted
             : null;
 
     /// <summary>Whether a lowered type is R25.1's comparer.</summary>
+    /// <summary>R27.2. The null comparer, <c>default</c> at a comparer type.</summary>
+    public const string NullComparer = "Pulse.Lib.CSharp.NullComparer.null_comparer";
+
     public static bool IsComparer(IrType? type) => type is IrUserSpecType { FStar: ComparerType };
 
     /// <summary>

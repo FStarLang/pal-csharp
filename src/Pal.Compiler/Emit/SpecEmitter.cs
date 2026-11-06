@@ -746,13 +746,24 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     : op.MachineArgs
                         ? a is IrLiteral { Value: not (null or bool or string or decimal) } l
                             ? Types.Literal(l.Value, l.Type)
-                            : Emit(a, scope).Text
+                            : DecidedEquality(a, scope) ?? Emit(a, scope).Text
                         : AsMath(Emit(a, scope)))).ToList();
         var text = operands.Count == 0
             ? op.Function
             : $"({op.Function} {string.Join(" ", operands)})";
         return new Term(text, Kind(op.Type));
     }
+
+    /// <summary>
+    /// R27.7. An integer comparison passed as a <c>bool</c> value (a component of a region
+    /// class's view) is the decidable <c>=</c>, not the proposition <c>==</c>.
+    /// </summary>
+    private string? DecidedEquality(IrExpr a, SpecScope scope) =>
+        a is IrBinary { Op: BinOp.Eq or BinOp.Ne } b &&
+        b.Left.Type is IrPrim { IsMachineInt: true } or IrPrim { IsSpecNumeric: true } &&
+        b.Right.Type is IrPrim { IsMachineInt: true } or IrPrim { IsSpecNumeric: true }
+            ? $"({AsMath(Emit(b.Left, scope))} {(b.Op == BinOp.Eq ? "=" : "<>")} {AsMath(Emit(b.Right, scope))})"
+            : null;
 
     /// <summary>R11.2. What a specification type's member returns, as a term kind.</summary>
     private static TermKind Kind(IrType? type) => type switch

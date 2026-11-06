@@ -100,3 +100,9 @@ let crem_nonneg (a: nat) (b: pos)
 let cdiv_crem (a: int) (b: int { b <> 0 })
   : Lemma ((cdiv a b) * b + crem a b == a) [SMTPat (crem a b)]
   = ()
+
+/// A loop measure that may stop decreasing once `set` is: `m + 1` while it is clear, `0`
+/// after. The iteration that sets a loop's break flag exits rather than decreasing `m`,
+/// and Pulse forbids a dereference in a branch of a measure's `if` (F9), so the emitter
+/// passes the flag and the measure here as arguments (doc/translation.md R27.10).
+unfold let until_set (set: bool) (m: int) : int = if set then 0 else m + 1

@@ -39,6 +39,7 @@ public sealed class WellKnown
         DecreasesAttribute = Type("DecreasesAttribute");
         ConsumesAttribute = Type("ConsumesAttribute");
         PlainAttribute = Type("PlainAttribute");
+        RegionAttribute = Type("RegionAttribute");
         WrappingAttribute = Type("WrappingAttribute");
         FracAttribute = Type("FracAttribute");
         NonNullAttribute = Type("NonNullAttribute");
@@ -138,6 +139,23 @@ public sealed class WellKnown
     public INamedTypeSymbol DecreasesAttribute { get; }
     public INamedTypeSymbol ConsumesAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
+
+    /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>
+    public INamedTypeSymbol RegionAttribute { get; }
+
+    /// <summary>R12.1/R27.3. <c>[Plain]</c> or <c>[Region]</c>: a class with a representation and no model.</summary>
+    public bool IsPlainLike(ISymbol symbol) =>
+        Declarations.Has(symbol, PlainAttribute) || Declarations.Has(symbol, RegionAttribute);
+
+    /// <summary>
+    /// R27.3. The type arguments a class type carries: those of every enclosing type, then
+    /// its own. A class nested in a generic class is generic in the outer parameters too.
+    /// </summary>
+    public static IEnumerable<ITypeSymbol> OuterAndOwnTypeArguments(INamedTypeSymbol named) =>
+        (named.ContainingType is { } outer ? OuterAndOwnTypeArguments(outer) : []).Concat(named.TypeArguments);
+
+    public static IEnumerable<ITypeParameterSymbol> OuterAndOwnTypeParameters(INamedTypeSymbol named) =>
+        (named.ContainingType is { } outer ? OuterAndOwnTypeParameters(outer) : []).Concat(named.TypeParameters);
     public INamedTypeSymbol WrappingAttribute { get; }
     public INamedTypeSymbol FracAttribute { get; }
     public INamedTypeSymbol NonNullAttribute { get; }
@@ -323,6 +341,10 @@ public sealed class WellKnown
     /// </summary>
     public bool HasModel(INamedTypeSymbol type)
     {
+        // R27.3. A `[Region]` class's `[Model]` is the view of one node, not an object
+        // model: its objects are cells of their owner's region, and have no methods of
+        // their own to translate.
+        if (Declarations.Has(type.OriginalDefinition, RegionAttribute)) return false;
         for (var t = type; t is not null; t = t.BaseType)
         {
             if (t.GetMembers().Any(m => Declarations.Has(m, ModelAttribute))) return true;
@@ -521,21 +543,22 @@ public sealed class WellKnown
             // reason: it has a representation. What it does not have is a model, so it is
             // recognised by the attribute rather than by the `[Model]` member.
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
-                when HasModel(named) || Declarations.Has(named.OriginalDefinition, PlainAttribute):
+                when HasModel(named) || IsPlainLike(named.OriginalDefinition):
             {
                 // R15.3. A constructed generic class carries its resolved arguments. An
                 // argument this cannot map makes the whole type unmappable, so the
                 // refusal lands on the class type rather than silently dropping a
                 // parameter and emitting a term with a free variable in it.
                 var classArgs = ImmutableArray.CreateBuilder<IrType>();
-                foreach (var a in named.TypeArguments)
+                foreach (var a in Declarations.Has(named.OriginalDefinition, RegionAttribute)
+                             ? OuterAndOwnTypeArguments(named) : named.TypeArguments)
                 {
                     if (MapType(a) is not { } mapped) return null;
                     classArgs.Add(mapped);
                 }
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {
-                    Plain = Declarations.Has(named.OriginalDefinition, PlainAttribute),
+                    Plain = IsPlainLike(named.OriginalDefinition),
                     TypeArguments = classArgs.ToImmutable(),
                 };
             }

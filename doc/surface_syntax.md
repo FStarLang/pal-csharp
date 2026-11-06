@@ -116,6 +116,7 @@ Both forms lower to the same thing. Mix them freely.
 | `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
+| `Tree<V>(x)`, `WellFormed(x)` | the `SpecTree<V>` of views a `[Region]` pointer reaches; every path from it ends at `null` (R27.7) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
@@ -1150,6 +1151,68 @@ will not do, and not before.
 See `test/dll_segment` for the whole of the above as a working test.
 
 ---
+
+### `[Region]`: tree nodes owned as one region
+
+```csharp
+public sealed class SearchTree<T>
+{
+    private readonly IComparer<T> comparer;
+    private Node? root;
+
+    [Model]
+    private TreeModel<T> Model => new TreeModel<T> { Nodes = Pal.Tree<(T, bool)>(root), Comparer = comparer };
+
+    [Region]
+    internal sealed class Node
+    {
+        public T Item;
+        public Node? Left;
+        public Node? Right;
+        public bool IsRed;
+
+        [Model]
+        private (T, bool) View => (Item, IsRed);
+    }
+}
+```
+
+A `[Region]` class is a node type whose objects belong, all together, to whichever object
+holds a field of that type. That object's invariant owns a ghost heap of every node (a
+*region*), so nodes may be reached by several pointers at once, as in a red-black tree's
+top-down re-linking. The class must be `sealed` and must declare exactly two nullable fields
+of its own type: the left and right children, in declaration order. Its optional `[Model]`
+is the *view* of one node. The class has no methods of its own.
+
+In the owner's model and contracts, and in loop invariants:
+
+* `Pal.Tree<V>(x)` is the `SpecTree<V>` of views reached from `x`;
+* `Pal.WellFormed(x)` says every path from `x` ends at `null`.
+
+A loop down the tree reads like this:
+
+```csharp
+Node? current = root;
+while (current != null)
+{
+    Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
+    Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) &&
+                  SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(current), item) ==
+                  SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item)));
+    ...
+    current = order < 0 ? current.Left : current.Right;
+}
+```
+
+The guard `!Pal.Returned()` is needed when the body can `return`: the iteration that
+returns leaves `current` unconstrained (doc/translation.md R27.10).
+
+`PalLang.SpecSearchTree` has the searches over a `SpecTree<(T, TTag)>`: `Contains`,
+`Find`, `Leftmost`, `Rightmost` and `HeapIndex`. Each follows the path the code follows, so
+none needs an ordering hypothesis.
+
+An owner of a region is always held whole (no `Pal.Share`). `new Node(...)` is not yet
+supported. See doc/translation.md §27.
 
 ## 10. Generics
 

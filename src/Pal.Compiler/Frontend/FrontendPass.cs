@@ -789,6 +789,9 @@ public static partial class FrontendPass
         /// <summary>R12.1. <c>[Plain]</c>: representation only, no derived ownership.</summary>
         public bool IsPlain { get; init; }
 
+        /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>
+        public bool IsRegion { get; init; }
+
         /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
         public ExpressionSyntax? ForgetBody { get; init; }
 
@@ -836,13 +839,18 @@ public static partial class FrontendPass
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
                 if (symbol.IsStatic) continue;
                 if (!IsPrincipalDeclaration(syntax, symbol, known)) continue;
+                // R27.1. Under `[TranslateAnnotatedOnly]` a subclass nothing translates is
+                // not part of the verified program at all, so its generic base is not a
+                // hierarchy the translator has to encode: the base is verified at its exact
+                // type (see `ExactType`).
+                if (UntranslatedSubclass(symbol, known)) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R18.1. Every class the collector *looks at* is one it has spoken about:
                 // if it rejects the class, the rejection is the diagnostic, and the
                 // members must not then draw PALCS0530 as well. Recording the attempt is
                 // what keeps one cause from producing a second, contradictory report.
-                if (Declarations.Has(symbol, known.PlainAttribute) ||
+                if (known.IsPlainLike(symbol) ||
                     symbol.GetMembers().Any(m => Declarations.Has(m, known.ModelAttribute)))
                     attempted.Add(symbol);
 
@@ -860,6 +868,58 @@ public static partial class FrontendPass
                 {
                     modelMembers = [up];
                     attempted.Add(symbol);
+                }
+
+                // R27.3. A `[Region]` class is a `[Plain]` representation whose objects an
+                // owner holds as one region. Its optional `[Model]` is the view of one node.
+                if (Declarations.Has(symbol, known.RegionAttribute))
+                {
+                    if (!symbol.IsSealed || symbol.BaseType?.SpecialType != SpecialType.System_Object)
+                    {
+                        diagnostics.Error("PALCS0700", Locations.From(syntax.Identifier),
+                            $"`{symbol.Name}` is `[Region]` but is not a `sealed` class deriving from " +
+                            "`object`. A region holds one record type, so the class cannot take part in " +
+                            "a hierarchy (doc/translation.md R27.3).");
+                        continue;
+                    }
+                    if (CollectPlainFields(symbol, known, diagnostics) is not { } regionFields)
+                        continue;
+                    var children = regionFields.Count(f =>
+                        f.Mapped is IrClassType { Nullable: true } ct && ct.Name == symbol.Name);
+                    if (children != 2)
+                    {
+                        diagnostics.Error("PALCS0701", Locations.From(syntax.Identifier),
+                            $"`{symbol.Name}` is `[Region]` and declares {children} nullable field(s) of its " +
+                            "own type. A region's shape is a binary tree: exactly two such fields, the " +
+                            "left and right children in declaration order (doc/translation.md R27.3).");
+                        continue;
+                    }
+                    ExpressionSyntax? viewBody = null;
+                    IrType viewType = IrPrim.SpecIntType;
+                    if (modelMembers.Length > 0)
+                    {
+                        if (modelMembers is not [IPropertySymbol vp] ||
+                            vp.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                                is not PropertyDeclarationSyntax { ExpressionBody.Expression: { } vb } ||
+                            known.MapType(vp.Type) is not { } vt)
+                        {
+                            diagnostics.Error("PALCS0702", Locations.From(syntax.Identifier),
+                                $"The `[Model]` of the `[Region]` class `{symbol.Name}` must be one " +
+                                "expression-bodied property of a translatable type: the view of one node " +
+                                "(doc/translation.md R27.3).");
+                            continue;
+                        }
+                        viewBody = vb;
+                        viewType = vt;
+                    }
+                    result.Add(new ClassCandidate(
+                        syntax, symbol, regionFields, modelMembers.FirstOrDefault() ?? symbol, viewType, viewBody,
+                        [], BuildClassUsings(syntax, symbol))
+                    {
+                        IsPlain = true,
+                        IsRegion = true,
+                    });
+                    continue;
                 }
 
                 // R12.1. A `[Plain]` class is collected for its *representation* alone. It
@@ -948,12 +1008,45 @@ public static partial class FrontendPass
     }
 
     /// <summary>
+    /// R27.1. A class nothing translates, deriving from a <em>generic</em> class. It has no
+    /// annotation and none of its members has one. (A subclass of a non-generic class with a
+    /// model inherits that model and is translated by R9.21b; a generic hierarchy has no
+    /// translation at all, R15.1, which is what leaves this case free.)
+    /// </summary>
+    private static bool UntranslatedSubclass(INamedTypeSymbol symbol, WellKnown known) =>
+        known.AnnotatedOnly &&
+        symbol.BaseType is { SpecialType: not SpecialType.System_Object, TypeParameters.Length: > 0 } &&
+        !Declarations.IsAnnotated(symbol, known) &&
+        !symbol.GetMembers().Any(m => Declarations.IsAnnotated(m, known) ||
+            m is IMethodSymbol { AssociatedSymbol: { } a } && Declarations.IsAnnotated(a, known));
+
+    /// <summary>
+    /// R27.1. Verification at the <em>exact type</em>. Under <c>[TranslateAnnotatedOnly]</c>,
+    /// a concrete class that is not <c>sealed</c>, but whose every subclass in the
+    /// compilation is untranslated (<see cref="UntranslatedSubclass"/>), is translated as a
+    /// leaf even when it declares virtual members and even though it has subclasses. Its
+    /// invariant is produced only by its own translated constructor, which runs only for a
+    /// translated <c>new C(...)</c>: a subclass's constructor chains to the CLR's, never to
+    /// the translation. So every receiver verified code holds has dynamic type exactly
+    /// <c>C</c>, and every virtual call on it binds to <c>C</c>'s own body.
+    /// </summary>
+    private static bool ExactType(INamedTypeSymbol symbol, WellKnown known) =>
+        known.AnnotatedOnly && !symbol.IsAbstract && !symbol.IsSealed &&
+        symbol.TypeParameters.Length > 0 &&
+        known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
+            .OfType<INamedTypeSymbol>()
+            .Where(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition))
+            .ToList() is { Count: > 0 } subs &&
+        subs.All(t => UntranslatedSubclass(t, known));
+
+    /// <summary>
     /// R22.5. Under <c>[TranslateAnnotatedOnly]</c>, a class that is not <c>sealed</c> but
     /// declares no virtual or abstract member, and that no class in the compilation derives
     /// from, is a leaf: a subclass elsewhere can add state but cannot change what any of
     /// this class's methods do, so there is no vtable for R9.21 to split off.
     /// </summary>
     private static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+        ExactType(symbol, known) ||
         known.AnnotatedOnly &&
         // R24.4. An unannotated virtual has no module, so no translated body can call it
         // (R22.4's refusal at the call); a subclass overriding it changes nothing verified.
@@ -1674,11 +1767,18 @@ public static partial class FrontendPass
         if (c.IsPlain)
             return new IrClass(
                 Locations.From(c.Syntax.Identifier), c.Symbol.Name, fields,
-                ModelMember: "", ModelType: IrPrim.SpecIntType, ModelBody: null,
+                ModelMember: "", ModelType: c.ModelType,
+                // R27.7. A region class's view reads its fields, as an abstraction does.
+                ModelBody: c.ModelBody is null ? null
+                    : new ExprLowerer(In(classModel, c.ModelBody), known, diagnostics, specPosition: true)
+                      { ClassMembers = c.Fields.Select(f => f.Name).ToImmutableHashSet() }.Lower(c.ModelBody),
                 ModelRefinements: [], Invariants: [], Observations: [])
             {
                 IsPlain = true,
-                TypeParameters = [.. c.Symbol.TypeParameters.Select(t => t.Name)],
+                IsRegion = c.IsRegion,
+                TypeParameters = c.IsRegion
+                    ? [.. WellKnown.OuterAndOwnTypeParameters(c.Symbol).Select(t => t.Name)]
+                    : [.. c.Symbol.TypeParameters.Select(t => t.Name)],
             };
 
         // The abstraction reads the fields; an observation reads the model. Both are
@@ -1933,7 +2033,7 @@ public static partial class FrontendPass
     /// <summary>R12.1. Whether a type is a <c>[Plain]</c> class.</summary>
     private static bool IsPlainClass(ITypeSymbol? t, WellKnown known) =>
         (t as INamedTypeSymbol)?.OriginalDefinition is { } n &&
-        Declarations.Has(n, known.PlainAttribute);
+        known.IsPlainLike(n);
 
     private static ImmutableArray<string> BuildClassUsings(
         ClassDeclarationSyntax syntax, INamedTypeSymbol symbol)

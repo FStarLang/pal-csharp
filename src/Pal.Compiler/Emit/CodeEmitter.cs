@@ -506,6 +506,9 @@ public sealed class CodeEmitter(
             if (!initialisers.TryGetValue(field.Name, out var value) &&
                 field.Type is IrPrim or IrTypeParamType or IrNamedType)
                 value = Default(field.Type);
+            // R27.6. A pointer into a region starts null, in a region that starts empty.
+            if (value is null && IsRegionType(field.Type))
+                value = "B.null";
             if (value is null)
             {
                 diagnostics.Unsupported(method.Loc,
@@ -543,6 +546,8 @@ public sealed class CodeEmitter(
             PreModel = null,
             PostModel = "post_" + Names.This,
         };
+        foreach (var k in RegionsOf(decl))
+            Line($"{Frontend.Region.Module}.empty #{PulseEmitter.RegionRaw(k)} ();");
         Line($"fold {Inv(alloc)} {Names.Result} {ModelWitness(decl, slot)};");
         if (alloc.Name != built.Name)
         {
@@ -805,6 +810,21 @@ public sealed class CodeEmitter(
     /// <summary>R10.6c. Binders that a call produced an object under.</summary>
     private readonly HashSet<string> _objectResults = new(StringComparer.Ordinal);
 
+    private bool IsRegionType(IrType? t) =>
+        t is IrClassType k && classes is not null && classes.TryGetValue(k.Name, out var d) && d.IsRegion;
+
+    /// <summary>R27.4. The region classes a class owns a region of, one per class.</summary>
+    private IEnumerable<IrClassType> RegionsOf(IrClass decl) =>
+        decl.Fields.Select(f => f.Type).Where(IsRegionType).Cast<IrClassType>()
+            .GroupBy(k => k.Name).Select(g => g.First());
+
+    /// <summary>R27.5. Whether a statement writes a field of an object of a region class.</summary>
+    private bool WritesRegion(IrStmt body, string regionClass) =>
+        Check.Statements(body).Any(s =>
+            s is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && k.Name == regionClass ||
+            Check.Expressions(s).SelectMany(Check.Subexpressions)
+                .Any(e => e is IrAlloc al && al.Class == regionClass || e is IrCall));
+
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
 
@@ -861,9 +881,29 @@ public sealed class CodeEmitter(
 
         if (classes is null || !classes.TryGetValue(klass.Name, out var decl)) return;
 
+        // R27.4. The region the receiver owns is carried beside its record. A loop that
+        // writes no region object leaves the heap where it was, so it is named once.
+        foreach (var k in RegionsOf(decl))
+        {
+            var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            var regionResource = PulseEmitter.RegionAt(k,
+                receiver.Fraction ?? "1.0R", heap);
+            resources.Add(regionResource);
+            var still = !WritesRegion(body, k.Name);
+            if (still) fixedNames.Add((heap, regionResource));
+            else existentials.Add(heap);
+            BindBoth(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other), still);
+        }
+
         foreach (var f in decl.Fields)
         {
             var projection = $"{record}.{Names.ClassProjection(klass.Name, f.Name)}";
+            if (IsRegionType(f.Type))
+            {
+                BindBoth($"{Names.This}.{f.Name}",
+                    new Term(projection, TermKind.Other, f.Type), !writesRecord);
+                continue;
+            }
             if (f.Type is IrClassType)
             {
                 // R3.10b. A sub-object is carried by its invariant, at its model, exactly
@@ -1523,6 +1563,11 @@ public sealed class CodeEmitter(
                 scope.Bind(SpecEmitter.ArrayRefKey(field.Name), new Term(projection, TermKind.Other, field.Type));
                 continue;
             }
+            if (IsRegionType(field.Type))
+            {
+                scope.Bind(field.Name, new Term(projection, TermKind.Other, field.Type));
+                continue;
+            }
             if (field.Type is IrClassType)
             {
                 // R3.10b, and the same device for the same reason. A sub-object's model
@@ -1537,6 +1582,14 @@ public sealed class CodeEmitter(
             }
             scope.Bind(field.Name, new Term(
                 projection, MethodPlan.KindOf(field.Type), field.Type));
+        }
+
+        // R27.4. The model reads the region as the context now holds it.
+        foreach (var k in RegionsOf(decl))
+        {
+            var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            Line($"with {heap}. assert ({PulseEmitter.RegionAt(k, obj.Fraction ?? "1.0R", heap)});");
+            scope.Bind(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other));
         }
 
         // R9.2: only a class with a representation has an abstraction function, and only
@@ -2000,6 +2053,15 @@ public sealed class CodeEmitter(
                 if (!Reachable(wobj, wfield.Loc, wfield.Field)) return;
                 var wvalue = Inject(FieldType(wc, wfield.Field), a.Value, Expr(a.Value));
                 var wcur = Fresh();
+                // R27.5. A write replaces the record in the region, as R3.6 replaces it in a box.
+                if (wdecl.IsRegion)
+                {
+                    var wrecv = wobj.NonNull;
+                    Line($"let {wcur} = {Names.ClassModule(wc.Name)}.{Frontend.Region.ReadOf(wc.Name)} {wrecv};");
+                    Line($"{Frontend.Region.Module}.write {wrecv} " +
+                         $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
+                    return;
+                }
                 Line($"let {wcur} = B.op_Bang {wobj.NonNull};");
                 Line($"B.op_Colon_Equals {wobj.NonNull} " +
                      $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
@@ -2527,10 +2589,12 @@ public sealed class CodeEmitter(
         {
             var measure = spec.Math(w.Decreases, measureScope);
             // The iteration that breaks need not decrease the user's measure — it exits
-            // instead. Adding one while the flag is still clear restores the decrease
-            // uniformly, and stays linear: F9 forbids a dereference inside a branch of an
-            // `if` in a measure, but not in its condition.
-            if (brkCell is not null) measure = $"({measure}) + (if !{brkCell} then 0 else 1)";
+            // instead. `until_set` makes the measure 0 once the flag is set, so the breaking
+            // iteration decreases it whatever the measure's state then is (R27.10: Pulse's
+            // join of the skipped rest keeps no fact about the cells it would have written).
+            // F9 forbids a dereference inside a branch of an `if` in a measure, so the flag
+            // and the measure are arguments rather than an `if`'s condition and arm.
+            if (brkCell is not null) measure = $"CA.until_set !{brkCell} ({measure})";
             Line($"decreases ({measure})");
         }
 
@@ -3384,7 +3448,8 @@ public sealed class CodeEmitter(
 
             case IrNull pn when pn.Type is IrClassType pk
                 && classes is not null && classes.TryGetValue(pk.Name, out var pnd) && pnd.IsPlain:
-                return "B.null";
+                // R27.6. Typed, so that a cell initialised with it has a type to allocate.
+                return pnd.IsRegion ? $"(B.null #{PulseEmitter.RegionRaw(pk)})" : "B.null";
 
             // R15.8. `B.null` at a generic class says nothing about what it is empty *of*,
             // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
@@ -3436,6 +3501,10 @@ public sealed class CodeEmitter(
                 // projected out of what was read; a value slot already is the reference.
                 var precv = pobj.Kind is SlotKind.Cell ? Expr(pv) : pobj.Binder;
                 var pt = Fresh();
+                // R27.5. A region object is read through the region its owner holds.
+                if (pdecl.IsRegion)
+                    Line($"let {pt} = {Names.ClassModule(pc.Name)}.{Frontend.Region.ReadOf(pc.Name)} {precv};");
+                else
                 Line($"let {pt} = B.op_Bang {precv};");
                 return $"{pt}.{Names.ClassProjection(pc.Name, pf.Field)}";
             }
@@ -3472,6 +3541,12 @@ public sealed class CodeEmitter(
             case IrAlloc al:
             {
                 var box = Fresh();
+                // R27.6. A region object is allocated into its owner's region.
+                if (classes is not null && classes.TryGetValue(al.Class, out var ad) && ad.IsRegion)
+                {
+                    Line($"let {box} = {Frontend.Region.Module}.alloc {AllocRecord(al)};");
+                    return box;
+                }
                 Line($"let {box} = B.alloc {AllocRecord(al)};");
                 // R10.6b, again: `new` is non-null, and the proof of it is a library call.
                 Line($"B.pts_to_not_null {box};");
