@@ -12,10 +12,17 @@ open Pulse.Lib.CSharp.Region
 module B = Pulse.Lib.Box
 module Seq = FStar.Seq
 
+/// How many times a callback may be called: fewer than an `int` counts. The callee proves
+/// it before each call (a walk calls it at most once per node of a region an `int` counts),
+/// and the callback may assume it, which is what lets it count its calls in an `int`.
+unfold let max_calls : int = 2147483647
+
+unfold let callable (#e: Type0) (tr: Seq.seq e) : bool = Seq.length tr < max_calls
+
 let region_cb (#a #v #r: Type0) (view: B.box a -> a -> v) (p: Seq.seq (v & r) -> slprop) =
   (#tr: erased (Seq.seq (v & r))) -> (#q: perm) -> (#h: erased (heap a)) ->
   (x: B.box a { not (B.is_null x) /\ mem h x }) ->
-  stt r (p tr ** region #a #q h)
+  stt r (p tr ** region #a #q h ** pure (Seq.length tr < max_calls))
         (fun res -> p (Seq.snoc tr (view x (get h x), res)) ** region #a #q h)
 
 /// The view of `x` in `h`, as the trace records it.

@@ -842,7 +842,8 @@ public sealed class StmtLowerer(
             return new IrLocalDecl(loc, $"__pal_discard_{_discards++}", dlg.Return!, _code.Lower(node)) { Immutable = true };
 
         // R27.22. A `void` region operation is a library lemma, called as a ghost statement.
-        if (known.RegionOpName(method) is not null && method.ReturnsVoid)
+        // R27.40. So is a `void` spec operation.
+        if ((known.RegionOpName(method) is not null || known.SpecOpName(method) is not null) && method.ReturnsVoid)
             return new IrGhostStmt(loc, GhostKind.LemmaCall, _spec.Lower(node), null);
 
         var kind = Declarations.KindOf(method, known);
@@ -1091,7 +1092,8 @@ public sealed class StmtLowerer(
         var owner = method.ContainingType?.ToDisplayString();
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
-            model.GetTypeInfo(args[0].Expression) is { Type: IArrayTypeSymbol or { TypeKind: TypeKind.Class } } nt &&
+            // R27.40. So is one at a non-nullable delegate type (R26.1).
+            model.GetTypeInfo(args[0].Expression) is { Type: IArrayTypeSymbol or { TypeKind: TypeKind.Class or TypeKind.Delegate } } nt &&
             nt.Nullability.FlowState == NullableFlowState.NotNull &&
             nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
             return new IrBlock(loc, []);

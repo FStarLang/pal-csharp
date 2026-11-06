@@ -1780,10 +1780,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrSpanType sp: ghosts.Add($"(pre_{p.Name}: erased (Seq.seq {Types.Atom(sp.Element)}))"); break;
                 case var t when p.Mode is ParamMode.Ref:
                     ghosts.Add($"(pre_{p.Name}: erased ({Types.Render(t)}))"); break;
+                // R27.40. A captured object is owned at its model, like an array at its contents.
+                case IrClassType { Plain: false } c when p.Fraction is null && !c.Nullable:
+                    ghosts.Add($"(pre_{p.Name}: erased ({Types.Applied($"{Names.ClassModule(c.Name)}.{Names.ClassModel(c.Name)}", c.TypeArguments)}))");
+                    break;
                 case IrClassType { Plain: false }:
                     diagnostics.Error("PALCS0709", p.Loc,
                         $"A lambda passed to a `[Callback]` parameter captures the object `{p.Name}` " +
-                        "(doc/translation.md R27.39): only values, arrays and locals it writes are carried.");
+                        "(doc/translation.md R27.39–R27.40): a captured object must be non-null and owned in full.");
                     break;
             }
         }
@@ -1795,7 +1799,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var protocol = Names.LambdaProtocol(method.Name);
         var applied = string.Join(" ", tyNames.Concat(captureNames));
         string P(string trace) => $"({protocol} {applied} {trace})".Replace("  ", " ");
-        var conjuncts = plan.PreConjuncts.Take(plan.PreConjuncts.Length - 1).Where(c => c.Length > 0).ToList();
+        // The lifted method requires its protocol, then the call bound, then the node's membership.
+        var conjuncts = plan.PreConjuncts.Take(plan.PreConjuncts.Length - 2).Where(c => c.Length > 0).ToList();
         var parts = plan.ParamPreResources.Where(r => r.Length > 0).ToList();
         if (conjuncts.Count > 0) parts.Add($"pure ({SpecEmitter.Conjunction([.. conjuncts])})");
         if (parts.Count == 0) parts.Add("emp");
@@ -1817,7 +1822,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($" (#tr: erased (Seq.seq {entry})) (#q: perm) (#h: erased ({Frontend.Region.Module}.heap {raw}))");
         sb.AppendLine($"  (x: B.box {raw} {{ not (B.is_null x) /\\ {Frontend.Region.Module}.mem h x }})");
         var after = $"(Seq.snoc (reveal tr) ({view} x ({Frontend.Region.Module}.get h x), r))";
-        sb.AppendLine($"  requires {P("(reveal tr)")} ** {Frontend.Region.Module}.region #{raw} #q h");
+        sb.AppendLine($"  requires {P("(reveal tr)")} ** {Frontend.Region.Module}.region #{raw} #q h ** " +
+                      "pure (Seq.length (reveal tr) < Pulse.Lib.CSharp.Callback.max_calls)");
         sb.AppendLine($"  returns r: {Types.Render(cb.Result)}");
         sb.AppendLine($"  ensures {P(after)} ** {Frontend.Region.Module}.region #{raw} #q h");
         sb.AppendLine("{");

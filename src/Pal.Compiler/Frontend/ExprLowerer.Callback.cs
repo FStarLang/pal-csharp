@@ -184,6 +184,8 @@ public sealed partial class ExprLowerer
         postLowerer.Alias(traceParam, extended);
         var post = postLowerer.Lower(inv.ExpressionBody!);
         var inRegion = new IrSpecOp(loc, $"{Region.Module}.mem", [heap, nodeVar]) { Type = IrPrim.Bool, MachineArgs = true };
+        var bounded = new IrSpecOp(loc, "Pulse.Lib.CSharp.Callback.callable",
+            [new IrVar(loc, trace) { Type = traceType }]) { Type = IrPrim.Bool, MachineArgs = true };
 
         var name = $"{LiftPrefix}_Lambda{Lifted.Count}";
         var body = new StmtLowerer(model, known, diagnostics);
@@ -191,7 +193,7 @@ public sealed partial class ExprLowerer
         body.Expressions.LiftTypeParameters = LiftTypeParameters;
         var lowered = statements.Skip(1).Select(body.Lower).ToImmutableArray();
         var method = new IrMethod(loc, name, parameters.ToImmutable(), cb.Result,
-            [pre, inRegion], [post], null, new IrBlock(loc, lowered))
+            [pre, bounded, inRegion], [post], null, new IrBlock(loc, lowered))
         {
             Lambda = new IrLambdaInfo(trace, node, cb),
             TypeParameters = LiftTypeParameters,

@@ -3161,7 +3161,11 @@ public sealed class CodeEmitter(
             if (rest.IsEmpty) { UnitTail(statements[k], plan); return; }
             // R27.31. So does one whose arm moves a region (R22.12): the heap each arm leaves
             // is a fresh existential at the join, and what the arm proved about it is lost.
-            if (statements[k] is IrIf i && (WritesRecordInArm(i) || _escape is null && MovesRegion(i)) &&
+            // R27.40. And so, in a loop that may escape, does one that calls a method on a local
+            // object without escaping (R26.5's split, which only a non-escaping loop gets).
+            if (statements[k] is IrIf i &&
+                (WritesRecordInArm(i) || _escape is null && MovesRegion(i) ||
+                 _escape is not null && !MayEscape(i) && CallsLocalObject(i)) &&
                 NullTest(i.Cond) is null)
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc) =>

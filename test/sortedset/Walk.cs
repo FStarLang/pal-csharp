@@ -58,6 +58,14 @@ public sealed class PtrStack<T>
         _size = 0;
     }
 
+    // R27.40. A class indexer, read in code, is a call of its getter.
+    public T this[int index]
+    {
+        [Requires("0 <= index && index < @this.SpecCount")]
+        [Ensures("Pal.Same(Result, @this.Items[index])")]
+        get => _array[index];
+    }
+
     [Requires("0 < @this.SpecCount")]
     [Ensures("Pal.Same(Result, Pal.Old(@this.Items)[Pal.Old(@this.SpecCount) - 1])")]
     [Ensures("@this.Items == Pal.Slice(Pal.Old(@this.Items), 0, Pal.Old(@this.SpecCount) - 1)")]
@@ -70,6 +78,75 @@ public sealed class PtrStack<T>
 }
 
 internal delegate bool WalkPredicate<T>(WalkSet<T>.WNode node);
+
+[Spec]
+public struct CounterModel
+{
+    public SpecInt Value;
+}
+
+[Invariant("0 <= _n")]
+public sealed class Counter
+{
+    private int _n;
+
+    [Model] private CounterModel Model => new CounterModel { Value = _n };
+    [Spec] public SpecInt SpecValue => Model.Value;
+
+    [Ensures("@this.SpecValue == 0")]
+    public Counter() { _n = 0; }
+
+    [Ensures("Result == @this.SpecValue && 0 <= Result")]
+    public int Value => _n;
+
+    [Requires("@this.SpecValue < int.MaxValue")]
+    [Ensures("@this.SpecValue == Pal.Old(@this.SpecValue) + 1")]
+    public void Increment() { _n++; }
+}
+
+public static class Filters
+{
+    // R27.40. A `void` `[SpecOp]` is a lemma, called as a ghost statement.
+    [Requires("Pal.StrictlySorted(c, Pal.Contents(a))")]
+    [Ensures("SpecSetFilter.Removing(c, Pal.Contents(a), Pal.Contents(a), Pal.Slice(Pal.Contents(a), 0, 0), -1)")]
+    public static void NothingRemoved(System.Collections.Generic.IComparer<int> c, int[] a)
+    {
+        SpecSetFilter.RemovingStart(c, Pal.Contents(a), Pal.Slice(Pal.Contents(a), 0, 0));
+    }
+
+    // R27.40. A loop that may return, with an `if` whose arms call a method on a local
+    // object: what follows is checked in each arm, so what the call ensured is kept.
+    [Requires("0 <= n")]
+    [Ensures("0 <= Result && Result <= n")]
+    public static int FillUntil(int n, int stop)
+    {
+        var bag = new PtrStack<int>(n);
+        int i = 0;
+        while (i < n)
+        {
+            Pal.Invariant(Pal.Returned()
+                              ? 0 <= Pal.ReturnValue<int>() && Pal.ReturnValue<int>() <= n
+                              : 0 <= i && i <= n && bag.SpecCount == i && bag.SpecCapacity == n);
+            Pal.Decreases(n - i);
+            if (i == stop)
+            {
+                return i;
+            }
+            if (i % 2 == 0)
+            {
+                bag.Push(i);
+            }
+            else
+            {
+                bag.Push(-i);
+            }
+            int x = bag[i];
+            Pal.Assert(x == i || x == -i);
+            i++;
+        }
+        return n;
+    }
+}
 
 [Spec]
 public struct WalkModel<T>
@@ -432,6 +509,25 @@ public sealed class WalkSet<T>
             _stack.Clear();
             Initialize();
         }
+    }
+
+    // R27.40. A lambda that captures an object (and a delegate, whose null guard is nothing).
+    [Ensures("0 <= Result")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    internal int CountWhere(System.Predicate<T> match)
+    {
+        System.ArgumentNullException.ThrowIfNull(match);
+        Counter counter = new Counter();
+        InOrderTreeWalk(node =>
+        {
+            Pal.Protocol<(T, bool), bool>(tr => counter.SpecValue <= tr.Length);
+            if (match(node.Item))
+            {
+                counter.Increment();
+            }
+            return true;
+        });
+        return counter.Value;
     }
 
     [Region]

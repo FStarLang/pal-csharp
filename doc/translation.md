@@ -7885,7 +7885,7 @@ At the call site the caller folds `protocol_L caps` at the empty trace and passe
 trace the callee ensures, so the captured locals and arrays come back with what the
 protocol says of them.
 
-A lambda that does not start with `Pal.Protocol`, or that captures `this` or an object, is
+A lambda that does not start with `Pal.Protocol`, or that captures `this` or an object (but see R27.40), is
 refused (PALCS0709).
 
 This is sound because the callee is verified against every protocol: `p` is a parameter,
@@ -7903,6 +7903,66 @@ its capacity may wrap, so the method is `[Wrapping]`, like the enumerator's cons
 (R27.38). `CopyTo(array, index, count)`'s lambda writes the captured `index` and
 `array`. `RegionWalk.copied_walked` turns its protocol and the walk's `walked` into
 `CopyResult`: the first `min(count, Count)` items, in order, at `index`.
+
+### R27.40 Breadth-first walks, captured objects and `RemoveWhere`
+
+`RemoveWhere` collects the members `match` holds of into a local `List<T>`, from a
+lambda passed to `BreadthFirstTreeWalk`, and then removes each. Verifying the pair needed
+the following, none of it trusted.
+
+**A bound on calls.** `Callback.region_cb`'s call now also requires
+`Seq.length tr < max_calls` (`max_calls = 2^31 - 1`). The callee proves it before each call
+(a walk calls back at most once per node, and an `int` counts the nodes), and the lifted
+lambda may assume it. That is what lets a callback count its calls, or add to a list, in an
+`int`.
+
+**Captured objects.** A lambda may capture a local of a translated class that is non-null
+(a `var` local is nullable in C#; declare its type) and owned in full. Its protocol holds
+the object at an existential model, as an array is held at its contents (R27.39), so the
+protocol can mention the object's specification members. Any other object capture, and
+`this`, is still PALCS0709.
+
+**Breadth-first walks.** `RegionWalk`'s second half is the queue's analogue of R27.35's
+stack: `bpending heap q` is the keys the queue of pointers owes, front first, each node
+followed by its children at the back. Its C# names are in `SpecWalk`:
+* `BfPending(heap, q)`, `BfVisited(keys, tr, pending)`, `BfWalked(keys, tr, res)`;
+* `BfStart(keys, tr, pending)` (a `[RegionOp]` lemma: an empty trace with the root queued
+  is a visit), `BfDequeue(heap, q, keys, tr)` and `BfNext(heap, q)`, the queue after one
+  step.
+
+`bf_walked keys tr res` says: every call was on a member of `keys`, all calls but the last
+returned true, a true result means every member was called on, and a false one that the
+last call returned false. `bf_visited` and `bf_walked` are `opaque_to_smt`, revealed only
+inside the library's lemmas. With them transparent, each Pulse query carried their
+quantifiers, and the runtime's walk ran out of time after 11 minutes. Opaque, it verifies in
+under a minute.
+
+**`SetFilter`.** `Pulse.Lib.CSharp.SetFilter` (C#: `SpecSetFilter`) states the removal:
+`removing c s0 s m i` says `m`'s elements past `i` were removed from the strictly sorted
+`s0`, leaving `s`. `RemovingStart` and `RemovingStep` are its lemmas, and `FilterUnique`
+turns the final membership into `s == Pal.RemoveAll(s0, match)`, since a strictly sorted
+sequence is determined by its members.
+
+**`void` `[SpecOp]`s are lemmas.** A `void` member with `[SpecOp]` is called as a ghost
+statement, as a `void` `[RegionOp]` is (R27.22).
+
+**Class indexers.** A read-only indexer whose `get` is an accessor, with its contract on
+the accessor (R22.13), is collected as `get_Item`. A read `list[i]` in code is a call of it,
+as a computed property read is (R9.20a). An indexer with a setter, or an expression-bodied
+one, is still PALCS0591.
+
+**`ThrowIfNull` of a delegate.** A non-nullable delegate parameter is non-null (R10), so
+`ArgumentNullException.ThrowIfNull(match)` is nothing, as it is for arrays and objects.
+
+**Splitting `if`s in escaping loops.** Pulse joins the arms of an unannotated `if`, and
+loses what the arms' calls ensured about a mutated object. R26.5 moves the rest of the
+block into both arms in a loop that does not escape. Inside a loop that may `return`, it now
+does so too for an `if` that does not escape itself and calls a method on a local object.
+
+**`RemoveWhere`.** It ensures `SpecItems == Pal.RemoveAll(Old(SpecItems), match)` and
+returns how many members it removed. It has no `[Throws]`. `match` cannot be null, and a
+`[Throws]` clause would need the local `List`'s resources to be dropped on `get_Item`'s
+raise path, which a raise clause cannot express (27.3).
 
 ### 27.1 Trusted assumptions
 
@@ -7947,6 +8007,8 @@ ensures that the tree and the comparer are unchanged.
 | `InOrderTreeWalk([Callback] action)` | `SpecWalk.Walked(SpecItems, Trace(action), Result)` (R27.39): `action` was called on the items in order and the walk stopped at the first `false` |
 | `CopyTo(array, index, count)` | throws on a negative `index` or `count` or too short an array; otherwise `SpecWalk.CopyResult(SpecItems, Old(array), array, index, index + count)`: the first `min(count, Count)` items at `index`, the rest of the array unchanged |
 | `CopyTo(array)`, `CopyTo(array, index)` | `array == Pal.Splice(Old(array), index, index + SpecItems.Length, SpecItems)` |
+| `BreadthFirstTreeWalk([Callback] action)` | `SpecWalk.BfWalked(SpecItems, Trace(action), Result)` (R27.40): every call was on a member, all but the last returned true, and a true result means every member was called on |
+| `RemoveWhere(match)` | `SpecItems == Pal.RemoveAll(Old(SpecItems), match)`, `Result == Old(SpecItems).Length - SpecItems.Length`, comparer unchanged (R27.40) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 **`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
@@ -8000,7 +8062,6 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`TreeSubSet`.** It constructs a second object that shares the region.
 * **The set operations.** `UnionWith`, `IntersectWith` and the rest build on enumeration
   and on `TreeSubSet`.
-* **`RemoveWhere`.** See R27.39's follow-up below.
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **`DeepClone` and the copy constructor.** `DeepClone` keeps a
@@ -8017,6 +8078,15 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings
+
+* **A `[Throws]` method cannot call a raising method while it owns a local object.** A
+  callee's raise path leaves the caller's local objects behind, and the caller's raise
+  clause has no way to drop them ("Leftover resources"). `RemoveWhere` would raise only on
+  a null `match`, which R10 rules out, so it carries no `[Throws]`.
+* **A pattern on `Seq.index` reaches every client.** A library lemma with
+  `[SMTPat (Seq.index s j)]` fires on every indexing in every module that loads it. One in
+  `SetFilter` made the unrelated `InOrderTreeWalk` time out. Its pattern is now the
+  membership it is about.
 
 * **`InternalIndexOf` and `BitHelper`.** `InternalIndexOf` returns a node's *breadth-first*
   index. The root is 0, and the children of `k` are `2k+1` and `2k+2`. That index is bounded

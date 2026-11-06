@@ -1242,6 +1242,10 @@ public static partial class FrontendPass
                      $"{symbol.Name}.{member.Name}"),
                 IMethodSymbol { MethodKind: MethodKind.Ordinary } => (null, null),
 
+                // R27.40. A read-only indexer whose getter is an accessor is collected as the
+                // method `get_Item` it is (R22.13), and a read through it is a call of it.
+                IPropertySymbol { IsIndexer: true, SetMethod: null, GetMethod: { } g }
+                    when g.DeclaringSyntaxReferences.Any(r => r.GetSyntax() is AccessorDeclarationSyntax) => (null, null),
                 IPropertySymbol { IsIndexer: true } =>
                     ("an indexer. Indexing a translated object has no rule: `a[i]` is the array " +
                      "subscript of R6.5 and nothing else (doc/translation.md R18.2)",

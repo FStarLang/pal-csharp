@@ -84,4 +84,50 @@ public static class SpecWalk
     /// <summary><paramref name="a"/> is <paramref name="a0"/> with the first min(|keys|, hi - i0) keys at <paramref name="i0"/>.</summary>
     [SpecOp("Pulse.Lib.CSharp.RegionWalk.copy_result")]
     public static bool CopyResult<T>(Seq<T> keys, Seq<T> a0, Seq<T> a, SpecInt i0, SpecInt hi) => throw Ghost();
+
+    // R27.40. A breadth-first walk over a queue of pointers into the region (front first).
+
+    /// <summary>The keys the queue still owes in <paramref name="h"/>: each queued node's tree, front first.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionWalk.bpending")]
+    public static Seq<T> BfPending<K, T>(SpecHeap<K> h, Seq<K> queue) where K : class => throw Ghost();
+
+    /// <summary>
+    /// A breadth-first walk over <paramref name="keys"/> has called the callback once per
+    /// node it dequeued, each call returning true, and <paramref name="pending"/> is owed:
+    /// the trace and what is owed account for every key, once.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.bf_visited")]
+    public static bool BfVisited<T, X>(Seq<T> keys, Seq<((T, X), bool)> tr, Seq<T> pending) => throw Ghost();
+
+    /// <summary>
+    /// A breadth-first walk over <paramref name="keys"/> that returned <paramref name="res"/>:
+    /// the callback was called only on keys, returned true on all calls but possibly the
+    /// last, and the walk returned true when it was called on every key and always returned
+    /// true, false when the last call returned false.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.bf_walked")]
+    public static bool BfWalked<T, X>(Seq<T> keys, Seq<((T, X), bool)> tr, bool res) => throw Ghost();
+
+    /// <summary>The queue after one round of the breadth-first walk: <paramref name="queue"/>'s front's non-null children queued after its rest.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionWalk.bf_next")]
+    public static Seq<K> BfNext<K, T>(SpecHeap<K> h, Seq<K> queue) where K : class => throw Ghost();
+
+    /// <summary>A lemma: an empty trace and a queue owing (a sequence equal to) <paramref name="keys"/> start a visit.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionWalk.bf_start")]
+    public static void BfStart<K, T, X>(Seq<T> keys, Seq<((T, X), bool)> tr, Seq<T> pending) where K : class => throw Ghost();
+
+    /// <summary>
+    /// A lemma: one round of the walk on a non-empty walkable queue — dequeue the front,
+    /// call the callback on it, enqueue its non-null children — keeps the visit when the
+    /// call returns true, and ends the walk when it returns false.
+    /// </summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionWalk.bf_dequeue")]
+    public static void BfDequeue<K, T, X>(SpecHeap<K> h, Seq<K> queue, Seq<T> keys, Seq<((T, X), bool)> tr) where K : class => throw Ghost();
+
+    /// <summary>
+    /// The protocol of a callback that collects into <paramref name="m"/> the keys it is
+    /// called on that <paramref name="match"/> holds of, returning true each time.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.collected")]
+    public static bool Collected<T, X>(Seq<((T, X), bool)> tr, Seq<T> m, Predicate<T> match) => throw Ghost();
 }

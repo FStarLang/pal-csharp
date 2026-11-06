@@ -1571,10 +1571,25 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var receiver = Lower(node.Expression);
         var index = Lower(node.ArgumentList.Arguments[0].Expression);
 
+
         if (known.IsSpecList(receiverType))
             return new IrListOp(loc, ListOpKind.Index, [receiver, index]);
 
         if (known.IsSeq(receiverType)) return new IrSeqOp(loc, SeqOpKind.Index, [receiver, index]);
+        // R27.40. A read through a translated class indexer, in code, is the call its getter
+        // is (as R9.20a's computed property read is): `list[i]` is `List.get_Item(list, i)`.
+        if (!SpecPosition && receiverType is { TypeKind: TypeKind.Class } &&
+            model.GetSymbolInfo(node).Symbol is IPropertySymbol { IsIndexer: true, GetMethod: { } itemGetter } &&
+            Declarations.KindOf(itemGetter, known) is not null && !Borrowing.IsMember(itemGetter, known))
+            return new IrCall(loc, Naming.Of(itemGetter), [receiver, index])
+            {
+                Kind = CalleeKind.Method,
+                ResultType = known.MapType(itemGetter.ReturnType),
+                HasReceiver = true,
+                ParamTypes = Declarations.ParamTypes(itemGetter, known, true),
+                TypeArguments = known.TypeArguments(itemGetter),
+                MutatesReceiver = false,
+            };
         // R24.16. C# indexes an array by any integer type; the element is the one at that
         // value, so a `uint` index is the `int` it equals, which the bounds check shows.
         if (receiverType is IArrayTypeSymbol &&
