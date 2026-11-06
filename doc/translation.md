@@ -8065,8 +8065,13 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **`DeepClone` and the copy constructor.** `DeepClone` keeps a
-  `Stack<(Node source, Node target)>` of pairs of pointers into two regions, the source
-  set's and the clone's. The copy constructor calls it.
+  `Stack<(Node source, Node target)>` of pairs of pointers. Its loop invariant is a tree
+  with holes: the clone's tree, with each pending target's (still childless) subtree
+  replaced by its source's, is the source tree, and no target is reachable from the source.
+  `RegionWalk` has no such substitution yet; it is the next library piece this needs. The
+  copy constructor also needs the clone moved into a second owner's region, and reaches it
+  only through `collection as SortedSet<T>`, a type test on an interface, which
+  pal-csharp does not translate.
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).

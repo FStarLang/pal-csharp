@@ -56,6 +56,7 @@ namespace System.Collections.Generic
         public SpecTree<(T, bool)> Tree;
         public IComparer<T> Comparer;
         public SpecInt Count;
+        public SpecInt Version;
     }
 
     [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
@@ -80,6 +81,7 @@ namespace System.Collections.Generic
             Tree = Pal.Tree<(T, bool)>(root),
             Comparer = comparer,
             Count = count,
+            Version = version,
         };
 
         [Spec]
@@ -87,6 +89,9 @@ namespace System.Collections.Generic
 
         [Spec]
         public IComparer<T> SpecComparer => Model.Comparer;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
 
         /// <summary>The red-black tree, each node seen as its item and whether it is red.</summary>
         [Spec]
@@ -223,7 +228,15 @@ namespace System.Collections.Generic
         /// If the delegate returns <c>false</c>, the walk is stopped.
         /// </param>
         /// <returns><c>true</c> if the entire tree has been walked; otherwise, <c>false</c>.</returns>
-        internal virtual bool InOrderTreeWalk(TreeWalkPredicate<T> action)
+        // pal: R27.39. `action` is called on the nodes in order, and the walk stops at the
+        // first false: what it was called on, and what it returned, is the trace the
+        // caller's protocol is kept over. Overrides (TreeSubSet) are not verified.
+        [Ensures("SpecWalk.Walked(@this.SpecItems, Pal.Trace<(T, bool), bool>(action), Result)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Rlimit(8)]
+        [Wrapping]
+        internal virtual bool InOrderTreeWalk([Callback] TreeWalkPredicate<T> action)
         {
             if (root == null)
             {
@@ -237,15 +250,36 @@ namespace System.Collections.Generic
 
             var stack = new Stack<Node>(2 * (int)Log2(Count + 1));
             Node? current = root;
+            SpecWalk.Empty<Node, T>(false, Pal.Heap<Node>(), stack.Items);
 
             while (current != null)
             {
+                Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
+                Pal.Invariant(Pal.WellFormed(current) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) &&
+                              SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                              Pal.Trace<(T, bool), bool>(action).Length == 0 &&
+                              Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(current)),
+                                         SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items)) ==
+                              SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)));
+                SpecWalk.Descend<Node, T>(false, Pal.Heap<Node>(), stack.Items, current);
+                Pal.Assert(stack.Items.Length < count);
                 stack.Push(current);
                 current = current.Left;
             }
 
             while (stack.Count != 0)
             {
+                Pal.Decreases(count - Pal.Trace<(T, bool), bool>(action).Length);
+                Pal.Invariant(SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) &&
+                              0 <= Pal.Trace<(T, bool), bool>(action).Length && Pal.Trace<(T, bool), bool>(action).Length <= count &&
+                              SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                              (Pal.Returned()
+                                  ? !Pal.ReturnValue<bool>() &&
+                                    SpecWalk.Walked(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action), false)
+                                  : SpecWalk.Visited(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action)) &&
+                                    SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items) ==
+                                    Pal.Slice(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action).Length, count)));
+                SpecWalk.PopAt<Node, T>(false, Pal.Heap<Node>(), stack.Items, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action).Length);
                 current = stack.Pop();
                 if (!action(current))
                 {
@@ -255,6 +289,16 @@ namespace System.Collections.Generic
                 Node? node = current.Right;
                 while (node != null)
                 {
+                    Pal.Decreases(Pal.Tree<(T, bool)>(node).Size);
+                    Pal.Invariant(Pal.WellFormed(node) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) &&
+                                  0 < Pal.Trace<(T, bool), bool>(action).Length && Pal.Trace<(T, bool), bool>(action).Length <= count &&
+                                  SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                                  SpecWalk.Visited(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action)) &&
+                                  Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(node)),
+                                             SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items)) ==
+                                  Pal.Slice(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action).Length, count));
+                    SpecWalk.Descend<Node, T>(false, Pal.Heap<Node>(), stack.Items, node);
+                    Pal.Assert(stack.Items.Length < count - Pal.Trace<(T, bool), bool>(action).Length);
                     stack.Push(node);
                     node = node.Left;
                 }
@@ -271,7 +315,16 @@ namespace System.Collections.Generic
         /// If the delegate returns <c>false</c>, the walk is stopped.
         /// </param>
         /// <returns><c>true</c> if the entire tree has been walked; otherwise, <c>false</c>.</returns>
-        internal virtual bool BreadthFirstTreeWalk(TreeWalkPredicate<T> action)
+        // pal: R27.40. `action` is called on the nodes level by level, and the walk stops at
+        // the first false: every call is on a distinct member, all calls but the last
+        // returned true, and a true result means every member was called on exactly once.
+        // Overrides (TreeSubSet) are not verified.
+        [Ensures("SpecWalk.BfWalked(@this.SpecItems, Pal.Trace<(T, bool), bool>(action), Result)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Rlimit(20)]
+        [Wrapping]
+        internal virtual bool BreadthFirstTreeWalk([Callback] TreeWalkPredicate<T> action)
         {
             if (root == null)
             {
@@ -280,24 +333,42 @@ namespace System.Collections.Generic
 
             var processQueue = new Queue<Node>();
             processQueue.Enqueue(root);
+            SpecWalk.BfStart<Node, T, bool>(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action),
+                                            SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items));
 
             Node current;
             while (processQueue.Count != 0)
             {
+                Pal.Decreases(count - Pal.Trace<(T, bool), bool>(action).Length);
+                Pal.Invariant(SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), processQueue.Items) &&
+                              0 <= Pal.Trace<(T, bool), bool>(action).Length &&
+                              SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                              (Pal.Returned()
+                                  ? !Pal.ReturnValue<bool>() &&
+                                    SpecWalk.BfWalked(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action), false)
+                                  : SpecWalk.BfVisited(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action),
+                                                       SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items))));
+                Ghost<Seq<Node>> q0 = processQueue.Items;
+                SpecWalk.BfDequeue<Node, T, bool>(Pal.Heap<Node>(), q0.Value,
+                                                  SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action));
                 current = processQueue.Dequeue();
+                Pal.Assert(Pal.Trace<(T, bool), bool>(action).Length < int.MaxValue);
                 if (!action(current))
                 {
                     return false;
                 }
 
+                Pal.Assert(processQueue.SpecCount < int.MaxValue);
                 if (current.Left != null)
                 {
                     processQueue.Enqueue(current.Left);
                 }
+                Pal.Assert(processQueue.SpecCount < int.MaxValue);
                 if (current.Right != null)
                 {
                     processQueue.Enqueue(current.Right);
                 }
+                Pal.Assert(processQueue.Items == SpecWalk.BfNext<Node, T>(Pal.Heap<Node>(), q0.Value));
             }
 
             return true;
@@ -659,10 +730,26 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         public virtual bool Contains(T item) => FindNode(item) != null;
 
+        [Throws(typeof(ArgumentException), "Pal.Contents(array).Length < @this.SpecItems.Length")]
+        [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), 0, @this.SpecItems.Length, @this.SpecItems)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         public void CopyTo(T[] array) => CopyTo(array, 0, Count);
 
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0")]
+        [Throws(typeof(ArgumentException), "Pal.Contents(array).Length - index < @this.SpecItems.Length")]
+        [Ensures("0 <= index && Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), index, index + @this.SpecItems.Length, @this.SpecItems)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         public void CopyTo(T[] array, int index) => CopyTo(array, index, Count);
 
+        // pal: R27.39. The first min(count, Count) items, in order, at `index`.
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || count < 0")]
+        [Throws(typeof(ArgumentException), "count > Pal.Contents(array).Length - index")]
+        [Ensures("0 <= index && 0 <= count && index + count <= Pal.Old(Pal.Contents(array)).Length")]
+        [Ensures("SpecWalk.CopyResult(@this.SpecItems, Pal.Old(Pal.Contents(array)), Pal.Contents(array), index, index + count)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         public void CopyTo(T[] array, int index, int count)
         {
             ArgumentNullException.ThrowIfNull(array);
@@ -677,9 +764,12 @@ namespace System.Collections.Generic
             }
 
             count += index; // Make `count` the upper bound.
+            Ghost<SpecInt> i0 = (SpecInt)index;
+            Ghost<Seq<T>> a0 = Pal.Contents(array);
 
             InOrderTreeWalk(node =>
             {
+                Pal.Protocol<(T, bool), bool>(tr => SpecWalk.Copied(tr, a0.Value, Pal.Contents(array), i0.Value, count, index));
                 if (index >= count)
                 {
                     return false;
@@ -743,6 +833,9 @@ namespace System.Collections.Generic
 
         #region IEnumerable<T> members
 
+        [Ensures("ReferenceEquals(Result._tree, @this) && Result._version == @this.SpecVersion && !Result._reverse")]
+        [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), Result._stack.Items)")]
+        [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(false, Pal.Heap<SortedSet<T>.Node>(), Result._stack.Items) == @this.SpecItems")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
         IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
@@ -1681,14 +1774,23 @@ namespace System.Collections.Generic
             return result;
         }
 
+        // pal: R27.40. The breadth-first walk collects the members `match` holds of; each is
+        // then removed, so what is left is exactly the members it rejects, in order. `match`
+        // is not null (R10), so `ThrowIfNull` is nothing, as it is for CopyTo's `array`.
+        [Ensures("@this.SpecItems == Pal.RemoveAll(Pal.Old(@this.SpecItems), match)")]
+        [Ensures("Result == Pal.Old(@this.SpecItems).Length - @this.SpecItems.Length")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Rlimit(20)]
         public int RemoveWhere(Predicate<T> match)
         {
             ArgumentNullException.ThrowIfNull(match);
 
             List<T> matches = new List<T>(this.Count);
+            Ghost<Seq<T>> s0 = this.SpecItems;
 
             BreadthFirstTreeWalk(n =>
             {
+                Pal.Protocol<(T, bool), bool>(tr => SpecWalk.Collected(tr, matches.Items, match));
                 if (match(n.Item))
                 {
                     matches.Add(n.Item);
@@ -1696,16 +1798,28 @@ namespace System.Collections.Generic
                 return true;
             });
 
+            Ghost<Seq<T>> m0 = matches.Items;
+            SpecSetFilter.RemovingStart(this.SpecComparer, s0.Value, m0.Value);
+
             // Enumerate the results of the breadth-first walk in reverse in an attempt to lower cost.
             int actuallyRemoved = 0;
             for (int i = matches.Count - 1; i >= 0; i--)
             {
+                Pal.Invariant(-1 <= i && i < m0.Value.Length);
+                Pal.Invariant(matches.Items == m0.Value && this.SpecComparer == Pal.Old(this.SpecComparer));
+                Pal.Invariant(SpecSetFilter.Removing(this.SpecComparer, s0.Value, this.SpecItems, m0.Value, i));
+                Pal.Invariant(actuallyRemoved == s0.Value.Length - this.SpecItems.Length);
+                Pal.Invariant(Pal.Forall((T y) => Pal.Implies(SpecSetFilter.Contains(m0.Value, y), SpecSetFilter.Contains(s0.Value, y) && match(y)) &&
+                                                  Pal.Implies(SpecSetFilter.Contains(s0.Value, y) && match(y), SpecSetFilter.Contains(m0.Value, y))));
+                Pal.Decreases(i + 1);
+                SpecSetFilter.RemovingStep(this.SpecComparer, s0.Value, this.SpecItems, m0.Value, i);
                 if (Remove(matches[i]))
                 {
                     actuallyRemoved++;
                 }
             }
 
+            SpecSetFilter.FilterUnique(this.SpecComparer, s0.Value, this.SpecItems, match);
             return actuallyRemoved;
         }
 
@@ -2196,11 +2310,18 @@ namespace System.Collections.Generic
 
             private readonly bool _reverse;
 
+            [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && !@this._reverse")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(false, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == set.SpecItems")]
             internal Enumerator(SortedSet<T> set)
                 : this(set, reverse: false)
             {
             }
 
+            [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && @this._reverse == reverse")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == (reverse ? Pal.Reverse(set.SpecItems) : set.SpecItems)")]
+            [Wrapping]
             internal Enumerator(SortedSet<T> set, bool reverse)
             {
                 _tree = set;
@@ -2225,13 +2346,28 @@ namespace System.Collections.Generic
                 throw new PlatformNotSupportedException();
             }
 
+            [Rlimit(40)]
+            [Requires("@this._stack.SpecCount == 0")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == SpecWalk.Keys(@this._reverse, @this._tree.SpecNodes)")]
             private void Initialize()
             {
                 _current = null;
                 Node? node = _tree.root;
                 Node? next, other;
+                SpecWalk.Empty<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
                 while (node != null)
                 {
+                    Pal.Decreases(Pal.Tree<(T, bool)>(node).Size);
+                    Pal.Invariant(Pal.WellFormed(node) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), _stack.Items) &&
+                                  SpecSearchTree.Keys(Pal.Tree<(T, bool)>(_tree.root)).Length == _tree.count &&
+                                  Pal.Concat(SpecWalk.Keys(_reverse, Pal.Tree<(T, bool)>(node)),
+                                             SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items)) ==
+                                  SpecWalk.Keys(_reverse, Pal.Tree<(T, bool)>(_tree.root)));
+                    SpecWalk.Length<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+                    SpecWalk.Descend<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items, node);
+                    Pal.Assert(Pal.Tree<(T, bool)>(_tree.root).Size == _tree.count);
+                    Pal.Assert(_stack.Items.Length < _tree.count);
                     next = (_reverse ? node.Right : node.Left);
                     other = (_reverse ? node.Left : node.Right);
                     if (_tree.IsWithinRange(node.Item))
@@ -2248,8 +2384,21 @@ namespace System.Collections.Generic
                         node = next;
                     }
                 }
+                Pal.Assert(Pal.Concat(SpecWalk.Keys(_reverse, Pal.Tree<(T, bool)>(node)),
+                                      SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items)) ==
+                           SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items));
             }
 
+            [Requires("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Requires("SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items).Length <= @this._tree.SpecCount")]
+            [Rlimit(40)]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._tree.SpecVersion")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("Result == (Pal.Old(SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)).Length > 0)")]
+            [Ensures("Pal.Implies(!Result, @this._current == null)")]
+            [Ensures("Pal.Implies(Result, @this._current != null && Pal.WellFormed(@this._current) && " +
+                     "Pal.Same(SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(@this._current), Pal.Old(SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items))[0]), Pal.Old(SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items))[0]))")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == Pal.Slice(Pal.Old(SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)), Result ? 1 : 0, Pal.Old(SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)).Length)")]
             public bool MoveNext()
             {
                 // Make sure that the underlying subset has not been changed since
@@ -2266,11 +2415,23 @@ namespace System.Collections.Generic
                     return false;
                 }
 
+                Ghost<Seq<T>> p0 = SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+                Pal.Assert(SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items) == Pal.Slice(p0.Value, 0, p0.Value.Length));
+                SpecWalk.PopAt<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items, p0.Value, 0);
                 _current = _stack.Pop();
                 Node? node = (_reverse ? _current.Left : _current.Right);
                 Node? next, other;
                 while (node != null)
                 {
+                    Pal.Decreases(Pal.Tree<(T, bool)>(node).Size);
+                    Pal.Invariant(Pal.WellFormed(node) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), _stack.Items) &&
+                                  p0.Value.Length <= _tree.count &&
+                                  Pal.Concat(SpecWalk.Keys(_reverse, Pal.Tree<(T, bool)>(node)),
+                                             SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items)) ==
+                                  Pal.Slice(p0.Value, 1, p0.Value.Length));
+                    SpecWalk.Length<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+                    SpecWalk.Descend<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items, node);
+                    Pal.Assert(_stack.Items.Length < p0.Value.Length);
                     next = (_reverse ? node.Right : node.Left);
                     other = (_reverse ? node.Left : node.Right);
                     if (_tree.IsWithinRange(node.Item))
@@ -2287,11 +2448,17 @@ namespace System.Collections.Generic
                         node = other;
                     }
                 }
+                Pal.Assert(Pal.Concat(SpecWalk.Keys(_reverse, Pal.Tree<(T, bool)>(node)),
+                                      SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items)) ==
+                           SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items));
                 return true;
             }
 
+            [Ensures("true")]
             public void Dispose() { }
 
+            [Requires("@this._current == null || Pal.InRegion(@this._current)")]
+            [Ensures("Pal.Implies(@this._current != null, Pal.Same(Result, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(@this._current), Result)))")]
             public T Current
             {
                 get
@@ -2304,6 +2471,9 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Requires("@this._current == null || Pal.InRegion(@this._current)")]
+            [Throws(typeof(InvalidOperationException), "@this._current == null")]
+            [Ensures("@this._current != null && Pal.Exists((T v) => Pal.Boxes(Result, v) && Pal.Same(v, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(@this._current), v)))")]
             object? IEnumerator.Current
             {
                 get
@@ -2317,8 +2487,12 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Ensures("Result == (@this._current == null)")]
             internal bool NotStartedOrEnded => _current == null;
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._tree.SpecVersion")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == SpecWalk.Keys(@this._reverse, @this._tree.SpecNodes)")]
             internal void Reset()
             {
                 if (_version != _tree.version)
@@ -2330,6 +2504,9 @@ namespace System.Collections.Generic
                 Initialize();
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._tree.SpecVersion")]
+            [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
+            [Ensures("SpecWalk.Pending<SortedSet<T>.Node, T>(@this._reverse, Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items) == SpecWalk.Keys(@this._reverse, @this._tree.SpecNodes)")]
             void IEnumerator.Reset() => Reset();
         }
 
@@ -2372,6 +2549,8 @@ namespace System.Collections.Generic
         }
 
         // Used for set checking operations (using enumerables) that rely on counting
+        [Wrapping]
+        [Ensures("0 <= Result && Result <= 31")]
         private static int Log2(int value) => BitOperations.Log2((uint)value);
 
         #endregion

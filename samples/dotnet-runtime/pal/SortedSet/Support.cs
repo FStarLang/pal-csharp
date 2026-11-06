@@ -22,9 +22,12 @@ namespace System
         internal static string ArgumentOutOfRange_IndexMustBeLessOrEqual => nameof(ArgumentOutOfRange_IndexMustBeLessOrEqual);
         internal static string ArgumentOutOfRange_SmallCapacity => nameof(ArgumentOutOfRange_SmallCapacity);
         internal static string Argument_AddingDuplicate => nameof(Argument_AddingDuplicate);
+        internal static string Argument_InvalidOffLen => nameof(Argument_InvalidOffLen);
         internal static string Argument_IncompatibleArrayType => nameof(Argument_IncompatibleArrayType);
         internal static string InvalidOperation_EnumFailedVersion => nameof(InvalidOperation_EnumFailedVersion);
         internal static string InvalidOperation_EnumOpCantHappen => nameof(InvalidOperation_EnumOpCantHappen);
+        internal static string InvalidOperation_EmptyStack => nameof(InvalidOperation_EmptyStack);
+        internal static string InvalidOperation_EmptyQueue => nameof(InvalidOperation_EmptyQueue);
         internal static string NotSupported_KeyCollectionSet => nameof(NotSupported_KeyCollectionSet);
         internal static string NotSupported_SortedListNestedWrite => nameof(NotSupported_SortedListNestedWrite);
         internal static string NotSupported_ValueCollectionSet => nameof(NotSupported_ValueCollectionSet);
