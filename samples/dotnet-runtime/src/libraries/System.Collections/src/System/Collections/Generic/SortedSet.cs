@@ -2046,35 +2046,55 @@ namespace System.Collections.Generic
             [Ensures("SpecTopDown.Recolored<SortedSet<T>.Node, T>(Pal.Old(Pal.Heap<SortedSet<T>.Node>()), Pal.Heap<SortedSet<T>.Node>(), @this, true)")]
             public void ColorRed() => Color = NodeColor.Red;
 
+            [Rlimit(100)]
+            [Requires("Pal.Unshared(@this)")]
+            [Requires("Pal.Tree<(T, bool)>(@this).Size <= count")]
+            [Ensures("Pal.Unshared(Result) && Pal.Reshaped(null, Result)")]
+            [Ensures("Pal.Tree<(T, bool)>(Result) == Pal.Old(Pal.Tree<(T, bool)>(@this))")]
             public Node DeepClone(int count)
             {
 #if DEBUG
                 Debug.Assert(count == GetCount());
 #endif
+                Ghost<SpecHeap<Node>> h0 = Pal.Heap<Node>();
                 Node newRoot = ShallowClone();
 
                 var pendingNodes = new Stack<(Node source, Node target)>(2 * Log2(count) + 2);
+                SpecClone.Init<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items);
                 pendingNodes.Push((this, newRoot));
 
                 while (pendingNodes.TryPop(out var next))
                 {
+                    Pal.Decreases(SpecClone.Measure<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items));
+                    Pal.Invariant(Pal.Old(Pal.Tree<(T, bool)>(this)).Size <= count);
+                    Pal.Invariant(SpecClone.Cloning<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items));
+                    SpecClone.Pop<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items, next);
                     Node clonedNode;
 
                     if (next.source.Left is Node left)
                     {
+                        Ghost<SpecHeap<Node>> h = Pal.Heap<Node>();
                         clonedNode = left.ShallowClone();
+                        Ghost<SpecHeap<Node>> h1 = Pal.Heap<Node>();
                         next.target.Left = clonedNode;
+                        SpecClone.Link<Node>(true, h0.Value, this, h.Value, h1.Value, Pal.Heap<Node>(), newRoot, pendingNodes.Items, next, clonedNode);
                         pendingNodes.Push((left, clonedNode));
                     }
 
                     if (next.source.Right is Node right)
                     {
+                        Ghost<SpecHeap<Node>> h = Pal.Heap<Node>();
                         clonedNode = right.ShallowClone();
+                        Ghost<SpecHeap<Node>> h1 = Pal.Heap<Node>();
                         next.target.Right = clonedNode;
+                        SpecClone.Link<Node>(false, h0.Value, this, h.Value, h1.Value, Pal.Heap<Node>(), newRoot, pendingNodes.Items, next, clonedNode);
                         pendingNodes.Push((right, clonedNode));
                     }
+
+                    SpecClone.Done<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items, next);
                 }
 
+                SpecClone.Finish<Node>(h0.Value, this, Pal.Heap<Node>(), newRoot, pendingNodes.Items);
                 return newRoot;
             }
 
