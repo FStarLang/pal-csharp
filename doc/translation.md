@@ -8063,6 +8063,58 @@ write the set mid-enumeration gets C#'s `InvalidOperationException` at its next
 returns is an enumerable, which has no translation. The iterator is verified for its
 contract; enumerating its result through `foreach` is a client feature not designed yet.
 
+### R27.43 Cloning a region tree: `DeepClone`
+
+`Node.DeepClone(count)` copies a tree without recursion. It keeps a
+`Stack<(Node source, Node target)>` of pairs still to do. It pops a pair, clones each child of
+`source` (`ShallowClone`), links the clone under `target`, and pushes the child pair. Four
+small rules and one library make it translate and verify.
+
+* **`out var` in a `while` condition.** `while (s.TryPop(out var next))` declares `next` in
+  the condition. The declaration is hoisted to a local before the loop, so the guard writes
+  it as any `out` argument does (R6.10).
+* **Declaration patterns on a region class.** `if (e is Node x) S1 else S2`, with `e` of a
+  `[Region]` class type, is `x = e; if (x != null) S1 else S2`. The test of a region pointer
+  is its null test; no type test is involved, since a region class is sealed in the
+  translation (R27.1).
+* **Region pointers in tuples.** A tuple component of a `[Region]` class type is the
+  nullable pointer (`class_X__opt`), as a generic argument already is (R27.35). So
+  `(Node, Node)` has a default, and `Stack<(Node, Node)>` is a stack of plain values.
+  Reading a field through a component needs the component's non-null fact, which the
+  loop's ghost steps supply.
+* **A measure that names a mutated object.** A loop's `Pal.Decreases` may name an object
+  local the loop writes (`pendingNodes.Items`). The measure is evaluated at the top of the
+  body and at its end, and binds the local to `Callback.model_now inv ()`: a ghost function
+  that returns the model under the object's current invariant and leaves it in place. This is
+  the object analogue of a heap's `Region.current`.
+
+**The invariant: a tree with holes.** `Pulse.Lib.CSharp.RegionClone` (C# facade
+`SpecClone`) states it. With `h0` the heap at entry, `src` the source root, `h` the current
+heap, `dst` the clone's root and `st` the stack, `SpecClone.Cloning(h0, src, h, dst, st)`
+says:
+
+* every pending pair is a source node of `src`'s tree and a target node of `dst`'s, and
+  each pending target is still a leaf of the clone;
+* if the clone's tree had each pending target's subtree replaced by its source's subtree,
+  it would be the source tree (`zip`);
+* the sources are distinct; no target is a node of the source tree; and the source tree is
+  unchanged since `h0`.
+
+The ghost steps `Init`, `Pop`, `Link` (once per child, after the write and before the
+`Push`), `Done` (after both children) and `Finish` (when the stack is empty) carry it
+around the loop. `Finish` concludes that the clone is the source tree and is unshared.
+`SpecClone.Measure` is `2 * (size - nz) + |st|`, where `nz` counts the source nodes whose
+children are cloned; `Pop` and `Done` state how it moves.
+
+So `DeepClone` ensures `Pal.Tree(Result) == Old(Pal.Tree(@this))`, `Pal.Unshared(Result)`
+and `Pal.Reshaped(null, Result)`. It requires `Pal.Unshared(@this)` and
+`Tree.Size <= count`. The size bound gives the stack's `Push` its `Count < int.MaxValue`
+bound, since the stack never holds more than the tree's nodes. The initial capacity
+`2 * Log2(count) + 2` is a hint: the runtime `Stack<T>` grows.
+
+The library has no admits or assumptions. `test/sortedset/TopDownInsert.cs` verifies the
+same loop over `RbNode`.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8158,6 +8210,7 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
 | `Rotate(rotation)` (removal) | also `SpecTopDownRemove.RotatedN`, the heap-level rotation |
 | `Node(item, color)` | `Region.alloc` of a leaf (R27.16) |
 | `ReplaceChild(child, newChild)` | `SpecTopDown.Relinked` |
+| `DeepClone(count)` (requires unshared, `Size <= count`) | an unshared fresh tree equal to `t` (R27.43) |
 
 The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recolored`,
 `Split4ed`, `Rotated`), which is what `AddIfNotPresent`'s ghost steps consume.
@@ -8169,14 +8222,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   and on `TreeSubSet`.
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
-* **`DeepClone` and the copy constructor.** `DeepClone` keeps a
-  `Stack<(Node source, Node target)>` of pairs of pointers. Its loop invariant is a tree
-  with holes: the clone's tree, with each pending target's (still childless) subtree
-  replaced by its source's, is the source tree, and no target is reachable from the source.
-  `RegionWalk` has no such substitution yet; it is the next library piece this needs. The
-  copy constructor also needs the clone moved into a second owner's region, and reaches it
-  only through `collection as SortedSet<T>`, a type test on an interface, which
-  pal-csharp does not translate.
+* **The copy constructor.** `DeepClone` is verified (R27.43). The copy constructor also
+  needs the clone moved into a second owner's region, and reaches it only through
+  `collection as SortedSet<T>`, a type test on an interface.
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).

@@ -303,6 +303,61 @@ public sealed class RbSet<T>
         [Ensures("Result == (node != null && Pal.InRegion(node) && SpecSearchTree.IsRed(Pal.Tree<(T, bool)>(node)))")]
         public static bool IsNonNullRed(RbNode? node) => node != null && node.IsRed;
 
+        [Requires("Pal.InRegion(@this)")]
+        [Ensures("Pal.Unshared(Result) && Pal.Reshaped(null, Result)")]
+        [Ensures("Pal.Tree<(T, bool)>(Result) == Pal.Old(Pal.Tree<(T, bool)>(@this)).RootOnly")]
+        public RbNode ShallowClone() => new RbNode(Item, Color);
+
+        // R27.43. A copy of the tree, built top-down from a stack of (source, target) pairs.
+        [Rlimit(100)]
+        [Requires("Pal.Unshared(@this)")]
+        [Requires("Pal.Tree<(T, bool)>(@this).Size <= count")]
+        [Ensures("Pal.Unshared(Result) && Pal.Reshaped(null, Result)")]
+        [Ensures("Pal.Tree<(T, bool)>(Result) == Pal.Old(Pal.Tree<(T, bool)>(@this))")]
+        public RbNode DeepClone(int count)
+        {
+            Ghost<SpecHeap<RbNode>> h0 = Pal.Heap<RbNode>();
+            RbNode newRoot = ShallowClone();
+
+            var pendingNodes = new PtrStack<(RbNode source, RbNode target)>(count);
+            SpecClone.Init<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items);
+            pendingNodes.Push((this, newRoot));
+
+            while (pendingNodes.TryPop(out var next))
+            {
+                Pal.Decreases(SpecClone.Measure<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items));
+                Pal.Invariant(pendingNodes.SpecCapacity == count && Pal.Old(Pal.Tree<(T, bool)>(this)).Size <= count);
+                Pal.Invariant(SpecClone.Cloning<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items));
+                SpecClone.Pop<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items, next);
+                RbNode clonedNode;
+
+                if (next.source.Left is RbNode left)
+                {
+                    Ghost<SpecHeap<RbNode>> h = Pal.Heap<RbNode>();
+                    clonedNode = left.ShallowClone();
+                    Ghost<SpecHeap<RbNode>> h1 = Pal.Heap<RbNode>();
+                    next.target.Left = clonedNode;
+                    SpecClone.Link<RbNode>(true, h0.Value, this, h.Value, h1.Value, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items, next, clonedNode);
+                    pendingNodes.Push((left, clonedNode));
+                }
+
+                if (next.source.Right is RbNode right)
+                {
+                    Ghost<SpecHeap<RbNode>> h = Pal.Heap<RbNode>();
+                    clonedNode = right.ShallowClone();
+                    Ghost<SpecHeap<RbNode>> h1 = Pal.Heap<RbNode>();
+                    next.target.Right = clonedNode;
+                    SpecClone.Link<RbNode>(false, h0.Value, this, h.Value, h1.Value, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items, next, clonedNode);
+                    pendingNodes.Push((right, clonedNode));
+                }
+
+                SpecClone.Done<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items, next);
+            }
+
+            SpecClone.Finish<RbNode>(h0.Value, this, Pal.Heap<RbNode>(), newRoot, pendingNodes.Items);
+            return newRoot;
+        }
+
         public T Item { get; set; }
 
         public RbNode? Left { get; set; }

@@ -328,6 +328,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 known.MapType(emptyArray) is IrArrayType emptyType =>
                 new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType },
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
+            // R27.43. `out var x`: the local, declared ahead of the statement.
+            DeclarationExpressionSyntax { Designation: SingleVariableDesignationSyntax dv }
+                when node.Parent is ArgumentSyntax { RefKindKeyword.RawKind: (int)SyntaxKind.OutKeyword } &&
+                     model.GetDeclaredSymbol(dv) is ILocalSymbol dl =>
+                new IrVar(loc, dv.Identifier.ValueText) { Type = known.MapType(dl.Type) },
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
             // R24.8. `ref e` denotes the location `e`; where it is accepted at all, the

@@ -2774,6 +2774,11 @@ public sealed class CodeEmitter(
             // R27.41. An object the loop leaves alone is at its fixed model in the measure too.
             if (slot is { Kind: SlotKind.Object, LoopHeaps.IsDefaultOrEmpty: false } && unassigned.Contains(slot.Name))
                 measureScope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            // R27.43. An object the loop changes is at the model its invariant holds now.
+            else if (slot is { Kind: SlotKind.Object, Open: false, Index: null, LoopHeaps.IsDefaultOrEmpty: true, Type: IrClassType oc })
+                measureScope.Bind(slot.Name, new Term(
+                    $"(Pulse.Lib.CSharp.Callback.model_now ({Names.ClassModule(oc.Name)}.{Names.ClassInv(oc.Name)} {slot.Binder} #{slot.Fraction ?? "1.0R"}) ())",
+                    MethodPlan.KindOf(slot.Type), slot.Type));
         }
 
         // R24.22. A name that owns nothing -- an immutable local, a ghost local -- holds

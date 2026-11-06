@@ -546,10 +546,15 @@ public sealed class WellKnown
                 return bcl;
             // R26.8. A pair `(T1, T2)` of values is F*'s `T1 & T2`. A component that is an
             // object or an array would make the pair a second owner of it, so it is refused.
+            // R27.43. A pointer into a region is plain data (R27.35), so it may be a component;
+            // like a type argument, it is the nullable pointer, so the pair has C#'s default.
             case INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } tuple
-                when MapType(tuple.TupleElements[0].Type) is { } t1 && IsPlainValue(t1) &&
-                     MapType(tuple.TupleElements[1].Type) is { } t2 && IsPlainValue(t2):
-                return new IrUserSpecType("ValueTuple", TupleType, [t1, t2]);
+                when MapType(tuple.TupleElements[0].Type) is { } t1 &&
+                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type)) &&
+                     MapType(tuple.TupleElements[1].Type) is { } t2 &&
+                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type)):
+                return new IrUserSpecType("ValueTuple", TupleType,
+                    [RegionArgument(tuple.TupleElements[0].Type, t1), RegionArgument(tuple.TupleElements[1].Type, t2)]);
             // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
             case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
                      MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&

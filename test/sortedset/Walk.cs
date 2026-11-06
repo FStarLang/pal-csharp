@@ -67,6 +67,23 @@ public sealed class PtrStack<T>
         get => _array[index];
     }
 
+    [Ensures("Result == (0 < Pal.Old(@this.SpecCount))")]
+    [Ensures("Pal.Implies(Result, Pal.Same(result, Pal.Old(@this.Items)[Pal.Old(@this.SpecCount) - 1]))")]
+    [Ensures("@this.Items == Pal.Slice(Pal.Old(@this.Items), 0, Result ? Pal.Old(@this.SpecCount) - 1 : Pal.Old(@this.SpecCount))")]
+    [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
+    public bool TryPop(out T result)
+    {
+        int size = _size - 1;
+        if (size < 0)
+        {
+            result = default!;
+            return false;
+        }
+        _size = size;
+        result = _array[size];
+        return true;
+    }
+
     [Requires("0 < @this.SpecCount")]
     [Ensures("Pal.Same(Result, Pal.Old(@this.Items)[Pal.Old(@this.SpecCount) - 1])")]
     [Ensures("@this.Items == Pal.Slice(Pal.Old(@this.Items), 0, Pal.Old(@this.SpecCount) - 1)")]

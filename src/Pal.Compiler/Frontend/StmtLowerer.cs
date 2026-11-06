@@ -46,8 +46,11 @@ public sealed class StmtLowerer(
             BlockSyntax b => LowerBlock(b),
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
+            IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
             IfStatementSyntax i => new IrIf(loc, _code.Lower(i.Condition),
                 Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement)),
+            WhileStatementSyntax w when OutDeclarations(w.Condition, loc) is { IsEmpty: false } outs =>
+                new IrBlock(loc, [.. outs, LowerWhile(w, loc)]) { Splice = true },
             WhileStatementSyntax w => LowerWhile(w, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
@@ -188,6 +191,61 @@ public sealed class StmtLowerer(
         return new IrBlock(loc,
             [new IrLocalDecl(loc, Iterators.Trace, new IrSeqType(_iterator!), empty), .. inner,
              new IrReturn(loc, TraceVar(loc))]);
+    }
+
+    /// <summary>
+    /// R27.43. <c>out var x</c> in a loop's condition declares <c>x</c> for the loop: it is
+    /// declared once, ahead of the loop, at its type's <c>default</c>. Every test writes it
+    /// before anything reads it, so where it starts is never observed.
+    /// </summary>
+    private ImmutableArray<IrStmt> OutDeclarations(ExpressionSyntax condition, IrLoc loc)
+    {
+        var decls = ImmutableArray.CreateBuilder<IrStmt>();
+        foreach (var arg in condition.DescendantNodesAndSelf(n => n is not AnonymousFunctionExpressionSyntax)
+                     .OfType<ArgumentSyntax>())
+        {
+            if (!arg.RefKindKeyword.IsKind(SyntaxKind.OutKeyword) ||
+                arg.Expression is not DeclarationExpressionSyntax { Designation: SingleVariableDesignationSyntax v } ||
+                model.GetDeclaredSymbol(v) is not ILocalSymbol local)
+                continue;
+            if (known.MapType(local.Type) is not { } type || _code.DefaultValue(local.Type, loc) is not { } init)
+            {
+                diagnostics.Unsupported(Locations.From(arg), $"The `out var {v.Identifier.ValueText}` of type `{local.Type}`");
+                continue;
+            }
+            decls.Add(new IrLocalDecl(loc, v.Identifier.ValueText, type, init));
+        }
+        return decls.ToImmutable();
+    }
+
+    /// <summary>
+    /// R27.43. <c>if (e is K x)</c>, where <c>e</c> is a pointer into a region of class
+    /// <c>K</c>: <c>e</c> is read once into the local <c>x</c>, and the test is that it is not
+    /// null. (A pattern otherwise substitutes the subject for <c>x</c>, re-reading the heap at
+    /// each use.)
+    /// </summary>
+    private IrStmt? RegionPatternIf(IfStatementSyntax i, IrLoc loc)
+    {
+        if (i.Condition is not IsPatternExpressionSyntax
+            {
+                Pattern: DeclarationPatternSyntax { Designation: SingleVariableDesignationSyntax v } d,
+            } isp ||
+            model.GetTypeInfo(isp.Expression).Type is not { } from || !known.IsRegionClass(from) ||
+            model.GetTypeInfo(d.Type).Type is not { } to ||
+            !SymbolEqualityComparer.Default.Equals(from.WithNullableAnnotation(NullableAnnotation.NotAnnotated),
+                                                   to.WithNullableAnnotation(NullableAnnotation.NotAnnotated)) ||
+            model.GetDeclaredSymbol(v) is not ILocalSymbol local ||
+            known.MapType(local.Type) is not IrClassType type)
+            return null;
+        var name = v.Identifier.ValueText;
+        var nullable = type with { Nullable = true };
+        var x = new IrVar(loc, name) { Type = nullable };
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(loc, name, nullable, _code.Lower(isp.Expression)),
+            new IrIf(loc, new IrBinary(loc, BinOp.Ne, x, new IrNull(loc) { Type = nullable }) { Type = IrPrim.Bool },
+                Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement)),
+        ]) { Splice = true };
     }
 
     private IrStmt LowerYield(YieldStatementSyntax y, IrLoc loc)

@@ -38,3 +38,13 @@ ghost fn trace_now (#e: Type0) (p: Seq.seq e -> slprop) (#tr: erased (Seq.seq e)
 {
   reveal tr
 }
+
+/// R27.43. The model an object's invariant is at now, for a loop's `decreases`, as
+/// `trace_now` names a trace.
+ghost fn model_now (#m: Type0) (inv: m -> slprop) (#v: erased m) (_: unit)
+  preserves inv v
+  returns  r: m
+  ensures  rewrites_to r (reveal v)
+{
+  reveal v
+}
