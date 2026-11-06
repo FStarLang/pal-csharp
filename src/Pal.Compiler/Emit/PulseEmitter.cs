@@ -1132,7 +1132,18 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                         if (writes[entry.Key].Add(kn)) changed = true;
                 }
         }
-        return touched.Where(t => t.Value.Count > 0).ToDictionary(
+        // R27.36. A method that touches no region, and calls only methods that touch none,
+        // holds none: a loop calling it (a `Stack<Node>` holding the region's pointers)
+        // keeps the region's heap. One calling a method this does not see (an owner's,
+        // which holds its region through `this`) is left out, and is assumed to write.
+        var opaque = new HashSet<string>(calls.Where(c => c.Value.Any(callee => !touched.ContainsKey(callee))).Select(c => c.Key));
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            foreach (var entry in calls)
+                if (!opaque.Contains(entry.Key) && entry.Value.Any(opaque.Contains)) { opaque.Add(entry.Key); changed = true; }
+        }
+        return touched.Where(t => t.Value.Count > 0 || !opaque.Contains(t.Key)).ToDictionary(
             t => t.Key,
             t => t.Value.Values.Select(k => new RegionUse(k, writes[t.Key].Contains(k.Name))).ToImmutableArray());
     }

@@ -7695,6 +7695,43 @@ Construct(…, new Node(…)) : Construct(…, null)` is the case. Joined as one
 arms' differently allocated heaps leave Pulse a `match` on the condition that it cannot
 reduce.
 
+### R27.35 Collections of pointers into a region
+
+A `[Region]` class can be a type argument of an ordinary class (`Stack<Node>`,
+`PtrStack<WNode>`), an array element type, or a `Seq` element type. Its image there is
+the nullable box `class_K__opt`, which is the pointer as a value (R27.3). C# lets a
+`Stack<Node>` hold the `Node?` that `Pop` might return, so the nullable box is the right
+image. Boxes get a `has_default` instance (`B.null`), so a generic collection can take
+`default(T)` at one.
+
+What the stack holds is plain data, so its model is a `Seq` of pointers. Any claim about
+those pointers, for example that each is in the region or that together they still owe
+certain keys of the tree, is a pure statement about the heap the owner holds.
+`Pulse.Lib.CSharp.RegionWalk` (C# surface `SpecWalk`) states the claims an in-order walk
+needs:
+
+* `Keys(rev, t)`: the keys of `t` in order, or in reverse.
+* `Pending(rev, h, s)`: what the stack `s` still owes in `h`, with the top (the last
+  element) first. Each entry owes its key and then the keys of its far subtree.
+* `Walkable(h, s)`: every entry is non-null and well-formed.
+* Lemmas:
+  * `Empty`;
+  * `Descend`: push `x`, move to its near child;
+  * `Pop`, and `PopAt` for a stack that owes a window `ks[n..]`;
+  * `Length`.
+
+`test/sortedset/Walk.cs` uses an array-backed `PtrStack<WNode>` and verifies that an
+iterative in-order walk counts every node and copies the keys out in order.
+
+### R27.36 A call to a method that holds no region
+
+A method of the owner calls region-free code mid-traversal, such as `stack.Push(node)`.
+R27.16 used to assume such a callee might write the region, since it was not known to
+leave it alone. A loop around the call then re-quantified the heap, and so lost what
+the invariant said about it. Now a method whose body names no region and calls only
+methods that are themselves region-free (transitively) holds no region. A call to it
+neither reads nor writes the caller's region.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).

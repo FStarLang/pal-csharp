@@ -60,3 +60,9 @@ instance has_default_option (a: Type) : has_default (option a) = {
 
 // R14.2a. `default(T)`, with `T` applied explicitly as R14.5 applies every type argument.
 let default_of (a: Type) {| d: has_default a |} : a = d.default_value
+
+// R27.35. A pointer into a region, as a type argument (`Stack<Node>`), is a nullable box,
+// and its default is null.
+instance has_default_box (a: Type0) : has_default (Pulse.Lib.Box.box a) = {
+  default_value = Pulse.Lib.Box.null #a
+}

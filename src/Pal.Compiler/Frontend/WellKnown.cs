@@ -405,6 +405,14 @@ public sealed class WellKnown
         !tp.HasUnmanagedTypeConstraint;
 
     /// <summary>
+    /// R27.35. A region class as the type argument of another class (<c>Stack&lt;Node&gt;</c>)
+    /// is its nullable pointer: the elements are plain boxes, and <c>default</c> -- what
+    /// <c>new T[n]</c> fills an array with -- is null.
+    /// </summary>
+    private IrType RegionArgument(ITypeSymbol argument, IrType mapped) =>
+        mapped is IrClassType { Nullable: false } k && IsRegionClass(argument) ? k with { Nullable = true } : mapped;
+
+    /// <summary>
     /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
     /// resolved them — inferred and explicit calls are indistinguishable here, which is
     /// why they translate identically. An argument this cannot map yields no arguments at
@@ -421,11 +429,12 @@ public sealed class WellKnown
             ? owner.TypeArguments.AddRange(method.TypeArguments)
             : method.TypeArguments;
         if (all.IsEmpty) return ImmutableArray<IrType>.Empty;
+        var classArgs = method.ContainingType is { } c && !IsRegionDeclaration(c) ? c.TypeArguments.Length : 0;
         var mapped = ImmutableArray.CreateBuilder<IrType>();
         foreach (var a in all)
         {
             if (MapType(a) is not { } t) return ImmutableArray<IrType>.Empty;
-            mapped.Add(t);
+            mapped.Add(mapped.Count < classArgs ? RegionArgument(a, t) : t);
         }
         return mapped.ToImmutable();
     }
@@ -570,8 +579,10 @@ public sealed class WellKnown
             case INamedTypeSymbol named when IsAnySpan(named) &&
                                              MapType(named.TypeArguments[0]) is { } spanElement:
                 return new IrSpanType(spanElement);
+            // R27.35. A sequence of region pointers is a sequence of nullable boxes, as the
+            // model of a `Stack<Node>` is.
             case INamedTypeSymbol named when IsSeq(named) && MapType(named.TypeArguments[0]) is { } se:
-                return new IrSeqType(se);
+                return new IrSeqType(RegionArgument(named.TypeArguments[0], se));
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:
                 return new IrGhostType(ge);
             case INamedTypeSymbol named when IsSpecList(named) && MapType(named.TypeArguments[0]) is { } le:
@@ -625,7 +636,10 @@ public sealed class WellKnown
                              ? OuterAndOwnTypeArguments(named) : named.TypeArguments)
                 {
                     if (MapType(a) is not { } mapped) return null;
-                    classArgs.Add(mapped);
+                    // R27.35. A region class as the argument of another class (`Stack<Node>`)
+                    // is its nullable pointer: the elements are plain boxes, and `default` --
+                    // what `new T[n]` fills an array with -- is null.
+                    classArgs.Add(Declarations.Has(named.OriginalDefinition, RegionAttribute) ? mapped : RegionArgument(a, mapped));
                 }
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {
