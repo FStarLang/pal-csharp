@@ -7732,6 +7732,97 @@ the invariant said about it. Now a method whose body names no region and calls o
 methods that are themselves region-free (transitively) holds no region. A call to it
 neither reads nor writes the caller's region.
 
+### R27.37 A borrowing struct that owns an object
+
+R28 lets a struct borrow its owner (`_tree`) and hold plain fields. An enumerator over a
+tree also holds a stack of pointers that it allocated itself (`_stack = new
+Stack<Node>(…)`). That object belongs to the struct, not to the owner.
+
+* **Owned field.** A `readonly` class-typed field of a borrowing struct is *owned* if:
+  * it is not the owner field;
+  * its class has a model; and
+  * its class is not a `[Region]` class.
+
+  A region-class field (`_current`) is a pointer, which is plain data (R27.35).
+* **Members.** Each member takes one extra object parameter per owned field,
+  `__pal_own<f>`, after `self`. It holds the object's invariant before and after (R4.10).
+  Its contract gains `self.f == __pal_own<f>`, required and (for writers) ensured. In a
+  contract or body, `this.f` denotes that parameter, so `_stack.Items` is the stack's
+  model.
+* **Frame facts.** A writer's frame facts are stated unconditionally, outside R4.8's
+  `PRE ==> POST`: the owner and owned fields keep their objects, and `readonly` fields
+  keep their values. They are well typed without the precondition.
+* **Writer self-calls.** A member may call a writer member of the same struct
+  (`Reset` calls `Initialize`). The call passes `self` by reference and the owned
+  objects. Whether a member writes is transitive over such calls.
+* **Constructor.** A constructor may initialise an owned field with a constructor call
+  and end with calls to its own members (`Initialize()`).
+  * Field values that contain calls are let-bound first, in source order.
+  * The struct is then built in a cell, and the trailing calls run on it.
+  * The cell is returned.
+  * The postcondition hands over each owned object as `exists* m. inv (result.f) m`,
+    and `Result.f` in its contract denotes `m`.
+  * At the return, the local's invariant is rewritten to the field's, since they are
+    the same reference.
+  * The same applies to an owner method that returns such a struct (`GetEnumerator`).
+
+A client that *holds* such a struct and calls its members is not supported. This
+includes `foreach` over it and an `IEnumerator` box. The members are verified, but the
+call site does not yet thread the owned objects. `test/sortedset/Walk.cs` verifies
+`WalkSet<T>.Enumerator`, an in-order or reverse walk over a `PtrStack<WNode>`:
+
+* `MoveNext` yields the next pending key.
+* `Reset` starts again.
+* The constructor and `GetEnumerator` leave the whole in-order (or reversed) key
+  sequence pending.
+
+### R27.38 Translating the runtime's enumerator
+
+`SortedSet<T>.Enumerator` in the runtime source needs several small rules beyond R27.37.
+
+* **Chained borrowing constructors.** A borrowing struct's constructor whose body is
+  empty and whose initializer is `: this(…)` is the call of the target constructor. Its
+  owner parameter is the target's, through the argument passed for it.
+* **`[Wrapping]` on constructors.** R21's `[Wrapping]` may mark a constructor. The
+  enumerator sizes its stack as `2 * Log2(TotalCount() + 1)`, whose `+ 1` may wrap at
+  `int.MaxValue`, harmlessly.
+* **Omitted optional arguments.** A call that omits an optional parameter whose default
+  is a `bool` or integer constant passes that constant (`VersionCheck()` is
+  `VersionCheck(false)`). Only positional arguments are supported.
+* **Multiple declarators.** `Node? next, other;` declares both locals in the enclosing
+  block, not in a nested one.
+* **Owner methods that keep their heaps.** An owner's method is held at its heaps
+  (R27.13) and gives them back unchanged when all of the following hold:
+  * no value of a region class appears in its body, parameters, return type or locals;
+  * every call it makes on an object is a call on `this` to another such method (a
+    greatest fixpoint over the call graph);
+  * its contract does not name a heap; and
+  * it is not `[Open]`, a constructor or an override.
+
+  `IsWithinRange`, `VersionCheck`, `Count` and `TotalCount` are such methods. A caller
+  part-way through a traversal therefore keeps what it knew about the region across the
+  call, and a loop that calls one keeps its heap named (R27.31). Soundness does not rest
+  on the test: each body is verified against the signature it selects.
+* **Calls that may raise.** A call to a method with a `[Throws]` hands its exception, with
+  everything the caller holds, to the caller's `raises` clause, which owns the closed
+  objects. Before such a call, every open object held read-only (a borrowing struct's
+  owner) is closed at its model. After the call it is reopened at the same model, which
+  the call could not change.
+* **Throw guards.** In `if (c) throw …;` followed by more statements, the rest of the
+  block becomes the `else` arm. Pulse's join of the two arms would otherwise forget `!c`.
+* **Loops that reopen an object.** A loop body that closes and reopens an open object
+  gets a fresh record at each reopening. This happens with a self-call (R22.15) or with
+  the raising bracket above. The loop invariant therefore quantifies that record
+  existentially; it cannot name the record from before the loop. If the object is held
+  read-only and its class has no array or object fields, the invariant also states
+  `class_C__abs r heaps m`. That is the pure half of the class invariant, which is what
+  folding the object back at its model needs. The class module defines `class_C__abs`
+  for such classes.
+
+The runtime `SortedSet<T>.Enumerator` is verified with these rules (27.2). It uses the
+runtime's own verified `Stack<T>` as its stack of region pointers (R27.35), and
+`BitOperations.Log2` is a trusted binding (27.1).
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7739,6 +7830,9 @@ neither reads nor writes the caller's region.
 * Exact-type verification (R27.1) is a soundness argument rather than an axiom. It holds as
   long as verified code obtains every `SortedSet` it holds from a translated constructor.
 * Comparers are R22.30's total preorder.
+* The runtime harness binds `BitOperations.Log2(uint)` to `Arith.log2_u32`, the floor of
+  the base-2 logarithm with `Log2(0) == 0`. It also binds
+  `EnumerableHelpers.GetEmptyEnumerator<T>()` to R29.4's `Obj.empty_enumerator`.
 
 ### 27.2 What is verified in `SortedSet<T>`
 
@@ -7770,6 +7864,26 @@ ensures that the tree and the comparer are unchanged.
 | `DoRemove`, `Remove` | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) >= 0)`; `SpecItems == SpecTopDownRemove.Removed(…)` (the element at `KeyIndex` taken out, or unchanged); comparer unchanged. The owner's invariants are re-established (R27.30) |
 | `ReplaceNode` (`[Open]`) | `SpecTopDownRemove.RnPost` under `RnPre` (R27.30) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
+
+**`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
+`Stack<Node>` (`_stack`). `Pending` is `SpecWalk.Pending(_reverse, heap, _stack.Items)`,
+the keys the stack still owes, and `Walkable` says every stacked pointer is non-null and
+well-formed.
+
+| member | ensures |
+|---|---|
+| `GetEnumerator`, `Enumerator(set)` | borrows `set` at its version, forward, `Walkable`, `Pending == set.SpecItems` |
+| `Enumerator(set, reverse)` | the same, with `Pending == Reverse(set.SpecItems)` when `reverse` |
+| `Initialize` (requires an empty stack) | `Walkable`, `Pending == SpecWalk.Keys(_reverse, set.SpecNodes)` |
+| `MoveNext` (requires `Walkable`, `Pending.Length <= Count`) | throws when the set's version moved; otherwise `Result == (Old(Pending).Length > 0)`, a true result leaves `_current` well-formed with `Old(Pending)[0]` at its root, and `Pending` is `Old(Pending)` without that key |
+| `Current` | the key at `_current`'s root, when there is one |
+| `IEnumerator.Current` | throws when `_current` is null; otherwise boxes `_current`'s key (R29) |
+| `NotStartedOrEnded` | `Result == (_current == null)` |
+| `Reset`, `IEnumerator.Reset` | throw when the version moved; otherwise `Pending` is the whole walk again |
+| `Dispose` | nothing |
+
+So, while the version is unchanged, `MoveNext` yields `SpecItems` in order (or in reverse)
+one key at a time.
 
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
@@ -7807,18 +7921,16 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   delegate is PALCS0685, and the walk's callback would need a contract over the region
   held by its caller.
 * **`DeepClone` and the copy constructor.** `DeepClone` keeps a
-  `Stack<(Node source, Node target)>` of region pointers. A collection whose elements
-  point into a region is outside R27. The copy constructor calls it.
+  `Stack<(Node source, Node target)>` of pairs of pointers into two regions, the source
+  set's and the clone's. The copy constructor calls it.
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).
 * **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>` (a
   `SortedSet` subclass) with a key-only comparer. It needs subclassing a region owner and
   an abstraction from pairs to keys, and was not reached.
-* **`Enumerator`, `GetEnumerator` and `Reverse`.** R29's borrowing design covers the
-  enumerator's `_tree` field. But the enumerator walks with a `Stack<Node>` of region
-  pointers, the same obstacle as `DeepClone`. Its contract would also need the stack's
-  contents to be the left spine of the unvisited part of the tree.
+* **`Reverse`.** It is an iterator method (`yield return`), which pal-csharp does not
+  translate.
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings

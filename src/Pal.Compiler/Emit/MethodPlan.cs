@@ -31,7 +31,8 @@ public sealed class MethodPlan
 
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
         ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
-        ImmutableArray<IrFieldDecl> openFields = default)
+        ImmutableArray<IrFieldDecl> openFields = default, ImmutableArray<IrFieldDecl> resultOwned = default,
+        bool heapsKept = false)
     {
         _spec = spec;
         Held = held.IsDefault ? [] : held;
@@ -317,7 +318,7 @@ public sealed class MethodPlan
                     // heaps as indices, so the contract can say what they hold.
                     var heapIndexed = p.Name == Names.This && !heaps.IsDefaultOrEmpty &&
                                       view == klass.Name && !klass.Nullable;
-                    var moves0 = mutatedObjects.Contains(p.Name) && fraction is null;
+                    var moves0 = mutatedObjects.Contains(p.Name) && fraction is null && !heapsKept;
                     var heapSlots = heapIndexed
                         ? heaps.Select(k => (Region: k,
                                 Pre: "pre_" + Frontend.Region.HeapBinder(k.Name),
@@ -511,6 +512,23 @@ public sealed class MethodPlan
             postResources.Add($"A.pts_to {Names.Result} {resultModel}");
             postExistentials.Add(resultModel);
         }
+        else if (!resultOwned.IsDefaultOrEmpty && method.ReturnType is IrNamedType ownerStruct)
+        {
+            // R27.37. A borrowing struct returned with the objects it owns: each owned
+            // field's object at a model the postcondition names as `Result.f`.
+            var owned = ImmutableArray.CreateBuilder<(string, string)>();
+            foreach (var f in resultOwned)
+            {
+                if (f.Type is not IrClassType ft) continue;
+                owned.Add((f.Name, Names.Projection(ownerStruct.Name, f.Name)));
+                var m = $"post_{Names.Result}_{f.Name.TrimStart('_')}";
+                postResources.Add(PulseEmitter.SubInvApp(ft,
+                    $"({Names.Result}.{Names.Projection(ownerStruct.Name, f.Name)})", "1.0R", m));
+                postExistentials.Add(m);
+                post.Bind(OwnedResultKey(f.Name), new Term(m, TermKind.Math, ft));
+            }
+            ResultOwned = owned.ToImmutable();
+        }
 
         // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method
         // takes the unit argument its Pulse counterpart is called with.
@@ -544,7 +562,10 @@ public sealed class MethodPlan
 
         var preConjuncts = method.Requires.Where(r => !IsResource(r))
             .Select(r => _spec.AsProp(_spec.Emit(r, pre))).ToImmutableArray();
-        var postConjuncts = method.Ensures.Where(e => !IsResource(e))
+        var unconditional = method.Ensures.Take(method.UnconditionalEnsures)
+            .Where(e => !IsResource(e))
+            .Select(e => _spec.AsProp(_spec.Emit(e, post))).ToImmutableArray();
+        var postConjuncts = method.Ensures.Skip(method.UnconditionalEnsures).Where(e => !IsResource(e))
             .Select(e => _spec.AsProp(_spec.Emit(e, post)))
             .Concat(method.Preserves.Where(e => !IsResource(e))
                 .Select(e => _spec.AsProp(_spec.Emit(e, post))))
@@ -560,12 +581,22 @@ public sealed class MethodPlan
         }
 
         Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
-        Ensures = Clause(postResources.ToImmutable(), UnderPrecondition(preConjuncts, postConjuncts),
+        Ensures = Clause(postResources.ToImmutable(), [.. unconditional, .. UnderPrecondition(preConjuncts, postConjuncts)
+            .Select(c => unconditional.IsEmpty ? c : $"({c})")],
             postExistentials.ToImmutable());
 
         _ = diagnostics;
     }
 
+
+    /// <summary>R27.37. The scope key of the model of a returned struct's owned field.</summary>
+    public static string OwnedResultKey(string field) => "$result." + field;
+
+    /// <summary>
+    /// R27.37. The owned fields (name, record projection) of a returned borrowing struct,
+    /// whose objects the return hands over under the projection rather than dropping.
+    /// </summary>
+    public ImmutableArray<(string Field, string Projection)> ResultOwned { get; } = [];
 
     public ImmutableArray<string> Binders { get; }
     /// <summary>By-value parameters that must be rebound as cells (R4.2).</summary>

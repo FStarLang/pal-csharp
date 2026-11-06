@@ -408,7 +408,8 @@ public sealed class StmtLowerer(
             });
         }
 
-        return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable());
+        // `T a, b;` declares both names in the enclosing block: the enclosing block splices them.
+        return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable()) { Splice = true };
     }
 
     /// <summary>

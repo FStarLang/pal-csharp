@@ -91,6 +91,9 @@ public static class Names
 
     /// <summary>R27.13. The invariant of an owner of regions, its heaps named rather than hidden.</summary>
     public static string ClassInvHeap(string name) => "class_" + name + "__inv_heap";
+
+    /// <summary>R27.38. The pure half of a class's invariant: a record, its heaps, its model.</summary>
+    public static string ClassAbs(string name) => "class_" + name + "__abs";
     public static string ClassToHeap(string name) => "class_" + name + "__to_heap";
     public static string ClassOfHeap(string name) => "class_" + name + "__of_heap";
 

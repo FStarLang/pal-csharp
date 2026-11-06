@@ -2387,10 +2387,18 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             context = fields;
         }
 
+        // R27.38. An omitted optional argument is the parameter's constant default.
+        var omitted = new List<IrExpr>();
+        if (args.All(a => a.NameColon is null))
+            for (var k = args.Count; k < method.Parameters.Length; k++)
+                if (method.Parameters[k] is { HasExplicitDefaultValue: true, ExplicitDefaultValue: bool or int } dp &&
+                    known.MapType(dp.Type) is { } dt)
+                    omitted.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
+
         return new IrCall(loc, Naming.Of(method),
             receiver is null
-                ? [.. args.Select(LowerArgument), .. context.Select(ContextRead)]
-                : [receiver, .. args.Select(LowerArgument)])
+                ? [.. args.Select(LowerArgument), .. omitted, .. context.Select(ContextRead)]
+                : [receiver, .. args.Select(LowerArgument), .. omitted])
         {
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),

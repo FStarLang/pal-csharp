@@ -26,7 +26,8 @@ public sealed class CodeEmitter(
     IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null,
     IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null,
     IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null,
-    ISet<string>? openMethods = null)
+    ISet<string>? openMethods = null,
+    ISet<string>? raising = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -311,7 +312,7 @@ public sealed class CodeEmitter(
 
                 var t = Fresh();
                 Line($"let {t} = {text};");
-                CloseObjects(method, plan);
+                CloseObjects(method, plan, ownedBy: plan.ResultOwned.IsDefaultOrEmpty ? null : t);
                 Line(t);
                 return;
             }
@@ -647,8 +648,17 @@ public sealed class CodeEmitter(
     /// closed receiver's model moved by a call (R25.10).
     /// </summary>
     private bool JoinLoses(IrIf i) =>
-        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i) ||
+        (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
         MutatesClosedReceiver(i) || MovesRegion(i);
+
+    /// <summary>
+    /// R27.38. `if (c) throw …;` with nothing else: Pulse's join of the arms keeps no pure
+    /// fact of either, so what follows would not know `!c` (that a field read through is
+    /// not null). The rest of the block is the `else` instead.
+    /// </summary>
+    private static bool ThrowGuard(IrIf i) =>
+        i.Else is null or IrBlock { Statements.IsEmpty: true } &&
+        (i.Then is IrThrow || i.Then is IrBlock { Statements: [.., IrThrow] });
 
     /// <summary>
     /// R27.16. Whether an arm allocates in, writes, or calls a method that writes a region:
@@ -892,12 +902,19 @@ public sealed class CodeEmitter(
     {
         var klass = (IrClassType)receiver.Type;
         var (writesRecord, written) = ReceiverWrites(body);
+        // R27.38. A call that closes the receiver around itself (R22.15's self-call, or a
+        // raising callee's bracket) reopens it at a fresh record: the record cannot be
+        // named before the loop. A read-only receiver says instead that the record is still
+        // one its model abstracts, which is what folding it back at that model needs.
+        var reopened = Reopens(receiver, body);
+        writesRecord |= reopened;
 
         var record = FreshValue("rep");
         var recordResource = $"B.pts_to {receiver.Binder} {receiver.PermArg}{record}";
         resources.Add(recordResource);
         if (writesRecord) existentials.Add(record);
         else fixedNames.Add((record, recordResource));
+        var heapsOfRecord = new List<string>();
 
         // F3. A `decreases` measure may name a field only when the loop leaves it alone,
         // because then the record has a name from before the loop. A loop that writes a
@@ -920,9 +937,10 @@ public sealed class CodeEmitter(
             var regionResource = PulseEmitter.RegionAt(k,
                 receiver.Fraction ?? "1.0R", heap);
             resources.Add(regionResource);
-            var still = !WritesRegion(body, k.Name);
+            var still = !WritesRegion(body, k.Name) && !(reopened && receiver.Heaps.IsEmpty);
             if (still) fixedNames.Add((heap, regionResource));
             else existentials.Add(heap);
+            heapsOfRecord.Add(heap);
             BindBoth(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other), still);
             // R27.25. A loop that moves the heap measures it by a ghost read, which Pulse
             // evaluates against the invariant as it does `!r`.
@@ -930,6 +948,11 @@ public sealed class CodeEmitter(
                 measureScope.Bind(Frontend.Region.HeapName(k.Name), new Term(
                     $"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(k)}) ())", TermKind.Other));
         }
+
+        if (reopened && receiver.PostModel == receiver.PreModel && receiver.ViewBase is null &&
+            decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
+            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {record} " +
+                     $"{string.Concat(heapsOfRecord.Select(h => h + " "))}{receiver.PreModel}");
 
         foreach (var f in decl.Fields)
         {
@@ -1006,6 +1029,18 @@ public sealed class CodeEmitter(
             }
         }
     }
+
+    /// <summary>
+    /// R27.38. Whether the loop body closes <paramref name="receiver"/> around a call and
+    /// reopens it: a call on it (R22.15), or a raising call while it is held read-only.
+    /// </summary>
+    private bool Reopens(Slot receiver, IrStmt body) =>
+        Check.Statements(body).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.Args is [IrVar { Name: var n }, ..] && n == receiver.Name &&
+                      receiver.ViewBase is null && openMethods?.Contains(c.Callee) != true ||
+                      raising?.Contains(c.Callee) == true && receiver.Fraction is not null &&
+                      receiver.ViewBase is null && receiver.PostModel == receiver.PreModel);
 
     /// <summary>
     /// What a loop body does to the receiver, which decides which halves of R5.12's
@@ -1527,20 +1562,31 @@ public sealed class CodeEmitter(
             _slots.Remove(name);
     }
 
-    private void DropLocals(string? returned, int from = 0)
+    private void DropLocals(string? returned, int from = 0, string? ownedBy = null,
+        ImmutableArray<(string Field, string Projection)> owned = default)
     {
         foreach (var local in _objectLocals.Skip(from))
         {
             if (local.Binder == returned) continue;
             var m = FreshValue(local.Name);
+            // R27.37. An object the returned borrowing struct owns is handed over under
+            // the struct's field: the value is the same reference, so the rewrite is pure.
+            if (ownedBy is not null && !owned.IsDefaultOrEmpty &&
+                owned.FirstOrDefault(o => Pal.Compiler.Frontend.Borrowing.OwnedName(o.Field) == local.Name) is { Projection: { } proj })
+            {
+                Line($"with {m}. assert ({local.Resource(m)});");
+                Line($"assert (pure ({ownedBy}.{proj} == {local.Binder}));");
+                Line($"rewrite ({local.Resource(m)}) as ({(local with { Binder = $"({ownedBy}.{proj})" }).Resource(m)});");
+                continue;
+            }
             Line($"with {m}. assert ({local.Resource(m)});");
             Line($"drop_ ({local.Resource(m)});");
         }
     }
 
-    private void CloseObjects(IrMethod method, MethodPlan plan, string? returned = null)
+    private void CloseObjects(IrMethod method, MethodPlan plan, string? returned = null, string? ownedBy = null)
     {
-        DropLocals(returned);
+        DropLocals(returned, 0, ownedBy, plan.ResultOwned);
 
         // R10.7. The innermost window closes first: it was opened last, and what it
         // re-establishes is a conjunct of what the one outside it re-establishes.
@@ -2072,7 +2118,10 @@ public sealed class CodeEmitter(
         // is inferred from its initialiser; the annotation resolves it first (R26.2's cell).
         // A tuple's universe is likewise inferred, and `let mut` needs it to be zero.
         Line(init.StartsWith("(Pulse.Lib.CSharp.Inhabited.default_of", StringComparison.Ordinal) ||
-             d.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType }
+             d.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType } ||
+             // R27.37. The struct a borrowing constructor builds is passed by reference to
+             // its writer members, which take a reference to the (refined) struct type.
+             d.Name == Frontend.BorrowContext.SelfCell
             ? $"let mut {cell} : {Types.Render(d.Type)} = {init};"
             : $"let mut {cell} = {init};");
     }
@@ -3968,9 +4017,19 @@ public sealed class CodeEmitter(
             : null;
         var recvClass = (self ?? closedRecv)?.Type is IrClassType rcls ? rcls.Name : null;
         if (self is not null) CloseObject(_method!, self);
+        // R27.38. A callee that may raise hands its exception, with whatever the caller
+        // holds, to the caller's `raises`, which owns the objects closed. An object only
+        // read (a borrowing struct's owner) is closed around the call, and reopened at the
+        // same model after it: the call cannot have changed it.
+        var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow
+            ? _objects.Where(o => o != self && o.Fraction is not null && o.ViewBase is null &&
+                                  o.PostModel == o.PreModel && !raw.Contains(o.Binder)).ToList()
+            : [];
+        foreach (var o in bracketed) CloseObject(_method!, o);
         if (convert is not null)
             Line($"{convert}{(wantsHeap ? Names.ClassToHeap(recvClass!) : Names.ClassOfHeap(recvClass!))} {raw[0]};");
         Line($"let {binder} = {callee} {applied};");
+        foreach (var o in bracketed) Line(Unfold(o) + ";");
         if (convert is not null && closedRecv is not null)
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");
         if (self is not null)

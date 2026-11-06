@@ -651,6 +651,12 @@ public static partial class FrontendPass
                     // borrowed reference: the record holds the box and owns nothing.
                     var borrowed = mapped is IrClassType &&
                         SymbolEqualityComparer.Default.Equals(Borrowing.OwnerField(symbol, known), member);
+                    // R27.37. A borrowing struct may also hold an object it owns (the record
+                    // holds the box; its members take the object's invariant alongside) and a
+                    // pointer into the borrowed object's region (a value, R27.3).
+                    borrowed |= mapped is IrClassType && Borrowing.IsBorrowing(symbol, known) &&
+                        (known.IsRegionClass(type) ||
+                         member is IFieldSymbol of && Borrowing.OwnedFields(symbol, known).Contains(of, SymbolEqualityComparer.Default));
                     if (mapped is null || !(borrowed || (specOnly ? IsSpecField(mapped) : IsValueField(mapped))))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
@@ -782,7 +788,11 @@ public static partial class FrontendPass
     {
         var fields = s.Fields
             .Select(f => new IrFieldDecl(
-                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped))
+                Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped)
+                {
+                    IsOwned = f.Symbol is IFieldSymbol fs &&
+                        Borrowing.OwnedFields(s.Symbol, known).Contains(fs, SymbolEqualityComparer.Default),
+                })
             .ToImmutableArray();
 
         var refinements = ImmutableArray.CreateBuilder<IrExpr>();

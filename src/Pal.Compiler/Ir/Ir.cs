@@ -794,6 +794,12 @@ public sealed record IrMethod(
     public bool Open { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>
     public ImmutableArray<IrExpr> Preserves { get; init; } = ImmutableArray<IrExpr>.Empty;
+    /// <summary>
+    /// R27.37. How many leading <see cref="Ensures"/> are well typed and hold without the
+    /// precondition (a borrowing member's frame facts), and so are stated unconditionally
+    /// rather than under R4.8's <c>PRE ==&gt; POST</c>.
+    /// </summary>
+    public int UnconditionalEnsures { get; init; }
 
     /// <summary>
     /// The class this is an instance member of, if any (§4.5). A non-null value is what
@@ -865,6 +871,12 @@ public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
     /// <c>Pulse.Lib.CSharp.NullableArray.pts_to</c>, which owns nothing when it is null.
     /// </summary>
     public bool IsNullableArray { get; init; }
+
+    /// <summary>
+    /// R27.37. A borrowing struct's field that owns an object: the record holds the box, and
+    /// whoever holds the struct holds the object's invariant alongside it.
+    /// </summary>
+    public bool IsOwned { get; init; }
 }
 
 /// <summary>One argument of a recursive class's model constructor (R10.5).</summary>

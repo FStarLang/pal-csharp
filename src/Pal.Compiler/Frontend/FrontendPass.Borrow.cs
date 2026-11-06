@@ -36,7 +36,7 @@ public static partial class FrontendPass
             return null;
         }
         var isCtor = symbol.MethodKind == MethodKind.Constructor;
-        var ownerParameter = isCtor ? Borrowing.OwnerParameter(symbol, owner) : null;
+        var ownerParameter = isCtor ? Borrowing.OwnerParameter(symbol, owner, known.Compilation) : null;
         if (isCtor && ownerParameter is null)
         {
             diagnostics.Error("PALCS0730", loc,
@@ -44,7 +44,20 @@ public static partial class FrontendPass
                 "borrowing struct's constructor takes the object it borrows (doc/translation.md R28.4).");
             return null;
         }
-        var borrow = new BorrowContext(self, owner, selfType, ownerType, isCtor, ownerParameter);
+        var borrow = new BorrowContext(self, owner, selfType, ownerType, isCtor, ownerParameter)
+            { Owned = Borrowing.OwnedFields(self, known) };
+        // R27.37. Each object the struct owns is a further parameter of a member, owned
+        // through its invariant as any object parameter is, and held by the field.
+        var owned = ImmutableArray.CreateBuilder<(IFieldSymbol Field, IrClassType Type)>();
+        foreach (var f in borrow.Owned)
+        {
+            if (known.MapType(f.Type) is not IrClassType ot)
+            {
+                diagnostics.Unsupported(loc, $"The field `{self.Name}.{f.Name}`");
+                return null;
+            }
+            owned.Add((f, ot));
+        }
 
         // R28.7. The borrowed object is shared: nothing of it is written.
         foreach (var node in candidate.Syntax.DescendantNodes())
@@ -71,7 +84,8 @@ public static partial class FrontendPass
         IrParam[] leading = isCtor
             ? [new IrParam(loc, Names.This, ownerType, ParamMode.Value)]
             : [new IrParam(loc, Names.This, ownerType, ParamMode.Value),
-               new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value)];
+               new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value),
+               .. owned.Select(o => new IrParam(loc, Borrowing.OwnedName(o.Field), o.Type, ParamMode.Value))];
 
         var returnType = isCtor ? selfType : known.MapType(symbol.ReturnType);
         if (returnType is null)
@@ -86,12 +100,18 @@ public static partial class FrontendPass
                 new IrField(loc, structValue, owner.Name) { Type = ownerType },
                 new IrRefOf(loc, Names.This) { Type = ownerType }) { Type = IrPrim.Bool };
         var selfVar = new IrVar(loc, BorrowContext.Self) { Type = selfType };
-        var requires = isCtor ? [] : ImmutableArray.Create(Holds(selfVar));
+        // R27.37. Each owned field holds the object passed for it.
+        IEnumerable<IrExpr> HoldsOwned(IrExpr structValue) => owned.Select(o =>
+            (IrExpr)new IrBinary(loc, BinOp.Eq,
+                new IrField(loc, structValue, o.Field.Name) { Type = o.Type },
+                new IrRefOf(loc, Borrowing.OwnedName(o.Field)) { Type = o.Type }) { Type = IrPrim.Bool });
+        var requires = isCtor ? [] : ImmutableArray.Create([Holds(selfVar), .. HoldsOwned(selfVar)]);
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
         if (isCtor) ensures.Add(Holds(new IrResult(loc) { Type = selfType }));
         else if (writes)
         {
             ensures.Add(Holds(selfVar));
+            ensures.AddRange(HoldsOwned(selfVar));
             // R28.4. A readonly field of the struct is not written by its members.
             foreach (var f in self.GetMembers().OfType<IFieldSymbol>())
             {
@@ -108,14 +128,18 @@ public static partial class FrontendPass
         ImmutableArray<IrExpr> bodyRequires = [], bodyEnsures = [];
         if (isCtor)
         {
-            if (candidate.Syntax is not ConstructorDeclarationSyntax { Initializer: null } c)
+            if (candidate.Syntax is ConstructorDeclarationSyntax { Initializer: { } init } chained &&
+                init.ThisOrBaseKeyword.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.ThisKeyword) &&
+                chained.ExpressionBody is null && chained.Body is { Statements.Count: 0 })
+                body = lowerer.Expressions.ChainedBorrowingConstructor(init, loc);
+            else if (candidate.Syntax is not ConstructorDeclarationSyntax { Initializer: null } c)
             {
                 diagnostics.Error("PALCS0730", loc,
                     $"The constructor of `{self.Name}` chains to another. A borrowing struct's constructor " +
                     "assigns its fields (doc/translation.md R28.5).");
                 return null;
             }
-            body = lowerer.Expressions.BorrowingConstructorBody(c, loc);
+            else body = lowerer.Expressions.BorrowingConstructorBody(c, loc);
         }
         else
         {
@@ -138,6 +162,7 @@ public static partial class FrontendPass
             specs.Decreases, body)
         {
             Preserves = specs.Preserves,
+            UnconditionalEnsures = ensures.Count,
             Throws = specs.Throws,
             DeclaringClass = ((INamedTypeSymbol)owner.Type).Name,
             IsReadOnly = true,

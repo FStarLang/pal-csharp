@@ -258,6 +258,10 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 when scope.TryGet($"{Names.This}.{tf.Field}", out var repField):
                 return repField;
 
+            // R27.37. An owned field of a returned borrowing struct denotes its object's model.
+            case IrField { Receiver: IrResult } rf when scope.TryGet(MethodPlan.OwnedResultKey(rf.Field), out var ownedModel):
+                return ownedModel;
+
             case IrField { Receiver.Type: IrClassType oc } cf:
                 diagnostics.Unsupported(cf.Loc,
                     $"The field `{cf.Field}` in this specification",

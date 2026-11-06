@@ -296,6 +296,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 g => Enumerable.Range(0, g.First().Parameters.Length)
                     .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i]))
                     .ToImmutableHashSet());
+        _heapsKept = HeapsKept(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         _heapIndexed = program.Declarations.OfType<IrMethod>()
             .Select(m => (m, HeapRegions(m)))
             .Where(x => !x.Item2.IsEmpty)
@@ -303,6 +304,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .ToDictionary(g => g.Key, g => g.First().Item2);
         _openMethods = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
         _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
+        _raising = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
+        // R27.38. A call to an owner's method that gives its heaps back writes no region.
+        foreach (var kept in _heapsKept)
+            if (!_regionHeld.ContainsKey(kept)) _regionHeld[kept] = [];
+        _ownedFields = program.Declarations.OfType<IrStruct>()
+            .Where(st => st.Fields.Any(f => f.IsOwned))
+            .GroupBy(st => st.Name)
+            .ToDictionary(g => g.Key, g => g.First().Fields.Where(f => f.IsOwned).ToImmutableArray());
         var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
         if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
 
@@ -416,6 +425,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvHeap(cl.Name), decl.Loc),
                     new Provenance(Names.ClassToHeap(cl.Name), decl.Loc),
                     new Provenance(Names.ClassOfHeap(cl.Name), decl.Loc),
+                    // R27.38. The pure half of the invariant, for a class with no array or
+                    // object field.
+                    new Provenance(Names.ClassAbs(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
                     // §10. A recursive class states its invariant at the option (R10.3) and
@@ -1072,8 +1084,60 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var names = m.Requires.Concat(m.Ensures).Concat(m.Preserves)
             .SelectMany(Passes.Check.Subexpressions)
             .OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
-        return regions.Any(k => names.Contains(Frontend.Region.HeapName(k.Name))) ? regions : [];
+        if (regions.Any(k => names.Contains(Frontend.Region.HeapName(k.Name)))) return regions;
+        return _heapsKept.Contains(m.Name) ? regions : [];
     }
+
+    /// <summary>
+    /// R27.38. An owner's method whose body names no value of a region class (it reads no
+    /// region field and holds no node) leaves its regions alone: it is held at its heaps,
+    /// and gives them back unchanged, so a caller part-way through a traversal keeps what
+    /// it knew of them (`IsWithinRange`, `VersionCheck`). Nothing rests on the test: the
+    /// body is verified against the contract it selects.
+    /// </summary>
+    private HashSet<string> HeapsKept(ImmutableArray<IrMethod> methods)
+    {
+        bool IsRegion(IrType? t) => t is IrClassType k && _classes.TryGetValue(k.Name, out var d) && d.IsRegion;
+        bool Base(IrMethod m)
+        {
+            if (m.Body is null || m.IsLemma || m.Open || m.IsConstructor || m.Overrides is not null) return false;
+            if (m.DeclaringClass is not { } dc || !_classes.TryGetValue(dc, out var c) || c.IsPlain ||
+                !c.Fields.Any(IsRegionField))
+                return false;
+            if (m.Requires.Concat(m.Ensures).Concat(m.Preserves).SelectMany(Passes.Check.Subexpressions)
+                .OfType<IrVar>().Any(v => v.Name.StartsWith(Frontend.Region.HeapName(""))))
+                return false;
+            if (m.Parameters.Any(p => IsRegion(p.Type)) || IsRegion(m.ReturnType)) return false;
+            foreach (var st in Passes.Check.Statements(m.Body))
+            {
+                if (st is IrLocalDecl ld && IsRegion(ld.Type)) return false;
+                if (Passes.Check.Expressions(st).SelectMany(Passes.Check.Subexpressions).Any(e => IsRegion(e.Type)))
+                    return false;
+            }
+            return true;
+        }
+        // The calls a kept method makes on an object are its own calls, on `this`, to kept
+        // methods: the greatest such set.
+        var kept = methods.Where(Base).GroupBy(m => m.Name).Where(g => g.Count() == 1)
+            .ToDictionary(g => g.Key, g => g.First());
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            foreach (var entry in kept.ToList())
+            {
+                var (name, m) = (entry.Key, entry.Value);
+                var ok = Passes.Check.Statements(m.Body!).SelectMany(Passes.Check.Expressions)
+                    .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>()
+                    .All(c => !c.HasReceiver ||
+                              c.Args is [IrVar { Name: Names.This }, ..] && kept.ContainsKey(c.Callee));
+                if (!ok) { kept.Remove(name); changed = true; }
+            }
+        }
+        return [.. kept.Keys];
+    }
+
+    /// <summary>R27.38. The owner methods held at their heaps that give them back unchanged.</summary>
+    private HashSet<string> _heapsKept = [];
 
     /// <summary>
     /// R27.16. The regions a method that is not an owner's holds itself: those of the region
@@ -1149,6 +1213,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     }
 
     private Dictionary<string, ImmutableArray<RegionUse>> _regionHeld = [];
+
+    /// <summary>R27.38. The methods with a <c>[Throws]</c>: a call to one may raise.</summary>
+    private HashSet<string> _raising = [];
+
+    /// <summary>R27.37. The fields of each borrowing struct that own an object.</summary>
+    private Dictionary<string, ImmutableArray<IrFieldDecl>> _ownedFields = [];
 
     private bool IsRegionField(IrFieldDecl f) =>
         f.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var d) && d.IsRegion;
@@ -1326,6 +1396,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
         Body();
+
+        // R27.38. With no array or object field, the pure half of the invariant is a
+        // relation of the record, the heaps and the model alone: a loop that reopens the
+        // object states it of the record it holds.
+        if (arrays.IsEmpty && objects.IsEmpty)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"let {Names.ClassAbs(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}) " +
+                          string.Concat(regions.Select(k =>
+                              $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)}) ")) +
+                          $"(m: {tb.App(Names.ClassModel(c.Name))}) : prop =");
+            sb.AppendLine($"  {SpecEmitter.Conjunction(conjuncts)}");
+        }
 
         // R27.13. The same invariant with its heaps as indices rather than existentials, so
         // a contract can speak of the region the owner holds, and two conversions between
@@ -1557,11 +1640,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
         var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld,
-            _openMethods);
+            _openMethods, _raising);
         var plan = new MethodPlan(method, _spec, diagnostics,
             _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held,
             method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
-                ? openClass.Fields : default);
+                ? openClass.Fields : default,
+            method.ReturnType is IrNamedType rn && _ownedFields.TryGetValue(rn.Name, out var ro) ? ro : default,
+            _heapsKept.Contains(method.Name));
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");

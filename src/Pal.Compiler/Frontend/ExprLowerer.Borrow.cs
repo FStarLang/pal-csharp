@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Emit;
@@ -20,6 +21,14 @@ public sealed record BorrowContext(
 {
     /// <summary>R28.2. The IR name of the struct a member is called on.</summary>
     public const string Self = "self";
+    /// <summary>R27.37. The cell an extended borrowing constructor builds its struct in.</summary>
+    public const string SelfCell = "__pal_self";
+
+    /// <summary>R27.37. The struct's fields that own an object (<see cref="Borrowing.OwnedFields"/>).</summary>
+    public ImmutableArray<IFieldSymbol> Owned { get; init; } = [];
+
+    public bool IsOwned(IFieldSymbol f) =>
+        Owned.Any(o => SymbolEqualityComparer.Default.Equals(o.OriginalDefinition, f.OriginalDefinition));
 
     public bool IsOwner(IFieldSymbol f) =>
         SymbolEqualityComparer.Default.Equals(f.OriginalDefinition, Owner.OriginalDefinition);
@@ -41,6 +50,9 @@ public sealed partial class ExprLowerer
     public bool BorrowBody { get; init; }
 
     private IrVar BorrowedObject(IrLoc loc) => new(loc, Names.This) { Type = Borrow!.OwnerType };
+
+    private IrVar OwnedObject(IFieldSymbol f, IrLoc loc) =>
+        new(loc, Borrowing.OwnedName(f)) { Type = known.MapType(f.Type) };
 
     private IrExpr SelfExpr(IrLoc loc) =>
         Borrow!.Constructor
@@ -67,6 +79,9 @@ public sealed partial class ExprLowerer
                 return BorrowedObject(loc);
             case IFieldSymbol f when bw.IsOwner(f):
                 return BorrowedObject(loc);
+            // R27.37. An owned object is a parameter of every member but the constructor.
+            case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
+                return OwnedObject(f, loc);
             case IFieldSymbol f when bw.IsState(f):
                 if (bw.Constructor && !SpecPosition)
                 {
@@ -92,6 +107,10 @@ public sealed partial class ExprLowerer
     {
         if (Borrow is not { } bw || symbol is not IFieldSymbol { IsStatic: false } f) return null;
         if (bw.IsOwner(f) && node.Expression is ThisExpressionSyntax) return BorrowedObject(loc);
+        if (bw.IsOwned(f) && !bw.Constructor &&
+            (node.Expression is ThisExpressionSyntax ||
+             model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } op && IsShim(op.ContainingSymbol)))
+            return OwnedObject(f, loc);
         if (bw.IsState(f) && node.Expression is ThisExpressionSyntax)
             return BorrowedIdentifier(f, SyntaxFactory_Identifier(node), loc);
         if (bw.IsOwner(f) && model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } sp &&
@@ -159,15 +178,30 @@ public sealed partial class ExprLowerer
         // property is the unit whose body R28.4's test reads.
         if (decl.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
-        if (Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), bw.Struct)) return null;
+        // R27.37. A member that writes the struct is passed the caller's own `ref`; the
+        // caller writes it too (Borrowing.WritesState counts the call).
+        var self = Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), bw.Struct)
+            ? new IrRefArg(loc, new IrVar(loc, BorrowContext.Self) { Type = bw.StructType })
+            : SelfExpr(loc);
+        return BorrowingCall(callee, self, args.Select(Lower), loc);
+    }
 
+    /// <summary>
+    /// R28.2/R27.37. A call of a borrowing member's translation: the borrowed object, the
+    /// struct (a value, or a <c>ref</c> when the callee writes it), each owned object, then
+    /// the arguments.
+    /// </summary>
+    private IrCall BorrowingCall(IMethodSymbol callee, IrExpr self, IEnumerable<IrExpr> args, IrLoc loc)
+    {
+        var bw = Borrow!;
         var targs = WellKnown.AllTypeArguments(bw.Struct).Select(known.MapType).ToList();
-        return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), SelfExpr(loc), .. args.Select(Lower)])
+        var owned = bw.Owned.Select(f => OwnedObject(f, loc)).ToList();
+        return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), self, .. owned, .. args])
         {
             Kind = CalleeKind.Method,
             ResultType = known.MapType(callee.ReturnType),
             HasReceiver = true,
-            ParamTypes = [null, null, .. callee.Parameters.Select(p => known.MapType(p.Type))],
+            ParamTypes = [null, null, .. owned.Select(o => o.Type), .. callee.Parameters.Select(p => known.MapType(p.Type))],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
             MutatesReceiver = false,
         };
@@ -182,7 +216,7 @@ public sealed partial class ExprLowerer
         BaseObjectCreationExpressionSyntax node, IMethodSymbol ctor, INamedTypeSymbol named, IrLoc loc)
     {
         var owner = Borrowing.OwnerField(named, known)!;
-        if (Borrowing.OwnerParameter(ctor, owner) is not { } op || node.ArgumentList is null ||
+        if (Borrowing.OwnerParameter(ctor, owner, known.Compilation) is not { } op || node.ArgumentList is null ||
             node.Initializer is not null)
         {
             diagnostics.Error("PALCS0730", loc,
@@ -190,10 +224,29 @@ public sealed partial class ExprLowerer
                 "field from a parameter, without an object initializer (doc/translation.md R28.4).");
             return new IrLiteral(loc, null);
         }
+        return ConstructorCall(node.ArgumentList, ctor, named, op, loc);
+    }
+
+    /// <summary>
+    /// R27.38. A chaining constructor of a borrowing struct (<c>: this(set, false) { }</c>)
+    /// is the struct the constructor it chains to builds: its body returns that call.
+    /// </summary>
+    public IrStmt ChainedBorrowingConstructor(ConstructorInitializerSyntax init, IrLoc loc)
+    {
+        var bw = Borrow!;
+        if (model.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
+            Borrowing.OwnerParameter(target, bw.Owner, known.Compilation) is not { } op)
+            return new IrReturn(loc, new IrLiteral(loc, null));
+        return new IrReturn(loc, ConstructorCall(init.ArgumentList, target, bw.Struct, op, loc));
+    }
+
+    private IrExpr ConstructorCall(ArgumentListSyntax argList, IMethodSymbol ctor, INamedTypeSymbol named,
+        IParameterSymbol op, IrLoc loc)
+    {
         var receiver = default(IrExpr);
         var rest = new List<IrExpr>();
         var types = new List<IrType?> { null };
-        foreach (var a in node.ArgumentList.Arguments)
+        foreach (var a in argList.Arguments)
         {
             var p = model.GetOperation(a) is Microsoft.CodeAnalysis.Operations.IArgumentOperation ao ? ao.Parameter : null;
             if (SymbolEqualityComparer.Default.Equals(p, op)) receiver = Lower(a.Expression);
@@ -215,11 +268,18 @@ public sealed partial class ExprLowerer
     /// <summary>
     /// R28.5. The body of a borrowing struct's constructor, which must assign each field it
     /// sets once from the parameters and the borrowed object: the struct value it builds.
+    /// R27.37. With an owned field, it may also call methods (of the borrowed or an owned
+    /// object) between the assignments, and end by calling members of the struct itself: an
+    /// owned field's object is a local, and the struct is built in a local the trailing
+    /// calls write by reference.
     /// </summary>
     public IrStmt BorrowingConstructorBody(ConstructorDeclarationSyntax ctor, IrLoc loc)
     {
         var bw = Borrow!;
         var given = new List<IrFieldInit>();
+        var extended = !bw.Owned.IsEmpty;
+        var prefix = new List<IrStmt>();
+        var tail = new List<(IMethodSymbol Callee, InvocationExpressionSyntax Call)>();
         // An expression-bodied constructor (`=> _queue = queue`) is its one expression; it is
         // read in place, because a statement synthesised around it is in no syntax tree.
         IEnumerable<(SyntaxNode Node, ExpressionSyntax? Expr)> steps = ctor.ExpressionBody is { } eb
@@ -228,26 +288,74 @@ public sealed partial class ExprLowerer
                 ((SyntaxNode)st, st is ExpressionStatementSyntax es ? es.Expression : null));
         foreach (var (node, expr) in steps)
         {
-            if (expr is AssignmentExpressionSyntax { Left: var left, Right: var right } a &&
+            if (tail.Count == 0 &&
+                expr is AssignmentExpressionSyntax { Left: var left, Right: var right } a &&
                 a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
                 (left is IdentifierNameSyntax || left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
                 model.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) &&
                 given.All(g => g.Field != f.Name))
             {
-                given.Add(new IrFieldInit(f.Name, Lower(right)));
+                var value = Lower(right);
+                if (extended && (bw.IsOwned(f) || ContainsCall(value)) && known.MapType(f.Type) is { } ft)
+                {
+                    var local = bw.IsOwned(f) ? Borrowing.OwnedName(f) : "__pal_init" + f.Name;
+                    prefix.Add(new IrLocalDecl(Locations.From(node), local, ft, value));
+                    value = new IrVar(loc, local) { Type = ft };
+                }
+                given.Add(new IrFieldInit(f.Name, value));
                 continue;
             }
             if (expr is InvocationExpressionSyntax inv &&
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
                 continue;
+            if (extended && expr is InvocationExpressionSyntax call &&
+                model.GetSymbolInfo(call).Symbol is IMethodSymbol callee)
+            {
+                if (call.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } &&
+                    !callee.IsStatic && Borrowing.IsMember(callee, known) &&
+                    SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition))
+                {
+                    tail.Add((callee, call));
+                    continue;
+                }
+                if (tail.Count == 0)
+                {
+                    prefix.Add(new IrExprStmt(Locations.From(node), Lower(call)));
+                    continue;
+                }
+            }
             diagnostics.Error("PALCS0730", Locations.From(node),
                 $"`{node.ToString().Trim()}` in the constructor of `{bw.Struct.Name}`. A borrowing type's " +
-                "constructor assigns each field at most once, and does nothing else (doc/translation.md R28.5).");
+                "constructor assigns each field at most once, and does nothing else (doc/translation.md R28.5, R27.37).");
         }
-        var value = Construct(loc, WellKnown.StructName(bw.Struct), bw.Struct, given);
-        return new IrReturn(loc, value is IrNew n ? n with { Type = bw.StructType } : value);
+        var built = Construct(loc, WellKnown.StructName(bw.Struct), bw.Struct, given);
+        var structValue = built is IrNew n ? n with { Type = bw.StructType } : built;
+        if (!extended) return new IrReturn(loc, structValue);
+        if (tail.Count > 0)
+        {
+            const string selfLocal = BorrowContext.SelfCell;
+            prefix.Add(new IrLocalDecl(loc, selfLocal, bw.StructType, structValue));
+            var selfVar = new IrVar(loc, selfLocal) { Type = bw.StructType };
+            foreach (var (callee, call) in tail)
+                prefix.Add(new IrExprStmt(Locations.From(call),
+                    BorrowingCall(callee, new IrRefArg(loc, selfVar),
+                        call.ArgumentList.Arguments.Select(x => Lower(x.Expression)), Locations.From(call))));
+            structValue = selfVar;
+        }
+        return new IrBlock(loc, [.. prefix, new IrReturn(loc, structValue)]);
     }
+
+    private static bool ContainsCall(IrExpr e) => e switch
+    {
+        IrCall => true,
+        IrField f => ContainsCall(f.Receiver),
+        IrBinary b => ContainsCall(b.Left) || ContainsCall(b.Right),
+        IrUnary u => ContainsCall(u.Operand),
+        IrConvert c => ContainsCall(c.Operand),
+        IrConditional c => ContainsCall(c.Cond) || ContainsCall(c.Then) || ContainsCall(c.Else),
+        _ => false,
+    };
 }
 
 /// <summary>
@@ -281,6 +389,11 @@ public static class BorrowFacts
         yield return new IrBinary(loc, BinOp.Eq,
             new IrField(loc, self, borrow.Owner.Name) { Type = borrow.OwnerType },
             new IrRefOf(loc, Pal.Compiler.Emit.Names.This) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
+        // R27.37. Each owned field holds its parameter.
+        foreach (var f in borrow.Owned)
+            if (known.MapType(f.Type) is IrClassType ot)
+                yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, self, f.Name) { Type = ot },
+                    new IrRefOf(loc, Borrowing.OwnedName(f)) { Type = ot }) { Type = IrPrim.Bool };
         foreach (var (f, type) in ReadOnlyFields(borrow, known))
         {
             var snapshotType = type.IsMachineInt ? new IrPrim(PrimKind.SpecInt) : type;

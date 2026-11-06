@@ -106,3 +106,15 @@ let cdiv_crem (a: int) (b: int { b <> 0 })
 /// and Pulse forbids a dereference in a branch of a measure's `if` (F9), so the emitter
 /// passes the flag and the measure here as arguments (doc/translation.md R27.10).
 unfold let until_set (set: bool) (m: int) : int = if set then 0 else m + 1
+
+/// `floor(log2 n)`, and `0` at `0`: `System.Numerics.BitOperations.Log2`'s documented
+/// result. A runtime harness binds that method here (R21.5), which is a trusted item.
+let rec log2_nat (n: nat) : Tot nat (decreases n) = if n < 2 then 0 else 1 + log2_nat (n / 2)
+
+let rec log2_nat_lt (n: nat) (k: pos)
+  : Lemma (requires n < pow2 k) (ensures log2_nat n < k) (decreases k)
+  = if n < 2 then () else (FStar.Math.Lemmas.pow2_double_mult (k - 1); log2_nat_lt (n / 2) (k - 1))
+
+let log2_u32 (x: FStar.UInt32.t) : r: FStar.Int32.t { 0 <= FStar.Int32.v r /\ FStar.Int32.v r <= 31 } =
+  log2_nat_lt (FStar.UInt32.v x) 32;
+  FStar.Int32.int_to_t (log2_nat (FStar.UInt32.v x))

@@ -78,6 +78,24 @@ public static class Borrowing
         SymbolEqualityComparer.Default.Equals(
             model.GetTypeInfo(a.Right).Type?.OriginalDefinition, f.Type.OriginalDefinition);
 
+    /// <summary>
+    /// R27.37. The fields of a borrowing struct that own an object: <c>readonly</c>, typed at
+    /// a class with a model that is not the borrowed one and holds no region.
+    /// </summary>
+    public static System.Collections.Immutable.ImmutableArray<IFieldSymbol> OwnedFields(ITypeSymbol? type, WellKnown known)
+    {
+        if (type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } s || OwnerField(s, known) is not { } owner) return [];
+        return [.. s.GetMembers().OfType<IFieldSymbol>().Where(f =>
+            f is { IsStatic: false, IsConst: false, IsReadOnly: true } &&
+            !SymbolEqualityComparer.Default.Equals(f, owner) &&
+            f.Type is INamedTypeSymbol { TypeKind: TypeKind.Class } ft &&
+            !known.IsRegionClass(ft) && known.HasModel(ft.OriginalDefinition))];
+    }
+
+    /// <summary>R27.37. The parameter an owned field's object arrives in.</summary>
+    public static string OwnedName(IFieldSymbol f) => "__pal_own" + f.Name;
+    public static string OwnedName(string field) => "__pal_own" + field;
+
     /// <summary>R29.3. Whether <paramref name="type"/> is a class that borrows (R28.1).</summary>
     public static bool IsBorrowingClass(ITypeSymbol? type, WellKnown known) =>
         type is { TypeKind: TypeKind.Class } && IsBorrowing(type, known);
@@ -113,10 +131,22 @@ public static class Borrowing
         n.IsKind(SyntaxKind.PreIncrementExpression) || n.IsKind(SyntaxKind.PreDecrementExpression) ||
         n.IsKind(SyntaxKind.PostIncrementExpression) || n.IsKind(SyntaxKind.PostDecrementExpression);
 
-    public static bool WritesState(SyntaxNode body, SemanticModel model, INamedTypeSymbol self)
+    public static bool WritesState(SyntaxNode body, SemanticModel model, INamedTypeSymbol self) =>
+        WritesState(body, model, self, new HashSet<SyntaxNode>());
+
+    private static bool WritesState(SyntaxNode body, SemanticModel model, INamedTypeSymbol self, HashSet<SyntaxNode> seen)
     {
+        if (!seen.Add(body)) return false;
         foreach (var node in body.DescendantNodes())
         {
+            // R27.37. A call of a member of the same struct that writes it writes it too.
+            if (node is InvocationExpressionSyntax { Expression: IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } } call &&
+                model.GetSymbolInfo(call).Symbol is IMethodSymbol { IsStatic: false } callee &&
+                SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
+                callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } decl &&
+                model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) &&
+                WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), self, seen))
+                return true;
             var target = node switch
             {
                 AssignmentExpressionSyntax a => a.Left,
@@ -138,10 +168,29 @@ public static class Borrowing
     /// R28.4. The constructor parameter the borrowed object arrives in: the one the
     /// borrowing field is assigned from.
     /// </summary>
-    public static IParameterSymbol? OwnerParameter(IMethodSymbol ctor, IFieldSymbol owner)
+    public static IParameterSymbol? OwnerParameter(IMethodSymbol ctor, IFieldSymbol owner, Compilation? compilation = null)
     {
         if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl)
             return null;
+        // R27.38. A constructor that only chains (`: this(set, false) { }`) passes the
+        // borrowed object on: its parameter is the one given for the chained-to constructor's.
+        if (decl.Initializer is { } init)
+        {
+            if (compilation is null || !init.ThisOrBaseKeyword.IsKind(SyntaxKind.ThisKeyword) ||
+                decl.Body is { Statements.Count: > 0 } || decl.ExpressionBody is not null)
+                return null;
+            var m = compilation.GetSemanticModel(decl.SyntaxTree);
+            if (m.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
+                OwnerParameter(target, owner, compilation) is not { } tp)
+                return null;
+            foreach (var a in init.ArgumentList.Arguments)
+                if (m.GetOperation(a) is Microsoft.CodeAnalysis.Operations.IArgumentOperation ao &&
+                    SymbolEqualityComparer.Default.Equals(ao.Parameter, tp))
+                    return a.Expression is IdentifierNameSyntax id
+                        ? ctor.Parameters.FirstOrDefault(p => p.Name == id.Identifier.ValueText)
+                        : null;
+            return null;
+        }
         IEnumerable<ExpressionSyntax> exprs = decl.Body?.Statements.OfType<ExpressionStatementSyntax>()
             .Select(s => s.Expression) ?? [];
         if (decl.ExpressionBody is { } eb) exprs = [eb.Expression];
