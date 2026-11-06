@@ -110,6 +110,12 @@ documented and its upstream licence carried beside it. Both run through the same
 carry the same two obligations, and are held to the same lints; only their provenance
 differs. `make -C examples` runs the examples alone.
 
+`samples/` holds larger bodies of third-party code verified in place, kept at their
+upstream paths beside their licence. [`samples/dotnet-runtime`](samples/dotnet-runtime) is
+`List<T>`, `Stack<T>`, `Queue<T>`, `PriorityQueue`, `SortedList` and `HashSet<T>` from
+dotnet/runtime, annotated directly. `make test` gates them too; `make -C samples` runs
+them alone.
+
 To translate and verify one program:
 
 ```bash
