@@ -585,9 +585,33 @@ public sealed class StmtLowerer(
             case InvocationExpressionSyntax call:
                 return RefFieldCopy(call, loc) ?? LowerCallStatement(call, loc);
 
+            case ConditionalAccessExpressionSyntax access
+                when known.IsRegionClass(model.GetTypeInfo(access.Expression).Type):
+                return LowerRegionConditionalAccess(access, loc);
+
             default:
                 return UnsupportedStatement(expression, loc);
         }
+    }
+
+    /// <summary>
+    /// R27.29. <c>x?.M();</c> and <c>x?.F = v;</c> on a region pointer, as statements, are
+    /// <c>if (x != null) { x.M(); }</c> and <c>if (x != null) { x.F = v; }</c>. A pointer is
+    /// a value (R27.3), so the test and the member read the same <c>x</c>; an <c>x</c> with an
+    /// effect would be evaluated twice, and is refused.
+    /// </summary>
+    private IrStmt LowerRegionConditionalAccess(ConditionalAccessExpressionSyntax node, IrLoc loc)
+    {
+        var subject = _code.Lower(node.Expression);
+        if (ExprLowerer.HasEffect(subject) || subject.Type is not IrClassType pointer)
+            return UnsupportedStatement(node, loc);
+        var bound = subject with { Type = pointer with { Nullable = false } };
+        var body = _code.WithBound(bound, node.Expression, () => LowerSideEffect(node.WhenNotNull, loc));
+        var test = new IrBinary(loc, BinOp.Ne, subject, new IrNull(loc) { Type = pointer with { Nullable = true } })
+        {
+            Type = IrPrim.Bool,
+        };
+        return new IrIf(loc, test, body, null);
     }
 
     private IrStmt Step(ExpressionSyntax target, BinOp op, IrLoc loc)

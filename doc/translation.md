@@ -7539,6 +7539,19 @@ great-grandparent when the parent is the root's child. The runtime's call sites 
 declared type would be a promise the caller cannot keep. The attribute is inert in C#, and
 nullable analysis already honours it.
 
+### R27.29 `x?.M()` and `x?.F = v` as statements; re-assigned region parameters
+
+A statement `x?.M()` or `x?.F = v` whose receiver `x` is a region pointer (a local, a
+parameter or a field read, with no effect) becomes `if (x != null) { x.M(); }` (resp.
+`{ x.F = v; }`). Inside the arm, the bound `.M()` / `.F` takes `x` as its receiver; a call
+bound by `?.` used to take `this` instead, which was a bug. An effectful `x` is refused
+(PALCS0001), since it would be evaluated twice.
+
+A by-value region-typed parameter that the body assigns (`successor = match.Left`) is a
+mutable cell, initialised from the argument (`let mut var_x = arg_x`). Only a direct
+assignment `x = e` counts: passing `x` to a call or writing `x.F` does not make it a cell.
+The contract still names the argument.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).

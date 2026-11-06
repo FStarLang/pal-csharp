@@ -610,6 +610,31 @@ public static class Normalize
         }
     }
 
+    /// <summary>
+    /// R27.29. The names a statement rebinds: the targets of assignments to the name itself,
+    /// not to a field or element through it, and not arguments of calls.
+    /// </summary>
+    public static void Rebound(IrStmt? stmt, HashSet<string> into)
+    {
+        switch (stmt)
+        {
+            case IrBlock b: foreach (var s in b.Statements) Rebound(s, into); return;
+            case IrAssign { Target: IrVar v }: into.Add(v.Name); return;
+            case IrIf i: Rebound(i.Then, into); Rebound(i.Else, into); return;
+            case IrWhile w: Rebound(w.Body, into); foreach (var st in w.Step) Rebound(st, into); return;
+            case IrFor f:
+                foreach (var s in f.Init) Rebound(s, into);
+                foreach (var s in f.Step) Rebound(s, into);
+                Rebound(f.Body, into);
+                return;
+            case IrTry t:
+                Rebound(t.Body, into);
+                foreach (var c in t.Catches) Rebound(c.Body, into);
+                return;
+            default: return;
+        }
+    }
+
     public static void Assigned(IrStmt? stmt, HashSet<string> into)
     {
         switch (stmt)

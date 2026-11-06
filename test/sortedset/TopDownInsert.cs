@@ -221,6 +221,30 @@ public sealed class RbSet<T>
         }
     }
 
+    // R27.29. A statement `x?.M()` on a region pointer, and a region parameter re-assigned.
+    [Open]
+    [Requires("x == null || Pal.Unshared(x)")]
+    [Ensures("x == null || Pal.Tree<(T, bool)>(x) == SpecSearchTree.Recolor(Pal.Old(Pal.Tree<(T, bool)>(x)), false)")]
+    [Ensures("@this.comparer == Pal.Old(@this.comparer) && @this.count == Pal.Old(@this.count) && @this.version == Pal.Old(@this.version)")]
+    private void BlackenIfAny(RbNode? x)
+    {
+        x?.ColorBlack();
+    }
+
+    [Open]
+    [Requires("x == null || Pal.InRegion(x)")]
+    [Requires("y == null || Pal.InRegion(y)")]
+    [Ensures("Pal.Implies(x != null, Result == SpecSearchTree.IsRed(Pal.Tree<(T, bool)>(x)))")]
+    [Ensures("Pal.Implies(x == null, Result == (y != null && SpecSearchTree.IsRed(Pal.Tree<(T, bool)>(y))))")]
+    private bool FirstIsRed(RbNode? x, RbNode? y)
+    {
+        if (x == null)
+        {
+            x = y;
+        }
+        return RbNode.IsNonNullRed(x);
+    }
+
     [Region]
     internal sealed class RbNode
     {

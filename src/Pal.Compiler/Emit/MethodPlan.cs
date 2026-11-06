@@ -34,6 +34,8 @@ public sealed class MethodPlan
 
         var assigned = new HashSet<string>();
         Passes.Normalize.Assigned(method.Body, assigned);
+        var rebound = new HashSet<string>();
+        Passes.Normalize.Rebound(method.Body, rebound);
 
         // R4.11 decides `preserves` from the body: `this` is mutated exactly when the
         // frontend found a field assignment, and any other object is mutated when the
@@ -204,6 +206,19 @@ public sealed class MethodPlan
                     // it. There is no invariant to name, no model binder to quantify, and
                     // nothing to say in the postcondition: what this method owns is
                     // exactly what its `[Requires]` says, in the user's own predicate.
+                    if (p.Plain && rebound.Contains(p.Name) && p.Mode is ParamMode.Value)
+                    {
+                        // R27.29. An assigned region (or `[Plain]`) pointer is a cell like an assigned local
+                        // (R4.2), holding the *nullable* pointer as R27.23's `ref` does: C# lets
+                        // the body store `null` through a `!`, and the runtime does.
+                        var source = Names.Argument(p.Name);
+                        binders.Add($"({source}: {Types.Render(p.Type)})");
+                        prologue.Add(($"{name} : {Types.Render(klass with { Nullable = true })}", source));
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name);
+                        pre.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
+                        post.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
+                        break;
+                    }
                     if (p.Plain)
                     {
                         binders.Add($"({name}: {Types.Render(p.Type)})");

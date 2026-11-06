@@ -343,6 +343,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             MemberBindingExpressionSyntax mb when _bound is { } bound &&
                                                   known.SpecTypeName(model.GetTypeInfo(BoundSyntax!).Type) is not null =>
                 SpecMember(model.GetSymbolInfo(mb).Symbol, [bound], mb, loc),
+            // R27.29. `x?.F` on a region pointer, in statement position: `F` of the bound pointer.
+            MemberBindingExpressionSyntax mb when _bound is { } rbound &&
+                                                  known.IsRegionClass(model.GetTypeInfo(BoundSyntax!).Type) &&
+                                                  model.GetSymbolInfo(mb).Symbol is IFieldSymbol or IPropertySymbol =>
+                new IrField(loc, rbound, mb.Name.Identifier.ValueText),
             // R20.9. `(int)E.Member` is the number C# folds it to: an enum is not a type
             // the translation models, but each of its constants is an integer literal.
             CastExpressionSyntax c when model.GetTypeInfo(c.Expression).Type is { TypeKind: TypeKind.Enum } &&
@@ -1870,6 +1875,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             : new IrStmtExpr(loc, prelude.ToImmutable(), conditional) { Type = result };
     }
 
+    /// <summary>
+    /// R27.29. Runs <paramref name="body"/> with <c>?.</c>'s bound value set to
+    /// <paramref name="bound"/>, as <see cref="LowerConditionalAccess"/> does for its member.
+    /// </summary>
+    public T WithBound<T>(IrExpr bound, ExpressionSyntax syntax, Func<T> body)
+    {
+        var (savedBound, savedSyntax) = (_bound, BoundSyntax);
+        _bound = bound;
+        BoundSyntax = syntax;
+        try { return body(); }
+        finally { (_bound, BoundSyntax) = (savedBound, savedSyntax); }
+    }
+
     private int _steps;
     private string Fresh(string hint) => $"__pal_{hint}{_steps++}";
 
@@ -1943,7 +1961,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// prelude of an already-lowered increment, or allocate. Deliberately conservative:
     /// the cost of a false positive is a refusal, and of a false negative a wrong program.
     /// </summary>
-    private static bool HasEffect(IrExpr expr) =>
+    public static bool HasEffect(IrExpr expr) =>
         Subexpressions(expr).Any(e => e is IrCall { Kind: CalleeKind.Method }
                                        or IrStmtExpr or IrNew or IrNewArray or IrRaise);
 
@@ -2335,12 +2353,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                        known.HasModel(method.ContainingType!)
             ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
                 ? Lower(m.Expression)
+                // R20.11. Inside `a?.M()`, the receiver is the value `a` was tested to be.
+                : node.Expression is MemberBindingExpressionSyntax && _bound is { } boundModel
+                ? boundModel
                 : new IrVar(loc, Names.This) { Type = Enclosing(node) }
             // R27.16. A region object's method takes the object first, as any instance method does.
             : method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
               known.IsRegionClass(method.ContainingType)
             ? node.Expression is MemberAccessExpressionSyntax rm && rm.Expression is not ThisExpressionSyntax
                 ? NonNull(Lower(rm.Expression))
+                : node.Expression is MemberBindingExpressionSyntax && _bound is { } rb
+                ? rb
                 : RegionThis(loc, method.ContainingType!)
             : null;
 
