@@ -7778,7 +7778,11 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>` (a
   `SortedSet` subclass) with a key-only comparer. It needs subclassing a region owner and
   an abstraction from pairs to keys, and was not reached.
-* **The enumerator and serialization.** These are out of scope.
+* **`Enumerator`, `GetEnumerator` and `Reverse`.** R29's borrowing design covers the
+  enumerator's `_tree` field. But the enumerator walks with a `Stack<Node>` of region
+  pointers, the same obstacle as `DeepClone`. Its contract would also need the stack's
+  contents to be the left spine of the unvisited part of the tree.
+* **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings
 
