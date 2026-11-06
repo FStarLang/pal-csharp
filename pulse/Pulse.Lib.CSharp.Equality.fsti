@@ -18,8 +18,9 @@ val equals (#t: Type0) (c: handle) (x y: t) : bool
 /// `c.GetHashCode(x)` for a non-null `x`.
 val get_hash_code (#t: Type0) (c: handle) (x: t) : FStar.Int32.t
 
-/// `x == null` for a value of a type parameter: always false at a non-nullable value type.
-val is_null (#t: Type0) (x: t) : bool
+/// `x == null` for a value of a type parameter: R25.4's test, which is also what the
+/// translator emits for `x == null` in code.
+let is_null (#t: Type0) (x: t) : bool = Pulse.Lib.CSharp.Null.is_null x
 
 /// The hash a hashing collection stores for `x`: `x != null ? c.GetHashCode(x) : 0`.
 let hash (#t: Type0) (c: handle) (x: t) : FStar.Int32.t =

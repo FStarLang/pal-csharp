@@ -326,6 +326,10 @@ public static class Names
     public const string ModelPost = "var_model_post";
 
     public const string Result = "var_result";
+
+    /// <summary>R24.14. The C# locals a loop's <c>return</c> stores to, as IR names.</summary>
+    public const string LoopResult = "palReturnValue";
+    public const string LoopReturned = "palReturned";
 }
 
 /// <summary>The Pulse rendering of a C# type (doc/translation.md §3).</summary>

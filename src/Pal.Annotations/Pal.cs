@@ -151,8 +151,17 @@ public static class Pal
     /// <summary>In a postcondition, the value of <paramref name="expression"/> on entry.</summary>
     public static T Old<T>(T expression) => throw Ghost();
 
-    /// <summary>In a postcondition, the returned value.</summary>
+    /// <summary>
+    /// In a postcondition, the returned value. In the invariant of a loop that contains a
+    /// <c>return</c>, the value that <c>return</c> stored (R24.14).
+    /// </summary>
     public static T Result<T>() => throw Ghost();
+
+    /// <summary>
+    /// In the invariant of a loop that contains a <c>return</c>: whether that <c>return</c>
+    /// has run, so the loop is exiting to return <see cref="Result{T}"/> (R24.14).
+    /// </summary>
+    public static bool Returned() => throw Ghost();
 
     /// <summary>Logical implication.</summary>
     public static bool Implies(bool antecedent, bool consequent) => throw Ghost();

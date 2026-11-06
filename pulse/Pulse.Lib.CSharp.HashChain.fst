@@ -57,12 +57,17 @@ let complete_at (#e #k: Type0) (o: ops e k) (es: seq e) (m hole: int) (b: int) (
   = forall (j: int). {:pattern lvx o es m hole j; in_bucket o es b j}
       lvx o es m hole j /\ in_bucket o es b j ==> (exists (q: nat). q < l /\ walk o es h q == j)
 
-let bucket_ok (#e #k: Type0) (o: ops e k) (bs: seq int) (es: seq e) (m hole: int) (b: nat{b < Seq.length bs})
+let bucket_ok (#e #k: Type0) (o: ops e k) (bs: seq I32.t) (es: seq e) (m hole: int) (b: nat{b < Seq.length bs})
   : prop
-  = exists (l: nat). chain_at o es m hole b (Seq.index bs b - 1) l /\
-                     complete_at o es m hole b (Seq.index bs b - 1) l
+  = exists (l: nat). chain_at o es m hole b (I32.v (Seq.index bs b) - 1) l /\
+                     complete_at o es m hole b (I32.v (Seq.index bs b) - 1) l
 
-let chains (#e #k: Type0) (o: ops e k) (bs: seq int) (es: seq e) (m hole: int) : prop =
+/// `bs'` is `bs` but for bucket `b`.
+let same_but (bs bs': seq I32.t) (b: nat) : prop =
+  b < Seq.length bs /\ Seq.length bs' == Seq.length bs /\
+  (forall (b': nat). {:pattern Seq.index bs' b'} b' < Seq.length bs /\ b' <> b ==> Seq.index bs' b' == Seq.index bs b')
+
+let chains (#e #k: Type0) (o: ops e k) (bs: seq I32.t) (es: seq e) (m hole: int) : prop =
   Seq.length bs == Seq.length es /\
   (forall (b: nat). {:pattern Seq.index bs b} b < Seq.length bs ==> bucket_ok o bs es m hole b)
 
@@ -115,7 +120,7 @@ let hashes_ok (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n hole: in
 (* ---------------------------------------------------------------------------------- *)
 (* The invariant *)
 
-let wfh (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let wfh (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
         (n hole fl fc: int)
   : prop
   = 0 <= n /\ n <= Seq.length es /\
@@ -124,7 +129,7 @@ let wfh (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
     free_ok o es n hole fl fc /\
     hashes_ok o c es n hole
 
-let wf (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e) (n fl fc: int)
+let wf (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e) (n fl fc: int)
   : prop
   = wfh o c bs es n (-1) fl fc
 
@@ -165,61 +170,67 @@ let hit (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (h: int) (x: k) (
 
 /// The search for `x`, whose hash is `h`, has followed `q` links of its bucket's chain to
 /// `i`, and none of the entries passed is a hit.
-let search (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let search (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
            (n fl fc: int) (x: k) (i: int) (q: nat)
   : prop
   = wf o c bs es n fl fc /\ Seq.length es > 0 /\
     (let b = bkt (hv c x) (Seq.length es) in
-     i == walk o es (Seq.index bs b - 1) q /\
-     (forall (q': nat). {:pattern walk o es (Seq.index bs b - 1) q'}
-        q' < q ==> not (hit o c es (hv c x) x (walk o es (Seq.index bs b - 1) q'))))
+     i == walk o es (I32.v (Seq.index bs b) - 1) q /\
+     (forall (q': nat). {:pattern walk o es (I32.v (Seq.index bs b) - 1) q'}
+        q' < q ==> not (hit o c es (hv c x) x (walk o es (I32.v (Seq.index bs b) - 1) q'))))
 
-let search_start (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
-                 (n fl fc: int) (x: k)
-  : Lemma (requires wf o c bs es n fl fc /\ Seq.length es > 0)
-          (ensures search o c bs es n fl fc x (Seq.index bs (bkt (hv c x) (Seq.length es)) - 1) 0)
-  = ()
 
-let chain_of (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let chain_of (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
              (n fl fc: int) (b: nat)
   : Ghost nat (requires wf o c bs es n fl fc /\ b < Seq.length bs)
-              (ensures fun l -> chain_at o es n (-1) b (Seq.index bs b - 1) l /\
-                               complete_at o es n (-1) b (Seq.index bs b - 1) l)
+              (ensures fun l -> chain_at o es n (-1) b (I32.v (Seq.index bs b) - 1) l /\
+                               complete_at o es n (-1) b (I32.v (Seq.index bs b) - 1) l)
   = assert (bucket_ok o bs es n (-1) b);
     FStar.IndefiniteDescription.indefinite_description_ghost nat
-      (fun l -> chain_at o es n (-1) b (Seq.index bs b - 1) l /\
-                complete_at o es n (-1) b (Seq.index bs b - 1) l)
+      (fun l -> chain_at o es n (-1) b (I32.v (Seq.index bs b) - 1) l /\
+                complete_at o es n (-1) b (I32.v (Seq.index bs b) - 1) l)
+
+let search_start (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                 (n fl fc: int) (x: k)
+  : Lemma (requires wf o c bs es n fl fc /\ Seq.length es > 0)
+          (ensures search o c bs es n fl fc x (I32.v (Seq.index bs (bkt (hv c x) (Seq.length es))) - 1) 0 /\
+                   0 <= I32.v (Seq.index bs (bkt (hv c x) (Seq.length es))) /\
+                   I32.v (Seq.index bs (bkt (hv c x) (Seq.length es))) <= Seq.length es)
+  = let b = bkt (hv c x) (Seq.length es) in
+    let l = chain_of o c bs es n fl fc b in
+    let h = I32.v (Seq.index bs b) - 1 in
+    if l = 0 then assert (walk o es h 0 == h) else assert (lvx o es n (-1) (walk o es h 0))
 
 /// A step past an entry that is not a hit: the search goes on, and has followed no more
 /// links than the table has entries -- so `collisionCount` never exceeds the length.
-let search_step (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let search_step (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                 (n fl fc: int) (x: k) (i: int) (q: nat)
   : Lemma (requires search o c bs es n fl fc x i q /\ inr es i /\ not (hit o c es (hv c x) x i))
           (ensures search o c bs es n fl fc x (o.nx (Seq.index es i)) (q + 1) /\
                    q + 1 <= Seq.length es)
   = let b = bkt (hv c x) (Seq.length es) in
-    let h = Seq.index bs b - 1 in
+    let h = I32.v (Seq.index bs b) - 1 in
     let l = chain_of o c bs es n fl fc b in
     if q >= l then walk_end o es h l q;
     assert (walk o es h (q + 1) == nxt o es i)
 
 /// A search that stops at an entry in range has found a live entry equal to `x`.
-let search_found (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let search_found (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                  (n fl fc: int) (x: k) (i: int) (q: nat)
   : Lemma (requires search o c bs es n fl fc x i q /\ inr es i)
           (ensures lvx o es n (-1) i /\ q < Seq.length es)
   = let b = bkt (hv c x) (Seq.length es) in
-    let h = Seq.index bs b - 1 in
+    let h = I32.v (Seq.index bs b) - 1 in
     let l = chain_of o c bs es n fl fc b in
     if q >= l then walk_end o es h l q
 
 /// A search that runs off its chain has passed every live entry equal to `x`.
-let search_none (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq int) (es: seq e)
+let search_none (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                 (n fl fc: int) (x: k) (i: int) (q: nat) (j: int)
   : Lemma (requires search o c bs es n fl fc x i q /\ not (inr es i) /\ lvx o es n (-1) j)
           (ensures not (Eq.equals c (o.key (Seq.index es j)) x))
   = let b = bkt (hv c x) (Seq.length es) in
-    let h = Seq.index bs b - 1 in
+    let h = I32.v (Seq.index bs b) - 1 in
     let l = chain_of o c bs es n fl fc b in
     if Eq.equals c (o.key (Seq.index es j)) x then begin
       Eq.equals_hash c (o.key (Seq.index es j)) x;
@@ -410,7 +421,7 @@ let free_pop (#e #k: Type0) (o: ops e k) (es: seq e) (n fl fc: int)
 
 /// The chains survive any change that keeps the set of chain nodes, and their links and
 /// hash codes.
-let chains_same (#e #k: Type0) (o: ops e k) (bs: seq int) (es es': seq e) (m hole m' hole': int)
+let chains_same (#e #k: Type0) (o: ops e k) (bs: seq I32.t) (es es': seq e) (m hole m' hole': int)
   : Lemma (requires chains o bs es m hole /\ Seq.length es' == Seq.length es /\
                     (forall (j: int). lvx o es m hole j == lvx o es' m' hole' j) /\
                     (forall (j: int). lvx o es m hole j ==>
@@ -419,7 +430,7 @@ let chains_same (#e #k: Type0) (o: ops e k) (bs: seq int) (es es': seq e) (m hol
           (ensures chains o bs es' m' hole')
   = let one (b: nat) : Lemma (b < Seq.length bs ==> bucket_ok o bs es' m' hole' b) =
       if b < Seq.length bs then begin
-      let h = Seq.index bs b - 1 in
+      let h = I32.v (Seq.index bs b) - 1 in
       let l = FStar.IndefiniteDescription.indefinite_description_ghost nat
                 (fun l -> chain_at o es m hole b h l /\ complete_at o es m hole b h l) in
       let w (q: nat) : Lemma (requires q <= l) (ensures walk o es' h q == walk o es h q) =
@@ -439,7 +450,7 @@ let chains_same (#e #k: Type0) (o: ops e k) (bs: seq int) (es es': seq e) (m hol
 
 /// One bucket's chain survives a change that keeps its nodes, their links and hash codes,
 /// and adds no node to the bucket.
-let bucket_frame (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
+let bucket_frame (#e #k: Type0) (o: ops e k) (bs bs': seq I32.t) (es es': seq e)
                  (m hole m' hole': int) (b: nat)
   : Lemma (requires b < Seq.length bs /\ bucket_ok o bs es m hole b /\
                     Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\
@@ -451,7 +462,7 @@ let bucket_frame (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
                     (forall (j: int). lvx o es' m' hole' j /\ in_bucket o es' b j ==>
                        lvx o es m hole j /\ in_bucket o es b j))
           (ensures bucket_ok o bs' es' m' hole' b)
-  = let h = Seq.index bs b - 1 in
+  = let h = I32.v (Seq.index bs b) - 1 in
     let l = FStar.IndefiniteDescription.indefinite_description_ghost nat
               (fun l -> chain_at o es m hole b h l /\ complete_at o es m hole b h l) in
     let w (q: nat) : Lemma (requires q <= l) (ensures walk o es' h q == walk o es h q) =
@@ -466,7 +477,17 @@ let bucket_frame (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
     assert (complete_at o es' m' hole' b h l)
 
 /// Linking the entry `x` in at the head of its bucket's chain.
-let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
+let chain_distinct (#e #k: Type0) (o: ops e k) (es: seq e) (m hole b h: int) (l: nat) (q1 q2: nat)
+  : Lemma (requires chain_at o es m hole b h l /\ q1 < q2 /\ q2 < l)
+          (ensures walk o es h q1 <> walk o es h q2)
+  = ()
+
+let chain_live (#e #k: Type0) (o: ops e k) (es: seq e) (m hole b h: int) (l: nat) (q: nat)
+  : Lemma (requires chain_at o es m hole b h l /\ q < l)
+          (ensures lvx o es m hole (walk o es h q) /\ in_bucket o es b (walk o es h q))
+  = ()
+
+let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq I32.t) (es es': seq e)
                 (m hole m' hole': int) (x: int)
   : Lemma (requires chains o bs es m hole /\ Seq.length es' == Seq.length es /\ inr es x /\
                     not (lvx o es m hole x) /\
@@ -475,7 +496,7 @@ let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
                        o.nx (Seq.index es' j) == o.nx (Seq.index es j) /\
                        o.hc (Seq.index es' j) == o.hc (Seq.index es j)) /\
                     (let b = bkt (o.hc (Seq.index es' x)) (Seq.length es) in
-                     o.nx (Seq.index es' x) == Seq.index bs b - 1 /\ bs' == Seq.upd bs b (x + 1)))
+                     o.nx (Seq.index es' x) == I32.v (Seq.index bs b) - 1 /\ same_but bs bs' b /\ I32.v (Seq.index bs' b) == x + 1))
           (ensures chains o bs' es' m' hole')
   = let len = Seq.length es in
     let bx = bkt (o.hc (Seq.index es' x)) len in
@@ -483,7 +504,7 @@ let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
       if b < Seq.length bs' then begin
         if b <> bx then bucket_frame o bs bs' es es' m hole m' hole' b
         else begin
-          let h = Seq.index bs b - 1 in
+          let h = I32.v (Seq.index bs b) - 1 in
           let l = FStar.IndefiniteDescription.indefinite_description_ghost nat
                     (fun l -> chain_at o es m hole b h l /\ complete_at o es m hole b h l) in
           let w (q: nat) : Lemma (walk o es' x (q + 1) == walk o es h q) =
@@ -496,9 +517,18 @@ let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
           in
           let d (q1 q2: nat) : Lemma (requires q1 < q2 /\ q2 < l + 1)
                                      (ensures walk o es' x q1 <> walk o es' x q2) =
-            w (q2 - 1);
-            if q1 > 0 then w (q1 - 1)
-            else assert (lvx o es m hole (walk o es h (q2 - 1)))
+            let r2 = q2 - 1 in
+            w r2;
+            assert (walk o es' x q2 == walk o es h r2);
+            if q1 > 0 then begin
+              let r1 = q1 - 1 in
+              w r1;
+              assert (walk o es' x q1 == walk o es h r1);
+              chain_distinct o es m hole b h l r1 r2
+            end else begin
+              chain_live o es m hole b h l r2;
+              assert (walk o es' x q1 == x)
+            end
           in
           FStar.Classical.forall_intro_2 (fun q1 q2 -> FStar.Classical.move_requires (d q1) q2);
           let lv (q: nat) : Lemma (requires q < l + 1)
@@ -519,7 +549,7 @@ let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
           FStar.Classical.forall_intro (FStar.Classical.move_requires ir);
           distinct_bound o es' x (l + 1);
           w l;
-          assert (Seq.index bs' b - 1 == x);
+          assert (I32.v (Seq.index bs' b) - 1 == x);
           assert (chain_at o es' m' hole' b x (l + 1));
           let c (j: int) : Lemma (requires lvx o es' m' hole' j /\ in_bucket o es' b j)
                                  (ensures exists (q: nat). q < l + 1 /\ walk o es' x q == j) =
@@ -538,3 +568,253 @@ let chains_link (#e #k: Type0) (o: ops e k) (bs bs': seq int) (es es': seq e)
       end
     in
     FStar.Classical.forall_intro one
+
+(* ---------------------------------------------------------------------------------- *)
+(* The collection's view *)
+
+let items_zero (#e #k: Type0) (o: ops e k) (es: seq e) (n: nat{n <= Seq.length es}) (hole: int)
+  : Lemma (requires n == 0) (ensures items o es n hole == Seq.empty /\ ndead o es n hole == 0)
+  = ()
+
+/// `Array.Clear(buckets); _count = 0; _freeList = -1; _freeCount = 0`, or a fresh table.
+let wf_empty (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+  : Lemma (requires Seq.length bs == Seq.length es /\
+                    (forall (b: nat). b < Seq.length bs ==> I32.v (Seq.index bs b) == 0))
+          (ensures wf o c bs es 0 (-1) 0 /\ items o es 0 (-1) == Seq.empty)
+  = let one (b: nat) : Lemma (b < Seq.length bs ==> bucket_ok o bs es 0 (-1) b) =
+      if b < Seq.length bs then assert (chain_at o es 0 (-1) b (-1) 0 /\ complete_at o es 0 (-1) b (-1) 0)
+    in
+    FStar.Classical.forall_intro one
+
+/// The table holds `n - fc` items.
+let wf_count (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e) (n fl fc: int)
+  : Lemma (requires wf o c bs es n fl fc)
+          (ensures Seq.length (items o es n (-1)) == n - fc)
+  = count_items o es n (-1)
+
+/// The items are the keys of the chain nodes.
+let mem_live (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n: nat{n <= Seq.length es}) (x: k)
+  : Lemma (requires mem c (items o es n (-1)) x)
+          (ensures exists (j: int). lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x)
+  = let p = FStar.IndefiniteDescription.indefinite_description_ghost nat
+              (fun p -> p < Seq.length (items o es n (-1)) /\ Eq.equals c (Seq.index (items o es n (-1)) p) x) in
+    let j = items_live o es n p in
+    assert (lvx o es n (-1) j)
+
+let live_mem (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n: nat{n <= Seq.length es}) (x: k) (j: int)
+  : Lemma (requires lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x)
+          (ensures mem c (items o es n (-1)) x /\ pos o es j < Seq.length (items o es n (-1)) /\
+                   Seq.index (items o es n (-1)) (pos o es j) == o.key (Seq.index es j))
+  = items_index o es n j
+
+/// `FindItemIndex` ran off its chain: `x` is not in the table.
+let search_absent (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                  (n fl fc: int) (x: k) (i: int) (q: nat)
+  : Lemma (requires search o c bs es n fl fc x i q /\ not (inr es i))
+          (ensures ~ (mem c (items o es n (-1)) x))
+  = let aux () : Lemma (requires mem c (items o es n (-1)) x) (ensures False) =
+      mem_live o c es n x;
+      let j = FStar.IndefiniteDescription.indefinite_description_ghost int
+                (fun j -> lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x) in
+      search_none o c bs es n fl fc x i q j
+    in
+    FStar.Classical.move_requires aux ()
+
+/// `FindItemIndex` stopped at a hit: `x` is in the table, at the live entry `i`.
+let search_hit (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+               (n fl fc: int) (x: k) (i: int) (q: nat)
+  : Lemma (requires search o c bs es n fl fc x i q /\ hit o c es (hv c x) x i)
+          (ensures lvx o es n (-1) i /\ mem c (items o es n (-1)) x)
+  = search_found o c bs es n fl fc x i q;
+    live_mem o c es n x i
+
+(* ---------------------------------------------------------------------------------- *)
+(* Unlinking (Remove) *)
+
+let skip (q r: nat) : nat = if r < q then r else r + 1
+
+/// The predecessor of the `q`th node of the chain from `h`, if it has one.
+let prev (#e #k: Type0) (o: ops e k) (es: seq e) (h: int) (q: nat) : int =
+  if q = 0 then -2 else walk o es h (q - 1)
+
+let rec unlink_walk (#e #k: Type0) (o: ops e k) (es es': seq e) (m: int) (b h: int) (l q: nat) (x h': int) (r: nat)
+  : Lemma (requires chain_at o es m (-1) b h l /\ q < l /\ x == walk o es h q /\ r <= l - 1 /\
+                    Seq.length es' == Seq.length es /\
+                    h' == (if q = 0 then walk o es h 1 else h) /\
+                    (forall (j: int). lvx o es m (-1) j /\ j <> x /\ (j <> prev o es h q \/ q = 0) ==>
+                       o.nx (Seq.index es' j) == o.nx (Seq.index es j)) /\
+                    (q > 0 ==> o.nx (Seq.index es' (prev o es h q)) == o.nx (Seq.index es x)))
+          (ensures walk o es' h' r == walk o es h (skip q r))
+          (decreases r)
+  = if r = 0 then () else begin
+      unlink_walk o es es' m b h l q x h' (r - 1);
+      let r0 = skip q (r - 1) in
+      let j = walk o es h r0 in
+      chain_live o es m (-1) b h l r0;
+      if r0 <> q then chain_distinct o es m (-1) b h l (if r0 < q then r0 else q) (if r0 < q then q else r0);
+      assert (walk o es' h' r == nxt o es' j);
+      if q > 0 && r - 1 = q - 1 then begin
+        assert (walk o es h (q + 1) == nxt o es x)
+      end else begin
+        assert (skip q r == r0 + 1);
+        if q > 0 && r0 = q - 1 then () else
+        if q > 0 then chain_distinct o es m (-1) b h l (if r0 < q - 1 then r0 else q - 1) (if r0 < q - 1 then q - 1 else r0);
+        assert (nxt o es' j == nxt o es j)
+      end
+    end
+
+/// Unlinking the `q`th node `x` of bucket `b`'s chain, either by moving the bucket's head
+/// past it (`q = 0`) or by linking its predecessor past it, leaves `x` as the hole.
+let chains_unlink (#e #k: Type0) (o: ops e k) (bs bs': seq I32.t) (es es': seq e)
+                  (m: int) (b: nat) (l q: nat) (x: int)
+  : Lemma (requires chains o bs es m (-1) /\ b < Seq.length bs /\
+                    chain_at o es m (-1) b (I32.v (Seq.index bs b) - 1) l /\
+                    q < l /\ x == walk o es (I32.v (Seq.index bs b) - 1) q /\
+                    Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\
+                    (forall (j: int). j <> x ==> lvx o es' m x j == lvx o es m (-1) j) /\
+                    (let p = prev o es (I32.v (Seq.index bs b) - 1) q in
+                     (forall (j: int). lvx o es m (-1) j /\ j <> x ==>
+                        o.hc (Seq.index es' j) == o.hc (Seq.index es j) /\
+                        (j <> p \/ q = 0 ==> o.nx (Seq.index es' j) == o.nx (Seq.index es j))) /\
+                     (if q = 0
+                      then same_but bs bs' b /\ I32.v (Seq.index bs' b) == o.nx (Seq.index es x) + 1
+                      else bs' == bs /\ o.nx (Seq.index es' p) == o.nx (Seq.index es x))))
+          (ensures chains o bs' es' m x)
+  = let h = I32.v (Seq.index bs b) - 1 in
+    let h' = if q = 0 then walk o es h 1 else h in
+    assert (lvx o es m (-1) x /\ in_bucket o es b x);
+    let one (b': nat) : Lemma (b' < Seq.length bs' ==> bucket_ok o bs' es' m x b') =
+      if b' < Seq.length bs' then begin
+        if b' <> b then begin
+          assert (bucket_ok o bs es m (-1) b');
+          if q > 0 then assert (lvx o es m (-1) (prev o es h q) /\ in_bucket o es b (prev o es h q));
+          bucket_frame o bs bs' es es' m (-1) m x b'
+        end else begin
+          let w (r: nat) : Lemma (requires r <= l - 1)
+                                (ensures walk o es' h' r == walk o es h (skip q r)) =
+            unlink_walk o es es' m b h l q x h' r
+          in
+          w (l - 1);
+          assert (I32.v (Seq.index bs' b) - 1 == h');
+          let lv (r: nat) : Lemma (requires r < l - 1)
+                                  (ensures lvx o es' m x (walk o es' h' r) &&
+                                           in_bucket o es' b (walk o es' h' r)) =
+            w r;
+            let j = walk o es h (skip q r) in
+            assert (lvx o es m (-1) j /\ in_bucket o es b j);
+            assert (j <> x)
+          in
+          FStar.Classical.forall_intro (FStar.Classical.move_requires lv);
+          let d (r1 r2: nat) : Lemma (requires r1 < r2 /\ r2 < l - 1)
+                                     (ensures walk o es' h' r1 <> walk o es' h' r2) =
+            w r1; w r2;
+            assert (walk o es h (skip q r1) <> walk o es h (skip q r2))
+          in
+          FStar.Classical.forall_intro_2 (fun r1 r2 -> FStar.Classical.move_requires (d r1) r2);
+          assert (chain_at o es' m x b h' (l - 1));
+          let c (j: int) : Lemma (requires lvx o es' m x j /\ in_bucket o es' b j)
+                                 (ensures exists (r: nat). r < l - 1 /\ walk o es' h' r == j) =
+            assert (lvx o es m (-1) j /\ in_bucket o es b j);
+            let q' = FStar.IndefiniteDescription.indefinite_description_ghost nat
+                       (fun q' -> q' < l /\ walk o es h q' == j) in
+            let r = if q' < q then q' else q' - 1 in
+            w r;
+            assert (skip q r == q')
+          in
+          FStar.Classical.forall_intro (FStar.Classical.move_requires c);
+          assert (complete_at o es' m x b h' (l - 1))
+        end
+      end
+    in
+    FStar.Classical.forall_intro one
+
+(* ---------------------------------------------------------------------------------- *)
+(* Remove *)
+
+/// Remove's search state: `search`, with `last` the node before `i` (-1 at the head).
+let search_last (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                (n fl fc: int) (x: k) (i: int) (q: nat) (last: int)
+  : prop
+  = search o c bs es n fl fc x i q /\
+    last == (if q = 0 then -1 else walk o es (I32.v (Seq.index bs (bkt (hv c x) (Seq.length es))) - 1) (q - 1))
+
+let search_last_start (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                      (n fl fc: int) (x: k)
+  : Lemma (requires wf o c bs es n fl fc /\ Seq.length es > 0)
+          (ensures search_last o c bs es n fl fc x (I32.v (Seq.index bs (bkt (hv c x) (Seq.length es))) - 1) 0 (-1))
+  = search_start o c bs es n fl fc x
+
+let search_last_step (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                     (n fl fc: int) (x: k) (i: int) (q: nat) (last: int)
+  : Lemma (requires search_last o c bs es n fl fc x i q last /\ inr es i /\ not (hit o c es (hv c x) x i))
+          (ensures search_last o c bs es n fl fc x (o.nx (Seq.index es i)) (q + 1) i /\
+                   q + 1 <= Seq.length es)
+  = search_step o c bs es n fl fc x i q
+
+/// The writes `Remove` makes on finding `x` at the live entry `i`, with predecessor
+/// `last`: the chain is linked past `i` (through the bucket, or through `last`), and `i`
+/// is pushed on the free list. Nothing else changes, but `i`'s other fields.
+let remove_writes (#e #k: Type0) (o: ops e k) (bs bs': seq I32.t) (es es': seq e)
+                  (b: nat) (fl i last: int)
+  : prop
+  = Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\ inr es i /\
+    (forall (j: nat). {:pattern Seq.index es' j}
+       j < Seq.length es /\ j <> i /\ j <> last ==> Seq.index es' j == Seq.index es j) /\
+    (last >= 0 ==> inr es last /\ last <> i /\
+                   o.nx (Seq.index es' last) == o.nx (Seq.index es i) /\
+                   o.hc (Seq.index es' last) == o.hc (Seq.index es last) /\
+                   o.key (Seq.index es' last) == o.key (Seq.index es last)) /\
+    o.nx (Seq.index es' i) == -3 - fl /\
+    (if last < 0 then same_but bs bs' b /\ I32.v (Seq.index bs' b) == o.nx (Seq.index es i) + 1
+     else bs' == bs)
+
+#push-options "--z3rlimit 40"
+let remove_ok (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs bs': seq I32.t) (es es': seq e)
+              (n fl fc: int) (x: k) (i: int) (q: nat) (last: int)
+  : Lemma (requires search_last o c bs es n fl fc x i q last /\ hit o c es (hv c x) x i /\
+                    remove_writes o bs bs' es es' (bkt (hv c x) (Seq.length es)) fl i last)
+          (ensures 0 <= i /\ i < n /\ n <= Seq.length es /\
+                   pos o es i < Seq.length (items o es n (-1)) /\
+                   wf o c bs' es' n i (fc + 1) /\
+                   items o es' n (-1) == remove_at (items o es n (-1)) (pos o es i) /\
+                   Eq.equals c (Seq.index (items o es n (-1)) (pos o es i)) x)
+  = let len = Seq.length es in
+    let b = bkt (hv c x) len in
+    let h = I32.v (Seq.index bs b) - 1 in
+    let l = chain_of o c bs es n fl fc b in
+    search_found o c bs es n fl fc x i q;
+    if q >= l then walk_end o es h l q;
+    assert (q < l);
+    if q > 0 then begin
+      chain_live o es n (-1) b h l (q - 1);
+      chain_distinct o es n (-1) b h l (q - 1) q;
+      assert (last == prev o es h q)
+    end;
+    fl_range o es n (-1) fl fc;
+    assert (forall (j: int). j <> i ==> lvx o es' n i j == lvx o es n (-1) j);
+    chains_unlink o bs bs' es es' n b l q i;
+    chains_same o bs' es' es' n i n (-1);
+    items_hole o es n i;
+    items_hole o es' n i;
+    items_frame o es es' n i;
+    free_same o es es' n (-1) i fl fc;
+    free_push o es' n i fl fc;
+    remove_insert (items o es n i) (pos o es i) (o.key (Seq.index es i));
+    items_index o es n i
+#pop-options
+
+/// The entry a search stops at in range links on to an entry in range, or to the end:
+/// `entry.Next + 1` cannot overflow; nor can `StartOfFreeList - _freeList`, the free list
+/// being in range too.
+let search_next (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
+                (n fl fc: int) (x: k) (i: int) (q: nat)
+  : Lemma (requires search o c bs es n fl fc x i q /\ inr es i)
+          (ensures -1 <= o.nx (Seq.index es i) /\ o.nx (Seq.index es i) < Seq.length es /\
+                   -1 <= fl /\ fl < Seq.length es)
+  = fl_range o es n (-1) fl fc;
+    let b = bkt (hv c x) (Seq.length es) in
+    let h = I32.v (Seq.index bs b) - 1 in
+    let l = chain_of o c bs es n fl fc b in
+    if q >= l then walk_end o es h l q;
+    assert (walk o es h (q + 1) == nxt o es i);
+    if q + 1 < l then assert (lvx o es n (-1) (walk o es h (q + 1)))

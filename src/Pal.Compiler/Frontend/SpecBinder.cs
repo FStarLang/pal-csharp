@@ -29,6 +29,12 @@ public sealed record SpecSite(
     /// </summary>
     public ImmutableArray<string> TypeParameters { get; init; } = [];
 
+    /// <summary>
+    /// R24.17. The contract is of a <c>private</c> member: its only clients are inside the
+    /// declaring type, which sees that type's private members.
+    /// </summary>
+    public bool Private { get; init; }
+
     /// <summary>Name of the generated shim method; also the lookup key.</summary>
     public string ShimName => SpecBinder.ShimMethodPrefix + Key;
 }
@@ -109,11 +115,12 @@ public static class SpecBinder
         // compilation still reports every error, less an inaccessibility inside an
         // invariant's shim; the specs are then bound against a compilation that ignores
         // accessibility, which only ever differs from the strict one there.
+        var privateShims = new HashSet<string>(sites.Where(s => s.Private).Select(s => s.ShimName));
         var strict = compilation.AddSyntaxTrees(trees.Select(t => t.Tree));
         var exempt = false;
         foreach (var (tree, _, _) in trees)
             foreach (var d in strict.GetSemanticModel(tree).GetDiagnostics())
-                if (d.Severity == DiagnosticSeverity.Error && IsInvariantInaccessible(d)) exempt = true;
+                if (d.Severity == DiagnosticSeverity.Error && IsInvariantInaccessible(d, privateShims)) exempt = true;
         compilation = exempt && IgnoringAccessibility(compilation) is { } lax
             ? lax.AddSyntaxTrees(trees.Select(t => t.Tree))
             : strict;
@@ -125,7 +132,7 @@ public static class SpecBinder
             foreach (var d in strict.GetSemanticModel(strict.SyntaxTrees.First(t => t.FilePath == tree.FilePath)).GetDiagnostics())
             {
                 if (d.Severity != DiagnosticSeverity.Error) continue;
-                if (IsInvariantInaccessible(d)) continue;
+                if (IsInvariantInaccessible(d, privateShims)) continue;
                 var (code, message) = Remap(d);
                 diagnostics.Error(code, MapBack(d.Location, map, groupSites), message);
             }
@@ -151,11 +158,11 @@ public static class SpecBinder
         return result.ToImmutable();
     }
 
-    private static bool IsInvariantInaccessible(Diagnostic d) =>
+    private static bool IsInvariantInaccessible(Diagnostic d, HashSet<string> privateShims) =>
         d.Id == "CS0122" && d.Location.SourceTree is { } t &&
         t.GetRoot().FindNode(d.Location.SourceSpan).AncestorsAndSelf()
             .OfType<MethodDeclarationSyntax>().FirstOrDefault() is { } m &&
-        m.Identifier.ValueText.Contains("_invariant_");
+        (m.Identifier.ValueText.Contains("_invariant_") || privateShims.Contains(m.Identifier.ValueText));
 
     /// <summary>
     /// R24.3. Roslyn's own switch for binding without accessibility checks (the one its
@@ -169,7 +176,14 @@ public static class SpecBinder
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         if (flagsType is null || with is null || !Enum.IsDefined(flagsType, "IgnoreAccessibility")) return null;
         var options = with.Invoke(c.Options, [Enum.Parse(flagsType, "IgnoreAccessibility")]);
-        return options is CSharpCompilationOptions o ? c.WithOptions(o) : null;
+        // Ignoring accessibility also makes every internal type of every referenced
+        // assembly a candidate, and two framework assemblies declaring the same internal
+        // name (`System.Collections.ThrowHelper`) then make a program name ambiguous that
+        // the strict compilation resolves. Only the references the program uses are kept.
+        var used = c.GetUsedAssemblyReferences();
+        return options is CSharpCompilationOptions o
+            ? c.WithOptions(o).WithReferences(c.References.Where(r => used.Contains(r)))
+            : null;
     }
 
     /// <summary>

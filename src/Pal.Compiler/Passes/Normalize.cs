@@ -29,10 +29,166 @@ public static class Normalize
         // exception.
         IrMethod m when m.Body is not null => m with
         {
-            Body = Statement(m.Body, [.. m.Parameters.Select(p => p.Name)], diagnostics),
+            Body = Statement(LoopReturns(m, m.Body, diagnostics), [.. m.Parameters.Select(p => p.Name)], diagnostics),
         },
         _ => decl,
     };
+
+    // -----------------------------------------------------------------------
+    // R24.14 `return` inside a loop
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// R24.14. A <c>return e</c> inside a loop stores to two locals declared at the top of
+    /// the method and leaves the loop, and the loop is followed by the <c>return</c> it
+    /// left for:
+    ///
+    /// <code>
+    ///   while (c) { … return e; … }        bool palReturned = false; T palReturnValue = 0;
+    ///   S;                           ==&gt;   while (c) { … { palReturnValue = e; palReturned = true; break; } … }
+    ///                                      if (palReturned) return palReturnValue;
+    ///                                      S;
+    /// </code>
+    ///
+    /// A nested loop's exit is followed by <c>if (palReturned) break;</c> instead. R5.10 then
+    /// translates the <c>break</c>s, and R5.5b moves <c>S</c> under the guard's <c>else</c>.
+    /// When the loop is inside an <c>if</c> that something follows, what follows is copied
+    /// into both arms first, so that the guard and <c>S</c> end up in the same block. Only
+    /// methods with such a <c>return</c> change. <c>Pal.Returned()</c> and
+    /// <c>Pal.Result&lt;T&gt;()</c> name the two locals in the loop's invariant.
+    /// </summary>
+    private static IrStmt LoopReturns(IrMethod m, IrStmt body, DiagnosticBag diagnostics)
+    {
+        if (!MayReturn(body, inLoop: false)) return body;
+        var loc = body.Loc;
+        var isVoid = m.ReturnType is IrPrim { Kind: PrimKind.Void };
+        var decls = new List<IrStmt>
+        {
+            new IrLocalDecl(loc, Pal.Compiler.Emit.Names.LoopReturned, IrPrim.Bool,
+                new IrLiteral(loc, false) { Type = IrPrim.Bool }),
+        };
+        if (!isVoid)
+        {
+            if (Zero(loc, m.ReturnType) is not { } zero)
+            {
+                diagnostics.Unsupported(loc, $"A `return` inside a loop of a method returning `{m.ReturnType}`",
+                    "R24.14 stores the value in a local, which needs a constant to start from: " +
+                    "an integer or a `bool`.");
+                return body;
+            }
+            decls.Add(new IrLocalDecl(loc, Pal.Compiler.Emit.Names.LoopResult, m.ReturnType, zero));
+        }
+        return new IrBlock(loc, [.. decls, .. OutsideLoops(Stmts(body), isVoid, m.ReturnType)]);
+    }
+
+    private static IrExpr? Zero(IrLoc loc, IrType type) => type switch
+    {
+        IrPrim { Kind: PrimKind.Bool } => new IrLiteral(loc, false) { Type = type },
+        IrPrim { Kind: PrimKind.Int } => new IrLiteral(loc, 0) { Type = type },
+        _ => null,
+    };
+
+    private static ImmutableArray<IrStmt> Stmts(IrStmt? s) =>
+        s is null ? [] : s is IrBlock b ? b.Statements : [s];
+
+    /// <summary>Whether <paramref name="s"/> holds a <c>return</c> R24.14 rewrites.</summary>
+    private static bool MayReturn(IrStmt? s, bool inLoop) => s switch
+    {
+        IrReturn => inLoop,
+        IrBlock b => b.Statements.Any(x => MayReturn(x, inLoop)),
+        IrIf i => MayReturn(i.Then, inLoop) || MayReturn(i.Else, inLoop),
+        IrWhile w => MayReturn(w.Body, true),
+        IrFor f => MayReturn(f.Body, true),
+        _ => false,
+    };
+
+    /// <summary>A <c>break</c> of this loop: not one of a nested loop's.</summary>
+    private static bool HasBreak(IrStmt? s) => s switch
+    {
+        IrBreak => true,
+        IrBlock b => b.Statements.Any(HasBreak),
+        IrIf i => HasBreak(i.Then) || HasBreak(i.Else),
+        IrSwitch or IrTry => true,
+        _ => false,
+    };
+
+    private static IrVar LoopVar(IrLoc loc, string name, IrType type) => new(loc, name) { Type = type };
+
+    private static ImmutableArray<IrStmt> OutsideLoops(ImmutableArray<IrStmt> stmts, bool isVoid, IrType returnType)
+    {
+        var result = new List<IrStmt>();
+        for (var i = 0; i < stmts.Length; i++)
+        {
+            var s = stmts[i];
+            if (!MayReturn(s, inLoop: false)) { result.Add(s); continue; }
+            var rest = stmts.RemoveRange(0, i + 1);
+            switch (s)
+            {
+                case IrWhile or IrFor:
+                    result.Add(InLoop(s, isVoid, returnType, top: true));
+                    result.Add(new IrIf(s.Loc, LoopVar(s.Loc, Pal.Compiler.Emit.Names.LoopReturned, IrPrim.Bool),
+                        new IrReturn(s.Loc, isVoid ? null : LoopVar(s.Loc, Pal.Compiler.Emit.Names.LoopResult, returnType)),
+                        null));
+                    result.AddRange(OutsideLoops(rest, isVoid, returnType));
+                    return [.. result];
+                case IrBlock b:
+                    result.AddRange(OutsideLoops([.. b.Statements, .. rest], isVoid, returnType));
+                    return [.. result];
+                case IrIf f:
+                    result.Add(f with
+                    {
+                        Then = new IrBlock(f.Then.Loc, OutsideLoops([.. Stmts(f.Then), .. rest], isVoid, returnType)),
+                        Else = new IrBlock(f.Else?.Loc ?? f.Loc, OutsideLoops([.. Stmts(f.Else), .. rest], isVoid, returnType)),
+                    });
+                    return [.. result];
+                default:
+                    result.Add(s);
+                    break;
+            }
+        }
+        return [.. result];
+    }
+
+    /// <summary>A statement inside a loop: its <c>return</c>s store and break.</summary>
+    private static IrStmt InLoop(IrStmt s, bool isVoid, IrType returnType, bool top = false)
+    {
+        if (!MayReturn(s, inLoop: true)) return s;
+        var loc = s.Loc;
+        IrStmt Exit() => new IrIf(loc, LoopVar(loc, Pal.Compiler.Emit.Names.LoopReturned, IrPrim.Bool),
+            new IrBreak(loc), null);
+        switch (s)
+        {
+            case IrReturn r:
+                return new IrBlock(loc,
+                [
+                    .. isVoid ? Array.Empty<IrStmt>()
+                        : [new IrAssign(loc, LoopVar(loc, Pal.Compiler.Emit.Names.LoopResult, returnType), r.Value!)],
+                    new IrAssign(loc, LoopVar(loc, Pal.Compiler.Emit.Names.LoopReturned, IrPrim.Bool),
+                        new IrLiteral(loc, true) { Type = IrPrim.Bool }),
+                    new IrBreak(loc),
+                ]);
+            case IrBlock b:
+                return b with { Statements = [.. b.Statements.Select(x => InLoop(x, isVoid, returnType))] };
+            case IrIf i:
+                return i with
+                {
+                    Then = InLoop(i.Then, isVoid, returnType),
+                    Else = i.Else is null ? null : InLoop(i.Else, isVoid, returnType),
+                };
+            case IrWhile w:
+            {
+                var loop = w with { Body = InLoop(w.Body, isVoid, returnType), BreakIsReturn = !HasBreak(w.Body) };
+                return top ? loop : new IrBlock(loc, [loop, Exit()]);
+            }
+            case IrFor f:
+            {
+                var loop = f with { Body = InLoop(f.Body, isVoid, returnType), BreakIsReturn = !HasBreak(f.Body) };
+                return top ? loop : new IrBlock(loc, [loop, Exit()]);
+            }
+            default:
+                return s;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // R5.7 / R5.8 / R5.8b / R5.9
@@ -182,6 +338,7 @@ public static class Normalize
             {
                 Counted = DetectCounter(f),
                 Step = f.Step,
+                BreakIsReturn = f.BreakIsReturn,
             }
             : new IrWhile(
                 f.Loc,
@@ -189,6 +346,7 @@ public static class Normalize
                 f.Invariants, f.Decreases, merged)
             {
                 Counted = DetectCounter(f),
+                BreakIsReturn = f.BreakIsReturn,
             };
 
         return new IrBlock(f.Loc, [.. f.Init, Loop(loop, inner, diagnostics)]);
@@ -445,6 +603,18 @@ public static class Normalize
                 .Select(v => v.Name)];
 
     /// <summary>
+    /// R24.21. A write to a field of an array element, <c>a[i].f = v</c>, writes the
+    /// element: the struct is read, updated and written back. Analyses of what a statement
+    /// writes see it as the element it is.
+    /// </summary>
+    public static IrExpr ElementTarget(IrExpr target)
+    {
+        for (var t = target; t is IrField f; t = f.Receiver)
+            if (f.Receiver is IrElement el) return el;
+        return target;
+    }
+
+    /// <summary>
     /// R4.11. The names whose model a statement may move: an assignment target, a name
     /// passed by reference, and anything handed to a callee — except the receiver of an
     /// instance method the frontend has already found read-only, whose own postcondition
@@ -463,7 +633,7 @@ public static class Normalize
             case IrBlock b: foreach (var x in b.Statements) Mutated(x, into); return;
             case IrLocalDecl d: MutatedIn(d.Init, into); return;
             case IrAssign a:
-                switch (a.Target)
+                switch (ElementTarget(a.Target))
                 {
                     case IrVar v: into.Add(v.Name); break;
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;
@@ -542,7 +712,7 @@ public static class Normalize
             case null: return;
             case IrBlock b: foreach (var s in b.Statements) Assigned(s, into); return;
             case IrAssign a:
-                switch (a.Target)
+                switch (ElementTarget(a.Target))
                 {
                     case IrVar v: into.Add(v.Name); break;
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;

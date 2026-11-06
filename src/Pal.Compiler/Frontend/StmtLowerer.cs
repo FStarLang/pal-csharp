@@ -249,6 +249,40 @@ public sealed class StmtLowerer(
                 diagnostics.Unsupported(Locations.From(v), $"The local type `{declared.Type}`");
                 continue;
             }
+            // R24.8. A `ref` local bound to an array element is that element: its index is
+            // evaluated once, into a fresh local, and every use of the name is the element
+            // at that local.
+            if (symbol is { RefKind: RefKind.Ref or RefKind.RefReadOnly })
+            {
+                if (RefLocal(v, symbol, node, statements) is null)
+                    diagnostics.Unsupported(Locations.From(v), $"The `ref` local `{v.Identifier.ValueText}`",
+                        "Only `ref` locals bound to an element of an array named by an unrebound " +
+                        "local or an unwritten field, and never rebound, are supported (doc/translation.md R24.8).");
+                continue;
+            }
+            // R24.19. `T[] a = _field;`, never written, is another name for the field.
+            if (symbol is not null && FieldAlias(v, symbol, node) is { } aliased)
+            {
+                _code.Alias(symbol, aliased.Code);
+                _spec.Alias(symbol, aliased.Spec);
+                continue;
+            }
+            // R24.12. A `Ghost<T>` local is a snapshot: a ghost name for a specification
+            // value (`Pal.Contents(a)`, a model), fixed at its declaration, that later ghost
+            // statements can mention.
+            if (known.IsGhost(symbol?.Type))
+            {
+                if (v.Initializer is null || !NeverWritten(symbol!, node.Parent ?? node))
+                {
+                    diagnostics.Unsupported(Locations.From(v),
+                        "A `Ghost<T>` local without an initialiser, or one that is assigned",
+                        "A ghost local names one specification value for its whole life.");
+                    continue;
+                }
+                statements.Add(new IrGhostStmt(Locations.From(v), GhostKind.Let,
+                    _code.Lower(v.Initializer.Value), v.Identifier.ValueText) { Type = type });
+                continue;
+            }
             statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
                 v.Initializer is null ? null : _code.ToDeclared(_code.Lower(v.Initializer.Value), type))
             {
@@ -260,6 +294,108 @@ public sealed class StmtLowerer(
         }
 
         return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable());
+    }
+
+    /// <summary>
+    /// R24.19. An array local initialised from an instance field of the class, written
+    /// nowhere in its scope, in a scope that neither assigns that field nor calls another
+    /// instance method of the class (either could replace the field's array): every use
+    /// of the local is a use of the field. A cell holding the reference would hide from
+    /// the verifier that the array it points to is the one the class invariant describes.
+    /// </summary>
+    private (IrExpr Code, IrExpr Spec)? FieldAlias(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node)
+    {
+        if (symbol.Type is not IArrayTypeSymbol || v.Initializer?.Value is not { } init) return null;
+        while (init is ParenthesizedExpressionSyntax p) init = p.Expression;
+        if (init is not (IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }))
+            return null;
+        if (model.GetSymbolInfo(init).Symbol is not IFieldSymbol { IsStatic: false } field ||
+            !SymbolEqualityComparer.Default.Equals(field.ContainingType.OriginalDefinition,
+                symbol.ContainingSymbol.ContainingType?.OriginalDefinition))
+            return null;
+        var scope = node.Parent ?? node;
+        // Writing an element writes the field's array; only rebinding the name matters.
+        bool Names(ExpressionSyntax? e)
+        {
+            while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+            return e is IdentifierNameSyntax &&
+                   SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(e).Symbol, symbol);
+        }
+        if (scope.DescendantNodes().Any(n => n switch
+            {
+                AssignmentExpressionSyntax a => Names(a.Left),
+                ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => Names(arg.Expression),
+                _ => false,
+            }))
+            return null;
+        var self = symbol.ContainingSymbol.ContainingType;
+        foreach (var n in scope.DescendantNodes())
+        {
+            if (n is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, field))
+                return null;
+            if (n is InvocationExpressionSyntax inv &&
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
+                !Declarations.Has(m, known.LemmaAttribute))
+                return null;
+        }
+        return (_code.Lower(init), _spec.Lower(init));
+    }
+
+    private IrExpr? RefLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (v.Initializer?.Value is not RefExpressionSyntax { Expression: var target }) return null;
+        var scope = node.Parent ?? node;
+        // `x = ref e` rebinds; any other write goes through the alias, to the element.
+        if (scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a =>
+                a.Right is RefExpressionSyntax &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, symbol)))
+            return null;
+        while (target is ParenthesizedExpressionSyntax p) target = p.Expression;
+        var root = target is ElementAccessExpressionSyntax { Expression: var arr }
+            ? model.GetSymbolInfo(arr).Symbol : null;
+        // Writing an element is seen through the alias; rebinding the array's name is not.
+        if (root is ILocalSymbol al && scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                .Any(a => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
+            return null;
+        if (root is IParameterSymbol) return null;
+        // A field may be replaced by an assignment or by a call of another method of the
+        // class; the alias would then name the new array's element, not the old one. The
+        // fields the alias can depend on are the array's own, or every field the inlined
+        // `ref`-returning method mentions; assigning any other field is harmless.
+        if (target is InvocationExpressionSyntax || root is IFieldSymbol)
+        {
+            var self = symbol.ContainingSymbol.ContainingType;
+            var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+            if (root is IFieldSymbol rf) read.Add(rf);
+            if (target is InvocationExpressionSyntax call &&
+                model.GetSymbolInfo(call).Symbol is IMethodSymbol { DeclaringSyntaxReferences: [var callee] } &&
+                callee.SyntaxTree == model.SyntaxTree)
+                foreach (var id in callee.GetSyntax().DescendantNodes().OfType<IdentifierNameSyntax>())
+                    if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f) read.Add(f);
+            foreach (var n in scope.DescendantNodes())
+            {
+                if (n is AssignmentExpressionSyntax a && model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol { IsStatic: false } af &&
+                    read.Contains(af))
+                    return null;
+                if (n is InvocationExpressionSyntax inv &&
+                    model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+                    SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
+                    !Declarations.Has(m, known.LemmaAttribute))
+                    return null;
+            }
+        }
+        if (_code.Lower(v.Initializer.Value) is not IrElement element) return null;
+        var index = Fresh("ref");
+        var indexType = element.Index.Type ?? IrPrim.Int;
+        statements.Add(new IrLocalDecl(Locations.From(v), index, indexType, element.Index));
+        var alias = element with { Index = new IrVar(element.Loc, index) { Type = indexType } };
+        _code.Alias(symbol, alias);
+        _spec.Alias(symbol, _spec.Lower(v.Initializer.Value) is IrElement se
+            ? se with { Index = alias.Index } : alias);
+        return alias;
     }
 
     /// <summary>
@@ -342,8 +478,11 @@ public sealed class StmtLowerer(
         // R5.3 expands `x++` into `x = x + 1`, which names the L-value twice. C# evaluates
         // it once, so anything effectful in it is hoisted first and both copies share it.
         var lowered = _code.LinearizeLValue(_code.Lower(target), out var prelude);
-        var assign = new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, new IrLiteral(loc, 1))
-            { Wraps = _code.Wraps(target) });
+        // R24.16: the one is at the target's type, so `u++` on a `uint` adds `1ul`.
+        var one = lowered.Type is IrPrim { IsMachineInt: true } prim
+            ? new IrLiteral(loc, 1) { Type = prim } : new IrLiteral(loc, 1);
+        var assign = new IrAssign(loc, lowered, new IrBinary(loc, op, lowered, one)
+            { Wraps = _code.Wraps(target), Type = lowered.Type });
         return prelude.IsEmpty ? assign : new IrBlock(loc, [.. prelude, assign]);
     }
 

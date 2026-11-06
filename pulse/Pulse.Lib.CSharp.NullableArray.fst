@@ -15,7 +15,9 @@ module A = Pulse.Lib.Array
 module Seq = FStar.Seq
 module T = FStar.Tactics
 
-let pts_to (#t: Type0) (a: A.array t) (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop =
+/// R24.25. The reference is the matching key, as for `A.pts_to`: Pulse finds the resource by
+/// it and proves the contents equal by SMT.
+let pts_to (#t: Type0) ([@@@mkey] a: A.array t) (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop =
   if A.is_null a then pure (s == Seq.empty #t) else A.pts_to a #p s
 
 ghost

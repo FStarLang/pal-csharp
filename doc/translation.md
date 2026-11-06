@@ -6490,6 +6490,32 @@ one owns its cells exactly as `A.pts_to` does. The parts that differ from R22.12
   spec, `_entries.Length` is the length of the contents, which is 0 while the field is
   null.
 
+### R24.8 `ref` locals
+
+`ref Entry entry = ref entries[i];` names an array element. Its index is evaluated once, into
+a fresh local, and every use of `entry` reads or writes the array element at that local:
+in code and in specifications alike. This is C#'s meaning while the array the alias points
+into stays the same. So the rule applies only when:
+
+- the local is never rebound (`entry = ref …`);
+- the array is named by a local that is not reassigned (R24.19 makes a field's local
+  qualify), or by a field;
+- for a field, or for an array produced by a call, nothing in the local's scope assigns a
+  field the alias depends on, or calls a non-`ref`, non-`[Lemma]` instance method of the
+  class. The fields an alias depends on are the array's own field, or, for an inlined
+  `ref`-returning call (R24.9), every field its body mentions. So `Remove` may assign
+  `_freeList` while `bucket` aliases `_buckets[…]`.
+
+Any other `ref` local is refused (PALCS0001).
+
+### R24.9 Inlining `ref`-returning helpers
+
+A call to a `ref`-returning method whose body is a sequence of single-variable local
+declarations followed by `return ref e;` is replaced by `e`, with the parameters and locals
+substituted. The call must be on `this` or have no receiver, and its arguments must be
+names or constants, so substituting them changes no evaluation order. With R24.8 this is
+what turns `ref int bucket = ref GetBucketRef(hashCode);` into an element of `_buckets`.
+
 ### R24.10 `Array.Clear(a)`
 
 `Array.Clear(a)` clears the whole array: it is `Array.Clear(a, 0, a.Length)` (R22.25).
@@ -6501,6 +6527,16 @@ integers, `bool`s or type parameters has C#'s `default(S)`. This is the `has_def
 instance that sets every field to its default, and it requires `has_default` for each
 type parameter. So `new Entry[n]` and `Array.Clear(entries, …)` need the caller's
 defaults for the type parameters that `Entry` mentions (R22.22).
+
+### R24.12 Ghost locals
+
+A local of type `Ghost<T>` that is initialised and never assigned is a ghost `let`. It names
+a specification value fixed at its declaration (`Ghost<Seq<int>> before = Pal.Contents(a);`)
+that later ghost statements can mention, and it has no run-time existence. A snapshot of
+a machine integer (`Ghost<int> length0 = entries.Length;`) is its mathematical value, an
+F* `int`, as every machine integer in a specification is. A loop that writes a field may
+not name that field in its measure (F3), so a snapshot is how such a loop is measured:
+`Pal.Invariant(entries.Length == length0.Value); Pal.Decreases(length0.Value - n);`.
 
 ### R24.13 What is trusted
 
@@ -6518,6 +6554,129 @@ for hashing:
 The R21.5 bindings that attach these to the BCL's members live in the harness
 (`pal/HashCommon/Bindings.cs`). `Pulse.Lib.CSharp.NullableArray` and
 `Pulse.Lib.CSharp.HashChain` are proved, and assume nothing.
+
+`Pulse.Lib.CSharp.Null.is_null` (`x == null` at a type parameter) is a trusted `val`
+shared with R25.4. The harness's `ThrowHelper` (`pal/common/ThrowHelper.cs`) is a
+stand-in whose members only throw. Choosing the 32-bit bucket computation (above) is
+an assumption about which path is verified, not a fact the proof establishes.
+
+### R24.14 `return` inside a loop
+
+A `return e` inside a `while`/`for` body sets a "returned" flag and a result cell, and
+then leaves the loop. The loop condition is conjoined with `!returned`, and the code after
+the loop runs only when the flag is clear; when it is set, the method returns the cell.
+So a loop's invariant has to say what a return inside it established:
+
+- `Pal.Returned()` is the flag. Using it outside a loop is an error (PALCS0645).
+- `Pal.Result<T>()` inside a loop invariant is the result cell.
+
+The usual shape is `Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && …))`.
+If a loop has no `break` of its own, the loop breaks on the flag itself (R5.10), so after
+the loop "not returned" means "the condition failed". If the loop does have its own
+`break`, that `break` keeps its separate cell.
+
+### R24.15 `typeof(T)`
+
+When `System.Type` has an R21.5 binding (the hashing harness binds it), `typeof(T)` is
+`Equality.type_of T`, an opaque handle. It is never null, whatever the nullable context says.
+`typeof(T).IsValueType` is then the bound function applied to that handle.
+
+### R24.16 Unsigned indices and counters
+
+An array index of type `uint`, `long`, `ulong`, `nint` or `nuint` is converted to `int`
+(`(uint)h % (uint)len` is an index below `len`, so the conversion is exact). The proof
+obligation is that the value fits, and F* warns that `uint32_to_int32` is deprecated
+(PALCS0601). The `1` in `x++`/`x--` has `x`'s type, so a `uint` counter adds `1ul`.
+
+### R24.17 Specification functions defined in F*
+
+A `[Spec]` method may carry `[PulseBody("…")]`. Its F* definition is the given text, with
+`$(p)` naming a parameter (R4.9), and its C# body (conventionally `=> throw …`) is not
+looked at. A `bool` result is a `prop`, and a machine-integer result is an `int`. This
+is how a theory that is proved in F* (`Pulse.Lib.CSharp.HashChain`: chain
+well-formedness, membership, the chain-search invariant) is named from C#.
+
+Only a `[Spec]` or `[Lemma]` method's body is skipped this way; a code method with
+`[PulseBody]` is still lowered, so a code method with two bodies is still refused
+(PALCS0503).
+
+Such a function is not an observation (R9.21). A class module opens the spec-function
+modules named by its invariants, model, refinements and observations, and so does every
+method that takes the class, because the method unfolds the invariant.
+
+The contracts of a `private` member may name the class's private members and nested types,
+the same way an invariant may (R24.3). The shim for the contract is bound with accessibility
+checks off. Inside a shim the helpers are reached as `C<T>.Name(…)`.
+
+### R24.18 Specification values in a `[Spec]` struct
+
+A `[Spec]` struct (R3.9a) may hold a field of a `[SpecType]` or bound type, and `T?` of
+one. An example is the comparer, `IEqualityComparer<T>?`, in `HashSetModel<T>`. These are
+pure F* values, so they own nothing. A public contract then reads the comparer through
+an observation of the model (`@this.SpecComparer`) rather than through the private field.
+
+### R24.19 A local copy of an array field
+
+`T[]? a = _field;`, at the head of a method, is another name for the field. The rule
+applies when the local is never assigned or passed by `ref`/`out` (writing an element is
+fine: it writes the field's array), and when nothing in its scope assigns that field or
+calls another instance method of the class. Every use of `a`, in code and in
+specifications, is then the field. Without the rule the local is a cell holding a
+reference, and nothing would tell the verifier that this reference is the one the class
+invariant describes.
+
+### R24.20 Static members of generic library types
+
+A static member of a generic type bound by R21.5 (`EqualityComparer<T>.Default`) takes the
+type's arguments as its leading explicit arguments (`default_comparer T`). If the library
+declares the member non-nullable, it is not an `option` even in a nullable-oblivious
+specification.
+
+### R24.21 A field of an array element
+
+`a[i].f = v`, for `a` an array of a code struct, reads the element, and writes it back
+with the field replaced: `write a i { cur with f = v }`. It counts as a write of the
+array, not of the struct, so it is what a loop's frame and R5.12's representation see.
+Through a `ref` local (R24.8), `entry.Next = …` is the same write.
+
+### R24.22 Immutable locals in loop invariants
+
+A local that is bound once (R5.2a), and a ghost local (R24.12), may be named by a loop's
+invariants and measure. It is the same value at every iteration, so it is bound in the
+invariant's scope as itself, as it already is in the body. `Remove`'s invariant can then
+say `_comparer == comparer` of the local it hashes with.
+
+### R24.23 `x!` and `x is null` at the translation's types
+
+`x!` is transparent (R10.5) except where `x` is an `option` (a nullable reference of a
+bound type, such as `IEqualityComparer<T>?`): there C# types `x!` at the non-nullable
+type, and its translation is the value, `Some?.v x`. The refinement of `Some?.v` is the
+proof obligation that `x` is not null. This is how `comparer!.GetHashCode(item)` reads.
+
+`x is null` and `x is not null`, for `x` of a type with an opaque null (R25.4: a type
+parameter that may be instantiated at a reference type), test `is_null x`. Before this
+rule they were the constant `false`, which is unsound for a `T` instantiated at a
+reference type; `HashSet<T>` hashes `item is not null ? comparer.GetHashCode(item) : 0`.
+
+### R24.24 A loop arm that writes a field
+
+A loop body is in tail position (R5.8d). When one of its statements, other than the last,
+is an `if` with an arm that assigns a field of the receiver, the statements that follow
+are moved into both arms. Statements after an escape (R5.10, R24.14) are still guarded by
+the escape test, again in tail position. Each arm is then checked against the loop
+invariant rather than joined first. Pulse joins differing record values as a `match` on
+the condition. No array field can then be found through a projection of that `match`.
+`Remove`'s found arm writes `_freeList` and `_freeCount` and returns, and needs this rule.
+
+### R24.25 Nullable arrays are matched by their reference
+
+`Pulse.Lib.CSharp.NullableArray.pts_to`, the resource for an array that may be null, marks
+the array as its matching key (`[@@@mkey]`), as `Pulse.Lib.Array.pts_to` does. Pulse then
+finds the resource by its reference and proves the contents and permission equal by SMT,
+rather than by unification. It matters after an `if` whose arms write different arrays
+(`bucket = …` in one arm, `entries[last].Next = …` in the other). Pulse's join states each
+array's contents as a `match` on the condition, and unification cannot equate that with
+either arm's contents.
 
 ## 25. Sorted collections
 

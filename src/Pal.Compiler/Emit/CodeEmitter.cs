@@ -935,7 +935,7 @@ public sealed class CodeEmitter(
         {
             if (stmt is IrAssign a)
             {
-                switch (a.Target)
+                switch (Normalize.ElementTarget(a.Target))
                 {
                     case IrField { Receiver: IrVar { Name: Names.This }, Field: var f }:
                         record = true;
@@ -2015,6 +2015,23 @@ public sealed class CodeEmitter(
                 return;
             }
 
+            // R24.21. `a[i].f = v` on an array of structs: read the element, replace the
+            // field, write the element back.
+            case IrField efield when Normalize.ElementTarget(efield) is IrElement el:
+            {
+                if (el.Array is IrVar eav && _slots.TryGetValue(eav.Name, out var earr) && ReadOnly(earr, a.Loc)) return;
+                var array = Expr(el.Array);
+                var index = Expr(el.Index);
+                var value = Expr(a.Value);
+                var current = Fresh();
+                WithArrays([(el.Array, array)], () =>
+                {
+                    Line($"let {current} = {(IsSpan(el.Array) ? "Span." : "")}read {array} {index};");
+                    Line($"{(IsSpan(el.Array) ? "Span." : "")}write {array} {index} {Update(current, efield, value, a.Loc)};");
+                });
+                return;
+            }
+
             // R3.6. A C# field assignment on a value type replaces the whole value, so
             // it becomes an update of the cell the value lives in.
             case IrField field when Root(field) is { } root &&
@@ -2066,7 +2083,7 @@ public sealed class CodeEmitter(
     /// <summary>The pure projection path from a root binder down to a field access.</summary>
     private string Path(string root, IrExpr expr, IrLoc loc)
     {
-        if (expr is IrVar) return root;
+        if (expr is IrVar or IrElement) return root;
         if (expr is IrField f && f.Receiver.Type is IrNamedType named)
             return $"{Path(root, f.Receiver, loc)}.{Names.Projection(named.Name, f.Field)}";
         diagnostics.Unsupported(loc, "This assignment target");
@@ -2370,6 +2387,12 @@ public sealed class CodeEmitter(
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
         }
 
+        // R24.22. A name that owns nothing -- an immutable local, a ghost local -- holds
+        // one value for the whole loop, and the invariant may mention it as such.
+        foreach (var (name, slot) in _slots)
+            if (!slot.Owns && !_objects.Any(o => o.Name == name) && !scope.TryGet(name, out _))
+                scope.Bind(name, new Term(slot.Binder, MethodPlan.KindOf(slot.Type), slot.Type));
+
         // R5.12. Everything R4.10 opened has to be carried across the loop.
         var pure = ImmutableArray.CreateBuilder<string>();
         var repFixed = new List<(string Name, string Resource)>();
@@ -2400,7 +2423,13 @@ public sealed class CodeEmitter(
         var outerEscape = _escape;
         _escape = brkCell is null && contCell is null ? null : new Escape(brkCell, contCell);
 
-        if (brkCell is not null)
+        // R24.14. A loop whose every `break` is a `return`'s breaks on `palReturned`, so
+        // that after the loop "not returned" is "the guard failed".
+        var breakIsReturn = brkCell is not null && w.BreakIsReturn;
+        if (breakIsReturn) brkCell = Names.Local(Names.LoopReturned);
+        _escape = brkCell is null && contCell is null ? null : new Escape(brkCell, contCell);
+
+        if (brkCell is not null && !breakIsReturn)
         {
             Line($"let mut {brkCell} = false;");
             var value = FreshValue("brk");
@@ -2466,7 +2495,7 @@ public sealed class CodeEmitter(
         // write — is therefore typable in tail position and untypable one statement short of
         // it. Emitting the branch as a tail rather than terminating it with `()` is what
         // closes that gap, and it is the same rule the method case already applies.
-        if (w.Step.IsEmpty && brkCell is null && contCell is null)
+        if (w.Step.IsEmpty && (brkCell is null && contCell is null || SplitsRecordWrite(w.Body)))
         {
             UnitTail(w.Body, plan);
             _indent--;
@@ -2752,6 +2781,49 @@ public sealed class CodeEmitter(
     /// the window's closing lemma is emitted by the non-tail path, and moving it would be a
     /// change to R10.7 rather than to where a block ends.</para>
     /// </summary>
+    /// <summary>
+    /// R5.8d, R24.24. A loop body's statements in tail position. Where one may escape, what
+    /// follows it is guarded and is itself in tail position; an <c>if</c> one of whose arms
+    /// writes a field of the receiver takes what follows into both arms, so that each arm is
+    /// checked against the invariant rather than joined first: Pulse joins the record as a
+    /// <c>match</c>, through whose projection no array field can then be found.
+    /// </summary>
+    private void UnitTailSequence(ImmutableArray<IrStmt> statements, MethodPlan plan)
+    {
+        for (var k = 0; k < statements.Length; k++)
+        {
+            var rest = statements.RemoveRange(0, k + 1);
+            if (rest.IsEmpty) { UnitTail(statements[k], plan); return; }
+            if (statements[k] is IrIf i && WritesRecordInArm(i) && NullTest(i.Cond) is null)
+            {
+                IrBlock Arm(IrStmt? arm, IrLoc loc) =>
+                    new(loc, [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest]);
+                UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan);
+                return;
+            }
+            Statement(statements[k], plan);
+            if (_escape is not null && MayEscape(statements[k]))
+            {
+                Line($"if ({EscapeTest()}) {{");
+                _indent++;
+                UnitTailSequence(rest, plan);
+                _indent--;
+                Line("} else { () }");
+                return;
+            }
+        }
+        Line("()");
+    }
+
+    /// <summary>R24.24. Whether some arm of an <c>if</c> assigns a field of the receiver.</summary>
+    private bool WritesRecordInArm(IrIf i) =>
+        ReceiverWrites(i.Then).Record || i.Else is { } e && ReceiverWrites(e).Record;
+
+    /// <summary>R24.24. Whether a loop body has an <c>if</c>, not last, that R24.24 splits.</summary>
+    private bool SplitsRecordWrite(IrStmt body) =>
+        body is IrBlock b && b.Statements.Length > 1 &&
+        b.Statements.RemoveAt(b.Statements.Length - 1).Any(s => s is IrIf i && WritesRecordInArm(i));
+
     private void UnitTail(IrStmt stmt, MethodPlan plan)
     {
         switch (stmt)
@@ -2761,11 +2833,7 @@ public sealed class CodeEmitter(
                 return;
 
             case IrBlock b:
-                Scoped(() =>
-                {
-                    Sequence(b.Statements.RemoveAt(b.Statements.Length - 1), plan);
-                    UnitTail(b.Statements[^1], plan);
-                }, dropAtEnd: false);
+                Scoped(() => UnitTailSequence(b.Statements, plan), dropAtEnd: false);
                 return;
 
             case IrIf { Else: not null } i when NullTest(i.Cond) is null:
@@ -2908,6 +2976,17 @@ public sealed class CodeEmitter(
             case GhostKind.Raw:
                 Line(Antiquotation.Expand(g.Text!, scope, Binder) + ";");
                 return;
+            case GhostKind.Let:
+            {
+                var inner = g.Type is IrGhostType gt ? gt.Inner : g.Type!;
+                // R24.12. A snapshot is a specification value, and a machine integer in a
+                // specification is its mathematical value.
+                if (inner is IrPrim { IsMachineInt: true }) inner = new IrPrim(PrimKind.SpecInt);
+                Line($"let {g.Text} : erased ({Types.Render(inner)}) = " +
+                     $"hide ({SpecArgument(g.Prop!, inner, scope)});");
+                _slots[g.Text!] = new Slot(g.Text!, inner, SlotKind.Value, g.Text!);
+                return;
+            }
             case GhostKind.LemmaCall when g.Prop is IrCall call:
                 // R14.5. A generic [Lemma] is applied to its type arguments first.
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +

@@ -174,6 +174,22 @@ loop ran to completion**. If your contract needs that, carry the exit condition 
 guard instead — `while (i < n && !done)` rather than `if (…) break;`. `test/compare_elements`
 does exactly this and says why.
 
+A `return` inside a loop is supported too (translation.md R24.14). Its flag *can* be named,
+inside the loop: `Pal.Returned()` is whether a `return` in the loop has run, and
+`Pal.Result<T>()` is the value it returned. The invariant says what a `return` established:
+
+```csharp
+while (i < a.Length)
+{
+    Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && Pal.Contents(a)[Pal.Result<int>()] == x));
+    …
+    if (a[i] == x) return i;
+    i++;
+}
+```
+
+`Pal.Returned()` outside a loop is an error (`PALCS0645`).
+
 ### 2.2 Cursors
 
 A loop that walks a linked structure owns a different part of it on each iteration. The
@@ -718,6 +734,11 @@ Without that `Ensures`, a caller of `Wrap` would learn only that the result is i
 type property. With it, the caller knows *which* index it is, which is the property the
 rest of the proof needs.
 
+**A `[Spec]` function may be defined in F*** when its theory is proved there:
+`[Spec][PulseBody("HashChain.wf $(buckets) $(entries)")] static bool Wf(Seq<int> buckets,
+Seq<Entry> entries) => throw new InvalidOperationException();`. The text is the definition,
+with `$(p)` for a parameter; the C# body is not looked at (translation.md R24.17).
+
 **Keep a predicate total if a loop invariant will mention it.** A `[Requires]` on a `[Spec]`
 function becomes a refinement that must be discharged *wherever the predicate appears* —
 including when the loop invariant is first established, where the counter is often still
@@ -813,6 +834,10 @@ xs.Length")]` — because a spec string is bound against parameters that are alr
 unwrapped. In a *statement*-position specification (`Pal.Invariant`, `Pal.Decreases`, a
 `[Lemma]` argument) you are writing ordinary C#, where `Ghost<T>` is a real type, so write
 `xs.Value`. The `.Value` is transparent: it means exactly what `xs` means.
+
+A `Ghost<T>` *local*, initialised and never assigned, is a snapshot: `Ghost<Seq<int>> before
+= Pal.Contents(a);` names the contents at that point for later ghost statements, and has no
+run-time existence (translation.md R24.12).
 
 ---
 

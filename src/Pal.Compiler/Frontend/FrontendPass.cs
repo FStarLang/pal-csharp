@@ -658,7 +658,15 @@ public static partial class FrontendPass
     /// the spec-only types, and no wider: a ghost value still cannot own a resource, so an
     /// array or a class reference is refused here as it is there.
     /// </summary>
-    private static bool IsSpecField(IrType type) => type is IrPrim or IrNamedType or IrSeqType || Sorted.IsComparer(type);
+    private static bool IsSpecField(IrType type) => type switch
+    {
+        IrPrim or IrNamedType or IrSeqType => true,
+        // R24.18. A `[SpecType]`/`[SpecBinding]` value is a pure F* value (an equality
+        // comparer, say), and so is `T?` of one: neither owns a resource.
+        IrUserSpecType => true,
+        IrOptionType { Inner: IrUserSpecType } => true,
+        _ => Sorted.IsComparer(type),
+    };
 
     /// <summary>
     /// R3.4: a refinement is bound with the struct's fields in scope as simple names,
@@ -1165,7 +1173,9 @@ public static partial class FrontendPass
                 continue;
             }
 
+            // R24.17: a `[PulseBody]` spec function has no C# body to observe through.
             if (Declarations.Has(member, known.SpecAttribute) &&
+                !Declarations.Has(member, known.PulseBodyAttribute) &&
                 Body(member) is { } observationBody &&
                 ReturnTypeOf(member) is { } observationType)
             {
@@ -1986,6 +1996,7 @@ public static partial class FrontendPass
                     Usings: usings)
                 {
                     TypeParameters = MethodTypeParameters(candidate.Symbol),
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private,
                 });
             }
 
@@ -2328,7 +2339,12 @@ public static partial class FrontendPass
         // something the translation does not depend on. That is what lets a trusted method
         // call code that is not translated at all -- the reason to admit it.
         var admitted = Declarations.Has(symbol, known.AdmitAttribute);
-        var body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+        // R24.17. A `[Spec]` (or `[Lemma]`) function's `[PulseBody]` replaces its C# body,
+        // which is then never looked at: it has `=> throw …` or `{ }` for C# to compile.
+        // On any other method both are kept, and the pair is refused (PALCS0503).
+        var verbatim = Declarations.Has(symbol, known.PulseBodyAttribute) &&
+                       (Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute));
+        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
@@ -2359,7 +2375,7 @@ public static partial class FrontendPass
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures],
             specs.Decreases,
-            admitted ? null : trimmed ?? body)
+            admitted || verbatim ? null : trimmed ?? body)
         {
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
@@ -2405,6 +2421,16 @@ public static partial class FrontendPass
         var bodyExpression = candidate.ExpressionBody?.Expression
             ?? BlockOf(candidate.Syntax)?.Statements
                 .OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression;
+
+        // R24.17. A `[Spec]` function may be defined in F*: `[PulseBody]` is its body, and
+        // the C# body (`=> throw …`) is not looked at.
+        if (Declarations.Find(candidate.Symbol, known.PulseBodyAttribute) is { } verbatim)
+            return new IrSpecFunction(loc, Naming.Of(candidate.Symbol), parameters, returnType,
+                specs.Requires, new IrLiteral(loc, true) { Type = IrPrim.Bool })
+            {
+                TypeParameters = MethodTypeParameters(candidate.Symbol),
+                PulseBody = Declarations.StringArgument(verbatim),
+            };
 
         if (bodyExpression is null)
         {
