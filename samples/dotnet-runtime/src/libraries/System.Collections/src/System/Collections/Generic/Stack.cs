@@ -24,6 +24,8 @@ namespace System.Collections.Generic
         public SpecInt Capacity;
         /// <summary>The whole backing store, of which <c>Items</c> is a prefix.</summary>
         public Seq<T> Store;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
     }
 
     // A simple stack of objects.  Internally it is implemented as an array,
@@ -53,6 +55,7 @@ namespace System.Collections.Generic
             Items = Pal.Slice(Pal.Contents(_array), 0, _size),
             Capacity = _array.Length,
             Store = Pal.Contents(_array),
+            Version = _version,
         };
 
         /// <summary>The elements, bottom first: the top of the stack is the last.</summary>
@@ -67,6 +70,9 @@ namespace System.Collections.Generic
 
         [Spec]
         public Seq<T> SpecStore => Model.Store;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
 
         [Ensures("@this.SpecCount == 0")]
         [Ensures("@this.SpecCapacity == 0")]
@@ -214,9 +220,12 @@ namespace System.Collections.Generic
         }
 
         // Returns an IEnumerator for this Stack.
+        [Ensures("ReferenceEquals(Result._stack, @this) && Result._version == @this.SpecVersion && Result._index == @this.SpecCount")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
         /// <internalonly/>
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((Stack<T>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._stack, @this) && e._version == @this.SpecVersion && e._index == @this.SpecCount))")]
         IEnumerator<T> IEnumerable<T>.GetEnumerator() =>
             Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<T>() :
             GetEnumerator();
@@ -456,6 +465,7 @@ namespace System.Collections.Generic
             private int _index;
             private T? _currentElement;
 
+            [Ensures("ReferenceEquals(@this._stack, stack) && @this._version == stack.SpecVersion && @this._index == stack.SpecCount")]
             internal Enumerator(Stack<T> stack)
             {
                 _stack = stack;
@@ -464,8 +474,16 @@ namespace System.Collections.Generic
                 _currentElement = default;
             }
 
+            [Ensures("@this._index == -1")]
             public void Dispose() => _index = -1;
 
+            [Requires("-1 <= @this._index && @this._index <= @this._stack.SpecCount")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._stack.SpecVersion")]
+            [Ensures("@this._version == @this._stack.SpecVersion")]
+            [Ensures("-1 <= @this._index && @this._index <= @this._stack.SpecCount")]
+            [Ensures("Result == (0 < Pal.Old(@this._index))")]
+            [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) - 1 && Pal.Same(@this._currentElement, @this._stack.Items[@this._index]))")]
+            [Ensures("Pal.Implies(!Result, @this._index == -1)")]
             public bool MoveNext()
             {
                 if (_version != _stack._version)
@@ -488,10 +506,14 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._currentElement)")]
             public T Current => _currentElement!;
 
+            [Ensures("Pal.Boxes(Result, @this._currentElement)")]
             object? System.Collections.IEnumerator.Current => Current;
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._stack.SpecVersion")]
+            [Ensures("@this._version == @this._stack.SpecVersion && @this._index == @this._stack.SpecCount")]
             void IEnumerator.Reset()
             {
                 if (_version != _stack._version)
@@ -503,6 +525,9 @@ namespace System.Collections.Generic
                 _currentElement = default;
             }
 
+            [DoesNotReturn]
+            [Throws(typeof(InvalidOperationException))]
+            [Ensures("false")]
             private static void ThrowInvalidVersion() => throw new InvalidOperationException(SR.InvalidOperation_EnumFailedVersion);
         }
     }

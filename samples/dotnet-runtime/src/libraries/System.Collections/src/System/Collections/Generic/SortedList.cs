@@ -16,6 +16,8 @@ namespace System.Collections.Generic
         public Seq<TValue> Values;
         public SpecInt Capacity;
         public IComparer<TKey> Comparer;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
     }
 
     // The SortedDictionary class implements a generic sorted list of keys
@@ -88,6 +90,7 @@ namespace System.Collections.Generic
             Values = Pal.Slice(Pal.Contents(values), 0, _size),
             Capacity = keys.Length,
             Comparer = comparer,
+            Version = version,
         };
 
         /// <summary>The keys, in strictly ascending order under <see cref="SpecComparer"/>.</summary>
@@ -100,6 +103,9 @@ namespace System.Collections.Generic
 
         [Spec]
         public SpecInt SpecCount => Model.Keys.Length;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
 
         [Spec]
         public SpecInt SpecCapacity => Model.Capacity;
@@ -426,8 +432,10 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("ReferenceEquals(Result._dict, @this)")]
         private KeyList GetKeyListHelper() => keyList ??= new KeyList(this);
 
+        [Ensures("ReferenceEquals(Result._dict, @this)")]
         private ValueList GetValueListHelper() => valueList ??= new ValueList(this);
 
         bool ICollection<KeyValuePair<TKey, TValue>>.IsReadOnly
@@ -629,12 +637,20 @@ namespace System.Collections.Generic
             version++;
         }
 
+        [Ensures("Pal.Exists((SortedList<TKey, TValue>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._sortedList, @this) && e._version == @this.SpecVersion && e._index == 0 && " +
+            "e._getEnumeratorRetType == SortedList<TKey, TValue>.Enumerator.KeyValuePair)")]
         public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator() => new Enumerator(this, Enumerator.KeyValuePair);
 
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((SortedList<TKey, TValue>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._sortedList, @this) && e._version == @this.SpecVersion && e._index == 0 && e._getEnumeratorRetType == SortedList<TKey, TValue>.Enumerator.KeyValuePair))")]
         IEnumerator<KeyValuePair<TKey, TValue>> IEnumerable<KeyValuePair<TKey, TValue>>.GetEnumerator() =>
             Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<KeyValuePair<TKey, TValue>>() :
             GetEnumerator();
 
+        [Ensures("Pal.Exists((SortedList<TKey, TValue>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._sortedList, @this) && e._version == @this.SpecVersion && e._index == 0 && " +
+            "e._getEnumeratorRetType == SortedList<TKey, TValue>.Enumerator.DictEntry)")]
         IDictionaryEnumerator IDictionary.GetEnumerator() => new Enumerator(this, Enumerator.DictEntry);
 
         IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<KeyValuePair<TKey, TValue>>)this).GetEnumerator();
@@ -885,6 +901,8 @@ namespace System.Collections.Generic
             internal const int KeyValuePair = 1;
             internal const int DictEntry = 2;
 
+            [Ensures("ReferenceEquals(@this._sortedList, sortedList) && @this._version == sortedList.SpecVersion && @this._index == 0")]
+            [Ensures("@this._getEnumeratorRetType == getEnumeratorRetType")]
             internal Enumerator(SortedList<TKey, TValue> sortedList, int getEnumeratorRetType)
             {
                 _sortedList = sortedList;
@@ -895,6 +913,7 @@ namespace System.Collections.Generic
                 _value = default;
             }
 
+            [Ensures("@this._index == 0")]
             public void Dispose()
             {
                 _index = 0;
@@ -902,6 +921,10 @@ namespace System.Collections.Generic
                 _value = default;
             }
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Boxes(Result, @this._key)")]
             object IDictionaryEnumerator.Key
             {
                 get
@@ -915,6 +938,17 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Requires("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion")]
+            [Ensures("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            [Ensures("Result == (Pal.Old(@this._index) < @this._sortedList.SpecCount)")]
+            [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && " +
+                "Pal.Same(@this._key, @this._sortedList.SpecKeys[Pal.Old(@this._index)]) && " +
+                "Pal.Same(@this._value, @this._sortedList.SpecValues[Pal.Old(@this._index)]))")]
+            [Ensures("Pal.Implies(!Result, @this._index == @this._sortedList.SpecCount + 1)")]
             public bool MoveNext()
             {
                 if (_version != _sortedList.version) throw new InvalidOperationException(SR.InvalidOperation_EnumFailedVersion);
@@ -933,6 +967,10 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Boxes(Result.Key, @this._key) && Pal.Boxes(Result.Value, @this._value)")]
             DictionaryEntry IDictionaryEnumerator.Entry
             {
                 get
@@ -946,8 +984,14 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Ensures("Pal.Same(Result.Key, @this._key) && Pal.Same(Result.Value, @this._value)")]
             public KeyValuePair<TKey, TValue> Current => new KeyValuePair<TKey, TValue>(_key!, _value!);
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Implies(@this._getEnumeratorRetType == SortedList<TKey, TValue>.Enumerator.DictEntry, Pal.Boxes(Result, new System.Collections.DictionaryEntry(@this._key, @this._value)))")]
+            [Ensures("Pal.Implies(@this._getEnumeratorRetType != SortedList<TKey, TValue>.Enumerator.DictEntry, Pal.Boxes(Result, new KeyValuePair<TKey, TValue>(@this._key, @this._value)))")]
             object? IEnumerator.Current
             {
                 get
@@ -968,6 +1012,10 @@ namespace System.Collections.Generic
                 }
             }
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Boxes(Result, @this._value)")]
             object? IDictionaryEnumerator.Value
             {
                 get
@@ -981,6 +1029,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion && @this._index == 0")]
             void IEnumerator.Reset()
             {
                 if (_version != _sortedList.version)
@@ -1001,18 +1051,30 @@ namespace System.Collections.Generic
             private readonly int _version;
             private TKey? _currentKey;
 
+            [Ensures("ReferenceEquals(@this._sortedList, sortedList) && @this._version == sortedList.SpecVersion && @this._index == 0")]
             internal SortedListKeyEnumerator(SortedList<TKey, TValue> sortedList)
             {
                 _sortedList = sortedList;
                 _version = sortedList.version;
             }
 
+            [Ensures("@this._index == 0")]
             public void Dispose()
             {
                 _index = 0;
                 _currentKey = default;
             }
 
+            [Requires("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion")]
+            [Ensures("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            [Ensures("Result == (Pal.Old(@this._index) < @this._sortedList.SpecCount)")]
+            [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && " +
+                "Pal.Same(@this._currentKey, @this._sortedList.SpecKeys[Pal.Old(@this._index)]))")]
+            [Ensures("Pal.Implies(!Result, @this._index == @this._sortedList.SpecCount + 1)")]
             public bool MoveNext()
             {
                 if (_version != _sortedList.version)
@@ -1032,8 +1094,13 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._currentKey)")]
             public TKey Current => _currentKey!;
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Boxes(Result, @this._currentKey)")]
             object? IEnumerator.Current
             {
                 get
@@ -1047,6 +1114,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion && @this._index == 0")]
             void IEnumerator.Reset()
             {
                 if (_version != _sortedList.version)
@@ -1065,18 +1134,30 @@ namespace System.Collections.Generic
             private readonly int _version;
             private TValue? _currentValue;
 
+            [Ensures("ReferenceEquals(@this._sortedList, sortedList) && @this._version == sortedList.SpecVersion && @this._index == 0")]
             internal SortedListValueEnumerator(SortedList<TKey, TValue> sortedList)
             {
                 _sortedList = sortedList;
                 _version = sortedList.version;
             }
 
+            [Ensures("@this._index == 0")]
             public void Dispose()
             {
                 _index = 0;
                 _currentValue = default;
             }
 
+            [Requires("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion")]
+            [Ensures("0 <= @this._index && @this._index <= @this._sortedList.SpecCount + 1")]
+            [Ensures("Result == (Pal.Old(@this._index) < @this._sortedList.SpecCount)")]
+            [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && " +
+                "Pal.Same(@this._currentValue, @this._sortedList.SpecValues[Pal.Old(@this._index)]))")]
+            [Ensures("Pal.Implies(!Result, @this._index == @this._sortedList.SpecCount + 1)")]
             public bool MoveNext()
             {
                 if (_version != _sortedList.version)
@@ -1096,8 +1177,13 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._currentValue)")]
             public TValue Current => _currentValue!;
 
+            // Unreachable in practice: an array is never longer than Array.MaxLength.
+            [Requires("@this._sortedList.SpecCount < int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._sortedList.SpecCount + 1")]
+            [Ensures("Pal.Boxes(Result, @this._currentValue)")]
             object? IEnumerator.Current
             {
                 get
@@ -1111,6 +1197,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._sortedList.SpecVersion")]
+            [Ensures("@this._version == @this._sortedList.SpecVersion && @this._index == 0")]
             void IEnumerator.Reset()
             {
                 if (_version != _sortedList.version)
@@ -1129,16 +1217,19 @@ namespace System.Collections.Generic
         {
             private readonly SortedList<TKey, TValue> _dict; // Do not rename (binary serialization)
 
+            [Ensures("ReferenceEquals(@this._dict, dictionary)")]
             internal KeyList(SortedList<TKey, TValue> dictionary)
             {
                 _dict = dictionary;
             }
 
+            [Ensures("Result == @this._dict.SpecCount")]
             public int Count
             {
                 get { return _dict._size; }
             }
 
+            [Ensures("Result")]
             public bool IsReadOnly
             {
                 get { return true; }
@@ -1154,21 +1245,30 @@ namespace System.Collections.Generic
                 get { return ((ICollection)_dict).SyncRoot; }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Add(TKey key)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Clear()
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
             }
 
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+            [Ensures("Result == (Pal.KeyIndex(@this._dict.SpecComparer, @this._dict.SpecKeys, key) >= 0)")]
             public bool Contains(TKey key)
             {
                 return _dict.ContainsKey(key);
             }
 
+            [Requires("arrayIndex >= 0 && arrayIndex + @this._dict.SpecCount <= Pal.Contents(array).Length")]
+            [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+            [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), arrayIndex, arrayIndex + @this._dict.SpecCount, @this._dict.SpecKeys)")]
             public void CopyTo(TKey[] array, int arrayIndex)
             {
                 // defer error checking to Array.Copy
@@ -1191,6 +1291,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Insert(int index, TKey value)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
@@ -1198,22 +1300,32 @@ namespace System.Collections.Generic
 
             public TKey this[int index]
             {
+                [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this._dict.SpecCount")]
+                [Ensures("0 <= index && index < @this._dict.SpecCount && Pal.Same(Result, @this._dict.SpecKeys[index])")]
                 get
                 {
                     return _dict.GetKeyAtIndex(index);
                 }
+                [Throws(typeof(NotSupportedException))]
+                [Ensures("false")]
                 set
                 {
                     throw new NotSupportedException(SR.NotSupported_KeyCollectionSet);
                 }
             }
 
+            [Ensures("Pal.Implies(@this._dict.SpecCount != 0, Pal.Exists((SortedList<TKey, TValue>.SortedListKeyEnumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._sortedList, @this._dict) && e._version == @this._dict.SpecVersion && e._index == 0))")]
             public IEnumerator<TKey> GetEnumerator() =>
                 Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<TKey>() :
                 new SortedListKeyEnumerator(_dict);
 
+            [Ensures("Pal.Implies(@this._dict.SpecCount != 0, Pal.Exists((SortedList<TKey, TValue>.SortedListKeyEnumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._sortedList, @this._dict) && e._version == @this._dict.SpecVersion && e._index == 0))")]
             IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+            [Ensures("Result == Pal.KeyIndex(@this._dict.SpecComparer, @this._dict.SpecKeys, key)")]
             public int IndexOf(TKey key)
             {
                 ArgumentNullException.ThrowIfNull(key);
@@ -1224,12 +1336,16 @@ namespace System.Collections.Generic
                 return -1;
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public bool Remove(TKey key)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
                 // return false;
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void RemoveAt(int index)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
@@ -1243,16 +1359,19 @@ namespace System.Collections.Generic
         {
             private readonly SortedList<TKey, TValue> _dict; // Do not rename (binary serialization)
 
+            [Ensures("ReferenceEquals(@this._dict, dictionary)")]
             internal ValueList(SortedList<TKey, TValue> dictionary)
             {
                 _dict = dictionary;
             }
 
+            [Ensures("Result == @this._dict.SpecCount")]
             public int Count
             {
                 get { return _dict._size; }
             }
 
+            [Ensures("Result")]
             public bool IsReadOnly
             {
                 get { return true; }
@@ -1268,21 +1387,29 @@ namespace System.Collections.Generic
                 get { return ((ICollection)_dict).SyncRoot; }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Add(TValue key)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Clear()
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
             }
 
+            [Ensures("Result == (Pal.IndexOf(@this._dict.SpecValues, value) >= 0)")]
             public bool Contains(TValue value)
             {
                 return _dict.ContainsValue(value);
             }
 
+            [Requires("arrayIndex >= 0 && arrayIndex + @this._dict.SpecCount <= Pal.Contents(array).Length")]
+            [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+            [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), arrayIndex, arrayIndex + @this._dict.SpecCount, @this._dict.SpecValues)")]
             public void CopyTo(TValue[] array, int arrayIndex)
             {
                 // defer error checking to Array.Copy
@@ -1305,6 +1432,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void Insert(int index, TValue value)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
@@ -1312,33 +1441,46 @@ namespace System.Collections.Generic
 
             public TValue this[int index]
             {
+                [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this._dict.SpecCount")]
+                [Ensures("0 <= index && index < @this._dict.SpecCount && Pal.Same(Result, @this._dict.SpecValues[index])")]
                 get
                 {
                     return _dict.GetValueAtIndex(index);
                 }
+                [Throws(typeof(NotSupportedException))]
+                [Ensures("false")]
                 set
                 {
                     throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
                 }
             }
 
+            [Ensures("Pal.Implies(@this._dict.SpecCount != 0, Pal.Exists((SortedList<TKey, TValue>.SortedListValueEnumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._sortedList, @this._dict) && e._version == @this._dict.SpecVersion && e._index == 0))")]
             public IEnumerator<TValue> GetEnumerator() =>
                 Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<TValue>() :
                 new SortedListValueEnumerator(_dict);
 
+            [Ensures("Pal.Implies(@this._dict.SpecCount != 0, Pal.Exists((SortedList<TKey, TValue>.SortedListValueEnumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._sortedList, @this._dict) && e._version == @this._dict.SpecVersion && e._index == 0))")]
             IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
+            [Ensures("Result == Pal.IndexOf(@this._dict.SpecValues, value)")]
             public int IndexOf(TValue value)
             {
                 return Array.IndexOf(_dict.values, value, 0, _dict.Count);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public bool Remove(TValue value)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);
                 // return false;
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             public void RemoveAt(int index)
             {
                 throw new NotSupportedException(SR.NotSupported_SortedListNestedWrite);

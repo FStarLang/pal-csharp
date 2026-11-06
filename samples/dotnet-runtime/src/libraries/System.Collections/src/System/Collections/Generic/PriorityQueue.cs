@@ -19,6 +19,8 @@ namespace System.Collections.Generic
         public Seq<(TElement Element, TPriority Priority)> Store;
         public SpecInt Size;
         public IComparer<TPriority>? Order;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
     }
 
     /// <summary>
@@ -75,6 +77,7 @@ namespace System.Collections.Generic
             Store = Pal.Contents(_nodes),
             Size = _size,
             Order = _comparer,
+            Version = _version,
         };
 
         /// <summary>The whole backing array, whose first <see cref="SpecCount"/> nodes are <see cref="Items"/>.</summary>
@@ -87,6 +90,9 @@ namespace System.Collections.Generic
 
         [Spec]
         public SpecInt SpecCount => Model.Size;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
 
         [Spec]
         public SpecInt SpecCapacity => Model.Store.Length;
@@ -229,6 +235,7 @@ namespace System.Collections.Generic
         ///  The enumeration does not order items by priority, since that would require N * log(N) time and N space.
         ///  Items are instead enumerated following the internal array heap layout.
         /// </remarks>
+        [Ensures("ReferenceEquals(Result._queue, @this)")]
         public UnorderedItemsCollection UnorderedItems => field ??= new UnorderedItemsCollection(this);
 
         /// <summary>
@@ -1237,8 +1244,10 @@ namespace System.Collections.Generic
         {
             internal readonly PriorityQueue<TElement, TPriority> _queue;
 
+            [Ensures("ReferenceEquals(@this._queue, queue)")]
             internal UnorderedItemsCollection(PriorityQueue<TElement, TPriority> queue) => _queue = queue;
 
+            [Ensures("Result == @this._queue.SpecCount")]
             public int Count => _queue._size;
             object ICollection.SyncRoot => this;
             bool ICollection.IsSynchronized => false;
@@ -1288,6 +1297,7 @@ namespace System.Collections.Generic
                 private int _index;
                 private (TElement, TPriority) _current;
 
+                [Ensures("ReferenceEquals(@this._queue, queue) && @this._version == queue.SpecVersion && @this._index == 0")]
                 internal Enumerator(PriorityQueue<TElement, TPriority> queue)
                 {
                     _queue = queue;
@@ -1299,12 +1309,20 @@ namespace System.Collections.Generic
                 /// <summary>
                 /// Releases all resources used by the <see cref="Enumerator"/>.
                 /// </summary>
+                [Ensures("true")]
                 public void Dispose() { }
 
                 /// <summary>
                 /// Advances the enumerator to the next element of the <see cref="UnorderedItems"/>.
                 /// </summary>
                 /// <returns><see langword="true"/> if the enumerator was successfully advanced to the next element; <see langword="false"/> if the enumerator has passed the end of the collection.</returns>
+                [Requires("-1 <= @this._index && @this._index <= @this._queue.SpecCount")]
+                [Throws(typeof(InvalidOperationException), "@this._version != @this._queue.SpecVersion")]
+                [Ensures("@this._version == @this._queue.SpecVersion")]
+                [Ensures("-1 <= @this._index && @this._index <= @this._queue.SpecCount")]
+                [Ensures("Result == (0 <= Pal.Old(@this._index) && Pal.Old(@this._index) < @this._queue.SpecCount)")]
+                [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && Pal.Same(@this._current, @this._queue.Items[Pal.Old(@this._index)]))")]
+                [Ensures("Pal.Implies(!Result, @this._index == -1)")]
                 public bool MoveNext()
                 {
                     PriorityQueue<TElement, TPriority> localQueue = _queue;
@@ -1329,9 +1347,13 @@ namespace System.Collections.Generic
                 /// <summary>
                 /// Gets the element at the current position of the enumerator.
                 /// </summary>
+                [Ensures("Pal.Same(Result, @this._current)")]
                 public (TElement Element, TPriority Priority) Current => _current;
+                [Ensures("Pal.Boxes(Result, @this._current)")]
                 object IEnumerator.Current => _current;
 
+                [Throws(typeof(InvalidOperationException), "@this._version != @this._queue.SpecVersion")]
+                [Ensures("@this._version == @this._queue.SpecVersion && @this._index == 0")]
                 void IEnumerator.Reset()
                 {
                     if (_version != _queue._version)
@@ -1348,12 +1370,17 @@ namespace System.Collections.Generic
             /// Returns an enumerator that iterates through the <see cref="UnorderedItems"/>.
             /// </summary>
             /// <returns>An <see cref="Enumerator"/> for the <see cref="UnorderedItems"/>.</returns>
+            [Ensures("ReferenceEquals(Result._queue, @this._queue) && Result._version == @this._queue.SpecVersion && Result._index == 0")]
             public Enumerator GetEnumerator() => new Enumerator(_queue);
 
+            [Ensures("Pal.Implies(@this._queue.SpecCount != 0, Pal.Exists((PriorityQueue<TElement, TPriority>.UnorderedItemsCollection.Enumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._queue, @this._queue) && e._version == @this._queue.SpecVersion && e._index == 0))")]
             IEnumerator<(TElement Element, TPriority Priority)> IEnumerable<(TElement Element, TPriority Priority)>.GetEnumerator() =>
                 _queue.Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<(TElement Element, TPriority Priority)>() :
                 GetEnumerator();
 
+            [Ensures("Pal.Implies(@this._queue.SpecCount != 0, Pal.Exists((PriorityQueue<TElement, TPriority>.UnorderedItemsCollection.Enumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._queue, @this._queue) && e._version == @this._queue.SpecVersion && e._index == 0))")]
             IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<(TElement Element, TPriority Priority)>)this).GetEnumerator();
         }
     }
