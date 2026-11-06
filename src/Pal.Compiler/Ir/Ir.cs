@@ -598,6 +598,12 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     /// block, where its name is out of scope.
     /// </summary>
     public bool Immutable { get; init; }
+
+    /// <summary>
+    /// R27.41. A borrowing struct held in a local: for each object it owns, the field that
+    /// holds it, the local the object is held in, and its class.
+    /// </summary>
+    public ImmutableArray<(string Field, string Local, IrClassType Type)> Owned { get; init; } = [];
 }
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
@@ -802,6 +808,13 @@ public sealed record IrMethod(
     IrStmt? Body) : IrDecl(Loc, Name)
 {
     public bool IsLemma { get; init; }
+
+    /// <summary>
+    /// R27.42. An iterator method: its body is one whole enumeration, and it returns the
+    /// sequence of the values it yields — a specification value, which no verified code
+    /// receives, since calls to iterators are refused.
+    /// </summary>
+    public bool IsIterator { get; init; }
     /// <summary>R27.39. Set on a lambda lifted from a <c>[Callback]</c> argument.</summary>
     public IrLambdaInfo? Lambda { get; init; }
     public string? PulseBody { get; init; }

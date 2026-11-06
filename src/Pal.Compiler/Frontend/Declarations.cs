@@ -219,6 +219,13 @@ public static class Declarations
 
             if (node is InvocationExpressionSyntax call)
             {
+                // R27.41. A member of a borrowing struct held in a local writes the local,
+                // and takes the object it borrows read-only.
+                if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol held &&
+                    Borrowing.IsMember(held, known) &&
+                    call.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax heldLocal } &&
+                    model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol)
+                    continue;
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
                     !IsReadOnly(callee, model.Compilation, visiting, known))

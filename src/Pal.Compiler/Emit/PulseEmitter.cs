@@ -125,6 +125,9 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
 
     public bool Open { get; init; }
 
+    /// <summary>R27.41. For a folded receiver held at its heaps: the heap values a loop names.</summary>
+    public ImmutableArray<string> LoopHeaps { get; init; }
+
     /// <summary>R10.7. The reference, as a non-null one. Legal only in a window.</summary>
     // R10.2 (F76). A nullable reference and a non-nullable one are the same term: the
     // non-nullable type is the nullable one under a refinement, so "the non-null form of
@@ -178,6 +181,10 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
         // R27.23. An `[Open]` receiver is held as its record.
         SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
+        // R27.41. A receiver held at its heaps and not opened, carried across a loop at
+        // the heap values the loop names.
+        SlotKind.Object when Type is IrClassType c && !LoopHeaps.IsDefaultOrEmpty =>
+            $"{Names.ClassModule(c.Name)}.{Names.ClassInvHeap(c.Name)} {Binder} {Perm}{value} {string.Join(" ", LoopHeaps)}",
         SlotKind.Object when Type is IrClassType c && Index is not null =>
             $"{Names.ClassModule(c.Name)}.{Names.ClassInvAt(c.Name)} {Binder} {Index} " +
             $"{(Fraction ?? "1.0R")} {value}",
@@ -1099,6 +1106,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .SelectMany(Passes.Check.Subexpressions)
             .OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
         if (regions.Any(k => names.Contains(Frontend.Region.HeapName(k.Name)))) return regions;
+        // R27.41. A method that holds a borrowing struct of its object holds it at its heaps,
+        // which the struct's members are passed, as do the loops that name them.
+        if (m.Body is not null && Passes.Check.Statements(m.Body).Any(st =>
+                st is IrLocalDecl { Owned.IsDefaultOrEmpty: false } ||
+                Passes.Check.Expressions(st).SelectMany(Passes.Check.Subexpressions)
+                    .OfType<IrVar>().Any(v => regions.Any(k => v.Name == Frontend.Region.HeapName(k.Name)))))
+            return regions;
         return _heapsKept.Contains(m.Name) ? regions : [];
     }
 

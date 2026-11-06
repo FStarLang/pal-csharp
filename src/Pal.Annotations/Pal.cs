@@ -235,6 +235,12 @@ public static class Pal
     public static Seq<T> EmptySeq<T>() => throw Ghost();
 
     /// <summary>
+    /// R27.42. In an iterator method (one with <c>yield return</c>), the values it has
+    /// yielded so far; in its postcondition, all of them, in order.
+    /// </summary>
+    public static Seq<T> Yielded<T>() => throw Ghost();
+
+    /// <summary>
     /// R22.25. <c>EqualityComparer&lt;T&gt;.Default.Equals(x, y)</c>: the equality every
     /// collection without a comparer of its own uses. Nothing is known of it.
     /// </summary>

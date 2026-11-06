@@ -2498,6 +2498,10 @@ public static partial class FrontendPass
         var loc = Locations.From(candidate.Identifier);
 
         // §28. A member of a borrowing struct is a member of the borrowed object's class.
+        // R27.41. Its `[Spec]` properties are abbreviations, expanded where they are read.
+        if (Borrowing.IsMember(symbol, known) && symbol.AssociatedSymbol is IPropertySymbol bsp &&
+            Declarations.Has(bsp, known.SpecAttribute))
+            return null;
         if (Borrowing.IsMember(symbol, known))
             return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc);
 
@@ -2524,8 +2528,13 @@ public static partial class FrontendPass
         if (candidate.Kind == CalleeKind.Spec)
             return LowerSpecFunction(candidate, model, known, diagnostics, loc, parameters, specs);
 
+        // R27.42. An iterator method returns the sequence of the values it yields.
+        var iterated = Iterators.Element(symbol) is { } yieldedType ? known.MapType(yieldedType) : null;
+        if (Iterators.Element(symbol) is not null && !IteratorAdmissible(symbol, model, known, diagnostics, loc))
+            return null;
         var returnType = symbol.MethodKind == MethodKind.Constructor
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
+            : iterated is not null ? new IrSeqType(iterated)
             : known.MapType(symbol.ReturnType);
         if (returnType is null)
         {
@@ -2556,6 +2565,7 @@ public static partial class FrontendPass
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
         lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
+        if (iterated is not null) lowerer.Iterate(iterated);
 
         // R20.2. An `[Admit]`ted body is not translated: its contract is assumed, so the
         // body is never looked at, and refusing a construct in it would be refusing
@@ -2599,8 +2609,11 @@ public static partial class FrontendPass
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures],
             specs.Decreases,
-            admitted || verbatim ? null : trimmed ?? body)
+            admitted || verbatim ? null
+            : iterated is not null && (trimmed ?? body) is { } iteratorBody ? lowerer.WrapIterator(iteratorBody)
+            : trimmed ?? body)
         {
+            IsIterator = iterated is not null,
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
             Admit = admitted,
@@ -2630,6 +2643,30 @@ public static partial class FrontendPass
                 ? baseName
                 : null,
         };
+    }
+
+    /// <summary>
+    /// R27.42. An iterator method is verified as one whole enumeration, which is what a
+    /// client observes when nothing else runs while it enumerates — the iterator's state is
+    /// then its own. So the enumeration must not write what the client could see: the
+    /// receiver is read-only, and every parameter is a value.
+    /// </summary>
+    private static bool IteratorAdmissible(IMethodSymbol symbol, SemanticModel model, WellKnown known,
+        DiagnosticBag diagnostics, IrLoc loc)
+    {
+        var syntax = symbol.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        var reason =
+            symbol.Parameters.FirstOrDefault(p => p.Type.IsReferenceType || p.Type.TypeKind == TypeKind.TypeParameter && !p.Type.IsValueType) is { } rp
+                ? $"its parameter `{rp.Name}` is a reference, which the enumeration could share with its client"
+            : syntax is null || (!symbol.IsStatic && Declarations.Mutates(syntax, model, known))
+                ? "it writes its receiver"
+            : null;
+        if (reason is null) return true;
+        diagnostics.Error("PALCS0712", loc,
+            $"The iterator method `{symbol.Name}`: {reason}. An iterator is verified as one whole " +
+            "enumeration, which is what its client observes only when the enumeration writes nothing " +
+            "the client can see (doc/translation.md R27.42).");
+        return false;
     }
 
     private static IrDecl? LowerSpecFunction(

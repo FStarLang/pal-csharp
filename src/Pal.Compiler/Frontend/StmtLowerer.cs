@@ -60,6 +60,7 @@ public sealed class StmtLowerer(
             SwitchStatementSyntax s => LowerSwitch(s, loc),
             GotoStatementSyntax g => LowerGoto(g, loc),
             EmptyStatementSyntax => new IrBlock(loc, []),
+            YieldStatementSyntax y => LowerYield(y, loc),
             ThrowStatementSyntax t => new IrThrow(loc,
                 t.Expression is null ? null : _code.Lower(t.Expression)),
             TryStatementSyntax t => LowerTry(t, loc),
@@ -160,6 +161,51 @@ public sealed class StmtLowerer(
 
     private int _loopDepth;
     private int _discards;
+    private IrType? _iterator;
+
+    /// <summary>
+    /// R27.42. Lowers an iterator method's body: its <c>yield</c> statements extend, and
+    /// return, the sequence of values yielded so far, held in <see cref="Iterators.Trace"/>.
+    /// </summary>
+    public void Iterate(IrType element)
+    {
+        _iterator = element;
+        _code.IteratorTrace = Iterators.Trace;
+        _spec.IteratorTrace = Iterators.Trace;
+    }
+
+    private IrVar TraceVar(IrLoc loc) => new(loc, Iterators.Trace) { Type = new IrSeqType(_iterator!) };
+
+    /// <summary>
+    /// R27.42. The statements an iterator body is wrapped in: the trace starts empty, and
+    /// falling off the end returns it.
+    /// </summary>
+    public IrStmt WrapIterator(IrStmt body)
+    {
+        var loc = body.Loc;
+        var empty = new IrSpecOp(loc, "Seq.empty", []) { Type = new IrSeqType(_iterator!) };
+        var inner = body is IrBlock b ? b.Statements : [body];
+        return new IrBlock(loc,
+            [new IrLocalDecl(loc, Iterators.Trace, new IrSeqType(_iterator!), empty), .. inner,
+             new IrReturn(loc, TraceVar(loc))]);
+    }
+
+    private IrStmt LowerYield(YieldStatementSyntax y, IrLoc loc)
+    {
+        if (_iterator is not { } element) return UnsupportedStatement(y, loc);
+        if (y.IsKind(SyntaxKind.YieldReturnStatement))
+            return new IrAssign(loc, TraceVar(loc),
+                new IrSpecOp(loc, "Seq.snoc", [TraceVar(loc), _code.ToDeclared(_code.Lower(y.Expression!), element)])
+                    { Type = new IrSeqType(element) });
+        if (_loopDepth == 0) return new IrReturn(loc, TraceVar(loc));
+        _loopReturnVoid = true;
+        return new IrBlock(loc,
+        [
+            new IrAssign(loc, new IrVar(loc, ReturnedFlag) { Type = IrPrim.Bool },
+                new IrLiteral(loc, true) { Type = IrPrim.Bool }),
+            new IrBreak(loc) { FromReturn = true },
+        ]);
+    }
     private ITypeSymbol? _loopReturnType;
     private bool _loopReturnVoid;
 
@@ -205,7 +251,7 @@ public sealed class StmtLowerer(
             ? new IrBreak(loc) { FromReturn = true }
             : new IrReturn(loc, _loopReturnType is { } rt
                 ? new IrVar(loc, ReturnedValue) { Type = known.MapType(rt) }
-                : null);
+                : _iterator is not null ? TraceVar(loc) : null);
         return new IrBlock(loc, [lowered, new IrIf(loc, flag, owed, null)]) { Splice = true };
     }
 
@@ -375,6 +421,8 @@ public sealed class StmtLowerer(
                 _spec.Alias(symbol, arrayField);
                 continue;
             }
+            // R27.41. A borrowing struct of the method's own object, held in a local.
+            if (borrow is null && symbol is not null && HeldStruct(v, symbol, type, statements)) continue;
             // R24.19. `T[] a = _field;`, never written, is another name for the field.
             if (symbol is not null && FieldAlias(v, symbol, node) is { } aliased)
             {
@@ -410,6 +458,57 @@ public sealed class StmtLowerer(
 
         // `T a, b;` declares both names in the enclosing block: the enclosing block splices them.
         return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable()) { Splice = true };
+    }
+
+    /// <summary>
+    /// R27.41. <c>S e = new S(this, a…);</c> in an instance method of the class a borrowing
+    /// struct <c>S</c> borrows: the local holds the struct, and each object the struct owns
+    /// is held in a further local of its own, as the struct's members expect it. Both
+    /// lowerers record the local, so that its members can be called and its <c>[Spec]</c>
+    /// properties read. <c>false</c> when the declaration is not one.
+    /// </summary>
+    private bool HeldStruct(VariableDeclaratorSyntax v, ILocalSymbol symbol, IrType type,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (symbol.Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } st || !Borrowing.IsBorrowing(st, known))
+            return false;
+        var loc = Locations.From(v);
+        var owner = Borrowing.OwnerField(st, known)!;
+        var self = symbol.ContainingSymbol as IMethodSymbol;
+        var creation = v.Initializer?.Value as BaseObjectCreationExpressionSyntax;
+        var args = creation?.ArgumentList?.Arguments ?? default;
+        var op = creation is not null && model.GetSymbolInfo(creation).Symbol is IMethodSymbol ctor
+            ? Borrowing.OwnerParameter(ctor, owner, known.Compilation) : null;
+        var ownerArg = op is null || creation?.ArgumentList is null ? null
+            : args.FirstOrDefault(a => a.NameColon?.Name.Identifier.ValueText == op.Name)?.Expression ??
+              (op.Ordinal < args.Count && args[op.Ordinal].NameColon is null ? args[op.Ordinal].Expression : null);
+        if (creation is null || ownerArg is not ThisExpressionSyntax ||
+            self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
+            !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
+            known.MapType(owner.Type) is not IrClassType ownerType ||
+            v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax { Parent: BaseMethodDeclarationSyntax or AccessorDeclarationSyntax } })
+        {
+            diagnostics.Error("PALCS0710", loc,
+                $"The local `{v.Identifier.ValueText}` holds a struct that borrows its collection. Such a " +
+                "local is declared in the method's own block of an instance method of the borrowed class, " +
+                "and initialised by the struct's constructor applied to `this` (doc/translation.md R27.41).");
+            return true;
+        }
+        var name = v.Identifier.ValueText;
+        var owned = Borrowing.OwnedFields(st, known);
+        var held = new BorrowContext(st, owner, type, ownerType, false, null)
+        {
+            Owned = owned,
+            SelfName = name,
+            OwnedNames = owned.ToImmutableDictionary(f => f.Name, f => $"__pal_own_{name}{f.Name}"),
+        };
+        var ownedLocals = ImmutableArray.CreateBuilder<(string, string, IrClassType)>();
+        foreach (var f in owned)
+            if (known.MapType(f.Type) is IrClassType ot) ownedLocals.Add((f.Name, held.OwnedLocal(f), ot));
+        statements.Add(new IrLocalDecl(loc, name, type, _code.Lower(creation)) { Owned = ownedLocals.ToImmutable() });
+        _code.Hold(symbol, held);
+        _spec.Hold(symbol, held);
+        return true;
     }
 
     /// <summary>
@@ -1024,6 +1123,10 @@ public sealed class StmtLowerer(
         var invariants = ImmutableArray.CreateBuilder<IrExpr>();
         if (loop && borrow is { Constructor: false })
             invariants.AddRange(BorrowFacts.Invariants(borrow, known, Locations.From(bodySyntax)));
+        // R27.41. So does a loop of a method that holds one, for each it holds.
+        if (loop)
+            foreach (var held in _spec.Held)
+                invariants.AddRange(BorrowFacts.Invariants(held, known, Locations.From(bodySyntax), snapshots: false));
         IrExpr? decreases = null;
 
         var statements = bodySyntax is BlockSyntax block

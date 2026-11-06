@@ -2,6 +2,7 @@
 // dotnet/runtime's `SortedSet<T>.InOrderTreeWalk` and its enumerator walk it. The stack is
 // an ordinary object holding pointers; what it owes is a pure function of the owner's heap
 // (`SpecWalk`).
+using System.Collections.Generic;
 using PalLang;
 #pragma warning disable CS0649
 
@@ -162,7 +163,7 @@ public sealed class WalkSet<T>
     private int count;
     [Wrapping] private int version;
 
-    [Refine("Result.Count == Result.Tree.Size")]
+    [Refine("Result.Count == Result.Tree.Size && Result.Count <= int.MaxValue")]
     [Model]
     private WalkModel<T> Model => new WalkModel<T> { Tree = Pal.Tree<(T, bool)>(root), Count = count, Version = version };
 
@@ -181,6 +182,7 @@ public sealed class WalkSet<T>
     // R27.35. A local stack of region pointers: the walk visits every node once.
     [Ensures("Result == @this.SpecItems.Length")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(4)]
     internal int CountInOrder()
     {
         var stack = new PtrStack<WNode>(count);
@@ -381,6 +383,38 @@ public sealed class WalkSet<T>
     [Ensures("SpecWalk.Pending<WalkSet<T>.WNode, T>(false, Pal.Heap<WalkSet<T>.WNode>(), Result._stack.Items) == @this.SpecItems")]
     public Enumerator GetEnumerator() => new Enumerator(this, false);
 
+    // R27.41. A method that holds an enumerator of its own set and calls its members.
+    [Ensures("Result == @this.SpecItems.Length")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(4)]
+    internal int CountByEnumerator()
+    {
+        Enumerator e = new Enumerator(this, false);
+        int n = 0;
+        while (e.MoveNext())
+        {
+            Pal.Invariant(e.SpecReady && n + e.SpecPending.Length == this.SpecItems.Length);
+            Pal.Decreases(this.SpecItems.Length - n);
+            n++;
+        }
+        return n;
+    }
+
+    // R27.42. An iterator method: verified as one whole enumeration of what it yields.
+    [Ensures("Pal.Yielded<T>() == Pal.Reverse(@this.SpecItems)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(4)]
+    public IEnumerable<T> Reverse()
+    {
+        Enumerator e = new Enumerator(this, true);
+        while (e.MoveNext())
+        {
+            Pal.Invariant(e.SpecReady && Pal.Concat(Pal.Yielded<T>(), e.SpecPending) == Pal.Reverse(this.SpecItems));
+            Pal.Decreases(this.SpecItems.Length - Pal.Yielded<T>().Length);
+            yield return e.Current;
+        }
+    }
+
     // R27.37. An enumerator that owns a stack of pointers into the set's region.
     public struct Enumerator
     {
@@ -390,8 +424,15 @@ public sealed class WalkSet<T>
         private WNode? _current;
         private readonly bool _reverse;
 
+        // R27.41. What a holder of the enumerator states of it.
+        [Spec] internal Seq<T> SpecPending => SpecWalk.Pending<WNode, T>(_reverse, Pal.Heap<WNode>(), _stack.Items);
+        [Spec] internal bool SpecReady =>
+            SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), _stack.Items) && _stack.SpecCapacity == _tree.SpecCount &&
+            SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;
+
         [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && @this._reverse == reverse")]
         [Ensures("SpecWalk.Walkable<WalkSet<T>.WNode, T>(Pal.Heap<WalkSet<T>.WNode>(), @this._stack.Items)")]
+        [Ensures("@this._stack.SpecCapacity == set.SpecCount")]
         [Ensures("SpecWalk.Pending<WalkSet<T>.WNode, T>(reverse, Pal.Heap<WalkSet<T>.WNode>(), @this._stack.Items) == (reverse ? Pal.Reverse(set.SpecItems) : set.SpecItems)")]
         internal Enumerator(WalkSet<T> set, bool reverse)
         {

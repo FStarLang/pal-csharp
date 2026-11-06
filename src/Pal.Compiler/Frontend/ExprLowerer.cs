@@ -64,6 +64,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private bool _inImplicitBorrow;
 
+    /// <summary>R27.42. In an iterator method's body, the local holding what it has yielded.</summary>
+    public string? IteratorTrace { get; set; }
+
     /// <summary>R24.8. Makes <paramref name="symbol"/> denote <paramref name="value"/>.</summary>
     public void Alias(ISymbol symbol, IrExpr value) => _patternBindings[symbol] = value;
 
@@ -1309,6 +1312,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
         // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
+        if (HeldMember(node, symbol, loc) is { } heldMember) return heldMember;
         if (BorrowedMember(node, symbol, loc) is { } borrowedMember) return borrowedMember;
         // R25.1. `Comparer<T>.Default` is the default comparer at `T`.
         if (symbol is IPropertySymbol { IsStatic: true, Name: "Default" } dp &&
@@ -2145,6 +2149,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             (node.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
             BorrowingSelfCall(method, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } selfCall)
             return selfCall;
+        if (HeldInvocation(node, method, loc) is { } held) return held;
+        // R27.42. An iterator method is verified as one whole enumeration; what a caller
+        // holds is the enumerable it returns, which is not designed.
+        if (!SpecPosition && Iterators.Element(method) is not null)
+        {
+            diagnostics.Error("PALCS0711", loc,
+                $"A call to the iterator method `{method.Name}`. An iterator is verified as one whole " +
+                "enumeration of what it yields; the enumerable a call returns has no translation " +
+                "(doc/translation.md R27.42).");
+            return new IrLiteral(loc, null);
+        }
         if (Borrowing.IsMember(method, known) && method.MethodKind != MethodKind.Constructor)
         {
             diagnostics.Error("PALCS0731", loc,
@@ -2555,6 +2570,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrSeqOp(loc, SeqOpKind.Snoc, [Arg(0), Arg(1)]);
             case nameof(PalLang.Pal.Concat):
                 return new IrSeqOp(loc, SeqOpKind.Concat, [Arg(0), Arg(1)]);
+            // R27.42. The values an iterator has yielded: so far, in its body; all, in its contract.
+            case nameof(PalLang.Pal.Yielded):
+                return IteratorTrace is { } trace
+                    ? new IrVar(loc, trace) { Type = known.MapType(method.ReturnType) }
+                    : new IrResult(loc) { Type = known.MapType(method.ReturnType) };
             case nameof(PalLang.Pal.EmptySeq):
                 return new IrSeqOp(loc, SeqOpKind.Empty, []);
             case nameof(PalLang.Pal.Reverse):

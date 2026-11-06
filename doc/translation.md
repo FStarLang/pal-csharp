@@ -7964,6 +7964,105 @@ returns how many members it removed. It has no `[Throws]`. `match` cannot be nul
 `[Throws]` clause would need the local `List`'s resources to be dropped on `get_Item`'s
 raise path, which a raise clause cannot express (27.3).
 
+### R27.41 An owner holds a borrowing struct
+
+R28.6 refuses every call of a borrowing struct's member from verified code, since what the
+call passes for the borrowed object is not designed. One case is designed now: an instance
+method of the owner class holds a struct that borrows `this`.
+
+```csharp
+Enumerator e = new Enumerator(this, reverse: true);
+while (e.MoveNext()) { … e.Current … }
+```
+
+**Where.** The local is declared in the method's top-level block (not in a nested block or a
+lambda), its type is a borrowing struct, and its initialiser is `new S(…)` whose owner
+argument (positional or named) is the literal `this`. Anything else is PALCS0710.
+
+**Translation.** The struct's constructor returns the struct, which owns its own objects
+(the enumerator's stack). The holder binds each owned object to a local
+`__pal_own_<e><field>` and keeps its invariant, as a method of the struct does for its
+fields. A call `e.M(args)` passes `this` (and its permission and heap) for the borrowed
+object, the owned locals for the owned objects, and `e` by reference when `M` writes the
+struct. A loop carries the owned objects at fresh models, and `this` at its fixed heap
+while nothing writes it.
+
+**Specification members.** A `[Spec]` property of the struct is an abbreviation. In a
+contract or invariant of the holder, `e.SpecPending` is inlined with `e`'s fields and the
+owned locals. It is never translated as a function. So `SortedSet.Enumerator` states the
+state a holder needs as two:
+
+```csharp
+[Spec] internal Seq<T> SpecPending => SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+[Spec] internal bool SpecReady => SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), _stack.Items) &&
+                                  SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;
+```
+
+**Read-only.** A call of a borrowing member on a held local writes the struct (a local), not
+the receiver. So it does not make the holder a writer of `this`, and a holder that only
+enumerates keeps `this` at a fraction.
+
+**Fail-fast.** `MoveNext` raises when the version moved. The holder knows the version is
+`this`'s, which it holds and does not write, so the raise path is unreachable and the holder
+needs no `[Throws]`.
+
+**Loops (fixes).** The loop analysis now reads the loop condition for what it assigns and
+mutates (`while (e.MoveNext())` writes `e` and its stack). A folded object with a heap is
+carried at a fresh heap in a loop invariant, rather than as a plain `class_inv`.
+
+### R27.42 Iterator methods
+
+A method whose return type is `IEnumerable<T>` or `IEnumerator<T>` and whose body has a
+`yield` statement is an iterator. C# compiles it to a state machine that runs the body
+lazily, one `MoveNext` at a time. pal-csharp verifies the body as **one whole
+enumeration**:
+
+* the translation returns `Seq<T>`, the values yielded, in order;
+* a local `__pal_yielded` starts at `Seq.empty`;
+* `yield return x` is `__pal_yielded := Seq.snoc __pal_yielded x`;
+* `yield break` returns `__pal_yielded`, inside a loop through R26.2's flag, and so does
+  falling off the end.
+
+`Pal.Yielded<T>()` names the trace. In the body (a loop invariant, an assertion) it is the
+values yielded so far; in an ensures it is all of them. So `Reverse` is:
+
+```csharp
+[Ensures("Pal.Yielded<T>() == Pal.Reverse(@this.SpecItems)")]
+[Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+public IEnumerable<T> Reverse()
+{
+    Enumerator e = new Enumerator(this, reverse: true);
+    while (e.MoveNext())
+    {
+        Pal.Invariant(e.SpecReady && Pal.Concat(Pal.Yielded<T>(), e.SpecPending) == Pal.Reverse(this.SpecItems));
+        Pal.Decreases(this.SpecItems.Length - Pal.Yielded<T>().Length);
+        yield return e.Current;
+    }
+}
+```
+
+**Why one whole enumeration is sound.** The lazy body interleaves with its client: the
+client runs between two `MoveNext`s. The whole-enumeration reading is what the client
+observes when the interleaved code does not write what the body reads, and the body does
+not write what the client reads. The second half is enforced (PALCS0712):
+
+* the receiver is read-only (the body does not write `this`), and
+* every parameter is a value (no array or object the body could share with its client).
+
+So the body's writes are to its own locals: its trace, and objects it creates (the
+enumerator and its stack). An enumeration stopped early has yielded a prefix of the trace.
+The first half — the client does not write the collection while it enumerates — is the
+assumption every enumerator makes (R28.8).
+
+**Fail-fast.** Under that assumption, the version check in the body never fails, and the
+translation proves it: the body's `MoveNext` calls need no `[Throws]`. A client that does
+write the set mid-enumeration gets C#'s `InvalidOperationException` at its next
+`MoveNext`, which this contract does not describe (27.3).
+
+**Calls are refused.** A call of an iterator method from verified code is PALCS0711: what it
+returns is an enumerable, which has no translation. The iterator is verified for its
+contract; enumerating its result through `foreach` is a client feature not designed yet.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8031,6 +8130,12 @@ well-formed.
 So, while the version is unchanged, `MoveNext` yields `SpecItems` in order (or in reverse)
 one key at a time.
 
+`SpecPending` and `SpecReady` (R27.41) name the pending keys and the state a holder keeps.
+
+| member | ensures |
+|---|---|
+| `Reverse()` (R27.42) | `Pal.Yielded<T>() == Pal.Reverse(SpecItems)`; tree unchanged. Verified as one whole enumeration, holding `new Enumerator(this, reverse: true)` (R27.41) |
+
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
 
@@ -8078,8 +8183,6 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>` (a
   `SortedSet` subclass) with a key-only comparer. It needs subclassing a region owner and
   an abstraction from pairs to keys, and was not reached.
-* **`Reverse`.** It is an iterator method (`yield return`), which pal-csharp does not
-  translate.
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings
@@ -8136,6 +8239,12 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`++count` can overflow.** `AddIfNotPresent` increments `count` unchecked. The verified
   contract requires `SpecItems.Length < int.MaxValue`. A tree of 2^31 - 1 nodes is out of
   reach in practice, but nothing in the code rules it out.
+
+* **An iterator's fail-fast is outside its contract.** `Reverse`'s body checks the version
+  at every `MoveNext`. Its contract describes the enumeration with the set unchanged
+  (R27.42), under which the check never fails. What a client that writes the set mid-way
+  sees — an `InvalidOperationException` at the next step — is the dynamic check of R28.8,
+  and is not stated.
 
 ## 28. Enumerators: structs that borrow their collection
 
@@ -8261,7 +8370,8 @@ not assign takes its type's `default`; for a type parameter, that is the caller'
 No verified code calls a member of a borrowing struct. `foreach` is not translated, and a
 caller would also have to pass the borrowed object, which is not designed. Such a call is
 refused (PALCS0731). The members are verified, and their contracts are the specification
-that a `foreach` translation would use.
+that a `foreach` translation would use. (R27.41 admits one case: an owner's method holding
+`new S(this, …)` in a local.)
 
 ### R28.7 The borrowed object is not written
 

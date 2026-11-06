@@ -184,6 +184,9 @@ public static class Normalize
                     }
                     else result.Add(normalized);
                     if (s is IrLocalDecl d) scope = scope.Add(d.Name);
+                    // R27.41. The objects a held borrowing struct owns are locals too.
+                    if (s is IrLocalDecl { Owned.IsDefaultOrEmpty: false } held)
+                        scope = scope.Union(held.Owned.Select(o => o.Local));
                 }
                 // Again, because R5.14 turns a `switch` into an `if` chain and a section
                 // that ended in `return` is a guard clause that was not one before.
@@ -341,6 +344,9 @@ public static class Normalize
         var assigned = new HashSet<string>();
         Assigned(loop.Body, assigned);
         foreach (var st in loop.Step) Assigned(st, assigned);
+        // R27.41. A condition may call a member that writes what it is passed (`e.MoveNext()`).
+        var cond = new IrExprStmt(loop.Cond.Loc, loop.Cond);
+        Assigned(cond, assigned);
 
         // R4.11, inside a loop. `Assigned` answers "which names need a cell", and answers
         // it by assuming a call writes everything it is handed. For an object that is
@@ -351,6 +357,7 @@ public static class Normalize
         var mutated = new HashSet<string>();
         Mutated(loop.Body, mutated);
         foreach (var st in loop.Step) Mutated(st, mutated);
+        Mutated(cond, mutated);
         var objects = Objects(loop);
 
         // R5.8: ownership of everything the loop touches that it did not itself declare.

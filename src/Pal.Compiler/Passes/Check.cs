@@ -175,7 +175,7 @@ public static class Check
     {
         // An executable method's signature is read with the *program* meaning of each
         // type (R4.2). A spec-only type has no program meaning, so it cannot appear.
-        if (SpecOnly(m.ReturnType, specOnlyStructs) is { } badReturn)
+        if (!m.IsIterator && SpecOnly(m.ReturnType, specOnlyStructs) is { } badReturn)
             diagnostics.Error("PALCS0500", m.Loc,
                 $"`{m.Name}` returns `{badReturn}`, which exists only in specifications. " +
                 "Mark the method `[Spec]` to make it a specification function, " +

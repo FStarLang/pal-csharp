@@ -1909,6 +1909,10 @@ public sealed class CodeEmitter(
                 ArrayLocal(d);
                 return;
 
+            case IrLocalDecl { Owned.IsDefaultOrEmpty: false } d:
+                HeldStruct(d);
+                return;
+
             case IrLocalDecl d:
                 LocalDeclaration(d);
                 return;
@@ -2120,11 +2124,47 @@ public sealed class CodeEmitter(
         // A tuple's universe is likewise inferred, and `let mut` needs it to be zero.
         Line(init.StartsWith("(Pulse.Lib.CSharp.Inhabited.default_of", StringComparison.Ordinal) ||
              d.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType } ||
+             // R27.42. An iterator's trace starts as `Seq.empty`, whose element type is implicit.
+             d.Type is IrSeqType ||
              // R27.37. The struct a borrowing constructor builds is passed by reference to
              // its writer members, which take a reference to the (refined) struct type.
              d.Name == Frontend.BorrowContext.SelfCell
             ? $"let mut {cell} : {Types.Render(d.Type)} = {init};"
             : $"let mut {cell} = {init};");
+    }
+
+    /// <summary>
+    /// R27.41. A borrowing struct held in a local. The constructor hands each owned object
+    /// over under the struct's field (R27.37); the object is held from here on in a local
+    /// of its own, which the struct's members are passed, and dropped with the method's
+    /// other object locals. The rewrite is pure: the local is the field's value.
+    /// </summary>
+    private void HeldStruct(IrLocalDecl d)
+    {
+        if (_closingBlocks > 0 || d.Init is null || d.Type is not IrNamedType structType)
+        {
+            diagnostics.Unsupported(d.Loc, $"The borrowing struct local `{d.Name}` here",
+                "R27.41 holds a borrowing struct in a local of the method's own block.");
+            return;
+        }
+        var t = Fresh();
+        if (d.Init is IrCall { Kind: CalleeKind.Method } call) Call(call, t);
+        else Line($"let {t} = {Expr(d.Init)};");
+        foreach (var (field, local, type) in d.Owned)
+        {
+            var binder = Names.Local(local);
+            var proj = $"({t}.{Names.Projection(structType.Name, field)})";
+            var slot = new Slot(local, type, SlotKind.Object, binder);
+            var m = FreshValue(local);
+            Line($"let {binder} = {proj};");
+            Line($"with {m}. assert ({(slot with { Binder = proj }).Resource(m)});");
+            Line($"rewrite ({(slot with { Binder = proj }).Resource(m)}) as ({slot.Resource(m)});");
+            _slots[local] = slot;
+            _objectLocals.Add(slot);
+        }
+        var cell = Names.Local(d.Name);
+        _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
+        Line($"let mut {cell} : {Types.Render(d.Type)} = {t};");
     }
 
     /// <summary>
@@ -2702,6 +2742,28 @@ public sealed class CodeEmitter(
         var resources = ImmutableArray.CreateBuilder<string>();
         var scope = new SpecScope(plan.PreScope) { Pre = plan.PreScope };
 
+        var measureScope = DerefScope();
+        var stillHeaps = new List<string>();
+        // R27.41. A receiver held at its heaps that the method has not opened (it only
+        // passes itself to calls, as to a borrowing struct's members) is carried at them.
+        for (var i = 0; i < live.Length; i++)
+        {
+            if (live[i] is not { Kind: SlotKind.Object, Heaps.IsDefaultOrEmpty: false, Open: false } held) continue;
+            var still = unassigned.Contains(held.Name);
+            var heaps = new List<string>();
+            foreach (var h in held.Heaps)
+            {
+                var hv = FreshValue(Frontend.Region.HeapBinder(h.Region.Name));
+                heaps.Add(hv);
+                if (!still) existentials.Add(hv);
+                else stillHeaps.Add(hv);
+                scope.Bind(Frontend.Region.HeapName(h.Region.Name), new Term(hv, TermKind.Other));
+                measureScope.Bind(Frontend.Region.HeapName(h.Region.Name), still
+                    ? new Term(hv, TermKind.Other)
+                    : new Term($"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(h.Region)}) ())", TermKind.Other));
+            }
+            live = live.SetItem(i, held with { LoopHeaps = [.. heaps] });
+        }
         foreach (var slot in live)
         {
             var value = FreshValue(slot.Name);
@@ -2709,6 +2771,9 @@ public sealed class CodeEmitter(
             if (!unassigned.Contains(slot.Name)) existentials.Add(value);
             resources.Add(slot.Resource(value));
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            // R27.41. An object the loop leaves alone is at its fixed model in the measure too.
+            if (slot is { Kind: SlotKind.Object, LoopHeaps.IsDefaultOrEmpty: false } && unassigned.Contains(slot.Name))
+                measureScope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
         }
 
         // R24.22. A name that owns nothing -- an immutable local, a ghost local -- holds
@@ -2720,7 +2785,6 @@ public sealed class CodeEmitter(
         // R5.12. Everything R4.10 opened has to be carried across the loop.
         var pure = ImmutableArray.CreateBuilder<string>();
         var repFixed = new List<(string Name, string Resource)>();
-        var measureScope = DerefScope();
         foreach (var receiver in _objects)
             Representation(receiver, w.Body, scope, measureScope, resources, existentials, pure, repFixed);
 
@@ -2763,7 +2827,7 @@ public sealed class CodeEmitter(
             .ToList();
         if (fixedAll.Count > 0)
         {
-            Line($"with {string.Join(" ", fixedAll.Select(f => f.Name))}. " +
+            Line($"with {string.Join(" ", fixedAll.Select(f => f.Name).Concat(stillHeaps))}. " +
                  $"assert ({string.Join(" ** ", fixedAll.Select(f => f.Resource))});");
         }
 

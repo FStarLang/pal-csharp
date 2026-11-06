@@ -27,6 +27,18 @@ public sealed record BorrowContext(
     /// <summary>R27.37. The struct's fields that own an object (<see cref="Borrowing.OwnedFields"/>).</summary>
     public ImmutableArray<IFieldSymbol> Owned { get; init; } = [];
 
+    /// <summary>
+    /// R27.41. The IR name the struct is read under: <c>self</c> in its own members, the
+    /// local in an owner's method that holds one.
+    /// </summary>
+    public string SelfName { get; init; } = Self;
+
+    /// <summary>R27.41. The local each owned field's object is held in, when not the parameter's name.</summary>
+    public ImmutableDictionary<string, string> OwnedNames { get; init; } = ImmutableDictionary<string, string>.Empty;
+
+    public string OwnedLocal(IFieldSymbol f) =>
+        OwnedNames.TryGetValue(f.Name, out var n) ? n : Borrowing.OwnedName(f);
+
     public bool IsOwned(IFieldSymbol f) =>
         Owned.Any(o => SymbolEqualityComparer.Default.Equals(o.OriginalDefinition, f.OriginalDefinition));
 
@@ -40,8 +52,14 @@ public sealed record BorrowContext(
 
 public sealed partial class ExprLowerer
 {
-    /// <summary>R28.2. Set while lowering a member of a borrowing struct, or its contract.</summary>
-    public BorrowContext? Borrow { get; init; }
+    private readonly BorrowContext? _borrow;
+    private BorrowContext? _heldAs;
+
+    /// <summary>
+    /// R28.2. Set while lowering a member of a borrowing struct, or its contract; R27.41,
+    /// also while expanding a <c>[Spec]</c> member of a struct an owner's method holds.
+    /// </summary>
+    public BorrowContext? Borrow { get => _heldAs ?? _borrow; init => _borrow = value; }
 
     /// <summary>
     /// R28.2. A ghost statement in a borrowing member's body, where the borrowed object is
@@ -52,12 +70,108 @@ public sealed partial class ExprLowerer
     private IrVar BorrowedObject(IrLoc loc) => new(loc, Names.This) { Type = Borrow!.OwnerType };
 
     private IrVar OwnedObject(IFieldSymbol f, IrLoc loc) =>
-        new(loc, Borrowing.OwnedName(f)) { Type = known.MapType(f.Type) };
+        new(loc, Borrow!.OwnedLocal(f)) { Type = known.MapType(f.Type) };
 
     private IrExpr SelfExpr(IrLoc loc) =>
         Borrow!.Constructor
             ? new IrResult(loc) { Type = Borrow.StructType }
-            : new IrVar(loc, BorrowContext.Self) { Type = Borrow.StructType };
+            : new IrVar(loc, Borrow.SelfName) { Type = Borrow.StructType };
+
+    // R27.41. The borrowing structs this method holds in locals, by local.
+    private readonly Dictionary<ISymbol, BorrowContext> _held = new(SymbolEqualityComparer.Default);
+    private int _inlineDepth;
+
+    /// <summary>R27.41. Records that <paramref name="local"/> holds a borrowing struct of the method's own object.</summary>
+    public void Hold(ILocalSymbol local, BorrowContext held) => _held[local] = held;
+
+    /// <summary>R27.41. The borrowing structs held so far, in declaration order.</summary>
+    public IEnumerable<BorrowContext> Held => _held.Values;
+
+    private BorrowContext? HeldContext(ExpressionSyntax e) =>
+        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l && _held.TryGetValue(l, out var c) ? c : null;
+
+    private T WithHeld<T>(BorrowContext held, Func<T> f)
+    {
+        var saved = _heldAs;
+        _heldAs = held;
+        try { return f(); }
+        finally { _heldAs = saved; }
+    }
+
+    /// <summary>
+    /// R27.41. <c>e.M(a…)</c> on a borrowing struct the method holds in a local: the
+    /// member's translation applied to the method's own object, the local (by reference
+    /// when the member writes the struct), the objects the local's struct owns, and the
+    /// arguments. <c>null</c> when the receiver is not such a local.
+    /// </summary>
+    private IrExpr? HeldInvocation(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc)
+    {
+        if (node.Expression is not MemberAccessExpressionSyntax { Expression: var receiver } ||
+            HeldContext(receiver) is not { } held)
+            return null;
+        if (SpecPosition || !Borrowing.IsMember(method, known) || method.IsStatic)
+            return HeldRefused(node, loc);
+        var args = node.ArgumentList.Arguments.Select(a => Lower(a.Expression)).ToList();
+        return WithHeld(held, () => HeldCall(held, method, args, loc));
+    }
+
+    /// <summary>
+    /// R27.41. <c>e.P</c> on a held borrowing struct: in code, a call of the getter; in a
+    /// contract, a <c>[Spec]</c> property's body with the struct read as the local.
+    /// </summary>
+    private IrExpr? HeldMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
+    {
+        if (symbol is IMethodSymbol || HeldContext(node.Expression) is not { } held) return null;
+        if (symbol is IPropertySymbol sp && SpecPosition && Declarations.Has(sp, known.SpecAttribute))
+            return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
+        if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
+            Borrowing.IsMember(getter, known))
+            return WithHeld(held, () => HeldCall(held, getter, [], loc));
+        return HeldRefused(node, loc);
+    }
+
+    private IrExpr HeldRefused(ExpressionSyntax node, IrLoc loc)
+    {
+        diagnostics.Error("PALCS0710", loc,
+            $"`{node}`. Of a borrowing struct held in a local, code may call its members and a " +
+            "contract may read its expression-bodied `[Spec]` properties (doc/translation.md R27.41).");
+        return new IrLiteral(loc, null);
+    }
+
+    private IrExpr HeldCall(BorrowContext held, IMethodSymbol callee, IReadOnlyList<IrExpr> args, IrLoc loc)
+    {
+        var decl = callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
+        if (decl?.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
+        if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
+        var local = new IrVar(loc, held.SelfName) { Type = held.StructType };
+        IrExpr self = decl is not null &&
+                      Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct)
+            ? new IrRefArg(loc, local)
+            : local;
+        return BorrowingCall(callee, self, args, loc);
+    }
+
+    /// <summary>
+    /// R27.41. A <c>[Spec]</c> property of a borrowing struct, read in a contract, is its
+    /// body: an abbreviation, expanded where it is read, with the struct, its borrowed
+    /// object and its owned objects those of the reader's context.
+    /// </summary>
+    private IrExpr? InlineSpec(BorrowContext held, IPropertySymbol property, IrLoc loc)
+    {
+        var body = property.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() switch
+        {
+            PropertyDeclarationSyntax { ExpressionBody.Expression: var e } => e,
+            _ => null,
+        };
+        if (body is null || _inlineDepth > 16) return null;
+        var nested = new ExprLowerer(model.Compilation.GetSemanticModel(body.SyntaxTree), known, diagnostics, specPosition: true)
+        {
+            Borrow = held,
+            ObjectFields = ObjectFields,
+        };
+        nested._inlineDepth = _inlineDepth + 1;
+        return nested.Lower(body);
+    }
 
     private static bool IsShim(ISymbol? s) =>
         s?.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal) == true;
@@ -79,6 +193,10 @@ public sealed partial class ExprLowerer
                 return BorrowedObject(loc);
             case IFieldSymbol f when bw.IsOwner(f):
                 return BorrowedObject(loc);
+            // R27.41. A `[Spec]` property of the struct, in a contract.
+            case IPropertySymbol { IsStatic: false } sp when SpecPosition && Declarations.Has(sp, known.SpecAttribute) &&
+                SymbolEqualityComparer.Default.Equals(sp.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition):
+                return InlineSpec(bw, sp, loc);
             // R27.37. An owned object is a parameter of every member but the constructor.
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
@@ -105,6 +223,8 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr? BorrowedMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
     {
+        if (Borrow is { } sb && symbol is IPropertySymbol && node.Expression is ThisExpressionSyntax)
+            return BorrowedIdentifier(symbol, SyntaxFactory_Identifier(node), loc);
         if (Borrow is not { } bw || symbol is not IFieldSymbol { IsStatic: false } f) return null;
         if (bw.IsOwner(f) && node.Expression is ThisExpressionSyntax) return BorrowedObject(loc);
         if (bw.IsOwned(f) && !bw.Constructor &&
@@ -383,9 +503,9 @@ public static class BorrowFacts
                 { Type = type };
     }
 
-    public static IEnumerable<IrExpr> Invariants(BorrowContext borrow, WellKnown known, IrLoc loc)
+    public static IEnumerable<IrExpr> Invariants(BorrowContext borrow, WellKnown known, IrLoc loc, bool snapshots = true)
     {
-        var self = new IrVar(loc, BorrowContext.Self) { Type = borrow.StructType };
+        var self = new IrVar(loc, borrow.SelfName) { Type = borrow.StructType };
         yield return new IrBinary(loc, BinOp.Eq,
             new IrField(loc, self, borrow.Owner.Name) { Type = borrow.OwnerType },
             new IrRefOf(loc, Pal.Compiler.Emit.Names.This) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
@@ -393,7 +513,8 @@ public static class BorrowFacts
         foreach (var f in borrow.Owned)
             if (known.MapType(f.Type) is IrClassType ot)
                 yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, self, f.Name) { Type = ot },
-                    new IrRefOf(loc, Borrowing.OwnedName(f)) { Type = ot }) { Type = IrPrim.Bool };
+                    new IrRefOf(loc, borrow.OwnedLocal(f)) { Type = ot }) { Type = IrPrim.Bool };
+        if (!snapshots) yield break;
         foreach (var (f, type) in ReadOnlyFields(borrow, known))
         {
             var snapshotType = type.IsMachineInt ? new IrPrim(PrimKind.SpecInt) : type;
