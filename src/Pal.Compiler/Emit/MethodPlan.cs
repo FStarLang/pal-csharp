@@ -20,9 +20,56 @@ public sealed class MethodPlan
     /// invariant back, and the caller stops owning it, and a rule read differently at the
     /// two ends is a resource that is owned twice or not at all.
     /// </summary>
-    public static bool Consumed(IrMethod method, IrParam p) =>
+    public static bool Consumed(IrMethod method, IrParam p, IReadOnlyDictionary<string, IrMethod>? methods = null) =>
         p.Type is IrClassType &&
-        (p.Consumes || (method.IsConstructor && p.Name != Names.This));
+        (p.Consumes || (method.IsConstructor && p.Name != Names.This && Stored(method, p.Name, methods, [])));
+
+    /// <summary>
+    /// R27.45. Whether a constructor body may store the parameter: it uses the reference as
+    /// a value, other than as the receiver of a field read or a method call, an argument of
+    /// a method that consumes none of its arguments or of a constructor that hands it back,
+    /// or in a null test. A constructor that only reads from an object it is given (a copy constructor)
+    /// hands it back.
+    /// </summary>
+    private static bool Stored(IrMethod method, string name, IReadOnlyDictionary<string, IrMethod>? methods,
+        ImmutableHashSet<string> visiting)
+    {
+        if (method.Body is null || visiting.Contains(method.Name)) return true;
+        visiting = visiting.Add(method.Name);
+        var uses = Passes.Check.Statements(method.Body)
+            .Where(s => s is not IrGhostStmt)
+            .SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).ToList();
+        var benign = new HashSet<IrExpr>(ByReference.Instance);
+        foreach (var e in uses)
+        {
+            switch (e)
+            {
+                case IrField f: benign.Add(f.Receiver); break;
+                case IrCall { KeepsArguments: true } c: foreach (var a in c.Args) benign.Add(a); break;
+                // A constructor that hands an argument back (this rule, at the callee).
+                case IrCall { HasReceiver: false } c when methods is not null &&
+                    methods.TryGetValue(c.Callee, out var callee) && callee.IsConstructor &&
+                    callee.Parameters.Length == c.Args.Length:
+                    for (var i = 0; i < c.Args.Length; i++)
+                        if (callee.Parameters[i] is { Consumes: false } cp && cp.Type is IrClassType &&
+                            !Stored(callee, cp.Name, methods, visiting))
+                            benign.Add(c.Args[i]);
+                    break;
+                case IrCall { HasReceiver: true, Args.Length: > 0 } c: benign.Add(c.Args[0]); break;
+                case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when b.Left is IrNull || b.Right is IrNull:
+                    benign.Add(b.Left); benign.Add(b.Right); break;
+            }
+        }
+        return uses.Any(e => e is IrVar v && v.Name == name && !benign.Contains(e));
+    }
+
+    private sealed class ByReference : IEqualityComparer<IrExpr>
+    {
+        public static readonly ByReference Instance = new();
+        public bool Equals(IrExpr? x, IrExpr? y) => ReferenceEquals(x, y);
+        public int GetHashCode(IrExpr obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+    }
 
     private readonly SpecEmitter _spec;
 
@@ -32,7 +79,7 @@ public sealed class MethodPlan
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
         ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
         ImmutableArray<IrFieldDecl> openFields = default, ImmutableArray<IrFieldDecl> resultOwned = default,
-        bool heapsKept = false)
+        bool heapsKept = false, IReadOnlyDictionary<string, IrMethod>? methods = null)
     {
         _spec = spec;
         Held = held.IsDefault ? [] : held;
@@ -398,7 +445,7 @@ public sealed class MethodPlan
                     // author said `[Consumes]`: a body that may only assign fields (R4.12)
                     // has nowhere else to put one. Keeping the invariant in the
                     // postcondition would ask the caller to own the same object twice.
-                    var consumed = Consumed(method, p);
+                    var consumed = Consumed(method, p, methods);
                     if (consumed)
                     {
                         post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));

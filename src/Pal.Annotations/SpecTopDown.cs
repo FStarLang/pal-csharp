@@ -5,7 +5,7 @@ namespace PalLang;
 
 /// <summary>
 /// R27.26. Top-down red-black insertion over the heap of a region whose class
-/// <typeparamref name="K"/> (each method's first type argument) is a node of a red-black
+/// <c>K</c> (each method's first type argument) is a node of a red-black
 /// tree viewed as <c>(T, bool)</c>, its key and whether it is red: the loop invariant of
 /// <c>SortedSet&lt;T&gt;.AddIfNotPresent</c>, what <c>Node</c>'s helpers do to the tree of
 /// boxes a pointer reaches, and the ghost steps between them.

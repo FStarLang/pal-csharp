@@ -1119,7 +1119,35 @@ public static partial class FrontendPass
     /// from, is a leaf: a subclass elsewhere can add state but cannot change what any of
     /// this class's methods do, so there is no vtable for R9.21 to split off.
     /// </summary>
-    private static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+    /// <summary>
+    /// R27.46. The class an <c>[Exactly]</c> parameter is an object of, when it is one whose
+    /// translated objects all have it as their dynamic type (R27.1) and which converts to the
+    /// parameter's type by an implicit reference conversion.
+    /// </summary>
+    internal static INamedTypeSymbol? ExactParameter(IParameterSymbol p, Compilation compilation, WellKnown known) =>
+        known.ExactClass(p) is { TypeKind: TypeKind.Class, IsAbstract: false } c && known.HasModel(c) &&
+        (c.IsSealed || EffectivelySealed(c.OriginalDefinition, known)) &&
+        compilation.ClassifyCommonConversion(c, p.Type) is { IsImplicit: true, IsReference: true }
+            ? c : null;
+
+    internal static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+        EffectivelySealedIn(Canonical(symbol, known), known);
+
+    /// <summary>
+    /// The symbol for <paramref name="symbol"/> in <c>known</c>'s compilation. A body is
+    /// bound in a compilation of its own, whose symbols are not equal to the original's.
+    /// </summary>
+    private static INamedTypeSymbol Canonical(INamedTypeSymbol symbol, WellKnown known)
+    {
+        if (SymbolEqualityComparer.Default.Equals(symbol.ContainingAssembly, known.Compilation.Assembly)) return symbol;
+        var name = symbol.MetadataName;
+        for (var outer = symbol.ContainingType; outer is not null; outer = outer.ContainingType)
+            name = outer.MetadataName + "+" + name;
+        if (symbol.ContainingNamespace is { IsGlobalNamespace: false } ns) name = ns.ToDisplayString() + "." + name;
+        return known.Compilation.GetTypeByMetadataName(name) ?? symbol;
+    }
+
+    private static bool EffectivelySealedIn(INamedTypeSymbol symbol, WellKnown known) =>
         ExactType(symbol, known) ||
         known.AnnotatedOnly &&
         // R24.4. An unannotated virtual has no module, so no translated body can call it
@@ -2470,6 +2498,8 @@ public static partial class FrontendPass
         foreach (var p in symbol.Parameters)
         {
             var type = known.IsGhost(p.Type) ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
+            // R27.46. An `[Exactly]` parameter is an object of its class in the contract too.
+            if (ExactParameter(p, compilation, known) is { } exact) type = exact;
             result.Add(new SpecParam(p.Name, type));
         }
         // R20.12. A receiver-free method's contract may name the receiver's readonly fields
@@ -2902,6 +2932,17 @@ public static partial class FrontendPass
             var loc = p.Locations.Length > 0 ? Locations.From(p.Locations[0]) : IrLoc.None;
             var isGhost = known.IsGhost(p.Type);
             var declared = isGhost ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
+            if (Declarations.Has(p, known.ExactlyAttribute))
+            {
+                if (ExactParameter(p, model.Compilation, known) is not { } exact)
+                {
+                    diagnostics.Error("PALCS0713", loc,
+                        $"`[Exactly]` on `{p.Name}` names no class translated at its exact type (R27.1) " +
+                        $"that converts to `{p.Type}` (doc/translation.md R27.46).");
+                    continue;
+                }
+                declared = exact;
+            }
             var type = known.MapType(declared);
             if (type is null)
             {

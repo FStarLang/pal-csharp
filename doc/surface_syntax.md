@@ -573,11 +573,9 @@ operate on it. A static mutable field is rejected too
 **Overloads and several constructors work.** A class may declare `Temperature(int, int)`,
 `Temperature(int)` and `Temperature()`, and a convenience constructor may chain to the
 general one with `: this(...)`; its postcondition is then discharged from the chained
-constructor's contract rather than re-proved from the fields. Methods overload too. The
-only shape refused is a constructor that chains *and then does more work*
-(`PALCS0598`) — the chained constructor hands the object back with its invariant already
-established, so a later assignment would have to reopen it. Chain to a constructor that
-does the work, or assign every field directly. `: base(...)` waits on a base class that
+constructor's contract rather than re-proved from the fields. Methods overload too. A
+constructor may also chain *and then* do more work: the body runs over the object the
+chained constructor returned, starting from what that constructor ensures. `: base(...)` waits on a base class that
 may have fields at all.
 
 The generated module name grows a suffix only where it must: `Func_Temperature_Get` when
@@ -588,6 +586,22 @@ Two things a class gets for free, and neither costs an annotation. A freshly con
 object is automatically distinct from every object that already existed. And nothing is
 ever freed — the CLR's garbage collector means pal-csharp inherits none of PAL's
 deallocation obligations.
+
+A parameter typed at an interface or `object` that every verified caller fills with one
+sealed class can say so with `[Exactly(typeof(C))]` (R27.46):
+
+```csharp
+[Ensures("Result == source.SpecValue")]
+public static int Read([Exactly(typeof(Cell))] object source)
+{
+    Cell? cell = source as Cell;          // the identity: `source` is a Cell
+    return cell == null ? -1 : cell.Get();
+}
+```
+
+Inside, the parameter is a `C`, contracts can name its spec members, and `as`/`is` on it
+are decided by `C`'s type. Each caller must pass a non-null expression of static type `C`
+(PALCS0713 otherwise).
 
 ### Recursive classes
 

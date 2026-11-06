@@ -150,8 +150,24 @@ public sealed class StmtLowerer(
     }
 
     private IrBlock LowerBlock(BlockSyntax block) =>
-        new(Locations.From(block), [.. block.Statements.Select(Lower)
+        new(Locations.From(block), [.. ReachableStatements(block.Statements).Select(Lower)
             .SelectMany(s => s is IrBlock { Splice: true } b ? b.Statements : [s])]);
+
+    /// <summary>
+    /// R27.48. The statements of a block up to and including a <c>Pal.Unreachable()</c>.
+    /// What follows it is never lowered: that the point is never reached is proved there.
+    /// </summary>
+    private IEnumerable<StatementSyntax> ReachableStatements(IEnumerable<StatementSyntax> statements)
+    {
+        foreach (var s in statements)
+        {
+            yield return s;
+            if (s is ExpressionStatementSyntax { Expression: InvocationExpressionSyntax call } &&
+                model.GetSymbolInfo(call).Symbol is IMethodSymbol { Name: nameof(PalLang.Pal.Unreachable) } m &&
+                known.IsPalIntrinsic(m))
+                yield break;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // R26.2. `return` inside a loop
@@ -477,6 +493,22 @@ public sealed class StmtLowerer(
             {
                 _code.Alias(symbol, arrayField);
                 _spec.Alias(symbol, arrayField);
+                continue;
+            }
+            // R27.46. `C? x = p as C;`, never written, where `p` is an `[Exactly(typeof(C))]`
+            // parameter: `p` is a `C`, so `x` is another name for it.
+            if (symbol is not null && v.Initializer?.Value is { } asInit &&
+                ExprLowerer.Unparenthesized(asInit) is BinaryExpressionSyntax { RawKind: (int)SyntaxKind.AsExpression } asExpr &&
+                model.GetSymbolInfo(asExpr.Left).Symbol is IParameterSymbol ap &&
+                FrontendPass.ExactParameter(ap, model.Compilation, known) is { } apClass &&
+                model.GetTypeInfo(asExpr.Right).Type is { } asTarget &&
+                SymbolEqualityComparer.Default.Equals(asTarget.WithNullableAnnotation(NullableAnnotation.NotAnnotated),
+                    apClass.WithNullableAnnotation(NullableAnnotation.NotAnnotated)) &&
+                NeverWritten(symbol, node.Parent ?? node))
+            {
+                var pType = known.MapType(apClass);
+                _code.Alias(symbol, new IrVar(Locations.From(v), ap.Name) { Type = pType });
+                _spec.Alias(symbol, new IrVar(Locations.From(v), ap.Name) { Type = pType });
                 continue;
             }
             // R27.41. A borrowing struct of the method's own object, held in a local.
@@ -918,6 +950,9 @@ public sealed class StmtLowerer(
                     return new IrGhostStmt(loc, GhostKind.Assert, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Assume):
                     return new IrGhostStmt(loc, GhostKind.Assume, _spec.Lower(args[0].Expression), null);
+                // R27.48. The rest of the block is dropped by LowerBlock.
+                case nameof(PalLang.Pal.Unreachable):
+                    return new IrGhostStmt(loc, GhostKind.Unreachable, null, null);
                 case nameof(PalLang.Pal.GhostStmt) when _spec.ConstantString(args[0].Expression) is { } text:
                     return new IrGhostStmt(loc, GhostKind.Raw, null, text);
                 // R5.13. The argument is lowered as an ordinary expression so that the
@@ -1254,7 +1289,11 @@ public sealed class StmtLowerer(
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
             // R27.40. So is one at a non-nullable delegate type (R26.1).
-            model.GetTypeInfo(args[0].Expression) is { Type: IArrayTypeSymbol or { TypeKind: TypeKind.Class or TypeKind.Delegate } } nt &&
+            model.GetTypeInfo(args[0].Expression) is { Type: { } ntType } nt &&
+            (ntType is IArrayTypeSymbol or { TypeKind: TypeKind.Class or TypeKind.Delegate } ||
+             // R27.46. So is one at an `[Exactly]` parameter, which is an object of its class.
+             model.GetSymbolInfo(args[0].Expression).Symbol is IParameterSymbol xp &&
+             FrontendPass.ExactParameter(xp, model.Compilation, known) is not null) &&
             nt.Nullability.FlowState == NullableFlowState.NotNull &&
             nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
             return new IrBlock(loc, []);

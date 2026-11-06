@@ -69,6 +69,13 @@ public static class Pal
     [Conditional(Cond)]
     public static void Assert(bool predicate) { }
 
+    /// <summary>
+    /// A proof that this point is never reached. The statements after it in its block are
+    /// not translated (doc/translation.md R27.48).
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Unreachable() { }
+
     /// <summary>Assume a predicate without proof. Reported as a diagnostic.</summary>
     [Conditional(Cond)]
     public static void Assume(bool predicate) { }

@@ -82,6 +82,19 @@ public sealed class DecreasesAttribute(string measure) : Attribute
 public sealed class ConsumesAttribute : Attribute;
 
 /// <summary>
+/// R27.46. The argument is not null and its dynamic type is exactly <paramref name="type"/>,
+/// a translated class implementing the parameter's interface type. An open generic
+/// (<c>typeof(C&lt;&gt;)</c>) is constructed at the parameter type's arguments. Every caller
+/// passes an expression whose static type is that class; inside the method, the parameter
+/// is an object of it, and its contracts may name the class's members on it.
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter)]
+public sealed class ExactlyAttribute(Type type) : Attribute
+{
+    public Type Type { get; } = type;
+}
+
+/// <summary>
 /// Carry <em>no derived ownership</em>.
 ///
 /// <para>On a <b>parameter</b>, this suppresses the resource the parameter's type would

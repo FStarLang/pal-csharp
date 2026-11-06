@@ -122,15 +122,26 @@ namespace System.Collections.Generic
         }
 
         [Ensures("@this.SpecItems.Length == 0")]
+        [Ensures("@this.SpecComparer == (comparer == null ? Comparer<T>.Default : comparer)")]
         public SortedSet(IComparer<T>? comparer)
         {
             this.comparer = comparer ?? Comparer<T>.Default;
         }
 
 
-        public SortedSet(IEnumerable<T> collection) : this(collection, Comparer<T>.Default) { }
+        [Requires("collection.SpecComparer == Comparer<T>.Default")]
+        [Ensures("@this.SpecItems == collection.SpecItems")]
+        [Ensures("@this.SpecComparer == collection.SpecComparer")]
+        [Ensures("collection.SpecItems == Pal.Old(collection.SpecItems)")]
+        [Ensures("collection.SpecComparer == Pal.Old(collection.SpecComparer)")]
+        public SortedSet([Exactly(typeof(SortedSet<>))] IEnumerable<T> collection) : this(collection, Comparer<T>.Default) { }
 
-        public SortedSet(IEnumerable<T> collection, IComparer<T>? comparer)
+        [Requires("(comparer == null ? Comparer<T>.Default : comparer) == collection.SpecComparer")]
+        [Ensures("@this.SpecItems == collection.SpecItems")]
+        [Ensures("@this.SpecComparer == collection.SpecComparer")]
+        [Ensures("collection.SpecItems == Pal.Old(collection.SpecItems)")]
+        [Ensures("collection.SpecComparer == Pal.Old(collection.SpecComparer)")]
+        public SortedSet([Exactly(typeof(SortedSet<>))] IEnumerable<T> collection, IComparer<T>? comparer)
             : this(comparer)
         {
             ArgumentNullException.ThrowIfNull(collection);
@@ -148,6 +159,10 @@ namespace System.Collections.Generic
                 }
                 return;
             }
+
+            // The contract requires `collection` to be a SortedSet<T> with this set's comparer,
+            // so the branch above was taken (doc/translation.md R27.46-R27.48).
+            Pal.Unreachable();
 
             int count;
             T[] elements = EnumerableHelpers.ToArray(collection, out count);
@@ -1160,6 +1175,11 @@ namespace System.Collections.Generic
         /// </summary>
         /// <param name="other">The other <see cref="SortedSet{T}"/>.</param>
         /// <returns>A value indicating whether both sets have the same comparer.</returns>
+        [Ensures("Pal.Implies(@this.SpecComparer == other.SpecComparer, Result)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("other.SpecNodes == Pal.Old(other.SpecNodes)")]
+        [Ensures("other.SpecComparer == Pal.Old(other.SpecComparer)")]
         private bool HasEqualComparer(SortedSet<T> other)
         {
             // Commonly, both comparers will be the default comparer (and reference-equal). Avoid a virtual method call to Equals() in that case.

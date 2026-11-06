@@ -115,6 +115,36 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return inlined;
     }
 
+    /// <summary>
+    /// R27.46. An argument at an <c>[Exactly(typeof(C))]</c> parameter is an expression whose
+    /// static type is <c>C</c> and which is not null: by R27.1 such a value's dynamic type is
+    /// <c>C</c>, which is the parameter's precondition.
+    /// </summary>
+    private bool ExactArgument(ExpressionSyntax node, TypeInfo info, IrLoc loc)
+    {
+        if (node.Parent is not ArgumentSyntax arg ||
+            model.GetOperation(arg) is not Microsoft.CodeAnalysis.Operations.IArgumentOperation { Parameter: { } p } ||
+            !Declarations.Has(p, known.ExactlyAttribute) ||
+            FrontendPass.ExactParameter(p, model.Compilation, known) is not { } exact)
+            return false;
+        var flow = info.Nullability.FlowState;
+        // An `[Exactly]` parameter of the same class is an object of it, and not null.
+        if (model.GetSymbolInfo(node).Symbol is IParameterSymbol forwarded &&
+            FrontendPass.ExactParameter(forwarded, model.Compilation, known) is { } forwardedClass &&
+            SymbolEqualityComparer.Default.Equals(forwardedClass, exact))
+            return true;
+        if (info.Type is { } t && SymbolEqualityComparer.Default.Equals(
+                t.WithNullableAnnotation(NullableAnnotation.NotAnnotated),
+                exact.WithNullableAnnotation(NullableAnnotation.NotAnnotated)) &&
+            (flow == NullableFlowState.NotNull || t.NullableAnnotation != NullableAnnotation.Annotated))
+            return true;
+        if (SpecPosition) return true;
+        diagnostics.Error("PALCS0713", loc,
+            $"The argument `{node}` at `[Exactly]` parameter `{p.Name}` is not a non-null " +
+            $"`{exact}`: its static type is `{info.Type}` (doc/translation.md R27.46).");
+        return true;
+    }
+
     private IrType? Declared(ExpressionSyntax node)
     {
         if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
@@ -125,7 +155,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var declared = symbol switch
         {
             ILocalSymbol l => l.Type,
-            IParameterSymbol p => p.Type,
+            IParameterSymbol p => FrontendPass.ExactParameter(p, model.Compilation, known) ?? p.Type,
             IFieldSymbol f => f.Type,
             _ => null,
         };
@@ -149,7 +179,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         };
     }
 
-    private static ExpressionSyntax Unparenthesized(ExpressionSyntax e)
+    internal static ExpressionSyntax Unparenthesized(ExpressionSyntax e)
     {
         while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
         return e;
@@ -169,7 +199,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private string? ObservedObject(ExpressionSyntax node, TypeInfo info)
     {
-        bool IsObj(ExpressionSyntax e) => WellKnown.IsObj(known.MapType(model.GetTypeInfo(e).Type));
+        bool IsObj(ExpressionSyntax e) => WellKnown.IsObj(Declared(e) ?? known.MapType(model.GetTypeInfo(e).Type));
         return node switch
         {
             BinaryExpressionSyntax b when b.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression
@@ -224,6 +254,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var loc = Locations.From(node);
         var info = model.GetTypeInfo(node);
+        var atExact = ExactArgument(node, info, loc);
         // R10.2. `null` has no type of its own; what it denotes is fixed by the context,
         // and that is the only thing that says *which* class's `None` this is.
         var type = Declared(node) ?? known.MapType(info.Type)
@@ -339,6 +370,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // location is the lvalue `e` itself.
             RefExpressionSyntax r => Lower(r.Expression),
             BinaryExpressionSyntax b when b.IsKind(SyntaxKind.AsExpression) => LowerAs(b, loc),
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.IsExpression) => LowerIsType(b, loc),
             BinaryExpressionSyntax b => LowerBinary(b, loc),
             PrefixUnaryExpressionSyntax u => LowerPrefixUnary(u, loc),
             AssignmentExpressionSyntax a when !SpecPosition && a.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
@@ -431,7 +463,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // reference seen at an interface type -- is `box`, at exactly the positions C#
         // inserts it.
         // `(x)` and `x!` are transparent, and C# reports the conversion on the operand too.
-        if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) &&
+        if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) && !atExact &&
             node.Parent is not (ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression }) &&
             WellKnown.IsObj(known.MapType(info.ConvertedType)))
             result = Box(loc, result);
@@ -1485,6 +1517,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ComputedRead(rprop, loc, Lower(node.Expression)) is { } rcall)
             return rcall;
 
+        // R27.44. In a method body of the class, a field of *another* object of the same
+        // class (a parameter or local) is read through that object's own invariant, which
+        // the emitter opens around the read.
+        if (!SpecPosition && symbol is IFieldSymbol { IsStatic: false } peerField &&
+            ObjectFields.Contains(peerField.Name) && node.Expression is IdentifierNameSyntax &&
+            receiverType is INamedTypeSymbol peerType &&
+            SymbolEqualityComparer.Default.Equals(peerType.OriginalDefinition, peerField.ContainingType.OriginalDefinition))
+            return new IrField(loc, Lower(node.Expression), peerField.Name) { Peer = true };
+
         if (symbol is IFieldSymbol { IsStatic: false } openField && OpenFields.Contains(openField.Name) &&
             node.Expression is IdentifierNameSyntax { Identifier.ValueText: Names.This })
             return new IrField(loc, new IrVar(loc, Names.This), openField.Name);
@@ -1669,6 +1710,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 var test = Sorted.IsNull(loc, right is IrNull ? left : right);
                 return op is BinOp.Eq ? test : new IrUnary(loc, UnOp.Not, test) { Type = IrPrim.Bool };
             }
+            // R27.46. An `[Exactly]` parameter (or a local naming it) is not null.
+            if ((right is IrNull && ExactOperand(node.Left)) || (left is IrNull && ExactOperand(node.Right)))
+                return new IrLiteral(loc, op is BinOp.Ne) { Type = IrPrim.Bool };
+            // R27.47. Two comparers are the same object when their values are equal.
+            if (!SpecPosition && left is not IrNull && right is not IrNull &&
+                Sorted.IsComparerSymbol(model.GetTypeInfo(node.Left).Type) &&
+                Sorted.IsComparerSymbol(model.GetTypeInfo(node.Right).Type))
+            {
+                var same = new IrSpecOp(loc, Sorted.Identity + ".same", [left, right]) { Type = IrPrim.Bool, MachineArgs = true };
+                return op is BinOp.Eq ? same : new IrUnary(loc, UnOp.Not, same) { Type = IrPrim.Bool };
+            }
             if (right is IrNull && right.Type is not IrOptionType && left.Type is IrOptionType lt)
                 right = right with { Type = lt };
             else if (left is IrNull && left.Type is not IrOptionType && right.Type is IrOptionType rt)
@@ -1678,6 +1730,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul && InWrappingMethod(node),
         };
+    }
+
+    /// <summary>R27.46. The expression is an <c>[Exactly]</c> parameter, or a local aliasing one.</summary>
+    private bool ExactOperand(ExpressionSyntax e)
+    {
+        while (e is ParenthesizedExpressionSyntax pe) e = pe.Expression;
+        switch (model.GetSymbolInfo(e).Symbol)
+        {
+            case IParameterSymbol p:
+                return Declarations.Has(p, known.ExactlyAttribute);
+            case ILocalSymbol l when _patternBindings.TryGetValue(l, out var v) && v is IrVar iv &&
+                                     model.GetEnclosingSymbol(e.SpanStart) is IMethodSymbol m:
+                return m.Parameters.Any(q => q.Name == iv.Name && Declarations.Has(q, known.ExactlyAttribute));
+            default:
+                return false;
+        }
     }
 
     /// <summary>R22.14. The node sits in a method marked <c>[Wrapping]</c>.</summary>
@@ -2238,6 +2306,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             }
         }
 
+        // R27.47. `c.Equals(o)` on a comparer is `object.Equals`, which the comparer's class
+        // may override: an uninterpreted function of the two.
+        if (method is { IsStatic: false, Name: "Equals", Parameters.Length: 1 } &&
+            method.Parameters[0].Type.SpecialType == SpecialType.System_Object &&
+            node.Expression is MemberAccessExpressionSyntax eqs &&
+            Sorted.IsComparerSymbol(model.GetTypeInfo(eqs.Expression).Type))
+            return new IrSpecOp(loc, Sorted.Identity + ".equals",
+                [Lower(eqs.Expression), Lower(args[0].Expression)])
+                { Type = IrPrim.Bool, MachineArgs = true };
+
         // R25.1. `c.Compare(x, y)` on a comparer is the comparison the model gives it.
         if (method is { IsStatic: false, Name: "Compare", Parameters.Length: 2 } &&
             Sorted.IsComparerSymbol(method.ContainingType) &&
@@ -2449,6 +2527,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
             HasReceiver = receiver is not null,
+            KeepsArguments = method.MethodKind != MethodKind.Constructor &&
+                !method.Parameters.Any(p => Declarations.Has(p, known.ConsumesAttribute)),
             ParamTypes = [.. Declarations.ParamTypes(method, known, receiver is not null),
                           .. context.Select(f => (IrType?)known.MapType(Declarations.ContextType(f)))],
             TypeArguments = known.TypeArguments(method),

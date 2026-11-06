@@ -44,6 +44,51 @@ public sealed class RbSet<T>
         comparer = Comparer<T>.Default;
     }
 
+    [Ensures("@this.SpecItems.Length == 0 && @this.SpecComparer == comparer")]
+    public RbSet(IComparer<T> comparer)
+    {
+        this.comparer = comparer;
+    }
+
+    // R27.45. A constructor body after `: this(...)`.
+    [Ensures("@this.SpecItems == other.SpecItems && @this.SpecComparer == other.SpecComparer")]
+    public RbSet(RbSet<T> other) : this(other.comparer)
+    {
+        if (other.root != null)
+        {
+            root = other.root.DeepClone(other.count);
+            count = other.count;
+        }
+    }
+
+    [Spec] public SpecTree<(T, bool)> SpecNodes => Model.Tree;
+
+    // R27.44. Another owner of the same class, opened through its own invariant.
+    [Ensures("Result == other.SpecCount")]
+    public int CountOf(RbSet<T> other) => other.count;
+
+    // R27.44. A region call in another owner's region.
+    [Ensures("Result == SpecSearchTree.IsRed(other.SpecNodes)")]
+    public bool RootRed(RbSet<T> other) => RbNode.IsNonNullRed(other.root);
+
+    // R27.44. A tree cloned in another owner's region, moved into this one.
+    [Requires("other.SpecComparer == @this.SpecComparer")]
+    [Ensures("@this.SpecItems == other.SpecItems")]
+    public void CopyFrom(RbSet<T> other)
+    {
+        if (other.root != null)
+        {
+            root = other.root.DeepClone(other.count);
+            count = other.count;
+        }
+        else
+        {
+            root = null;
+            count = 0;
+        }
+        version++;
+    }
+
     [Requires("@this.SpecItems.Length < int.MaxValue")]
     [Ensures("Result == (Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item) < 0)")]
     [Ensures("Pal.Implies(Result, @this.SpecItems == SpecTopDown.Inserted(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item))")]

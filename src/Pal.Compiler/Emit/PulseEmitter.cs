@@ -259,6 +259,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     /// <summary>R4.9c, R4.12b. The argument positions each method takes ownership at.</summary>
     private Dictionary<string, ImmutableHashSet<int>> _consumed = [];
+    private Dictionary<string, IrMethod> _methods = [];
 
     /// <summary>
     /// R27.13. The methods whose contract speaks of their receiver's regions, each with the
@@ -303,12 +304,15 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // argument's invariant with them, by position, so that a call site can stop owning
         // what it handed over. Computed from the same predicate the callee's own contract
         // is built from, once, because it is a property of the program and not of a call.
+        _methods = program.Declarations.OfType<IrMethod>()
+            .GroupBy(m => m.Name)
+            .ToDictionary(g => g.Key, g => g.First());
         _consumed = program.Declarations.OfType<IrMethod>()
             .GroupBy(m => m.Name)
             .ToDictionary(
                 g => g.Key,
                 g => Enumerable.Range(0, g.First().Parameters.Length)
-                    .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i]))
+                    .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i], _methods))
                     .ToImmutableHashSet());
         _heapsKept = HeapsKept(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         _heapIndexed = program.Declarations.OfType<IrMethod>()
@@ -1674,7 +1678,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
                 ? openClass.Fields : default,
             method.ReturnType is IrNamedType rn && _ownedFields.TryGetValue(rn.Name, out var ro) ? ro : default,
-            _heapsKept.Contains(method.Name));
+            _heapsKept.Contains(method.Name), _methods);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");

@@ -1410,13 +1410,11 @@ a method whose body is one call. The chaining constructor's own `[Ensures]` is t
 discharged from the chained one's, by Pulse, from the contract alone — so a convenience
 overload is checked against the general constructor rather than re-proved.
 
-**Only when nothing follows the call (`PALCS0598`).** `C() : this(0) { extra = 1; }` is
-refused. The chained constructor returns the object with its invariant already established,
-so an assignment after it needs the representation back, and R4.10c's argument applies
-unchanged: this constructor is not the one that closed the bracket, and reopening an
-invariant it never established would be the emitter choosing an unfold point on the user's
-behalf. The fix is in the source and it is small — chain to a constructor that does the
-work, or assign every field here.
+**A body after the call (R27.45).** `C(…) : this(args) { S }` runs the chained
+constructor, then `S` over the object it returned, opened as an instance method's receiver
+is (R4.10), and closes it at the end like R22.9's open constructor. All `S` knows of the
+object at the start is the chained constructor's postcondition, which is C#'s own order of
+evaluation: the chained constructor finishes before the body starts.
 
 `: base(...)` is a separate question and waits on a base class that has fields at all
 (§8.6, and R9.2 is why).
@@ -1438,7 +1436,9 @@ initialise fields (R4.12), so an object it is *given* has nowhere to go except i
 representation it is building. Ownership therefore moves, whether or not the author wrote
 `[Consumes]`, and the rule is read off the shape of a constructor rather than off an
 annotation. Keeping the argument's invariant in the postcondition would ask the caller to
-own the same object twice.
+own the same object twice. R27.45 narrows this to a body that may *store* the reference:
+one that uses it other than as the receiver of a field read or a method call, or in a null
+test. A copy constructor that only reads from the object it is given hands it back.
 
 **R4.9c/R4.12b on the calling side.** The two ends have to agree, or the resource is owned
 twice or not at all, so consumption is one predicate over `(method, parameter)` consulted by
@@ -8115,6 +8115,140 @@ bound, since the stack never holds more than the tree's nodes. The initial capac
 The library has no admits or assumptions. `test/sortedset/TopDownInsert.cs` verifies the
 same loop over `RbNode`.
 
+### R27.44 Two owners of one class
+
+A method of an owner may read another object of its own class. `other.f` (a parameter or
+local `other` of the receiver's class, outside a spec) is read through `other`'s own
+invariant. The emitter opens `other` (`class_C__to_heap`, then `unfold class_C__inv_heap`)
+around the read, and folds it again at the same model. Its heaps are named explicitly, so
+the fold cannot pick up the receiver's region by mistake. `other` is held the way any
+parameter of a class type is held (R4.9), so the method's contract still states only
+`other`'s model.
+
+**A call in the other owner's region.** A call that takes a region pointer read from
+`other`'s field (`other.root.DeepClone(n)`, `Node.IsRed(other.root)`) runs in `other`'s
+region:
+
+* The emitter opens `other` around the whole call, so the callee's `region` is `other`'s.
+* If the context holds the receiver's own region of the same class bare (the receiver is
+  open, or the method is `[Open]` or holds the region), that region is *parked* first.
+  `RegionMove.park` turns `region h` into `parked h`, which a region call cannot match.
+  `unpark` restores it after the call. So one `region` of the class is in scope at the
+  call.
+* `other` is folded at the heap the call left. Its abstraction must hold there at the same
+  model; that is checked, not assumed.
+
+**Moving a fresh tree.** A call in `other`'s region that returns a pointer of the region's
+class is taken to have built a fresh tree. The tree is moved into the receiver's region, so
+the receiver can store it. `Pulse.Lib.CSharp.RegionMove.move` checks that the callee
+ensured `Pal.Unshared(Result) && Pal.Reshaped(null, Result)`: the call touched no box
+`other` held before it, and every box of the result's tree is new.
+
+`move` splits the boxes of the result's tree out of `other`'s heap into the receiver's
+(`moved_from`, `moved_into`). It ensures:
+
+* the moved tree is the same tree, and unshared, in its new region;
+* every unshared tree of `other`'s heap before the call is the same tree, and unshared,
+  in what is left;
+* every unshared tree of the receiver's heap is the same in the joined heap.
+
+The last two are stated as quantified facts triggered on `unshared`/`ltree`, so the folds
+of both owners' abstractions find them. The disjointness of the two heaps comes from the
+full-permission cells (`apart`, by `Region.fresh`). No cell moves in memory; what moves is
+ownership. The library has no admits or assumptions.
+
+A move is attempted only when the receiver's region of that class is held bare. Otherwise
+the result stays in `other`'s region.
+
+`RbSet.CountOf`, `RootRed` and `CopyFrom` (`root = other.root.DeepClone(other.count)`) in
+`test/sortedset/TopDownInsert.cs` verify these rules. `CopyFrom` ensures
+`SpecItems == other.SpecItems`.
+
+### R27.45 Constructor bodies after `: this(...)`
+
+`C(…) : this(args) { S }` is no longer refused (it was PALCS0598, R4.12c). The chained
+constructor's call comes first, and returns the object with its invariant folded at some
+model. The emitter opens it there (`with m. assert (inv o m); unfold …`), and `S` is then
+an instance method body over it: field writes, region calls and R27.44's peer reads all
+work as in a method. The object is closed at the end against this constructor's own
+`[Ensures]`, as R22.9's open constructor's is.
+
+R4.12b's rule that a constructor consumes its object parameters is narrowed to a body that
+may store the reference. A parameter used only as the receiver of field reads and method
+calls, as an argument of a method none of whose parameters is `[Consumes]` or of a
+constructor that hands that parameter back by this rule, or in a null test, is handed back.
+So a copy constructor preserves its argument, and so does one that chains to it.
+
+`RbSet(RbSet<T> other) : this(other.comparer) { … root = other.root.DeepClone(other.count); … }`
+in `test/sortedset/TopDownInsert.cs` verifies both rules, together with R27.44's move.
+
+A `return;` in the body returns the object: the emitter rewrites it to `return this`, and
+appends `return this` to every path that falls off the end (both branches of a trailing
+`if`). A `return` inside a loop or a `try` is still refused. `Cell(Cell other, bool skip)
+: this(0)` in `test/sortedset/Exact.cs` returns early on `skip`.
+
+### R27.46 A parameter that is exactly one class: `[Exactly(typeof(C))]`
+
+`collection as SortedSet<T>` on an `IEnumerable<T>` parameter asks for the argument's
+dynamic type, which the translation does not model. R27.1's argument gives a sound special
+case. Every reference that verified code holds to a sealed (or effectively sealed, R27.1)
+translated class `C` has dynamic type exactly `C`. So a parameter that every caller fills
+with such a reference can be treated as a `C`:
+
+* **The parameter.** `[Exactly(typeof(C))]` is accepted on a parameter when `C` is a
+  non-abstract class with a model, sealed or effectively sealed, with an implicit
+  reference conversion to the parameter's type. A generic `C<>` is closed by unifying its
+  interfaces and base types with the parameter's type (`IEnumerable<T>` gives
+  `SortedSet<T>`). The parameter is lowered at type `C`: it is held as a `C` (R4.9), and
+  contracts may name its spec members.
+* **The callers.** An argument at the parameter must have static type `C` and be non-null
+  (it is not boxed). Anything else is PALCS0713.
+* **Type tests.** On such a parameter `p`, `p is D` and `p as D` are decided from `C`:
+  `p is D` is `p != null` when `C` converts to `D` and `false` otherwise, and `p as D` is
+  `p` or `null` alike. `D? x = p as D;`, with `x` never written, makes `x` another name
+  for `p`. `p == null` on a non-nullable class-typed value without effects is folded to
+  `false`, so the dead branch drops out.
+
+The callers that a verified contract leaves out — unverified code passing some other
+`IEnumerable<T>` — are outside the verified reading, as every caller that breaks a
+precondition is. `Cell.Read`, `IsCell` and `Client` in `test/sortedset/Exact.cs` verify
+these rules.
+
+### R27.47 Comparer identity and `Equals`
+
+Two operations on `IComparer<T>` references had no model:
+
+* **`==`/`!=` on two comparers** (outside a spec) is reference equality. It is lowered to
+  `ComparerIdentity.same c d`, whose result is `c == d` on R22.30's comparer values. This
+  is a modeling axiom: a comparer value stands for one object. It holds because the
+  translation creates comparer values only as `Comparer<T>.Default` (one cached object),
+  the null comparer (R27.2), or by receiving them, so it never gives two objects one value.
+  Two distinct objects that order alike are distinct values; nothing says they are equal.
+* **`c.Equals(o)`** (`object.Equals`, which a comparer class may override) is lowered to
+  `ComparerIdentity.equals c (box o)`, an uninterpreted, deterministic function. Nothing
+  else is assumed: in particular not that `Equals` implies the same order.
+
+`HasEqualComparer` (`Comparer == other.Comparer || Comparer.Equals(other.Comparer)`)
+therefore ensures only `Implies(Comparer == other.Comparer, Result)`. The copy
+constructor and the set operations *require* the two comparers to be equal values, which
+is what their fast path relies on (27.3). `Cell.Same` and `Cell.Equal` in
+`test/sortedset/Exact.cs` verify the lowering.
+
+### R27.48 `Pal.Unreachable()`
+
+`Pal.Unreachable();` is a ghost statement: a proof obligation that control never reaches
+it. It is emitted as Pulse's `unreachable ()`, whose argument is `squash False`, and the
+statements after it in its block are not translated at all. Runtime behaviour is unchanged
+(the call is `[Conditional]`), and a path that does reach the point fails verification, so
+nothing the dropped statements do is assumed away. A block ending in it is treated like
+one ending in a `throw` (R22.11): no epilogue follows, and R27.45's constructor rewriting
+adds no `return this` after it.
+
+The copy constructor uses it for its fallback branch, which enumerates an arbitrary
+`IEnumerable<T>`: under its contract `HasEqualComparer` holds, the branch above returns,
+and the fallback is dead. `ArgumentNullException.ThrowIfNull(p)` on an `[Exactly]`
+parameter is nothing, as at a non-nullable class type (R23.2).
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8122,6 +8256,9 @@ same loop over `RbNode`.
 * Exact-type verification (R27.1) is a soundness argument rather than an axiom. It holds as
   long as verified code obtains every `SortedSet` it holds from a translated constructor.
 * Comparers are R22.30's total preorder.
+* `ComparerIdentity.same` (R27.47): a comparer value stands for one object, so `==` on
+  comparers is equality of values. `ComparerIdentity.equals` is a function of its
+  arguments and nothing more.
 * The runtime harness binds `BitOperations.Log2(uint)` to `Arith.log2_u32`, the floor of
   the base-2 logarithm with `Log2(0) == 0`. It also binds
   `EnumerableHelpers.GetEmptyEnumerator<T>()` to R29.4's `Obj.empty_enumerator`.
@@ -8137,7 +8274,10 @@ ensures that the tree and the comparer are unchanged.
 | member | ensures |
 |---|---|
 | `SortedSet()` | empty, comparer `Comparer<T>.Default` |
-| `SortedSet(IComparer<T>?)` | empty |
+| `SortedSet(IComparer<T>?)` | empty, comparer `comparer ?? Comparer<T>.Default` |
+| `SortedSet(IEnumerable<T> collection, IComparer<T>?)` (`collection` `[Exactly]` a `SortedSet<T>`, R27.46; requires `comparer ?? Comparer<T>.Default` to be `collection`'s comparer) | `SpecItems` and `SpecComparer` are `collection`'s, which is unchanged. The fallback branch is proved dead (R27.48) |
+| `SortedSet(IEnumerable<T> collection)` (likewise, with `collection`'s comparer `Comparer<T>.Default`) | the same |
+| `HasEqualComparer(other)` | `Implies(SpecComparer == other.SpecComparer, Result)` (R27.47); both sets unchanged |
 | `Count`, `TotalCount` | `Result == SpecItems.Length` |
 | `Comparer` | `Result == SpecComparer` |
 | `IsWithinRange` | `Result` (the set has no range) |
@@ -8222,27 +8362,21 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   and on `TreeSubSet`.
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
-* **The copy constructor** (`SortedSet(IEnumerable<T>, IComparer<T>?)` on a `SortedSet`).
-  `DeepClone` is verified (R27.43); the constructor around it is not. It needs these
-  features, none of which the translation has:
-  * **A second object of the owner class.** It reads `sortedSet.count` and
-    `sortedSet.root`. Only the receiver's fields are readable (R4.10, PALCS0523), and a
-    method has one heap per region class (`$heap_K`), so a second region of the same class
-    cannot be named.
-  * **Moving a tree between regions.** `sortedSet.root.DeepClone(count)` allocates in
-    `sortedSet`'s region, and the result becomes `this.root`. A sound route is: hold
-    `sortedSet` at full permission; after the call, split the clone's boxes, which are
-    fresh and unshared (`Reshaped(null, Result)`), out of that region into this one. The
-    source's tree is unchanged, since its boxes are not fresh. This is a ghost split and
-    join over `Region.cells`.
-  * **A body after `: this(comparer)`.** This is refused (PALCS0598).
-  * **`collection as SortedSet<T>` on an interface parameter.** One sound reading
-    specialises the constructor to callers whose argument is exactly a `SortedSet<T>`
-    (R27.1's exact-type argument). Under it, `as` is the identity and
-    `sortedSet is TreeSubSet` is false. Every other caller is refused.
+* **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
+  `SortedSet(IEnumerable<T>)` and `SortedSet(IEnumerable<T>, IComparer<T>?)` are verified
+  for an argument that is exactly a `SortedSet<T>` whose comparer is the one the new set
+  gets: `SpecItems` and `SpecComparer` are the argument's, which is unchanged. The
+  features this took:
+  * **A second object of the owner class.** Done (R27.44).
+  * **Moving a tree between regions.** Done (R27.44).
+  * **A body after `: this(comparer)`.** Done (R27.45).
+  * **`collection as SortedSet<T>` on an interface parameter.** Done (R27.46):
+    `[Exactly(typeof(SortedSet<>))]` specialises the constructor to callers whose argument
+    is exactly a `SortedSet<T>`. Under it, `as` is the identity and
+    `sortedSet is TreeSubSet` is false.
   * **The fallback branch.** It enumerates an arbitrary `IEnumerable<T>`
-    (`EnumerableHelpers.ToArray`). It is dead only when `HasEqualComparer` holds, which
-    takes `IComparer<T>.Equals(object)`, and that has no model (27.3).
+    (`EnumerableHelpers.ToArray`). It is dead when `HasEqualComparer` holds, which the
+    contract ensures by requiring equal comparers (R27.47).
 
   The set operations (`SetEquals`, `IsSubsetOf`, …) and `TreeSubSet` meet the first and
   fourth of these as well. `TreeSubSet` is in addition a subclass that overrides the
@@ -8321,9 +8455,11 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   overrides `Equals` to return true for a comparer that orders differently, the
   constructor builds a set whose tree is not sorted under its own comparer, which breaks
   the owner invariant R27.11 states. A sound model needs `Equals` on comparers to imply the
-  same order. That would be a trusted law, like R22.30's. `==` on comparers is reference
-  equality, which R22.30's `comparer t` (the comparison function) cannot express either:
-  two distinct objects may compare alike.
+  same order. That would be a trusted law, like R22.30's. The verified contracts do not assume
+  it (R27.47): they require the two comparers to be one object (`==`), the only case in
+  which the code's reliance on `Equals` is known to be right. A caller whose comparers
+  differ but claim to be `Equals` is outside the contract, and gets a set whose tree may
+  not be sorted under its own comparer.
 
 ## 28. Enumerators: structs that borrow their collection
 

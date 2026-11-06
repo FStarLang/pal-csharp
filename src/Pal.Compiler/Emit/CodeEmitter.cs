@@ -239,7 +239,7 @@ public sealed class CodeEmitter(
                 ImmutableArray<IrStmt> Arm(IrStmt? arm)
                 {
                     ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
-                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } }]
+                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } } or IrGhostStmt { Kind: GhostKind.Unreachable }]
                         ? own : [.. own, .. rest];
                 }
                 Tail(split with
@@ -369,6 +369,12 @@ public sealed class CodeEmitter(
                 Line("unreachable ()");
                 return;
 
+            // R27.48. `Pal.Unreachable()` in tail position: proved unreachable, so nothing
+            // need be given back.
+            case IrGhostStmt { Kind: GhostKind.Unreachable }:
+                Line("unreachable ()");
+                return;
+
             default:
                 Statement(stmt, plan);
                 // The block's value is not the statement above it: it is the point at which
@@ -448,17 +454,7 @@ public sealed class CodeEmitter(
         {
             if (statements.Length > 1)
             {
-                // Not R4.10c's mixed case but its twin: the chained constructor hands back
-                // a folded object, and an assignment after it needs the fields, so the
-                // remaining body would have to reopen an invariant this function never
-                // established. Refusing beats choosing an unfold point for the user.
-                diagnostics.Error("PALCS0598", statements[1].Loc,
-                    $"`{built.Name}` chains to another constructor and then does more work. " +
-                    "The chained constructor returns the object with its invariant already " +
-                    "established (doc/translation.md R4.12c), so a later assignment would have " +
-                    "to reopen it, and this constructor is not the one that closed it. Move the " +
-                    "work into the constructor being chained to, or assign every field here " +
-                    "instead of chaining.");
+                ConstructChained(method, decl, built, chained, statements[1..]);
                 return;
             }
             Line($"{Expr(chained)}");
@@ -584,6 +580,80 @@ public sealed class CodeEmitter(
     /// array, and the stand-in is sound only because it is never observed: a body that
     /// does not assign such a field on every path that completes is refused.</para>
     /// </summary>
+    /// <summary>
+    /// R27.45. <c>C(…) : this(args) { body }</c>. The chained constructor returns the object
+    /// with its invariant folded at some model; the body then runs as an instance method's
+    /// does, over that object opened (R4.10), and the object is closed at the end like the
+    /// one R22.9 builds. The chained constructor's postcondition is all the body knows of
+    /// the object at the start, which is exactly C#'s order of evaluation.
+    /// </summary>
+    private void ConstructChained(IrMethod method, IrClass decl, IrClassType built, IrCall chained,
+        ImmutableArray<IrStmt> rest)
+    {
+        var self = new IrVar(method.Loc, Names.This) { Type = built };
+        if (rest.Any(LoopOrTryReturn))
+        {
+            diagnostics.Unsupported(method.Loc, "A `return` inside a loop or `try` in a constructor");
+            return;
+        }
+        var obj = Expr(chained);
+        var m = FreshValue(built.Name);
+        Line($"with {m}. assert ({Inv(built)} {obj} {m});");
+        var slot = new Slot(Names.This, built, SlotKind.Object, obj)
+        {
+            PreModel = m,
+            PostModel = "post_" + Names.This,
+        };
+        Line(Unfold(slot) + ";");
+        _slots[Names.This] = slot;
+        _objects = [slot];
+        _objectResults.Remove(obj);
+        EmitSequence(CloseWith(rest, self), method, _plan!);
+    }
+
+    private static bool LoopOrTryReturn(IrStmt s) => s switch
+    {
+        IrBlock b => b.Statements.Any(LoopOrTryReturn),
+        IrIf i => LoopOrTryReturn(i.Then) || i.Else is { } e && LoopOrTryReturn(e),
+        IrReturn => false,
+        _ => ContainsReturn(s),
+    };
+
+    /// <summary>
+    /// R27.45. The body of a chained constructor as a block that returns the object: every
+    /// <c>return;</c> becomes <c>return this;</c>, and every path that falls off the end
+    /// gains one. R5.5b has already made a guard <c>if (c) { …; return; }</c> the
+    /// <c>if</c>/<c>else</c> it stands for, so each return is in tail position.
+    /// </summary>
+    private static ImmutableArray<IrStmt> CloseWith(ImmutableArray<IrStmt> body, IrExpr self)
+    {
+        var stmts = body.Select(s => Returns(self)(s)).ToImmutableArray();
+        if (stmts.IsEmpty) return [new IrReturn(self.Loc, self)];
+        var last = stmts[^1];
+        return [.. stmts.Take(stmts.Length - 1), .. Close(last, self)];
+    }
+
+    private static ImmutableArray<IrStmt> Close(IrStmt last, IrExpr self) => last switch
+    {
+        IrReturn or IrThrow or IrGhostStmt { Kind: GhostKind.Unreachable } or
+            IrExprStmt { Expr: IrCall { DoesNotReturn: true } } => [last],
+        IrBlock b => [b with { Statements = CloseWith(b.Statements, self) }],
+        IrIf i => [i with
+        {
+            Then = new IrBlock(i.Then.Loc, CloseWith([i.Then], self)),
+            Else = new IrBlock(i.Loc, CloseWith(i.Else is { } e ? [e] : [], self)),
+        }],
+        _ => [last, new IrReturn(last.Loc, self)],
+    };
+
+    private static Func<IrStmt, IrStmt> Returns(IrExpr self) => s => s switch
+    {
+        IrReturn { Value: null } r => r with { Value = self },
+        IrBlock b => b with { Statements = [.. b.Statements.Select(Returns(self))] },
+        IrIf i => i with { Then = Returns(self)(i.Then), Else = i.Else is { } e ? Returns(self)(e) : null },
+        _ => s,
+    };
+
     private void ConstructOpen(IrMethod method, IrClass decl, IrClassType alloc, ImmutableArray<IrStmt> statements)
     {
         if (statements.Any(ContainsReturn))
@@ -752,6 +822,7 @@ public sealed class CodeEmitter(
     {
         IrThrow => true,
         IrExprStmt { Expr: IrCall { DoesNotReturn: true } } => true,
+        IrGhostStmt { Kind: GhostKind.Unreachable } => true,
         IrBlock { Statements: [.., var last] } => IsThrowBlock(last),
         _ => false,
     };
@@ -1489,6 +1560,122 @@ public sealed class CodeEmitter(
 
     private static string InvHeap(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInvHeap(c.Name)}";
+
+    /// <summary>
+    /// R27.44. Opens another object of the receiver's class around <paramref name="inside"/>,
+    /// through its own invariant, and closes it at the same model. Its heaps are named
+    /// explicitly, so the fold cannot pick up the receiver's region by mistake.
+    /// </summary>
+    private void PeerOpen(Slot obj, IrClassType oc, Action inside, Func<IReadOnlyList<string>, IReadOnlyList<string>>? after = null)
+    {
+        var decl = classes![oc.Name];
+        var regions = RegionsOf(decl).ToList();
+        var model = obj.PreModel;
+        if (regions.Count == 0)
+        {
+            Line($"unfold {Inv(oc)} {obj.Binder} {obj.PermArg}{model};");
+            inside();
+            Line($"fold {Inv(oc)} {obj.Binder} {obj.PermArg}{model};");
+            return;
+        }
+        var hs = regions.Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
+        var module = Names.ClassModule(oc.Name);
+        Line($"{module}.{Names.ClassToHeap(oc.Name)} {obj.Binder};");
+        var args = $"{obj.Binder} {obj.PermArg}{model} {string.Join(" ", hs)}";
+        Line($"with {string.Join(" ", hs)}. assert ({InvHeap(oc)} {args});");
+        Line($"unfold {InvHeap(oc)} {args};");
+        _peerHeaps.Push(regions.Select((k, i) => (k, hs[i])).ToList());
+        inside();
+        _peerHeaps.Pop();
+        var post = after?.Invoke(hs) ?? hs;
+        Line($"fold {InvHeap(oc)} {obj.Binder} {obj.PermArg}{model} {string.Join(" ", post)};");
+        Line($"{module}.{Names.ClassOfHeap(oc.Name)} {obj.Binder};");
+    }
+
+    private readonly Stack<List<(IrClassType Region, string Heap)>> _peerHeaps = new();
+    private readonly HashSet<string> _peerOpen = [];
+
+    /// <summary>
+    /// R27.44. A call that takes a pointer read from a field of another object of the
+    /// receiver's class: the call runs in that object's region, so it is emitted inside
+    /// <see cref="PeerOpen"/>. Returns the object and the region class.
+    /// </summary>
+    private (Slot Slot, IrClassType Region)? PeerRegionCall(IrCall call)
+    {
+        foreach (var a in call.Args)
+        {
+            var e = a;
+            while (e is IrField { Receiver: IrField inner } && IsRegionType(inner.Type)) e = inner;
+            if (e is IrField { Receiver: IrVar pv, Peer: true } pf && IsRegionType(pf.Type) &&
+                pv.Name != Names.This && !_peerOpen.Contains(pv.Name) &&
+                !_objects.Any(o => o.Name == pv.Name) &&
+                _slots.TryGetValue(pv.Name, out var ps) && ps is { Kind: SlotKind.Object, Type: IrClassType } &&
+                pf.Type is IrClassType k)
+                return (ps, k with { Nullable = false });
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// R27.44. A call in another owner's region. The receiver's own region of the same
+    /// class, if the context holds it bare, is parked around the call so that the callee's
+    /// region is unambiguous. A region pointer the call returns is a tree it built fresh
+    /// (<c>Reshaped(null, Result)</c>, checked by <c>RegionMove.move</c>): it is moved into the
+    /// receiver's region, so that the receiver can store it, and the other owner is closed
+    /// over what is left — which is what it held before the call.
+    /// </summary>
+    private string PeerCall(IrCall call, string binder, Slot peer, IrClassType k)
+    {
+        var oc = (IrClassType)peer.Type;
+        var thisBare = _objects.Any(o => o.Name == Names.This && o.Type is IrClassType tc &&
+                                         classes!.TryGetValue(tc.Name, out var td) &&
+                                         RegionsOf(td).Any(r => r.Name == k.Name)) ||
+                       _slots.Values.Any(s => s is { Open: true } && s.OpenHeaps.Any(r => r.Name == k.Name)) ||
+                       _plan!.Held.Any(u => u.Region.Name == k.Name);
+        string? parked = null;
+        if (thisBare)
+        {
+            parked = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            Line($"with {parked}. assert ({PulseEmitter.RegionAt(k, "1.0R", parked)});");
+            Line($"{MoveModule}.park {parked};");
+        }
+        var result = binder;
+        string? postHeap = null;
+        PeerOpen(peer, oc, () =>
+        {
+            _peerOpen.Add(peer.Name);
+            result = Call(call, binder);
+            _peerOpen.Remove(peer.Name);
+            var h1 = FreshValue(Frontend.Region.HeapBinder(k.Name));
+            Line($"with {h1}. assert ({PulseEmitter.RegionAt(k, "1.0R", h1)});");
+            postHeap = h1;
+            if (parked is null) return;
+            Line($"{MoveModule}.unpark {parked};");
+            if (call.ResultType is IrClassType rt && rt.Name == k.Name)
+            {
+                var h0 = _peerHeaps.Peek().First(p => p.Region.Name == k.Name).Heap;
+                var lr = RegionShape(k);
+                Line($"{MoveModule}.move {lr} {h0} {h1} {parked} {result};");
+                postHeap = $"({MoveModule}.moved_from {lr} {h1} {result})";
+            }
+        }, hs =>
+        {
+            var regions = RegionsOf(classes![oc.Name]).ToList();
+            return hs.Select((h, i) => regions[i].Name == k.Name && postHeap is not null ? postHeap : h).ToList();
+        });
+        return result;
+    }
+
+    private const string MoveModule = "Pulse.Lib.CSharp.RegionMove";
+
+    /// <summary>R27.44. The child projections of a region class, applied to its type arguments.</summary>
+    private static string RegionShape(IrClassType k)
+    {
+        string App(string f) => k.TypeArguments.Length == 0
+            ? $"{Names.ClassModule(k.Name)}.{f}"
+            : $"({Names.ClassModule(k.Name)}.{f}{string.Concat(k.TypeArguments.Select(t => " #" + Types.Atom(t)))})";
+        return $"{App(Frontend.Region.LeftOf(k.Name))} {App(Frontend.Region.RightOf(k.Name))}";
+    }
 
     /// <summary>R27.13. The heaps the last <see cref="ModelWitness"/> read the regions at.</summary>
     private ImmutableArray<string> _witnessHeaps = [];
@@ -3299,7 +3486,7 @@ public sealed class CodeEmitter(
                 ImmutableArray<IrStmt> Arm(IrStmt? arm)
                 {
                     ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
-                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } }]
+                    return own is [.., IrThrow or IrReturn or IrExprStmt { Expr: IrCall { DoesNotReturn: true } } or IrGhostStmt { Kind: GhostKind.Unreachable }]
                         ? own : [.. own, .. rest];
                 }
                 Scoped(() =>
@@ -3510,6 +3697,10 @@ public sealed class CodeEmitter(
             }
             case GhostKind.Assume:
                 Line($"assume (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
+                return;
+            // R27.48. Behind it nothing is held; LowerBlock dropped the rest of the block.
+            case GhostKind.Unreachable:
+                Line("unreachable ();");
                 return;
             case GhostKind.Raw:
                 Line(Antiquotation.Expand(g.Text!, scope, Binder) + ";");
@@ -3878,6 +4069,11 @@ public sealed class CodeEmitter(
             {
                 if (!Reachable(obj, f.Loc, f.Field)) return "()";
                 var t = Fresh();
+                if (f.Peer && ov.Name != Names.This && !_objects.Any(o => o.Name == ov.Name) && !_peerOpen.Contains(ov.Name))
+                {
+                    PeerOpen(obj, oc, () => Line($"let {t} = B.op_Bang {obj.NonNull};"));
+                    return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
+                }
                 Line($"let {t} = B.op_Bang {obj.NonNull};");
                 return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
             }
@@ -4031,6 +4227,7 @@ public sealed class CodeEmitter(
 
     private string Call(IrCall call, string binder)
     {
+        if (PeerRegionCall(call) is { } peer) return PeerCall(call, binder, peer.Slot, peer.Region);
         var declared = PulseEmitter.DispatchOwner(classes, slots, call.Callee);
         var owner = PulseEmitter.DispatchClass(classes, slots, call);
 

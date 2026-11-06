@@ -352,7 +352,11 @@ public sealed record IrSpanCreate(
     IrExpr? Length) : IrExpr(Loc);
 
 /// <summary><c>x.f</c> on a struct.</summary>
-public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc);
+public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc)
+{
+    /// <summary>R27.44. A field of another object of the method's own class.</summary>
+    public bool Peer { get; init; }
+}
 
 /// <summary>
 /// R3.9c. A <c>[Spec]</c> member of a class read off an object: <c>@this.Count</c>.
@@ -418,6 +422,12 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
     /// leave its first argument's model where it was.
     /// </summary>
     public bool HasReceiver { get; init; }
+
+    /// <summary>
+    /// R27.45. The callee is a method (not a constructor) none of whose parameters is
+    /// <c>[Consumes]</c>: every object argument's invariant comes back from the call.
+    /// </summary>
+    public bool KeepsArguments { get; init; }
 
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
@@ -728,7 +738,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
 /// <summary><c>DebugAssert</c> is R22.19's <c>Debug.Assert(c)</c>: <c>Prop</c> is an executable expression.</summary>
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert, Let }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert, Let, Unreachable }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);

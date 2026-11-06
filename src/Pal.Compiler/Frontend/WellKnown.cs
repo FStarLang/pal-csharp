@@ -38,6 +38,7 @@ public sealed class WellKnown
         PreservesValueAttribute = Type("PreservesValueAttribute");
         DecreasesAttribute = Type("DecreasesAttribute");
         ConsumesAttribute = Type("ConsumesAttribute");
+        ExactlyAttribute = Type("ExactlyAttribute");
         CallbackAttribute = Type("CallbackAttribute");
         PlainAttribute = Type("PlainAttribute");
         RegionAttribute = Type("RegionAttribute");
@@ -141,6 +142,7 @@ public sealed class WellKnown
     public INamedTypeSymbol PreservesValueAttribute { get; }
     public INamedTypeSymbol DecreasesAttribute { get; }
     public INamedTypeSymbol ConsumesAttribute { get; }
+    public INamedTypeSymbol ExactlyAttribute { get; }
     /// <summary>R27.39. <c>[Callback]</c>: a delegate parameter called with region pointers.</summary>
     public INamedTypeSymbol CallbackAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
@@ -363,6 +365,33 @@ public sealed class WellKnown
     /// at an `abstract` or `sealed` base: an abstract class's model is abstract, so R9.6
     /// makes every subclass supply its own, and a sealed one cannot be derived from.
     /// </summary>
+    /// <summary>
+    /// R27.46. The class an <c>[Exactly(typeof(C))]</c> parameter is an object of. An open
+    /// generic is constructed by matching the interface it implements against the
+    /// parameter's type: <c>C&lt;U&gt; : I&lt;U&gt;</c> at a parameter of type
+    /// <c>I&lt;T&gt;</c> is <c>C&lt;T&gt;</c>. <c>null</c> when there is no attribute, or
+    /// no such construction.
+    /// </summary>
+    public INamedTypeSymbol? ExactClass(IParameterSymbol p)
+    {
+        var attr = p.GetAttributes().FirstOrDefault(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, ExactlyAttribute));
+        if (attr is null) return null;
+        if (attr.ConstructorArguments is not [{ Value: INamedTypeSymbol named }]) return null;
+        if (!named.IsUnboundGenericType) return named;
+        var def = named.OriginalDefinition;
+        if (p.Type is not INamedTypeSymbol param) return null;
+        foreach (var i in def.AllInterfaces.Append(def.BaseType).OfType<INamedTypeSymbol>())
+        {
+            if (!SymbolEqualityComparer.Default.Equals(i.OriginalDefinition, param.OriginalDefinition)) continue;
+            var args = new ITypeSymbol?[def.TypeParameters.Length];
+            for (var k = 0; k < i.TypeArguments.Length; k++)
+                if (i.TypeArguments[k] is ITypeParameterSymbol tp && SymbolEqualityComparer.Default.Equals(tp.ContainingSymbol, def))
+                    args[tp.Ordinal] = param.TypeArguments[k];
+            if (args.All(a => a is not null)) return def.Construct(args!);
+        }
+        return null;
+    }
+
     public bool HasModel(INamedTypeSymbol type)
     {
         // R27.3. A `[Region]` class's `[Model]` is the view of one node, not an object
