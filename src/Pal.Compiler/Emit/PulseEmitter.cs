@@ -106,6 +106,12 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public bool Window { get; init; }
 
+    /// <summary>
+    /// R24.7. For a local array: it was initialised from a nullable array field, so the
+    /// array it holds is owned through <c>NA.pts_to</c> rather than <c>A.pts_to</c>.
+    /// </summary>
+    public bool NullableArray { get; init; }
+
     /// <summary>R10.7. The reference, as a non-null one. Legal only in a window.</summary>
     // R10.2 (F76). A nullable reference and a non-nullable one are the same term: the
     // non-nullable type is the nullable one under a refinement, so "the non-null form of
@@ -478,7 +484,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R14.2. Type binders first, so that a value binder may mention them.
         foreach (var t in fn.TypeParameters)
+        {
             binders.Add($"({Names.TypeParam(t)}: Type0)");
+            scope.Bind(t, new Term(Names.TypeParam(t), TermKind.Other));
+        }
 
         foreach (var p in fn.Parameters)
         {
@@ -518,6 +527,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         var (returnType, text) = fn.ReturnType switch
         {
+            _ when fn.PulseBody is { } raw => (fn.ReturnType switch
+            {
+                IrPrim { Kind: PrimKind.Bool } => "prop",
+                IrPrim { IsMachineInt: true } => "int",
+                _ => Types.Render(fn.ReturnType),
+            }, Antiquotation.Expand(raw, scope)),
             IrPrim { Kind: PrimKind.Bool } => ("prop", _spec.AsProp(_spec.Emit(fn.Body, scope))),
             // R4.6: a [Spec] method's integer result is mathematical for the same reason
             // its parameters are — a specification carries no overflow obligation.
@@ -825,6 +840,24 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"type {Names.StructType(s.Name)}{binders.Explicit} = " +
                       $"this: {binders.App(Names.StructRaw(s.Name))} {{ {Names.StructPred(s.Name)} this }}");
 
+        // R24.11. An unrefined struct of defaultable fields has C#'s `default(S)`, all
+        // fields defaulted, so an array of it can be allocated and cleared.
+        if (!s.IsSpecOnly && s.Refinements.Length == 0 &&
+            s.Fields.All(f => f.Type is IrPrim { IsMachineInt: true } or IrPrim { Kind: PrimKind.Bool }
+                                          or IrTypeParamType))
+        {
+            var needs = string.Concat(s.TypeParameters.Select(p =>
+                $" {{| Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(p)} |}}"));
+            sb.AppendLine();
+            sb.AppendLine($"instance {Names.StructType(s.Name)}__has_default{binders.Implicit}{needs} : " +
+                          $"Pulse.Lib.CSharp.Inhabited.has_default {binders.App(Names.StructType(s.Name))} = {{");
+            sb.AppendLine("  default_value = {");
+            foreach (var f in s.Fields)
+                sb.AppendLine($"    {Names.Field(f.Name)} = Pulse.Lib.CSharp.Inhabited.default_value;");
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+        }
+
         return new EmittedModule(Names.StructModule(s.Name), sb.ToString());
     }
 
@@ -966,6 +999,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 _ => new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type),
             };
             repScope.Bind(f.Name, term);
+            if (f.Type is IrArrayType)
+                repScope.Bind(SpecEmitter.ArrayRefKey(f.Name), new Term($"r.{Names.Field(f.Name)}", TermKind.Other, f.Type));
         }
         var arrays = c.Fields.Where(f => f.Type is IrArrayType).ToImmutableArray();
         var objects = c.Fields.Where(f => f.Type is IrClassType).ToImmutableArray();
@@ -1001,6 +1036,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("#lang-pulse");
         sb.AppendLine();
         sb.AppendLine(Preamble.Opens);
+        // R24.17. A `[Spec]` function named by the representation invariant, the model or
+        // an observation lives in its own module.
+        foreach (var open in ClassSpecOpens(c))
+            sb.AppendLine($"open {open}");
         sb.AppendLine();
         sb.AppendLine(Preamble.Modules);
         sb.AppendLine();
@@ -1048,7 +1087,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"  exists* {string.Join(" ", existentials)}.");
         sb.AppendLine("    B.pts_to this #p r **");
         foreach (var f in arrays)
-            sb.AppendLine($"    A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
+            sb.AppendLine($"    {ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)} **");
         // R3.10b. The sub-object's own invariant, at its own model. Nesting is one
         // conjunct: the outer invariant does not restate the inner one, it *contains* it,
         // so an inner class's [Invariant] clauses are proved once, where they were written.
@@ -1115,13 +1154,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("  with r. assert (B.pts_to this #p r);");
         foreach (var f in arrays)
             sb.AppendLine($"  with {Names.Contents(f.Name)}. assert " +
-                          $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
+                          $"({ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
                           $"({SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))});");
         sb.AppendLine("  B.share this;");
         foreach (var f in arrays)
-            sb.AppendLine($"  A.share r.{Names.Field(f.Name)};");
+            sb.AppendLine($"  {ArrayMod(f)}share r.{Names.Field(f.Name)};");
         foreach (var f in objects)
             sb.AppendLine($"  {SubShare(f.Type)} r.{Names.Field(f.Name)};");
         var shared = Resources(c, arrays, objects, half, "r", Names.Contents, Names.SubModel);
@@ -1152,7 +1191,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("  with r. assert (B.pts_to this #p r);");
         foreach (var f in arrays)
             sb.AppendLine($"  with {Names.Contents(f.Name)}. assert " +
-                          $"(A.pts_to r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
+                          $"({ArrayPts(f)} r.{Names.Field(f.Name)} #p {Names.Contents(f.Name)});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.SubModel(f.Name)}. assert " +
                           $"({SubInvApp(f.Type, $"r.{Names.Field(f.Name)}", "p", Names.SubModel(f.Name))});");
@@ -1160,7 +1199,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine("  with alt_r. assert (B.pts_to this #q alt_r);");
         foreach (var f in arrays)
             sb.AppendLine($"  with {Names.Alt(Names.Contents(f.Name))}. assert " +
-                          $"(A.pts_to alt_r.{Names.Field(f.Name)} #q {Names.Alt(Names.Contents(f.Name))});");
+                          $"({ArrayPts(f)} alt_r.{Names.Field(f.Name)} #q {Names.Alt(Names.Contents(f.Name))});");
         foreach (var f in objects)
             sb.AppendLine($"  with {Names.Alt(Names.SubModel(f.Name))}. assert " +
                           $"({SubInvApp(f.Type, $"alt_r.{Names.Field(f.Name)}", "q", Names.Alt(Names.SubModel(f.Name)))});");
@@ -1178,8 +1217,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         foreach (var f in arrays)
         {
             var alt = Names.Alt(Names.Contents(f.Name));
-            sb.AppendLine($"  rewrite (A.pts_to alt_r.{Names.Field(f.Name)} #q {alt})");
-            sb.AppendLine($"       as (A.pts_to r.{Names.Field(f.Name)} #q {alt});");
+            sb.AppendLine($"  rewrite ({ArrayPts(f)} alt_r.{Names.Field(f.Name)} #q {alt})");
+            sb.AppendLine($"       as ({ArrayPts(f)} r.{Names.Field(f.Name)} #q {alt});");
         }
         foreach (var f in objects)
         {
@@ -1189,7 +1228,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
         sb.AppendLine("  B.gather this;");
         foreach (var f in arrays)
-            sb.AppendLine($"  A.gather r.{Names.Field(f.Name)};");
+            sb.AppendLine(f.IsNullableArray
+                ? $"  NA.gather r.{Names.Field(f.Name)} #{Names.Contents(f.Name)} " +
+                  $"#{Names.Alt(Names.Contents(f.Name))} #p #q;"
+                : $"  A.gather r.{Names.Field(f.Name)};");
         foreach (var f in objects)
             sb.AppendLine($"  {SubGatherGen(f.Type)} r.{Names.Field(f.Name)} p q;");
         // No `assert` before this `fold`, unlike `share`'s: one candidate per existential
@@ -1220,13 +1262,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// <c>assert</c> before a <c>fold</c> has to name so the prover can solve the
     /// invariant's existentials against a context that holds two candidates for each.
     /// </summary>
+    /// <summary>R24.7. The resource an array field is owned through.</summary>
+    public static string ArrayPts(IrFieldDecl f) => f.IsNullableArray ? "NA.pts_to" : "A.pts_to";
+
+    /// <summary>R24.7. The module whose <c>share</c>/<c>gather</c> an array field uses.</summary>
+    public static string ArrayMod(IrFieldDecl f) => f.IsNullableArray ? "NA." : "A.";
+
     private static string Resources(
         IrClass c, ImmutableArray<IrFieldDecl> arrays, ImmutableArray<IrFieldDecl> objects,
         string perm, string record, Func<string, string> contents, Func<string, string> submodel)
     {
         var parts = new List<string> { $"B.pts_to this #{perm} {record}" };
         parts.AddRange(arrays.Select(f =>
-            $"A.pts_to {record}.{Names.Field(f.Name)} #{perm} {contents(f.Name)}"));
+            $"{ArrayPts(f)} {record}.{Names.Field(f.Name)} #{perm} {contents(f.Name)}"));
         parts.AddRange(objects.Select(f =>
             SubInvApp(f.Type, $"{record}.{Names.Field(f.Name)}", perm, submodel(f.Name))));
         return string.Join(" ** ", parts);
@@ -1245,10 +1293,15 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");
         sb.AppendLine("#lang-pulse");
         sb.AppendLine();
-        foreach (var open in Dependencies(
-                     Names.FunctionModule(method.Name), method.Body,
-                     method.Requires, method.Ensures, method.Preserves,
-                     method.Throws.Where(t => t.When is not null).Select(t => t.When!)))
+        var methodOpens = Dependencies(
+            Names.FunctionModule(method.Name), method.Body,
+            method.Requires, method.Ensures, method.Preserves,
+            method.Throws.Where(t => t.When is not null).Select(t => t.When!));
+        var classOpens = method.Parameters
+            .Select(p => p.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var owner) ? owner : null)
+            .OfType<IrClass>()
+            .SelectMany(ClassSpecOpens);
+        foreach (var open in methodOpens.Union(classOpens).Distinct())
             sb.AppendLine($"open {open}");
         sb.AppendLine(Preamble.Opens);
         sb.AppendLine();
@@ -1385,6 +1438,23 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             : declared;
     }
 
+    /// <summary>
+    /// R24.17. The `[Spec]` function modules a class's invariant, model and observations
+    /// name: the class module opens them, and so does every method of the class, whose
+    /// unfoldings of the invariant mention them.
+    /// </summary>
+    private IEnumerable<string> ClassSpecOpens(IrClass c)
+    {
+        var saved = _recursiveMethod;
+        var opens = Dependencies(Names.ClassModule(c.Name), null,
+                c.Invariants, c.ModelRefinements, c.ModelBody is { } mb ? [mb] : [],
+                c.Observations.Select(o => o.Body))
+            .Where(o => o.StartsWith(Names.SpecModule(""), StringComparison.Ordinal))
+            .ToImmutableArray();
+        _recursiveMethod = saved;
+        return opens;
+    }
+
     private ImmutableArray<string> Dependencies(
         string self, IrStmt? body, params IEnumerable<IrExpr>[] specifications)
     {
@@ -1455,6 +1525,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrStmtExpr se: foreach (var s in se.Prelude) Collect(s); CollectExpr(se.Value); return;
                 case IrOptionOp oo: CollectExpr(oo.Operand); return;
                 case IrRaise ra: CollectExpr(ra.Exception); return;
+                case IrNew nw: foreach (var fi in nw.Fields) CollectExpr(fi.Value); return;
                 default: return;
             }
         }
@@ -1502,5 +1573,6 @@ public static class Preamble
         module D = Pulse.Lib.CSharp.Decimal
         module Linq = Pulse.Lib.CSharp.Linq
         module Opaque = Pulse.Lib.CSharp.Opaque
+        module NA = Pulse.Lib.CSharp.NullableArray
         """;
 }

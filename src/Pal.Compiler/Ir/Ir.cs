@@ -605,7 +605,9 @@ public sealed record IrFor(
     ImmutableArray<IrStmt> Step,
     ImmutableArray<IrExpr> Invariants,
     IrExpr? Decreases,
-    IrStmt Body) : IrStmt(Loc);
+    IrStmt Body) : IrStmt(Loc)
+{
+}
 
 /// <summary>
 /// One section of a <c>switch</c>: the labels that select it and the statements it runs.
@@ -680,7 +682,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
 /// <summary><c>DebugAssert</c> is R22.19's <c>Debug.Assert(c)</c>: <c>Prop</c> is an executable expression.</summary>
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert, Let }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
@@ -713,7 +715,11 @@ public sealed record IrTry(IrLoc Loc, IrBlock Body, ImmutableArray<IrCatch> Catc
 
 /// <summary><c>Pal.Assert</c> / <c>Pal.Assume</c> / <c>Pal.GhostStmt</c> / <c>Pal.Share</c> /
 /// <c>Pal.Gather</c> / a <c>[Lemma]</c> call.</summary>
-public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string? Text) : IrStmt(Loc);
+public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string? Text) : IrStmt(Loc)
+{
+    /// <summary>R24.12. For <see cref="GhostKind.Let"/>, the ghost local's type.</summary>
+    public IrType? Type { get; init; }
+}
 
 // ---------------------------------------------------------------------------
 // Declarations (doc/translation.md §2, §4)
@@ -828,6 +834,9 @@ public sealed record IrSpecFunction(
     ImmutableArray<IrExpr> Requires,
     IrExpr Body) : IrDecl(Loc, Name)
 {
+    /// <summary>R24.17. A verbatim F* definition, replacing <see cref="Body"/>.</summary>
+    public string? PulseBody { get; init; }
+
     /// <summary>R14.2: type binders, ahead of every value binder.</summary>
     public ImmutableArray<string> TypeParameters { get; init; } = [];
 
@@ -839,6 +848,12 @@ public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
 {
     /// <summary>R10.10. A back pointer: constrained by the invariant, not owned by it.</summary>
     public bool IsBackward { get; init; }
+
+    /// <summary>
+    /// R24.7. An array field declared <c>T[]?</c>: the class owns it through
+    /// <c>Pulse.Lib.CSharp.NullableArray.pts_to</c>, which owns nothing when it is null.
+    /// </summary>
+    public bool IsNullableArray { get; init; }
 }
 
 /// <summary>One argument of a recursive class's model constructor (R10.5).</summary>

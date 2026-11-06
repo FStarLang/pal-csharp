@@ -1,0 +1,630 @@
+dotnet build Pal.slnx
+make -C pulse
+make[1]: Entering directory '/home/nswamy/wt/pal-hashing/pulse'
+make[1]: Nothing to be done for 'all'.
+make[1]: Leaving directory '/home/nswamy/wt/pal-hashing/pulse'
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/netstandard2.0/Pal.Annotations.dll
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/net10.0/Pal.Annotations.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/netstandard2.0/Pal.Compiler.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/net10.0/Pal.Compiler.dll
+  Pal.Analyzers -> /home/nswamy/wt/pal-hashing/src/Pal.Analyzers/bin/Debug/netstandard2.0/Pal.Analyzers.dll
+  Pal.Tool -> /home/nswamy/wt/pal-hashing/src/Pal.Tool/bin/Debug/net10.0/palcs.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.44
+make -C examples
+make[1]: Entering directory '/home/nswamy/wt/pal-hashing/examples'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/examples/adler32'
+make[3]: Nothing to be done for '_verify'.
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.88
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/examples/adler32'
+make[1]: Leaving directory '/home/nswamy/wt/pal-hashing/examples'
+make -C test
+make[1]: Entering directory '/home/nswamy/wt/pal-hashing/test'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/analyzer'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/abs_max'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/annotations'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/account_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/array_reverse'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/array_view'
+make[3]: Entering directory '/home/nswamy/wt/pal-hashing'
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/netstandard2.0/Pal.Annotations.dll
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/net10.0/Pal.Annotations.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/net10.0/Pal.Compiler.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/netstandard2.0/Pal.Compiler.dll
+  Pal.Tool -> /home/nswamy/wt/pal-hashing/src/Pal.Tool/bin/Debug/net10.0/palcs.dll
+  Pal.Analyzers -> /home/nswamy/wt/pal-hashing/src/Pal.Analyzers/bin/Debug/netstandard2.0/Pal.Analyzers.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.82
+make[3]: Leaving directory '/home/nswamy/wt/pal-hashing'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.77
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.80
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/abs_max'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/bag_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.81
+
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/array_reverse'
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:03.83
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/binary_search'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/account_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/binary_tree'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/array_view'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/break_continue'
+annotations: OK
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/annotations'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/circular_buffer'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.85
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/bag_class'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/collections_foundation'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.92
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.92
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/binary_search'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/collections_hashing'
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/binary_tree'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/collections_queuestack'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.07
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/break_continue'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/collections_sorted'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.16
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/circular_buffer'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/compare_elements'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.88
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/collections_foundation'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/computed_property'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.93
+/home/nswamy/wt/pal-hashing/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-hashing/pulse --include /home/nswamy/wt/pal-hashing/pulse/_cache  out/TranslationErrors.fst
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.99
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/collections_queuestack'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/counter_class'
+Verified module: TranslationErrors
+All verification conditions discharged successfully
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/collections_hashing'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/counter_client'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.04
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/collections_sorted'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/deep_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.83
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/compare_elements'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/deep_hierarchy'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.80
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/computed_property'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/diagnostics'
+make[3]: Entering directory '/home/nswamy/wt/pal-hashing'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.86
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/counter_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/dll_segment'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.90
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/counter_client'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/frac_alias'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.88
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/deep_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/generic_list'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.01
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/deep_hierarchy'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/generic_tree'
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/netstandard2.0/Pal.Annotations.dll
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/net10.0/Pal.Annotations.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/netstandard2.0/Pal.Compiler.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/net10.0/Pal.Compiler.dll
+  Pal.Tool -> /home/nswamy/wt/pal-hashing/src/Pal.Tool/bin/Debug/net10.0/palcs.dll
+  Pal.Analyzers -> /home/nswamy/wt/pal-hashing/src/Pal.Analyzers/bin/Debug/netstandard2.0/Pal.Analyzers.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.54
+make[3]: Leaving directory '/home/nswamy/wt/pal-hashing'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.87
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/dll_segment'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/ghost_arg'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.93
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/frac_alias'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/insertion_sort'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.96
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/generic_list'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/insertion_sort_sorted'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.87
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/generic_tree'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/interval_class'
+analyzer: OK (5 case(s) + verification + 1 clean build)
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/analyzer'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/legacy_entity'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.80
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/ghost_arg'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/legacy_validation'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.85
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/insertion_sort'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/lemma_call'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.91
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/insertion_sort_sorted'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/linked_list'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.80
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/interval_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/list_cursor'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.83
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/legacy_entity'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/nested_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.83
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/legacy_validation'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/objects_probe'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.89
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/lemma_call'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/open_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.78
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/linked_list'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/open_concrete'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.86
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/list_cursor'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/open_model'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.80
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/nested_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/out_param'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.72
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/objects_probe'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/overloads'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.94
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.81
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/open_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/point_struct'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/open_concrete'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/probe_insertion_sort'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.84
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/open_model'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/pulse_facts'
+make[2]: Nothing to be done for 'all'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/pulse_facts'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/pulse_interop'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.80
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/out_param'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/pulse_refusals'
+make[3]: Entering directory '/home/nswamy/wt/pal-hashing'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.84
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/overloads'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/quote_lines'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.65
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/probe_insertion_sort'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/record_cases'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.87
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/point_struct'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/ring_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.90
+  Determining projects to restore...
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/pulse_interop'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/shape_hierarchy'
+  All projects are up-to-date for restore.
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/netstandard2.0/Pal.Annotations.dll
+  Pal.Annotations -> /home/nswamy/wt/pal-hashing/src/Pal.Annotations/bin/Debug/net10.0/Pal.Annotations.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/netstandard2.0/Pal.Compiler.dll
+  Pal.Compiler -> /home/nswamy/wt/pal-hashing/src/Pal.Compiler/bin/Debug/net10.0/Pal.Compiler.dll
+  Pal.Tool -> /home/nswamy/wt/pal-hashing/src/Pal.Tool/bin/Debug/net10.0/palcs.dll
+  Pal.Analyzers -> /home/nswamy/wt/pal-hashing/src/Pal.Analyzers/bin/Debug/netstandard2.0/Pal.Analyzers.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:01.67
+make[3]: Leaving directory '/home/nswamy/wt/pal-hashing'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.08
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/quote_lines'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/spec_bitwise'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.01
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/record_cases'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/spec_division'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.16
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/ring_class'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/spec_let'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.22
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/shape_hierarchy'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/stack_class'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.22
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/spec_let'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/step_once'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.45
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/stack_class'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/sum_array'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.38
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:05.17
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:05.33
+make[3]: Nothing to be done for '_verify'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/step_once'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/swap'
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/spec_division'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/switch_stmt'
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/spec_bitwise'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/throw_catch'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.44
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/sum_array'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/toolchain_smoke'
+make[2]: Nothing to be done for 'all'.
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/toolchain_smoke'
+make[3]: Nothing to be done for '_verify'.
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/tree_cursor'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.18
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/swap'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/type_param'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.27
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/throw_catch'
+make[2]: Entering directory '/home/nswamy/wt/pal-hashing/test/user_spec_type'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.32
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/switch_stmt'
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+make[3]: Nothing to be done for '_verify'.
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.20
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/tree_cursor'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.17
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/type_param'
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.20
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/user_spec_type'
+pulse-refusals: OK (27 case(s))
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/pulse_refusals'
+diagnostics: OK (80 cases)
+make[2]: Leaving directory '/home/nswamy/wt/pal-hashing/test/diagnostics'
+no-example-names: OK
+diagnostic-ids: OK (93 id(s))
+provenance-lint: OK (2513 construct(s))
+module-refs: OK (1173 file(s))
+fst-configs: OK
+cs-projects: OK (58 project(s) + Pal.Tests.sln)
+ide-build: OK (61 project(s), analyzer silent)
+make[1]: Leaving directory '/home/nswamy/wt/pal-hashing/test'
+EXIT 0

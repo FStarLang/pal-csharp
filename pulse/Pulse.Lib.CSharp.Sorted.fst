@@ -13,11 +13,8 @@ module Seq = FStar.Seq
 module I32 = FStar.Int32
 module O = Pulse.Lib.CSharp.Order
 
-/// MODELING AXIOM (R25.4). Whether a value of a type the model treats as a value (a
-/// type parameter, a comparer) is the null reference. Left uninterpreted: nothing the
-/// model says about a value depends on it, except that `ThrowIfNull` throws exactly
-/// when it holds.
-assume val is_null (#t: Type) (x: t) : bool
+/// MODELING AXIOM (R25.4), stated in `Pulse.Lib.CSharp.Null`.
+let is_null (#t: Type) (x: t) : bool = Pulse.Lib.CSharp.Null.is_null x
 
 /// R25.5. `c ?? Comparer<T>.Default`: what a BCL search does with the comparer it is given.
 let or_default (#t: Type) (c: O.comparer t) : O.comparer t =

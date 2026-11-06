@@ -29,10 +29,73 @@ public static class Normalize
         // exception.
         IrMethod m when m.Body is not null => m with
         {
-            Body = Statement(m.Body, [.. m.Parameters.Select(p => p.Name)], diagnostics),
+            Body = Statement(LoopReturns(m.Body), [.. m.Parameters.Select(p => p.Name)], diagnostics),
         },
         _ => decl,
     };
+
+    // -----------------------------------------------------------------------
+    // R24.14 `return` inside a loop, nested in an `if`
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// R24.14. R26.2 rewrites a <c>return</c> inside a loop in the frontend, following the
+    /// loop with <c>if (returned) return value;</c>. When that loop sits inside an
+    /// <c>if</c> that something follows, the guard is not in tail position; what follows
+    /// is copied into both arms, so that R5.5b finds the guard and the rest in one block.
+    /// </summary>
+    private static IrStmt LoopReturns(IrStmt body) =>
+        LoopReturn(body) ? new IrBlock(body.Loc, Sink(Stmts(body))) : body;
+
+    private static ImmutableArray<IrStmt> Stmts(IrStmt? s) =>
+        s is null ? [] : s is IrBlock b ? b.Statements : [s];
+
+    /// <summary>Whether <paramref name="s"/> holds, outside any loop, a loop a <c>return</c> leaves.</summary>
+    private static bool LoopReturn(IrStmt? s) => s switch
+    {
+        IrWhile w => BreaksToReturn(w.Body),
+        IrFor f => BreaksToReturn(f.Body),
+        IrBlock b => b.Statements.Any(LoopReturn),
+        IrIf i => LoopReturn(i.Then) || LoopReturn(i.Else),
+        _ => false,
+    };
+
+    private static bool BreaksToReturn(IrStmt? s) => s switch
+    {
+        IrBreak { FromReturn: true } => true,
+        IrBlock b => b.Statements.Any(BreaksToReturn),
+        IrIf i => BreaksToReturn(i.Then) || BreaksToReturn(i.Else),
+        IrWhile w => BreaksToReturn(w.Body),
+        IrFor f => BreaksToReturn(f.Body),
+        _ => false,
+    };
+
+    private static ImmutableArray<IrStmt> Sink(ImmutableArray<IrStmt> stmts)
+    {
+        var result = new List<IrStmt>();
+        for (var i = 0; i < stmts.Length; i++)
+        {
+            var s = stmts[i];
+            var rest = stmts.RemoveRange(0, i + 1);
+            switch (s)
+            {
+                case IrBlock { Splice: false } b when LoopReturn(b):
+                    result.AddRange(Sink([.. b.Statements, .. rest]));
+                    return [.. result];
+                case IrIf f when LoopReturn(f):
+                    result.Add(f with
+                    {
+                        Then = new IrBlock(f.Then.Loc, Sink([.. Stmts(f.Then), .. rest])),
+                        Else = new IrBlock(f.Else?.Loc ?? f.Loc, Sink([.. Stmts(f.Else), .. rest])),
+                    });
+                    return [.. result];
+                default:
+                    result.Add(s);
+                    break;
+            }
+        }
+        return [.. result];
+    }
 
     // -----------------------------------------------------------------------
     // R5.7 / R5.8 / R5.8b / R5.9
@@ -445,6 +508,18 @@ public static class Normalize
                 .Select(v => v.Name)];
 
     /// <summary>
+    /// R24.21. A write to a field of an array element, <c>a[i].f = v</c>, writes the
+    /// element: the struct is read, updated and written back. Analyses of what a statement
+    /// writes see it as the element it is.
+    /// </summary>
+    public static IrExpr ElementTarget(IrExpr target)
+    {
+        for (var t = target; t is IrField f; t = f.Receiver)
+            if (f.Receiver is IrElement el) return el;
+        return target;
+    }
+
+    /// <summary>
     /// R4.11. The names whose model a statement may move: an assignment target, a name
     /// passed by reference, and anything handed to a callee — except the receiver of an
     /// instance method the frontend has already found read-only, whose own postcondition
@@ -463,7 +538,7 @@ public static class Normalize
             case IrBlock b: foreach (var x in b.Statements) Mutated(x, into); return;
             case IrLocalDecl d: MutatedIn(d.Init, into); return;
             case IrAssign a:
-                switch (a.Target)
+                switch (ElementTarget(a.Target))
                 {
                     case IrVar v: into.Add(v.Name); break;
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;
@@ -542,7 +617,7 @@ public static class Normalize
             case null: return;
             case IrBlock b: foreach (var s in b.Statements) Assigned(s, into); return;
             case IrAssign a:
-                switch (a.Target)
+                switch (ElementTarget(a.Target))
                 {
                     case IrVar v: into.Add(v.Name); break;
                     case IrElement { Array: IrVar arr }: into.Add(arr.Name); break;

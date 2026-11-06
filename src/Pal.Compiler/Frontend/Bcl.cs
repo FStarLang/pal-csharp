@@ -19,6 +19,7 @@ public static class Bcl
     /// <summary>The value types the table models, or null.</summary>
     public static IrType? MapType(INamedTypeSymbol type, Func<ITypeSymbol, IrType?> map)
     {
+        if (InSource(type)) return null;
         switch (type.OriginalDefinition.ToDisplayString())
         {
             case "System.Guid":
@@ -34,6 +35,13 @@ public static class Bcl
         }
     }
 
+    /// <summary>
+    /// R24.5. A type whose source is in the compilation is the program's own, not the
+    /// BCL's: verifying `HashSet&lt;T&gt;` itself must not see it as the opaque model.
+    /// </summary>
+    private static bool InSource(INamedTypeSymbol type) =>
+        type.OriginalDefinition.Locations.Any(l => l.IsInSource);
+
     /// <summary><c>Guid.Empty</c>, the one static member read.</summary>
     public static IrExpr? Member(ISymbol? symbol, IrLoc loc) =>
         symbol is IFieldSymbol { IsStatic: true, Name: "Empty" } f &&
@@ -43,6 +51,7 @@ public static class Bcl
 
     /// <summary>Whether <paramref name="method"/> is one of the table's.</summary>
     public static bool Models(IMethodSymbol method) =>
+        !(method.ContainingType is { } owner && InSource(owner)) &&
         (method.ContainingType?.OriginalDefinition.ToDisplayString(), method.Name) is
             ("string", "IsNullOrWhiteSpace") or ("string", "Equals") or
             ("System.Text.RegularExpressions.Regex", "IsMatch") or

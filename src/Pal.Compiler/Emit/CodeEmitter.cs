@@ -463,9 +463,10 @@ public sealed class CodeEmitter(
 
         // R22.9. A body that is more than field initialisations runs as C# runs it: the
         // object is allocated with every field at its default, and the body is then an
-        // ordinary method body over the open representation.
+        // ordinary method body over the open representation. R24.7: so does one over a
+        // class with a nullable array field, whose `null` the open path knows how to own.
         if (alloc.Name == built.Name && decl.Recursion is null &&
-            statements.Any(st => !IsInitialiser(st)))
+            (statements.Any(st => !IsInitialiser(st)) || decl.Fields.Any(f => f.IsNullableArray)))
         {
             ConstructOpen(method, decl, alloc, statements);
             return;
@@ -588,6 +589,13 @@ public sealed class CodeEmitter(
             string value;
             switch (field.Type)
             {
+                // R24.7. A nullable array field the constructor leaves alone is `null`,
+                // which owns nothing; one it assigns starts out `null` too, and the
+                // assignment drops that.
+                case IrArrayType nat when field.IsNullableArray:
+                    value = Fresh();
+                    Line($"let {value} = NA.alloc_null ({Types.Render(nat.Element)}) ();");
+                    break;
                 case IrArrayType at when assigned is null || assigned.Contains(field.Name):
                     value = Fresh();
                     Line($"let {value} = alloc_empty #({Types.Render(at.Element)}) ();");
@@ -873,7 +881,7 @@ public sealed class CodeEmitter(
             if (f.Type is IrArrayType)
             {
                 var contents = FreshValue(Names.Contents(f.Name));
-                var resource = $"A.pts_to {projection} {receiver.PermArg}{contents}";
+                var resource = $"{PulseEmitter.ArrayPts(f)} {projection} {receiver.PermArg}{contents}";
                 resources.Add(resource);
                 var stable = !writesRecord && !written.Contains(f.Name) && !written.Contains(AnyArray);
                 if (stable)
@@ -896,10 +904,15 @@ public sealed class CodeEmitter(
                         var entry = FreshValue(Names.Contents(f.Name));
                         fixedNames.Add((entry, resource.Replace(contents, entry)));
                         pure.Add($"Seq.length {contents} == Seq.length {entry}");
+                        // A measure may still name the array's length (R24.7's alias of a
+                        // field makes `a.Length` this field's): the length before the loop.
+                        measureScope.Bind($"{Names.This}.{f.Name}", new Term(entry, TermKind.Seq, f.Type));
                     }
                 }
                 pure.Add($"Seq.length {contents} <= 2147483647");
                 BindBoth($"{Names.This}.{f.Name}", new Term(contents, TermKind.Seq, f.Type), stable);
+                BindBoth(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                    new Term(projection, TermKind.Other, f.Type), !writesRecord);
             }
             else
             {
@@ -930,7 +943,7 @@ public sealed class CodeEmitter(
         {
             if (stmt is IrAssign a)
             {
-                switch (a.Target)
+                switch (Normalize.ElementTarget(a.Target))
                 {
                     case IrField { Receiver: IrVar { Name: Names.This }, Field: var f }:
                         record = true;
@@ -1505,8 +1518,9 @@ public sealed class CodeEmitter(
                 // even the binder the `unfold` produced is stale. `with c. assert p`
                 // names what is actually there, which is the same device R4.14 needs.
                 var contents = FreshValue(field.Name);
-                Line($"with {contents}. assert (A.pts_to {projection} {contents});");
+                Line($"with {contents}. assert ({PulseEmitter.ArrayPts(field)} {projection} {contents});");
                 scope.Bind(field.Name, new Term(contents, TermKind.Seq, field.Type));
+                scope.Bind(SpecEmitter.ArrayRefKey(field.Name), new Term(projection, TermKind.Other, field.Type));
                 continue;
             }
             if (field.Type is IrClassType)
@@ -1757,7 +1771,8 @@ public sealed class CodeEmitter(
                     _ => "reverse",
                 };
                 var module = c.Op == ArrayOpKind.Sort ? "Pulse.Lib.CSharp.Sort" : "Pulse.Lib.CSharp.Array";
-                Line($"{module}.{fn} {string.Join(" ", args)};");
+                WithArrays(c.Args.Zip(args, (e, t) => (e, t)).Where(p => p.e.Type is IrArrayType),
+                    () => Line($"{module}.{fn} {string.Join(" ", args)};"));
                 return;
             }
             case IrExprStmt e:
@@ -1885,6 +1900,7 @@ public sealed class CodeEmitter(
     {
         var cell = Names.Local(d.Name);
         var init = d.Init is null ? Default(d.Type) : Expr(d.Init);
+        var nullableArray = d.Type is IrArrayType && d.Init is not null && IsNullableArray(d.Init);
         if (d.Immutable)
         {
             // A value that is already a read's binder is named by it: a second `let` would
@@ -1892,14 +1908,23 @@ public sealed class CodeEmitter(
             // could not be joined (R26.4).
             if (System.Text.RegularExpressions.Regex.IsMatch(init, @"^t[0-9]+$"))
             {
-                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, init);
+                _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, init)
+                {
+                    NullableArray = nullableArray,
+                };
                 return;
             }
-            _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, cell);
+            _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Value, cell)
+            {
+                NullableArray = nullableArray,
+            };
             Line($"let {cell} = {init};");
             return;
         }
-        _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
+        _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell)
+        {
+            NullableArray = nullableArray,
+        };
         // A type parameter's default leaves its dictionary to be resolved, and a cell's type
         // is inferred from its initialiser; the annotation resolves it first (R26.2's cell).
         // A tuple's universe is likewise inferred, and `let mut` needs it to be zero.
@@ -1956,7 +1981,8 @@ public sealed class CodeEmitter(
                 var array = Expr(el.Array);
                 var index = Expr(el.Index);
                 var value = Expr(a.Value);
-                Line($"{(IsSpan(el.Array) ? "Span." : "")}write {array} {index} {value};");
+                WithArrays([(el.Array, array)], () =>
+                    Line($"{(IsSpan(el.Array) ? "Span." : "")}write {array} {index} {value};"));
                 return;
             }
 
@@ -1987,23 +2013,55 @@ public sealed class CodeEmitter(
                 _slots.TryGetValue(ov.Name, out var obj) && obj is { Kind: SlotKind.Object, Type: IrClassType oc }:
             {
                 if (!Reachable(obj, field.Loc, field.Field)) return;
-                var value = Inject(FieldType(oc, field.Field), a.Value, Expr(a.Value));
+                string value;
+                if (a.Value is IrNull && FieldType(oc, field.Field) is IrArrayType nullType &&
+                    FieldDecl(oc, field.Field) is { IsNullableArray: true })
+                {
+                    value = Fresh();
+                    Line($"let {value} = NA.alloc_null ({Types.Render(nullType.Element)}) ();");
+                }
+                else
+                    value = Inject(FieldType(oc, field.Field), a.Value, Expr(a.Value));
                 var current = Fresh();
                 Line($"let {current} = B.op_Bang {obj.NonNull};");
-                if (FieldType(oc, field.Field) is IrArrayType)
+                if (FieldType(oc, field.Field) is IrArrayType fat)
                 {
                     // R22.12. The object owns the array a field holds, so replacing the
                     // array discards the old one's contents -- it is garbage to the CLR --
                     // and the new one's ownership moves from the local into the object.
+                    var fdecl = FieldDecl(oc, field.Field)!;
+                    var pts = PulseEmitter.ArrayPts(fdecl);
                     var projection = $"{current}.{Names.ClassProjection(oc.Name, field.Field)}";
                     var old = FreshValue(field.Field);
-                    Line($"with {old}. assert (A.pts_to {projection} {old});");
-                    Line($"drop_ (A.pts_to {projection} {old});");
+                    Line($"with {old}. assert ({pts} {projection} {old});");
+                    Line($"drop_ ({pts} {projection} {old});");
                     if (a.Value is IrVar moved)
                         _objectLocals.RemoveAll(l => l.Name == moved.Name && l.Kind == SlotKind.Array);
+                    // R24.7. A nullable field owns what it holds through `NA.pts_to`: a
+                    // non-null array moves in by `intro`, and `null` owns nothing.
+                    // (`null` arrives owned, by `NA.alloc_null`.)
+                    if (fdecl.IsNullableArray && a.Value is not IrNull && !IsNullableArray(a.Value))
+                        Line($"NA.intro {value};");
                 }
                 Line($"B.op_Colon_Equals {obj.NonNull} " +
                      $"({{ {current} with {Names.ClassProjection(oc.Name, field.Field)} = {value} }});");
+                return;
+            }
+
+            // R24.21. `a[i].f = v` on an array of structs: read the element, replace the
+            // field, write the element back.
+            case IrField efield when Normalize.ElementTarget(efield) is IrElement el:
+            {
+                if (el.Array is IrVar eav && _slots.TryGetValue(eav.Name, out var earr) && ReadOnly(earr, a.Loc)) return;
+                var array = Expr(el.Array);
+                var index = Expr(el.Index);
+                var value = Expr(a.Value);
+                var current = Fresh();
+                WithArrays([(el.Array, array)], () =>
+                {
+                    Line($"let {current} = {(IsSpan(el.Array) ? "Span." : "")}read {array} {index};");
+                    Line($"{(IsSpan(el.Array) ? "Span." : "")}write {array} {index} {Update(current, efield, value, a.Loc)};");
+                });
                 return;
             }
 
@@ -2058,7 +2116,7 @@ public sealed class CodeEmitter(
     /// <summary>The pure projection path from a root binder down to a field access.</summary>
     private string Path(string root, IrExpr expr, IrLoc loc)
     {
-        if (expr is IrVar) return root;
+        if (expr is IrVar or IrElement) return root;
         if (expr is IrField f && f.Receiver.Type is IrNamedType named)
             return $"{Path(root, f.Receiver, loc)}.{Names.Projection(named.Name, f.Field)}";
         diagnostics.Unsupported(loc, "This assignment target");
@@ -2138,6 +2196,37 @@ public sealed class CodeEmitter(
             (i == 0 ? Names.ClassProjection(al.Class, f.Field) : Names.Field(f.Field))
             + " = " + Inject(f.FieldType, f.Value, Expr(f.Value)));
         return "({ " + string.Join("; ", flds) + " })";
+    }
+
+    private IrFieldDecl? FieldDecl(IrClassType owner, string field) =>
+        classes is not null && classes.TryGetValue(owner.Name, out var decl)
+            ? decl.Fields.FirstOrDefault(f => f.Name == field)
+            : null;
+
+    /// <summary>
+    /// R24.7. Whether an array expression denotes an array owned through
+    /// <c>NA.pts_to</c>: a nullable field, or a local that was initialised from one.
+    /// </summary>
+    private bool IsNullableArray(IrExpr e) => e switch
+    {
+        IrField { Receiver: IrVar rv } f =>
+            _slots.TryGetValue(rv.Name, out var o) && o.Type is IrClassType k &&
+            FieldDecl(k, f.Field) is { IsNullableArray: true },
+        IrVar v => _slots.TryGetValue(v.Name, out var slot) && slot.NullableArray,
+        _ => false,
+    };
+
+    /// <summary>
+    /// R24.7. Brackets an operation on an array owned through <c>NA.pts_to</c>: the
+    /// ordinary operation needs <c>A.pts_to</c>, which <c>elim</c> gives back for a
+    /// non-null array -- the obligation the C# null test discharges.
+    /// </summary>
+    private void WithArrays(IEnumerable<(IrExpr Expr, string Text)> arrays, Action op)
+    {
+        var nullable = arrays.Where(a => IsNullableArray(a.Expr)).Select(a => a.Text).Distinct().ToList();
+        foreach (var a in nullable) Line($"NA.elim {a};");
+        op();
+        foreach (var a in nullable) Line($"NA.intro {a};");
     }
 
     private IrType? FieldType(IrClassType owner, string field) =>
@@ -2348,6 +2437,12 @@ public sealed class CodeEmitter(
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
         }
 
+        // R24.22. A name that owns nothing -- an immutable local, a ghost local -- holds
+        // one value for the whole loop, and the invariant may mention it as such.
+        foreach (var (name, slot) in _slots)
+            if (!slot.Owns && !_objects.Any(o => o.Name == name) && !scope.TryGet(name, out _))
+                scope.Bind(name, new Term(slot.Binder, MethodPlan.KindOf(slot.Type), slot.Type));
+
         // R5.12. Everything R4.10 opened has to be carried across the loop.
         var pure = ImmutableArray.CreateBuilder<string>();
         var repFixed = new List<(string Name, string Resource)>();
@@ -2452,7 +2547,8 @@ public sealed class CodeEmitter(
         // it. Emitting the branch as a tail rather than terminating it with `()` is what
         // closes that gap, and it is the same rule the method case already applies.
         if (brkCell is null && contCell is null &&
-            (w.Step.IsEmpty || w.Body is IrBlock sb && SplitAt([.. sb.Statements, .. w.Step]) is not null))
+            (w.Step.IsEmpty || w.Body is IrBlock sb && SplitAt([.. sb.Statements, .. w.Step]) is not null) ||
+            w.Step.IsEmpty && SplitsRecordWrite(w.Body))
         {
             UnitTail(w.Step.IsEmpty ? w.Body
                 : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan);
@@ -2577,8 +2673,8 @@ public sealed class CodeEmitter(
         {
             var projection = $"{raw}.{Names.ClassProjection(decl.Name, field.Name)}";
             var contents = FreshValue(field.Name);
-            Line($"with {contents}. assert (A.pts_to {projection} {contents});");
-            Line($"drop_ (A.pts_to {projection} {contents});");
+            Line($"with {contents}. assert ({PulseEmitter.ArrayPts(field)} {projection} {contents});");
+            Line($"drop_ ({PulseEmitter.ArrayPts(field)} {projection} {contents});");
         }
         Line($"drop_ (B.pts_to {obj.Binder} {raw});");
     }
@@ -2739,6 +2835,49 @@ public sealed class CodeEmitter(
     /// the window's closing lemma is emitted by the non-tail path, and moving it would be a
     /// change to R10.7 rather than to where a block ends.</para>
     /// </summary>
+    /// <summary>
+    /// R5.8d, R24.24. A loop body's statements in tail position. Where one may escape, what
+    /// follows it is guarded and is itself in tail position; an <c>if</c> one of whose arms
+    /// writes a field of the receiver takes what follows into both arms, so that each arm is
+    /// checked against the invariant rather than joined first: Pulse joins the record as a
+    /// <c>match</c>, through whose projection no array field can then be found.
+    /// </summary>
+    private void UnitTailSequence(ImmutableArray<IrStmt> statements, MethodPlan plan)
+    {
+        for (var k = 0; k < statements.Length; k++)
+        {
+            var rest = statements.RemoveRange(0, k + 1);
+            if (rest.IsEmpty) { UnitTail(statements[k], plan); return; }
+            if (statements[k] is IrIf i && WritesRecordInArm(i) && NullTest(i.Cond) is null)
+            {
+                IrBlock Arm(IrStmt? arm, IrLoc loc) =>
+                    new(loc, [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest]);
+                UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan);
+                return;
+            }
+            Statement(statements[k], plan);
+            if (_escape is not null && MayEscape(statements[k]))
+            {
+                Line($"if ({EscapeTest()}) {{");
+                _indent++;
+                UnitTailSequence(rest, plan);
+                _indent--;
+                Line("} else { () }");
+                return;
+            }
+        }
+        Line("()");
+    }
+
+    /// <summary>R24.24. Whether some arm of an <c>if</c> assigns a field of the receiver.</summary>
+    private bool WritesRecordInArm(IrIf i) =>
+        ReceiverWrites(i.Then).Record || i.Else is { } e && ReceiverWrites(e).Record;
+
+    /// <summary>R24.24. Whether a loop body has an <c>if</c>, not last, that R24.24 splits.</summary>
+    private bool SplitsRecordWrite(IrStmt body) =>
+        body is IrBlock b && b.Statements.Length > 1 &&
+        b.Statements.RemoveAt(b.Statements.Length - 1).Any(s => s is IrIf i && WritesRecordInArm(i));
+
     private void UnitTail(IrStmt stmt, MethodPlan plan)
     {
         switch (stmt)
@@ -2775,11 +2914,7 @@ public sealed class CodeEmitter(
             }
 
             case IrBlock b:
-                Scoped(() =>
-                {
-                    Sequence(b.Statements.RemoveAt(b.Statements.Length - 1), plan);
-                    UnitTail(b.Statements[^1], plan);
-                }, dropAtEnd: false);
+                Scoped(() => UnitTailSequence(b.Statements, plan), dropAtEnd: false);
                 return;
 
             case IrIf { Else: not null } i when NullTest(i.Cond) is null:
@@ -2953,6 +3088,17 @@ public sealed class CodeEmitter(
             case GhostKind.Raw:
                 Line(Antiquotation.Expand(g.Text!, scope, Binder) + ";");
                 return;
+            case GhostKind.Let:
+            {
+                var inner = g.Type is IrGhostType gt ? gt.Inner : g.Type!;
+                // R24.12. A snapshot is a specification value, and a machine integer in a
+                // specification is its mathematical value.
+                if (inner is IrPrim { IsMachineInt: true }) inner = new IrPrim(PrimKind.SpecInt);
+                Line($"let {g.Text} : erased ({Types.Render(inner)}) = " +
+                     $"hide ({SpecArgument(g.Prop!, inner, scope)});");
+                _slots[g.Text!] = new Slot(g.Text!, inner, SlotKind.Value, g.Text!);
+                return;
+            }
             case GhostKind.LemmaCall when g.Prop is IrCall call:
                 // R14.5. A generic [Lemma] is applied to its type arguments first.
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
@@ -3142,7 +3288,8 @@ public sealed class CodeEmitter(
             {
                 var array = Expr(len.Array);
                 var t = Fresh();
-                Line($"let {t} = {(IsSpan(len.Array) ? "Span." : "")}length_i32 {array};");
+                WithArrays([(len.Array, array)], () =>
+                    Line($"let {t} = {(IsSpan(len.Array) ? "Span." : "")}length_i32 {array};"));
                 return t;
             }
 
@@ -3152,7 +3299,8 @@ public sealed class CodeEmitter(
                 var array = Expr(el.Array);
                 var index = Expr(el.Index);
                 var t = Fresh();
-                Line($"let {t} = {(IsSpan(el.Array) ? "Span." : "")}read {array} {index};");
+                WithArrays([(el.Array, array)], () =>
+                    Line($"let {t} = {(IsSpan(el.Array) ? "Span." : "")}read {array} {index};"));
                 return t;
             }
 
@@ -3591,6 +3739,14 @@ public sealed class CodeEmitter(
             return b.Op == BinOp.And
                 ? Branch(left, right, shortCircuit)
                 : Branch(left, shortCircuit, right);
+        }
+
+        // R24.7. An array compared with `null` asks whether the reference is null.
+        if (b.Op is BinOp.Eq or BinOp.Ne &&
+            (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is { Type: IrArrayType } tested)
+        {
+            var reference = Expr(tested);
+            return b.Op is BinOp.Eq ? $"(A.is_null {reference})" : $"(not (A.is_null {reference}))";
         }
 
         var l = Expr(b.Left);

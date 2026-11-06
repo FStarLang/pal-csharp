@@ -33,7 +33,7 @@ public static class Loader
             ReferenceSet(),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
-                nullableContextOptions: nullable
+                                nullableContextOptions: nullable
                     ? NullableContextOptions.Enable
                     : NullableContextOptions.Disable,
                 allowUnsafe: allowUnsafe));

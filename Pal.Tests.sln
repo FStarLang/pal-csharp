@@ -28,6 +28,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "circular_buffer", "test/cir
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "collections_foundation", "test/collections_foundation/collections_foundation.csproj", "{3450C1DE-BF9C-CC83-A71C-5CC8909C35EA}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "collections_hashing", "test/collections_hashing/collections_hashing.csproj", "{A3490296-2371-3EE2-0EAB-7541466525DA}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "collections_listrest", "test/collections_listrest/collections_listrest.csproj", "{81152C87-1DAF-247F-491D-B1557E7ADF4C}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "collections_queuestack", "test/collections_queuestack/collections_queuestack.csproj", "{2C6E1F48-0CFC-8626-54C9-24C828F33281}"
@@ -186,6 +188,10 @@ Global
 		{3450C1DE-BF9C-CC83-A71C-5CC8909C35EA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{3450C1DE-BF9C-CC83-A71C-5CC8909C35EA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{3450C1DE-BF9C-CC83-A71C-5CC8909C35EA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A3490296-2371-3EE2-0EAB-7541466525DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A3490296-2371-3EE2-0EAB-7541466525DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A3490296-2371-3EE2-0EAB-7541466525DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A3490296-2371-3EE2-0EAB-7541466525DA}.Release|Any CPU.Build.0 = Release|Any CPU
 		{81152C87-1DAF-247F-491D-B1557E7ADF4C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{81152C87-1DAF-247F-491D-B1557E7ADF4C}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{81152C87-1DAF-247F-491D-B1557E7ADF4C}.Release|Any CPU.ActiveCfg = Release|Any CPU

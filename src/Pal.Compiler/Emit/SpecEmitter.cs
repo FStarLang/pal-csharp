@@ -457,6 +457,19 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         return fn is null ? null : $"({fn} {Emit(b.Left, scope).Text} {Emit(b.Right, scope).Text})";
     }
 
+    /// <summary>R24.7. The scope key an array's reference (not its contents) is bound under.</summary>
+    public static string ArrayRefKey(string name) => "#ref:" + name;
+
+    private static string? ArrayRef(IrExpr e, SpecScope scope) => e switch
+    {
+        IrVar v when scope.TryGet(ArrayRefKey(v.Name), out var t) => t.Text,
+        IrField { Receiver: IrVar { Name: Names.This } } f
+            when scope.TryGet(ArrayRefKey($"{Names.This}.{f.Field}"), out var t) => t.Text,
+        IrField { Receiver: IrVar { Name: Names.This } } f
+            when scope.TryGet(ArrayRefKey(f.Field), out var t) => t.Text,
+        _ => null,
+    };
+
     private Term Binary(IrBinary b, SpecScope scope)
     {
         string Infix(string op, TermKind kind, bool mathematical = true)
@@ -488,6 +501,15 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             && (Signed(b.Left) || Signed(b.Right));
 
         if (DecimalOrder(b, scope) is { } ordered) return new Term(ordered, TermKind.Bool, IrPrim.Bool);
+
+        // R24.7. An array compared with `null` is a question about the reference, which a
+        // specification otherwise reads as its contents: the scope binds the reference
+        // separately, under `ArrayRefKey`.
+        if (b.Op is BinOp.Eq or BinOp.Ne &&
+            (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is { Type: IrArrayType } tested &&
+            ArrayRef(tested, scope) is { } reference)
+            return new Term(b.Op == BinOp.Eq ? $"(A.is_null {reference})" : $"(not (A.is_null {reference}))",
+                TermKind.Bool, IrPrim.Bool);
         if (b.Left.Type is IrPrim { Kind: PrimKind.Decimal or PrimKind.String } &&
             b.Op is not (BinOp.Eq or BinOp.Ne))
             return Unsupported(b);

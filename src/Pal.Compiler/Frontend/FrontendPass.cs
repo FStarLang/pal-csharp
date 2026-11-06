@@ -558,8 +558,15 @@ public static partial class FrontendPass
                 if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
                 // R20.1. Under `[TranslateAnnotatedOnly]` a struct is translated only when it
                 // or one of its members says so.
+                // R24.6. A struct nested in a class with a model, held by one of its
+                // fields, is that class's representation and is translated with it.
                 if (known.AnnotatedOnly && !Declarations.IsAnnotated(symbol, known) &&
-                    !symbol.GetMembers().Any(m => Declarations.IsAnnotated(m, known))) continue;
+                    !symbol.GetMembers().Any(m => Declarations.IsAnnotated(m, known)) &&
+                    !(symbol.ContainingType is { } owner && known.HasModel(owner) &&
+                      owner.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic &&
+                          SymbolEqualityComparer.Default.Equals(
+                              (f.Type is IArrayTypeSymbol at ? at.ElementType : f.Type).OriginalDefinition,
+                              symbol.OriginalDefinition)))) continue;
                 // R22.6. A `[Spec]` struct is an erased record, never copied or stored at run
                 // time, so R15.1's reason for refusing a generic struct does not apply to it.
                 if (!(Declarations.Has(symbol, known.SpecAttribute) && symbol.TypeParameters.All(WellKnown.Unconstrained))
@@ -644,14 +651,22 @@ public static partial class FrontendPass
             .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p));
 
     /// <summary>R3.4: the field types a struct may hold.</summary>
-    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType;
+    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType or IrTypeParamType;
 
     /// <summary>
     /// R3.9a: the field types a <c>[Spec]</c> struct may hold. Wider than R3.4 by exactly
     /// the spec-only types, and no wider: a ghost value still cannot own a resource, so an
     /// array or a class reference is refused here as it is there.
     /// </summary>
-    private static bool IsSpecField(IrType type) => type is IrPrim or IrNamedType or IrSeqType || Sorted.IsComparer(type);
+    private static bool IsSpecField(IrType type) => type switch
+    {
+        IrPrim or IrNamedType or IrSeqType => true,
+        // R24.18. A `[SpecType]`/`[SpecBinding]` value is a pure F* value (an equality
+        // comparer, say), and so is `T?` of one: neither owns a resource.
+        IrUserSpecType => true,
+        IrOptionType { Inner: IrUserSpecType } => true,
+        _ => Sorted.IsComparer(type),
+    };
 
     /// <summary>
     /// R3.4: a refinement is bound with the struct's fields in scope as simple names,
@@ -673,7 +688,7 @@ public static partial class FrontendPass
                     Parameters: parameters,
                     Usings: s.Usings)
                 {
-                    TypeParameters = [.. s.Symbol.TypeParameters.Select(t => t.Name)],
+                    TypeParameters = [.. WellKnown.AllTypeParameters(s.Symbol).Select(t => t.Name)],
                 });
         }
         return sites.ToImmutable();
@@ -717,10 +732,10 @@ public static partial class FrontendPass
                     .Lower(spec.Expression));
 
         return new IrStruct(
-            Locations.From(s.Syntax.Identifier), s.Symbol.Name, fields, refinements.ToImmutable())
+            Locations.From(s.Syntax.Identifier), WellKnown.StructName(s.Symbol), fields, refinements.ToImmutable())
         {
             IsSpecOnly = s.IsSpecOnly,
-            TypeParameters = [.. s.Symbol.TypeParameters.Select(t => t.Name)],
+            TypeParameters = [.. WellKnown.AllTypeParameters(s.Symbol).Select(t => t.Name)],
         };
     }
 
@@ -940,7 +955,11 @@ public static partial class FrontendPass
     /// </summary>
     private static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
         known.AnnotatedOnly &&
-        !symbol.GetMembers().Any(m => m.IsVirtual || m.IsAbstract || m.IsOverride) &&
+        // R24.4. An unannotated virtual has no module, so no translated body can call it
+        // (R22.4's refusal at the call); a subclass overriding it changes nothing verified.
+        !symbol.GetMembers().Any(m => (m.IsVirtual || m.IsAbstract || m.IsOverride) &&
+            (Declarations.IsAnnotated(m, known) ||
+             m is IMethodSymbol { AssociatedSymbol: { } a } && Declarations.IsAnnotated(a, known))) &&
         !known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
             .OfType<INamedTypeSymbol>()
             .Any(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition));
@@ -1154,7 +1173,9 @@ public static partial class FrontendPass
                 continue;
             }
 
+            // R24.17: a `[PulseBody]` spec function has no C# body to observe through.
             if (Declarations.Has(member, known.SpecAttribute) &&
+                !Declarations.Has(member, known.PulseBodyAttribute) &&
                 Body(member) is { } observationBody &&
                 ReturnTypeOf(member) is { } observationType)
             {
@@ -1234,8 +1255,11 @@ public static partial class FrontendPass
             // R15.5. A field at a type parameter is a value like any other: it is not an
             // array and not an object, so the invariant owns it by holding it in the
             // record, and its model is itself.
-            // R25.1. A comparer is a value like a type parameter's.
-            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType or IrTypeParamType) &&
+            // R24.2. A field of a `[SpecType]` or bound library type (R20.11, R21.5) -- a
+            // comparer -- is a value too: the type is opaque, so the record holds it and
+            // nothing else can. R25.1. A comparer is a value like a type parameter's.
+            if (mapped is not (IrPrim or IrNamedType or IrArrayType or IrClassType or IrTypeParamType
+                    or IrUserSpecType or IrOptionType { Inner: IrUserSpecType }) &&
                 !Sorted.IsComparer(mapped))
             {
                 diagnostics.Error("PALCS0531",
@@ -1637,6 +1661,10 @@ public static partial class FrontendPass
                 Locations.From(f.Symbol.Locations.FirstOrDefault() ?? Location.None), f.Name, f.Mapped)
             {
                 IsBackward = Declarations.Has(f.Symbol, known.BackwardAttribute),
+                IsNullableArray = f.Symbol is IFieldSymbol
+                {
+                    Type: IArrayTypeSymbol, NullableAnnotation: NullableAnnotation.Annotated,
+                },
             })
             .ToImmutableArray();
 
@@ -1968,6 +1996,7 @@ public static partial class FrontendPass
                     Usings: usings)
                 {
                     TypeParameters = MethodTypeParameters(candidate.Symbol),
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private,
                 });
             }
 
@@ -2310,7 +2339,12 @@ public static partial class FrontendPass
         // something the translation does not depend on. That is what lets a trusted method
         // call code that is not translated at all -- the reason to admit it.
         var admitted = Declarations.Has(symbol, known.AdmitAttribute);
-        var body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+        // R24.17. A `[Spec]` (or `[Lemma]`) function's `[PulseBody]` replaces its C# body,
+        // which is then never looked at: it has `=> throw …` or `{ }` for C# to compile.
+        // On any other method both are kept, and the pair is refused (PALCS0503).
+        var verbatim = Declarations.Has(symbol, known.PulseBodyAttribute) &&
+                       (Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute));
+        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
@@ -2341,7 +2375,7 @@ public static partial class FrontendPass
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures],
             specs.Decreases,
-            admitted ? null : trimmed ?? body)
+            admitted || verbatim ? null : trimmed ?? body)
         {
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
@@ -2387,6 +2421,16 @@ public static partial class FrontendPass
         var bodyExpression = candidate.ExpressionBody?.Expression
             ?? BlockOf(candidate.Syntax)?.Statements
                 .OfType<ReturnStatementSyntax>().FirstOrDefault()?.Expression;
+
+        // R24.17. A `[Spec]` function may be defined in F*: `[PulseBody]` is its body, and
+        // the C# body (`=> throw …`) is not looked at.
+        if (Declarations.Find(candidate.Symbol, known.PulseBodyAttribute) is { } verbatim)
+            return new IrSpecFunction(loc, Naming.Of(candidate.Symbol), parameters, returnType,
+                specs.Requires, new IrLiteral(loc, true) { Type = IrPrim.Bool })
+            {
+                TypeParameters = MethodTypeParameters(candidate.Symbol),
+                PulseBody = Declarations.StringArgument(verbatim),
+            };
 
         if (bodyExpression is null)
         {

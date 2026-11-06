@@ -58,13 +58,61 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private bool _inImplicitBorrow;
 
+    /// <summary>R24.8. Makes <paramref name="symbol"/> denote <paramref name="value"/>.</summary>
+    public void Alias(ISymbol symbol, IrExpr value) => _patternBindings[symbol] = value;
+
+    /// <summary>
+    /// R24.9. A call of a <c>ref</c>-returning method of this program whose body is a
+    /// sequence of single-variable local declarations followed by <c>return ref e;</c> is
+    /// <c>e</c>, with each local and each parameter replaced by what it was bound to. Each
+    /// argument must be a name or a constant, so substituting it is evaluating it.
+    /// </summary>
+    private IrExpr? InlineRef(InvocationExpressionSyntax node, IMethodSymbol method,
+        IReadOnlyList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (method.DeclaringSyntaxReferences is not [var reference] ||
+            reference.GetSyntax() is not MethodDeclarationSyntax { Body.Statements: var body } decl ||
+            decl.SyntaxTree != model.SyntaxTree ||
+            body.Count == 0 || body[^1] is not ReturnStatementSyntax { Expression: RefExpressionSyntax result } ||
+            !body.Take(body.Count - 1).All(st => st is LocalDeclarationStatementSyntax
+                { IsConst: false, Declaration.Variables: [{ Initializer: { Value: not RefExpressionSyntax } }] }) ||
+            (!method.IsStatic && node.Expression is not (IdentifierNameSyntax or
+                MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax })) ||
+            !args.All(a => a.RefKindKeyword.IsKind(SyntaxKind.None) &&
+                a.Expression is IdentifierNameSyntax or LiteralExpressionSyntax))
+        {
+            diagnostics.Unsupported(loc, $"A call to the `ref`-returning `{method.Name}`",
+                "Only a method of locals and `return ref e;`, called on `this` with names or " +
+                "constants for arguments, is inlined (doc/translation.md R24.9).");
+            return new IrLiteral(loc, null);
+        }
+        var bound = new List<ISymbol>();
+        for (var k = 0; k < method.Parameters.Length && k < args.Count; k++)
+        {
+            Alias(method.Parameters[k], Lower(args[k].Expression));
+            bound.Add(method.Parameters[k]);
+        }
+        foreach (LocalDeclarationStatementSyntax st in body.Take(body.Count - 1))
+        {
+            var v = st.Declaration.Variables[0];
+            if (model.GetDeclaredSymbol(v) is not { } local) return Unsupported(node, loc);
+            var value = Lower(v.Initializer!.Value);
+            if (known.MapType((local as ILocalSymbol)?.Type) is { } t) value = ToDeclared(value, t);
+            Alias(local, value);
+            bound.Add(local);
+        }
+        var inlined = Lower(result.Expression);
+        foreach (var b in bound) _patternBindings.Remove(b);
+        return inlined;
+    }
+
     private IrType? Declared(ExpressionSyntax node)
     {
         if (node is not IdentifierNameSyntax and not MemberAccessExpressionSyntax) return null;
         var symbol = model.GetSymbolInfo(node).Symbol;
         // R21.6. A pattern variable is the value it was bound to, at that value's type:
         // `var` declares it nullable whatever it matched.
-        if (symbol is ILocalSymbol pl && _patternBindings.TryGetValue(pl, out var bound)) return bound.Type;
+        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound.Type;
         var declared = symbol switch
         {
             ILocalSymbol l => l.Type,
@@ -119,13 +167,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                    known.IsAnySpan(info.ConvertedType)
                 => LowerImplicitBorrow(node, loc),
             ParenthesizedExpressionSyntax p => Lower(p.Expression),
+            // R24.15. `typeof(T)` is the opaque handle of R24.13's `type_of`, when `System.Type`
+            // has a binding (the hashing harness's) to ask it questions with.
+            TypeOfExpressionSyntax typeOf when known.MapType(model.GetTypeInfo(typeOf.Type).Type) is { } denoted &&
+                                          known.MapType(info.Type) is { } typeHandle
+                => new IrSpecOp(loc, "Pulse.Lib.CSharp.Equality.type_of", [])
+                    { TypeArgs = [denoted], Type = typeHandle is IrOptionType { Inner: var h } ? h : typeHandle, MachineArgs = true },
             // R10.5. `e!` is C#'s null-forgiving operator: it changes what the *C#*
             // compiler's flow analysis believes and nothing else. It is how a model
             // expression says that reading through a nullable reference is deliberate —
             // a null one denotes the empty structure — so it is transparent here, exactly
             // as parentheses are.
             PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn
-                => Lower(sn.Operand),
+                => SuppressNull(sn, info),
             // R13.3. An increment in expression position both produces a value and
             // performs a write. Postfix yields the value from *before* the write, prefix
             // from after; that one-word difference is the whole of the distinction.
@@ -157,6 +211,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             MemberAccessExpressionSyntax m => LowerMemberAccess(m, loc),
             ElementAccessExpressionSyntax e => LowerElementAccess(e, loc),
+            // R24.8. `ref e` denotes the location `e`; where it is accepted at all, the
+            // location is the lvalue `e` itself.
+            RefExpressionSyntax r => Lower(r.Expression),
             BinaryExpressionSyntax b when b.IsKind(SyntaxKind.AsExpression) => LowerAs(b, loc),
             BinaryExpressionSyntax b => LowerBinary(b, loc),
             PrefixUnaryExpressionSyntax u => LowerPrefixUnary(u, loc),
@@ -204,7 +261,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // which is what `info.Type` reports for the syntax the conversion was applied to.
         if (result is IrSpanCreate) type = known.MapType(info.ConvertedType) ?? type;
 
-        if (type is not null) result = result with { Type = type };
+        // R24.15: `typeof(T)` is never null, whatever the nullable context says of `Type`.
+        // R24.20: so is a bound static property the library declares non-nullable
+        // (`EqualityComparer<T>.Default`), read in a nullable-oblivious specification.
+        if (type is IrOptionType { Inner: var nonNull } && result is IrSpecOp &&
+            model.GetSymbolInfo(node).Symbol is IPropertySymbol { IsStatic: true, NullableAnnotation: NullableAnnotation.NotAnnotated })
+            type = nonNull;
+        if (type is not null && node is not TypeOfExpressionSyntax) result = result with { Type = type };
 
         // R21.9. A nullable variable C#'s flow analysis knows is not null, used where a
         // non-nullable value is expected, is its value: `Some?.v`, whose refinement F*
@@ -292,13 +355,24 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R22.10. `new T[n]` fills with `default(T)`, so at a type parameter it needs the
         // caller's default exactly as R14.2a's `default(T)` does -- unless the length is
         // the literal zero, which fills nothing.
+        // R24.11: so does an array of a struct whose default mentions a type parameter.
         if (length is not IrLiteral { Value: 0 or 0L } &&
-            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: var elementType })
+            model.GetTypeInfo(node).Type is IArrayTypeSymbol { ElementType: var element })
         {
-            foreach (var tp in WellKnown.DefaultedIn(elementType)) DefaultedTypeParameters.Add(tp.Name);
+            foreach (var tp in TypeParametersIn(element))
+                DefaultedTypeParameters.Add(tp.Name);
         }
         return new IrNewArray(loc, array.Element, length) { Type = array };
     }
+
+    /// <summary>R24.11. The type parameters a type's default value depends on.</summary>
+    public static IEnumerable<ITypeParameterSymbol> TypeParametersIn(ITypeSymbol t) => t switch
+    {
+        ITypeParameterSymbol tp => [tp],
+        INamedTypeSymbol n => n.TypeArguments.Concat(n.ContainingType?.TypeArguments ?? [])
+            .SelectMany(TypeParametersIn),
+        _ => [],
+    };
 
     /// <summary>
     /// R3.5. <c>new S { f = e, … }</c>. Only object-initializer syntax is translated:
@@ -900,7 +974,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrResult(loc);
 
         // R21.3. A pattern variable is the expression it was bound to.
-        if (symbol is ILocalSymbol pl && _patternBindings.TryGetValue(pl, out var bound)) return bound;
+        // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
+        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []);
 
@@ -1018,7 +1093,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R21.5. A static member bound to an F* term is that term.
         if (symbol is IPropertySymbol { IsStatic: true } or IFieldSymbol { IsStatic: true } &&
             known.SpecOpName(symbol) is { } staticOp)
-            return new IrSpecOp(loc, staticOp, []);
+            // R24.20. A static member of a generic type (`EqualityComparer<T>.Default`)
+            // depends on the type's arguments, which are the term's leading arguments.
+            return new IrSpecOp(loc, staticOp, [])
+            {
+                TypeArgs = symbol.ContainingType is { IsGenericType: true } boundOwner &&
+                           WellKnown.AllTypeArguments(boundOwner).Select(known.MapType).ToImmutableArray() is var targs &&
+                           targs.All(t => t is not null)
+                    ? [.. targs.Select(t => t!)] : [],
+            };
         if (symbol is IFieldSymbol { IsStatic: true, IsReadOnly: true } shared &&
             StaticInitializer(shared, loc) is { } inlined)
             return inlined;
@@ -1232,9 +1315,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (known.IsSpecList(receiverType))
             return new IrListOp(loc, ListOpKind.Index, [receiver, index]);
 
-        return known.IsSeq(receiverType)
-            ? new IrSeqOp(loc, SeqOpKind.Index, [receiver, index])
-            : new IrElement(loc, receiver, index);
+        if (known.IsSeq(receiverType)) return new IrSeqOp(loc, SeqOpKind.Index, [receiver, index]);
+        // R24.16. C# indexes an array by any integer type; the element is the one at that
+        // value, so a `uint` index is the `int` it equals, which the bounds check shows.
+        if (receiverType is IArrayTypeSymbol &&
+            model.GetTypeInfo(node.ArgumentList.Arguments[0].Expression).Type?.SpecialType is
+                SpecialType.System_UInt32 or SpecialType.System_Int64 or SpecialType.System_UInt64 or SpecialType.System_IntPtr or SpecialType.System_UIntPtr)
+            index = new IrConvert(loc, IrPrim.Int, index) { Type = IrPrim.Int };
+        return new IrElement(loc, receiver, index);
     }
 
     private IrExpr LowerBinary(BinaryExpressionSyntax node, IrLoc loc)
@@ -1449,6 +1537,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         value.Type is { } type and not IrOptionType && type.Equals(option.Inner)
             ? new IrOptionOp(value.Loc, OptionOpKind.Some, value) { Type = option }
             : value;
+
+    /// <summary>
+    /// R10.5, R24.23. <c>e!</c> is transparent, but for an <c>option</c>: there C# types
+    /// it at the non-nullable type, and the translation reads the value, <c>Some?.v</c>,
+    /// whose refinement is the proof obligation that <c>e</c> is not null.
+    /// </summary>
+    private IrExpr SuppressNull(PostfixUnaryExpressionSyntax node, TypeInfo info)
+    {
+        var operand = Lower(node.Operand);
+        return operand.Type is IrOptionType && known.MapType(info.Type) is { } t and not IrOptionType
+            ? NonNull(operand)
+            : operand;
+    }
 
     /// <summary>
     /// R20.11. A read through a nullable reference is a read through its value: the
@@ -1858,6 +1959,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return SpecMember(method, ops.ToImmutable(), node, loc);
         }
 
+        if (method.ReturnsByRef && InlineRef(node, method, args, loc) is { } inlined) return inlined;
+
         if (Bcl.Models(method))
         {
             var bclReceiver = !method.IsStatic && node.Expression is MemberAccessExpressionSyntax bm
@@ -2005,6 +2108,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return (key, t);
     }
 
+    /// <summary>R24.14. Whether <paramref name="node"/> is inside a loop of its own method.</summary>
+    private static bool InLoop(SyntaxNode node) =>
+        node.Ancestors()
+            .TakeWhile(a => a is not (MemberDeclarationSyntax or AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
+            .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax);
+
     private IrExpr LowerIntrinsic(
         IMethodSymbol method, InvocationExpressionSyntax node,
         SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
@@ -2014,7 +2123,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         switch (method.Name)
         {
             case nameof(PalLang.Pal.Old): return new IrOld(loc, Arg(0));
+            // R24.14. Inside a loop, the method's result is the cell its `return` stored to.
+            case nameof(PalLang.Pal.Result) when InLoop(node):
+                return new IrVar(loc, StmtLowerer.ReturnedValue)
+                    { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapType(rm.ReturnType) : null };
             case nameof(PalLang.Pal.Result): return new IrResult(loc);
+            case nameof(PalLang.Pal.Returned) when InLoop(node):
+                return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.Returned):
+                diagnostics.Error("PALCS0645", loc,
+                    "`Pal.Returned()` names whether a loop's `return` has run, so it may appear only inside a loop.");
+                return new IrLiteral(loc, false) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.Live): return new IrLive(loc, Arg(0));
             case nameof(PalLang.Pal.Implies): return new IrBinary(loc, BinOp.Implies, Arg(0), Arg(1));
             case nameof(PalLang.Pal.Iff): return new IrBinary(loc, BinOp.Iff, Arg(0), Arg(1));
@@ -2130,8 +2249,6 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R26.2. The cells a `return` inside a loop leaves its outcome in.
             case nameof(PalLang.Pal.Broke):
                 return new IrVar(loc, StmtLowerer.BrokeFlag) { Type = IrPrim.Bool };
-            case nameof(PalLang.Pal.Returned):
-                return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.ReturnValue):
                 return new IrVar(loc, StmtLowerer.ReturnedValue) { Type = known.MapType(method.TypeArguments[0]) };
             case nameof(PalLang.Pal.InlinePulse) when ConstantString(args[0].Expression) is { } text:

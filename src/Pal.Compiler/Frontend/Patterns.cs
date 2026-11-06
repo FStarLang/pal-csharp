@@ -276,6 +276,8 @@ public sealed partial class ExprLowerer
                 ? Sorted.IsNull(loc, value)
                 : value.Type is IrOptionType
                 ? new IrUnary(loc, UnOp.Not, new IrOptionOp(loc, OptionOpKind.HasValue, value) { Type = Bool }) { Type = Bool }
+                // R25.4, R24.23. A type parameter may be instantiated at a reference type.
+                : Sorted.HasOpaqueNull(value.Type) ? Sorted.IsNull(loc, value)
                 : new IrLiteral(loc, false) { Type = Bool };
 
         // R21.8. A constant of a `[SpecType]` enum is a constructor: its discriminator.
