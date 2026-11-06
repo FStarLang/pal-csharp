@@ -59,6 +59,8 @@ public sealed class WellKnown
         BackwardAttribute = Type("BackwardAttribute");
         SpecTypeAttribute = Type("SpecTypeAttribute");
         SpecOpAttribute = Type("SpecOpAttribute");
+        RegionOpAttribute = Type("RegionOpAttribute");
+        OpenAttribute = Type("OpenAttribute");
         SpecCtorAttribute = Type("SpecCtorAttribute");
         SpecCaseAttribute = Type("SpecCaseAttribute");
         SpecBindingAttribute = Type("SpecBindingAttribute");
@@ -191,6 +193,16 @@ public sealed class WellKnown
         symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
         bindings.TryGetValue(id, out var term) ? term : null;
     public INamedTypeSymbol SpecOpAttribute { get; }
+
+    /// <summary>R27.22. <c>[RegionOp]</c>: a specification operation over a region's nodes.</summary>
+    public INamedTypeSymbol RegionOpAttribute { get; }
+
+    /// <summary>R27.23. <c>[Open]</c>: a method run with its receiver's invariant unfolded.</summary>
+    public INamedTypeSymbol OpenAttribute { get; }
+
+    /// <summary>R27.22. The F* term a <c>[RegionOp]</c> method denotes, before the region's functions.</summary>
+    public string? RegionOpName(ISymbol? m) =>
+        m is not null ? Declarations.StringArgument(m, RegionOpAttribute) : null;
     public INamedTypeSymbol SpecCtorAttribute { get; }
 
     /// <summary>R17.1. <c>System.Span&lt;T&gt;</c>, or null where the framework has none.</summary>
@@ -329,7 +341,8 @@ public sealed class WellKnown
         type is not null &&
         (SpecTypeName(type) is not null ||
          type.GetMembers().Any(m =>
-             Declarations.Has(m, SpecOpAttribute) || Declarations.Has(m, SpecCtorAttribute)));
+             Declarations.Has(m, SpecOpAttribute) || Declarations.Has(m, SpecCtorAttribute) ||
+             Declarations.Has(m, RegionOpAttribute)));
 
     /// <summary>R11.3. The F* constructor a <c>[SpecCtor]</c> method denotes.</summary>
     public string? SpecCtorName(ISymbol? m) =>

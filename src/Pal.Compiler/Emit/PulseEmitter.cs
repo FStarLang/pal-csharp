@@ -118,6 +118,13 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public bool NullableArray { get; init; }
 
+    /// <summary>R27.23. The receiver of an <c>[Open]</c> method: held as its record and heaps.</summary>
+    /// <summary>R27.23. An <c>[Open]</c> receiver's fields and regions, for ghost statements.</summary>
+    public ImmutableArray<IrFieldDecl> OpenFields { get; init; } = [];
+    public ImmutableArray<IrClassType> OpenHeaps { get; init; } = [];
+
+    public bool Open { get; init; }
+
     /// <summary>R10.7. The reference, as a non-null one. Legal only in a window.</summary>
     // R10.2 (F76). A nullable reference and a non-nullable one are the same term: the
     // non-nullable type is the nullable one under a refinement, so "the non-null form of
@@ -169,6 +176,8 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
+        // R27.23. An `[Open]` receiver is held as its record.
+        SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
         SlotKind.Object when Type is IrClassType c && Index is not null =>
             $"{Names.ClassModule(c.Name)}.{Names.ClassInvAt(c.Name)} {Binder} {Index} " +
             $"{(Fraction ?? "1.0R")} {value}",
@@ -242,6 +251,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// region classes its receiver is held at the heaps of.
     /// </summary>
     private Dictionary<string, ImmutableArray<IrClassType>> _heapIndexed = [];
+    private HashSet<string> _openMethods = [];
 
     /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
     private ILookup<string, IrMethod> _virtuals =
@@ -291,6 +301,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .Where(x => !x.Item2.IsEmpty)
             .GroupBy(x => x.m.Name)
             .ToDictionary(g => g.Key, g => g.First().Item2);
+        _openMethods = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
         _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
         if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
@@ -1057,6 +1068,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var regions = c.Fields.Where(IsRegionField).Select(f => (IrClassType)f.Type)
             .GroupBy(t => t.Name).Select(g => g.First()).ToImmutableArray();
         if (regions.IsEmpty) return [];
+        if (m.Open) return regions;
         var names = m.Requires.Concat(m.Ensures).Concat(m.Preserves)
             .SelectMany(Passes.Check.Subexpressions)
             .OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
@@ -1533,9 +1545,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private EmittedModule EmitMethod(IrMethod method)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
-        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld);
+        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld,
+            _openMethods);
         var plan = new MethodPlan(method, _spec, diagnostics,
-            _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held);
+            _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held,
+            method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
+                ? openClass.Fields : default);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");

@@ -790,6 +790,8 @@ public sealed record IrMethod(
     public bool Admit { get; init; }
     /// <summary>R22.31. The method's `[Rlimit]` factor, if any.</summary>
     public int? RlimitFactor { get; init; }
+    /// <summary>R27.23. <c>[Open]</c>: the receiver is held as its record and heaps, not its invariant.</summary>
+    public bool Open { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>
     public ImmutableArray<IrExpr> Preserves { get; init; } = ImmutableArray<IrExpr>.Empty;
 

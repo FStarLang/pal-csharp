@@ -816,6 +816,10 @@ public sealed class StmtLowerer(
             known.MapType(method.ContainingType) is IrDelegateType { Callable: true } dlg)
             return new IrLocalDecl(loc, $"__pal_discard_{_discards++}", dlg.Return!, _code.Lower(node)) { Immutable = true };
 
+        // R27.22. A `void` region operation is a library lemma, called as a ghost statement.
+        if (known.RegionOpName(method) is not null && method.ReturnsVoid)
+            return new IrGhostStmt(loc, GhostKind.LemmaCall, _spec.Lower(node), null);
+
         var kind = Declarations.KindOf(method, known);
         if (kind == CalleeKind.Lemma)
         {

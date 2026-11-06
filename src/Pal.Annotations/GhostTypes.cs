@@ -198,6 +198,24 @@ public static class SpecList
 }
 
 /// <summary>
+/// R27.21. The heap of the region of the <c>[Region]</c> class <typeparamref name="K"/>: a
+/// value, so it can be snapshotted in a <c>Ghost</c> local and passed to a
+/// <see cref="RegionOpAttribute"/> operation. <c>Pal.Heap&lt;K&gt;()</c> names the current one.
+/// </summary>
+[SpecType("Pulse.Lib.CSharp.Region.heap")]
+public readonly struct SpecHeap<K> where K : class
+{
+    private static Exception Ghost() => new InvalidOperationException(
+        "SpecHeap<K> is a specification-only construct and has no runtime meaning.");
+
+    public static bool operator ==(SpecHeap<K> a, SpecHeap<K> b) => throw Ghost();
+    public static bool operator !=(SpecHeap<K> a, SpecHeap<K> b) => throw Ghost();
+
+    public override bool Equals(object? obj) => throw Ghost();
+    public override int GetHashCode() => throw Ghost();
+}
+
+/// <summary>
 /// A ghost binary tree, the model of a class with two recursive fields (R10.5).
 ///
 /// <para>R11.7. This type is <em>not</em> a compiler primitive. Nothing in the translator

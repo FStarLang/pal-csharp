@@ -7166,7 +7166,8 @@ halves would hold two heaps that nothing proves equal.
   invariant. An unassigned region field starts at `B.null`.
 * `default` at a region type is `B.null`, typed so that a mutable local initialised with it
   can be allocated.
-* A `new Node(...)` constructor call is still refused (R12.4).
+* `new Node(...)` is `Region.alloc` of the record its constructor builds (R27.16), as an
+  expression and as a local's initialiser alike.
 
 ### R27.7 `Pal.Tree` and `Pal.WellFormed`
 
@@ -7332,6 +7333,8 @@ and it holds the region `this` lives in: the heap is a ghost binder `$heap_K`.
 * `new K(a, b)`, for a `[Region]` class whose constructor only assigns parameters to
   fields, is `Region.alloc` of the record those assignments build. Fields it does not assign
   are `null` or the default. Any other constructor body is PALCS0705.
+* `x.P = v` on an auto-property `P` of a region class is the field write, as R3.4 reads `P`
+  as its backing field. Its setter has no body, so there is no method to call.
 
 Two predicates describe a re-linking, both from `Pulse.Lib.CSharp.RegionTree`:
 
@@ -7414,6 +7417,128 @@ arm is unreachable.
 assignment guarantees a write before every read. F\* proves the value read non-null from that
 write, where the non-null type is needed.
 
+### R27.21 `Pal.Heap<K>()` and `SpecHeap<K>`
+
+`SpecHeap<K>` is the ghost type of the heap of a `[Region]` class `K`: F\*'s
+`Region.heap (class_K__raw …)`, which maps a box to the record stored there. Two heaps compare
+with `==`. `Pal.Heap<K>()` is the heap the enclosing method holds:
+
+* in `requires`, and under `Pal.Old` in `ensures`, the heap on entry;
+* in `ensures`, the heap on exit;
+* in a ghost statement or a loop invariant, the heap at that point.
+
+`Ghost<SpecHeap<K>> h1 = Pal.Heap<K>();` snapshots an intermediate heap, so that a ghost step
+can relate two heaps of the same body. In a method of a region's owner, `Pal.Heap<K>()` is
+the owner's heap (R27.13).
+
+`Pulse.Lib.CSharp.RegionPath` carries the reasoning that relates heaps. A tree of boxes is a
+*focus*: the path of frames from the root down to one node, and the subtree at that node. A
+method that re-links the tree under `x` (`reshaped h0 h1 x x`) changes the whole tree by
+replacing the subtree at `x`. `graft` lifts the local change to the root's tree.
+
+### R27.22 `[RegionOp]`: specification operations over a region
+
+`[RegionOp("F")]` on a static method is `[SpecOp]` (R11.1) with three more leading arguments.
+The method's first type argument must be a `[Region]` class `K`. The call is the F\* term `F`
+applied to `class_K__view`, `class_K__left` and `class_K__right`, then to the type arguments
+and the arguments. So a library predicate can walk a region's heap without knowing the class.
+
+A `void` `[RegionOp]` is a lemma. Called as a statement, it is a ghost call of the F\* lemma.
+A first type argument that is not a region class is PALCS0706. `Pal.Heap<K>()` at a `K` that
+is not a region class is PALCS0707.
+
+### R27.23 `[Open]` helpers
+
+A helper that the owner calls in the middle of an update cannot take the owner's invariant:
+the invariant does not hold there. `InsertionBalance` is one. It runs between a split and the
+rotation that repairs it. `[Open]` on an instance method of a region's owner hands it the
+receiver *open*:
+
+* The receiver is the record of its fields (`class_C__raw`) in a reference, plus each
+  region's heap. It is not `class_C__inv`. The method gives them back the same way, at
+  whatever record and heaps it leaves.
+* Its contract names the fields directly (`@this.root`, `@this.count`). `Pal.Old(@this.f)` is
+  the field on entry. `Pal.Heap<K>()` is the heap (R27.21).
+* The caller hands over the receiver as it holds it: an `[Open]` caller passes its record
+  and heaps on, and an ordinary owner method unfolds its invariant around the call. The
+  record the callee returns is the caller's from then on, so a write to `root` inside the
+  callee is seen by the caller.
+* A ghost statement inside an `[Open]` method sees the fields and heaps as they stand at that
+  point, not as they stood on entry.
+
+A `ref` parameter of region type (`ref Node parent`) is a cell holding the *nullable*
+pointer, whatever the declared type. C# lets the method store `null` into it through a
+null-forgiving `!`, and the runtime does (R27.28). A `[Requires("parent != null")]` states
+the entry value's non-nullness.
+
+### R27.24 A conditional whose arms move a region
+
+`x = c ? f() : g()`, an assignment to a local where `f` or `g` writes the region, is
+translated as `if (c) x = f(); else x = g();`, as R22.15 already does for a `return` or a
+declaration. The R27.16 split at the join then applies, so the facts each arm proves about
+the new heap survive. `InsertionBalance`'s `currentIsOnRight ? grandParent.RotateLeft() :
+grandParent.RotateRight()` is the case.
+
+### R27.25 A loop that moves the heap it measures
+
+A `while` loop whose body re-links the region can still decrease a measure over that region.
+The measure (`Pal.Decreases(SpecTopDown.Measure(…, Pal.Heap<Node>(), …))`) reads the heap
+through `Region.current`. That is a ghost function that does nothing, but its `rewrites_to`
+gives Pulse the heap the invariant holds at each check. When the owner's record is also
+written in the loop, a field in the measure (`comparer`) reads `!this` the same way. A
+measure over a heap the loop moves without either form is PALCS0001: the measure would
+name a binder the loop has already generalised.
+
+### R27.26 Top-down red-black insertion
+
+`SortedSet<T>.AddIfNotPresent` inserts in one pass down the tree. It splits every 4-node on
+the way, and a rotation (`InsertionBalance`) repairs the red-red pair that a split under a
+red parent leaves. Three library modules prove it, with no admits:
+
+* **`Pulse.Lib.CSharp.TopDown`** is the pure half, over a boxed tree of `(box, (key, red))`.
+  * `cmp c k v` is the sign of `c.Compare(k, v)`. Only the sign is used.
+  * `descent` is the loop invariant. The tree is a focus (R27.21) whose path is a valid
+    2-3-4 descent to `current`: every frame turns the way the search for `k` turns,
+    `parent` and `grandParent` are the first two frames, and two facts carry the shape. If
+    the parent is red and `current` is about to be split, there is a grandparent, the
+    parent's sibling is black and `greatGrandParent` is the third frame. If `current` is
+    red and its next node will be split, its sibling is black. `ok` says the whole tree is
+    a set of the original keys, red-black but for a possibly red root.
+  * `step` is one iteration, `insert_leaf` the final insertion, and `measure` the
+    lexicographic measure. The measure decreases on a split even when `current` does not
+    move.
+* **`Pulse.Lib.CSharp.TopDownHeap`** reads `TopDown` through the heap. `nodes view left right
+  h x` is the boxed tree that `x` reaches. Its props are what `Node`'s helpers ensure
+  (`recolored`, `split4ed`, `rotated`, `relinked`, `replaced`). Its lemmas are the loop's
+  ghost steps (`start`, `at_cur`, `look`, `split`, `after_balance`, `finish`). A few
+  `SMTPat` lemmas cover facts that the emitted code produces but no ghost step names:
+  * `inserted_empty`, the empty set's insertion;
+  * `balance_pre_nonnull`, that `InsertionBalance`'s parent and grandparent are non-null;
+  * `size_succ`, that `count + 1` fits when `count < int.MaxValue`.
+* **`PalLang.SpecTopDown`** is the C# surface. Each member is a `[RegionOp]` (R27.22) over
+  `TopDownHeap`. `Inserted(c, s, k)` is `s` with `k` inserted at `Pal.LowerBound(c, s, k)`.
+
+`AddIfNotPresent`'s loop carries `SpecTopDown.Inv(comparer, k0, item, Pal.Heap<Node>(), root,
+current, parent, grandParent, greatGrandParent, order)`. The body calls one ghost step per
+program step. The result is the set-level contract of 27.2.
+
+### R27.27 A loop body that returns from inside a region-moving `if`
+
+In a loop body (R27.15), `if (order == 0) { …; return false; }` whose arm moves the region is
+an escaping `if`. R22.12 joins it with the rest of the body under `if (not returned)`, and
+the join would lose what the arm and the rest each know about the heap. So the rest of the
+body moves into the `if`'s arms that do not end in a jump: the `if` becomes
+`if (c) { …; return } else { rest }`, and there is no join to lose facts at.
+
+### R27.28 `[AllowNull]` on a parameter
+
+`[System.Diagnostics.CodeAnalysis.AllowNull]` on a parameter of non-nullable class type gives
+it the nullable type. `InsertionBalance(..., Node greatGrandParent)` is called with a `null`
+great-grandparent when the parent is the root's child. The runtime's call sites write
+`greatGrandParent!`, and that `!` is not true. Without the attribute, the parameter's
+declared type would be a promise the caller cannot keep. The attribute is inert in C#, and
+nullable analysis already honours it.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7446,6 +7571,9 @@ ensures that the tree and the comparer are unchanged.
 | `FindRange` (both overloads) | `(Result != null) == AnyInRange(SpecComparer, SpecItems, from, to, …)`, and a result is well-formed with its root key in range |
 | `MinInternal`, `Min` | `SpecItems[0]`, or `default(T)` when empty |
 | `MaxInternal`, `Max` | `SpecItems[SpecItems.Length - 1]`, or `default(T)` when empty |
+| `AddIfNotPresent`, `Add` (require `SpecItems.Length < int.MaxValue`) | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) < 0)`; when added, `SpecItems == SpecTopDown.Inserted(…)` (inserted at its `LowerBound`); otherwise unchanged; comparer unchanged. The owner's invariants (sorted, red-black, `Count == Size`) are re-established (R27.26) |
+| `InsertionBalance` (`[Open]`, R27.23) | `SpecTopDown.Balanced`: the rotation that repairs a red parent, re-linked under `greatGrandParent` or at the root; fields other than `root` unchanged |
+| `ReplaceChildOrRoot` (`[Open]`) | `SpecTopDown.Replaced`: `parent`'s link, or `root` when `parent` is null, now `newChild` |
 
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
@@ -7465,12 +7593,18 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
 | `Rotate(rotation)` (requires `CanRotate`) | `Rotate(rotation, t)`, non-null |
 | `GetSibling(node)` | the other child link (`Pal.LeftOf`/`Pal.RightOf`, R27.18) |
 | `GetRotation(current, sibling)` | the rotation its two tests choose, and `CanRotate` of it |
+| `Node(item, color)` | `Region.alloc` of a leaf (R27.16) |
+| `ReplaceChild(child, newChild)` | `SpecTopDown.Relinked` |
+
+The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recolored`,
+`Split4ed`, `Rotated`), which is what `AddIfNotPresent`'s ghost steps consume.
 
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.** Their loop
-  invariants must relate the region's heap to the model while the tree is being re-linked.
+* **`Remove`/`DoRemove` and the set operations.** Their loop invariants must relate the
+  region's heap to the model while the tree is being re-linked; R27.26's insertion theory
+  is the pattern a removal theory would follow.
 * **The enumerator, serialization and `IEnumerable` constructors.** These are out of
   scope.
 
@@ -7500,6 +7634,14 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
   read them, so those members were "verified" against `true`. The `SortedList` sample had
   the same problem. R27.12 fixes the compiler. The runtime source keeps its original
   property syntax, with the attributes on the properties.
+* **`greatGrandParent!` is not true.** `AddIfNotPresent` calls
+  `InsertionBalance(current, ref parent!, grandParent!, greatGrandParent!)`, and
+  `greatGrandParent` is `null` whenever the red parent is a child of the root. The callee
+  handles it (`ReplaceChildOrRoot` takes a `Node?`), but its parameter is declared
+  non-nullable. The verified source marks it `[AllowNull]` (R27.28).
+* **`++count` can overflow.** `AddIfNotPresent` increments `count` unchecked. The verified
+  contract requires `SpecItems.Length < int.MaxValue`. A tree of 2^31 - 1 nodes is out of
+  reach in practice, but nothing in the code rules it out.
 
 ## 28. Enumerators: structs that borrow their collection
 

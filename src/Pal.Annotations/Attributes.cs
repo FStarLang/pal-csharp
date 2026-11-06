@@ -365,6 +365,29 @@ public sealed class SpecOpAttribute(string function) : Attribute
 }
 
 /// <summary>
+/// R27.22. A <see cref="SpecOpAttribute"/> over the nodes of a region. The method's first type
+/// argument is a <c>[Region]</c> class <c>K</c>, and the F* term <paramref name="function"/>
+/// is applied to <c>K</c>'s view, left link and right link (<c>class_K__view</c>,
+/// <c>class_K__left</c>, <c>class_K__right</c>) before the arguments. A method returning
+/// <c>void</c> is a lemma: called as a statement, it is a ghost call of the F* lemma.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class RegionOpAttribute(string function) : Attribute
+{
+    public string Function { get; } = function;
+}
+
+/// <summary>
+/// R27.23. An instance method of the class owning a region that runs with its receiver
+/// <em>open</em>: it is handed the receiver's fields and the region's heap rather than its
+/// invariant, and gives them back the same way. Its contract names the fields directly
+/// (<c>root</c>) and the heap through <c>Pal.Heap&lt;K&gt;()</c>. It is for helpers called
+/// in the middle of an update, where the invariant does not hold.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OpenAttribute : Attribute;
+
+/// <summary>
 /// R11.3. Declares this static method to denote a <em>constructor</em> of the
 /// <c>[SpecType]</c> it returns. A constructor is a <see cref="SpecOpAttribute"/> that is
 /// also a declaration: it is what §10 inverts to obtain a recursive class's ownership

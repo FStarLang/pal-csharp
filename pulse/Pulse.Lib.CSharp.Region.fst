@@ -130,6 +130,16 @@ ghost fn empty (#a: Type0) ()
   fold (region #a #1.0R ([] <: heap a))
 }
 
+/// R27.25. The heap the region holds now. It does nothing; its `rewrites_to` is what
+/// lets a loop's `decreases` name a heap the invariant quantifies, as `!r` names a cell.
+ghost fn current (#a: Type0) (#p: perm) (#h: erased (heap a)) (_: unit)
+  preserves region #a #p h
+  returns  r: heap a
+  ensures  rewrites_to r (reveal h)
+{
+  reveal h
+}
+
 /// R27.5. Reading an object of the region: `x.f` is `(read x).f`.
 fn read (#a: Type0) (x: B.box a) (#p: perm) (#h: erased (heap a))
   preserves region #a #p h

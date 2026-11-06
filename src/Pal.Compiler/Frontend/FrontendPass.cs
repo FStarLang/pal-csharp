@@ -2586,6 +2586,7 @@ public static partial class FrontendPass
             Admit = admitted,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
+            Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
             Throws = specs.Throws,
             DeclaringClass = declaringClass,
@@ -2768,7 +2769,8 @@ public static partial class FrontendPass
             if (!bound.TryGetValue(key, out var spec)) continue;
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow };
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow,
+                  OpenFields = OpenFields(symbol, known) };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;
@@ -2808,6 +2810,13 @@ public static partial class FrontendPass
         };
     }
 
+    /// <summary>R27.23. The receiver's instance fields, for an <c>[Open]</c> method's contract.</summary>
+    private static ImmutableHashSet<string> OpenFields(IMethodSymbol symbol, WellKnown known) =>
+        !symbol.IsStatic && Declarations.Has(symbol, known.OpenAttribute) && symbol.ContainingType is { } holder
+            ? holder.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic && !f.IsConst)
+                .Select(f => f.Name).ToImmutableHashSet()
+            : [];
+
     /// <summary>
     /// R20.12. The receiver fields a contract of <paramref name="symbol"/> names, by name:
     /// its context fields, and the class's <c>static readonly</c> fields the contract
@@ -2842,6 +2851,13 @@ public static partial class FrontendPass
                 diagnostics.Unsupported(loc, $"The parameter type `{p.Type}`");
                 continue;
             }
+
+            // R27.28. `[AllowNull]` on a non-nullable reference parameter says null is passed
+            // anyway: its type is the nullable one, so no caller is asked to prove what the
+            // program does not hold.
+            if (type is IrClassType { Nullable: false } nk && p.GetAttributes().Any(a =>
+                    a.AttributeClass?.ToDisplayString() == "System.Diagnostics.CodeAnalysis.AllowNullAttribute"))
+                type = nk with { Nullable = true };
 
             // R20.13. A written specification-type parameter is passed by reference.
             var mode = Declarations.IsWritten(p, model.Compilation, known) ? ParamMode.Ref : Declarations.ModeOf(p);

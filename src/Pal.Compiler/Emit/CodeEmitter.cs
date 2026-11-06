@@ -25,7 +25,8 @@ public sealed class CodeEmitter(
     HashSet<string>? slots = null,
     IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null,
     IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null,
-    IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null)
+    IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null,
+    ISet<string>? openMethods = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -170,7 +171,7 @@ public sealed class CodeEmitter(
         _params = plan.Slots;
         _objects = method.DeclaringClass is not null &&
                    plan.Slots.TryGetValue(Names.This, out var self) &&
-                   self.Kind == SlotKind.Object
+                   self.Kind == SlotKind.Object && !self.Open
             ? [self]
             : [];
 
@@ -683,8 +684,13 @@ public sealed class CodeEmitter(
     {
         if (s is IrIf { Else: null, Cond: IrBinary { Op: BinOp.Or } or } guard && IsThrowBlock(guard.Then))
             return SplitGuard(guard, or);
-        if (_objects.Length == 0) return s;
-        var value = s switch { IrReturn r => r.Value, IrLocalDecl d => d.Init, _ => null };
+        var value = s switch
+        {
+            IrReturn r => r.Value, IrLocalDecl d => d.Init,
+            // R27.24. `x = c ? f() : g()` with arms that move a region is its `if` too.
+            IrAssign { Target: IrVar, Value: IrConditional } asn => asn.Value,
+            _ => null,
+        };
         (IrExpr Cond, IrExpr Then, IrExpr Else)? arms = value switch
         {
             IrBinary { Op: BinOp.And } b => (b.Left, b.Right, new IrLiteral(b.Loc, false) { Type = b.Type }),
@@ -692,14 +698,16 @@ public sealed class CodeEmitter(
             IrConditional c => (c.Cond, c.Then, c.Else),
             _ => null,
         };
-        if (arms is not { } a ||
-            !CallsOpenReceiver(new IrExprStmt(a.Then.Loc, a.Then)) &&
-            !CallsOpenReceiver(new IrExprStmt(a.Else.Loc, a.Else)))
+        bool Splits(IrExpr arm) =>
+            _objects.Length > 0 && CallsOpenReceiver(new IrExprStmt(arm.Loc, arm)) ||
+            value is IrConditional && MovesRegion(new IrExprStmt(arm.Loc, arm));
+        if (arms is not { } a || !Splits(a.Then) && !Splits(a.Else))
             return s;
         IrStmt With(IrExpr v) => s switch
         {
             IrReturn r => r with { Value = v },
             IrLocalDecl d => d with { Init = v },
+            IrAssign asg => asg with { Value = v },
             _ => s,
         };
         return new IrIf(s.Loc, a.Cond, With(a.Then), With(a.Else));
@@ -913,6 +921,11 @@ public sealed class CodeEmitter(
             if (still) fixedNames.Add((heap, regionResource));
             else existentials.Add(heap);
             BindBoth(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other), still);
+            // R27.25. A loop that moves the heap measures it by a ghost read, which Pulse
+            // evaluates against the invariant as it does `!r`.
+            if (!still)
+                measureScope.Bind(Frontend.Region.HeapName(k.Name), new Term(
+                    $"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(k)}) ())", TermKind.Other));
         }
 
         foreach (var f in decl.Fields)
@@ -922,6 +935,11 @@ public sealed class CodeEmitter(
             {
                 BindBoth($"{Names.This}.{f.Name}",
                     new Term(projection, TermKind.Other, f.Type), !writesRecord);
+                // R27.25. A written record is read in a measure as `!this` is.
+                if (writesRecord)
+                    measureScope.Bind($"{Names.This}.{f.Name}", new Term(
+                        $"(B.op_Bang {receiver.Binder}).{Names.ClassProjection(klass.Name, f.Name)}",
+                        TermKind.Other, f.Type));
                 continue;
             }
             if (f.Type is IrClassType)
@@ -978,6 +996,10 @@ public sealed class CodeEmitter(
             {
                 BindBoth($"{Names.This}.{f.Name}",
                     new Term(projection, MethodPlan.KindOf(f.Type), f.Type), !writesRecord);
+                if (writesRecord && RegionsOf(decl).Any())
+                    measureScope.Bind($"{Names.This}.{f.Name}", new Term(
+                        $"(B.op_Bang {receiver.Binder}).{Names.ClassProjection(klass.Name, f.Name)}",
+                        MethodPlan.KindOf(f.Type), f.Type));
             }
         }
     }
@@ -1023,6 +1045,10 @@ public sealed class CodeEmitter(
             foreach (var node in Check.Expressions(stmt).SelectMany(Check.Subexpressions))
             {
                 if (node is not IrCall call) continue;
+                // R27.23. An `[Open]` callee is handed the receiver's record and may write it.
+                if (call.HasReceiver && openMethods?.Contains(call.Callee) == true &&
+                    call.Args is [IrVar { Name: Names.This }, ..])
+                    record = true;
                 for (var i = 0; i < call.Args.Length; i++)
                 {
                     if (call.Args[i] is IrVar av && IsArrayCell(av.Name)) arrays.Add(AnyArray);
@@ -1715,8 +1741,14 @@ public sealed class CodeEmitter(
                     // a copy would leave the context holding `pts_to t0 _` while every later
                     // mention asked for `pts_to var_node _` — the same reason R3.8's alias
                     // case shares a slot instead of rebinding one.
-                    Line($"let {pbinder} = B.alloc {AllocRecord(pal)};");
-                    Line($"B.pts_to_not_null {pbinder};");
+                    // R27.6. A region object is allocated into its owner's region.
+                    if (pdecl.IsRegion)
+                        Line($"let {pbinder} = {Frontend.Region.Module}.alloc {AllocRecord(pal)};");
+                    else
+                    {
+                        Line($"let {pbinder} = B.alloc {AllocRecord(pal)};");
+                        Line($"B.pts_to_not_null {pbinder};");
+                    }
                 }
                 else if (d.Immutable)
                 {
@@ -3031,6 +3063,20 @@ public sealed class CodeEmitter(
                 UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan);
                 return;
             }
+            // R27.27. An escaping `if` whose join would lose a moved region (R22.12): the rest
+            // goes into the arm that falls through; the escaping arm keeps none of it.
+            if (statements[k] is IrIf ei && _escape is not null && MayEscape(ei) && MovesRegion(ei))
+            {
+                IrBlock Arm(IrStmt? arm, IrLoc loc)
+                {
+                    ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
+                    return new(loc, own is [.., var last] && Jumps(last) ? own : [.. own, .. rest]);
+                }
+                static bool Jumps(IrStmt t) =>
+                    t is IrBreak or IrContinue or IrThrow or IrReturn || t is IrBlock { Statements: [.., var l] } && Jumps(l);
+                UnitTail(ei with { Then = Arm(ei.Then, ei.Then.Loc), Else = Arm(ei.Else, ei.Else?.Loc ?? ei.Loc) }, plan);
+                return;
+            }
             Statement(statements[k], plan);
             if (_escape is not null && MayEscape(statements[k]))
             {
@@ -3229,6 +3275,19 @@ public sealed class CodeEmitter(
             var value = FreshValue(slot.Name);
             named.Add((value, slot.Resource(value)));
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            // R27.23. An `[Open]` receiver's fields and heaps, as held right now.
+            if (slot is { Open: true, Type: IrClassType oc })
+            {
+                foreach (var f in slot.OpenFields)
+                    scope.Bind($"{Names.This}.{f.Name}", new Term(
+                        $"{value}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+                foreach (var k in slot.OpenHeaps)
+                {
+                    var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
+                    named.Add((heap, PulseEmitter.RegionAt(k, "1.0R", heap)));
+                    scope.Bind(Frontend.Region.HeapName(k.Name), new Term(heap, TermKind.Other));
+                }
+            }
         }
 
         if (named.Count > 0)
@@ -3275,6 +3334,9 @@ public sealed class CodeEmitter(
                 _slots[g.Text!] = new Slot(g.Text!, inner, SlotKind.Value, g.Text!);
                 return;
             }
+            case GhostKind.LemmaCall when g.Prop is IrSpecOp lemma:
+                Line($"{spec.Emit(lemma, scope).Text};");
+                return;
             case GhostKind.LemmaCall when g.Prop is IrCall call:
                 // R14.5. A generic [Lemma] is applied to its type arguments first.
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
@@ -3828,7 +3890,10 @@ public sealed class CodeEmitter(
         // may hold it the other way: the two forms are converted around the call.
         var wantsHeap = call.HasReceiver && raw.Length > 0 && heapIndexed is not null &&
                         heapIndexed.ContainsKey(call.Callee);
-        var closedRecv = self is null && call.HasReceiver && raw.Length > 0 &&
+        // R27.23. An `[Open]` callee takes the receiver open, as the caller holds it.
+        var openCallee = openMethods?.Contains(call.Callee) == true;
+        if (openCallee) self = null;
+        var closedRecv = !openCallee && self is null && call.HasReceiver && raw.Length > 0 &&
                          SlotByBinder(raw[0]) is { Kind: SlotKind.Object, ViewBase: null, Type: IrClassType { Nullable: false } } cr &&
                          !_objects.Any(o => o.Binder == cr.Binder) && owner is null
             ? cr : null;

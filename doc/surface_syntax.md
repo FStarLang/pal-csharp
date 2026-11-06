@@ -120,6 +120,7 @@ Both forms lower to the same thing. Mix them freely.
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
 | `Tree<V>(x)`, `WellFormed(x)` | the `SpecTree<V>` of views a `[Region]` pointer reaches; every path from it ends at `null` (R27.7) |
+| `Heap<K>()` | the `SpecHeap<K>` of `[Region]` class `K` the method holds: on entry under `Old`, on exit in `ensures`, here in a ghost statement (R27.21) |
 | `ReferenceEquals(a, b)` | `a` and `b` are the same reference; each is a class-typed parameter (or `@this`) or an enumerator's borrowing field (R28.3) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
@@ -1264,8 +1265,41 @@ returns leaves `current` unconstrained (doc/translation.md R27.10).
 `Find`, `Leftmost`, `Rightmost` and `HeapIndex`. Each follows the path the code follows, so
 none needs an ordering hypothesis.
 
-An owner of a region is always held whole (no `Pal.Share`). `new Node(...)` is not yet
-supported. See doc/translation.md §27.
+An owner of a region is always held whole (no `Pal.Share`). `new Node(...)` allocates in the
+region when `Node`'s constructor only assigns its fields. See doc/translation.md §27.
+
+#### Re-linking the tree: `[Open]`, `[RegionOp]`, `Pal.Heap`
+
+An update that re-links nodes in place is specified over the region's heap. `Pal.Heap<Node>()`
+is that heap (`SpecHeap<Node>`), and a ghost local snapshots it between steps:
+
+```csharp
+[Open]
+[Requires("parent != null")]
+[Ensures("SpecTopDown.Balanced<SortedSet<T>.Node, T>(Pal.Old(Pal.Heap<SortedSet<T>.Node>()), " +
+         "Pal.Heap<SortedSet<T>.Node>(), Pal.Old(@this.root), @this.root, current, Pal.Old(parent), parent, greatGrandParent)")]
+private void InsertionBalance(Node current, ref Node parent, Node grandParent,
+                              [AllowNull] Node greatGrandParent)
+{
+    Ghost<SpecHeap<Node>> h0 = Pal.Heap<Node>();
+    ...
+}
+```
+
+* `[Open]` runs an owner's helper with the invariant unfolded: its contract names the fields
+  (`@this.root`) and the heap. Use it for helpers called mid-update (R27.23).
+* `ref Node p` passes a region pointer by reference. The cell may hold `null`.
+* `[AllowNull]` (`System.Diagnostics.CodeAnalysis`) on a parameter makes it nullable for the
+  proof, when callers pass `null` through a `!` (R27.28).
+* `[RegionOp("F")]` declares a static ghost operation over a region. Its first type argument
+  is the `[Region]` class, and `F` takes the class's view and links first. A `void` one is a
+  lemma called as a statement (R27.22).
+
+`PalLang.SpecTopDown` holds the `[RegionOp]`s for top-down red-black insertion: the props
+`Node`'s helpers ensure (`Recolored`, `Split4ed`, `Rotated`, `Relinked`, `Replaced`), the
+loop invariant `Inv` and measure `Measure`, the ghost steps (`Start`, `AtCur`, `Look`,
+`Split`, `AfterBalance`, …) and `Inserted(c, s, k)`, the set `s` with `k` added at its lower
+bound (R27.26).
 
 ## 10. Generics
 

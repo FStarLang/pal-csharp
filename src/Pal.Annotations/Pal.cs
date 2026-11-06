@@ -444,6 +444,14 @@ public static class Pal
     /// <summary>R27.18. The second child link (the right child), as <see cref="LeftOf"/>.</summary>
     public static T? RightOf<T>(T? node) where T : class => throw Ghost();
 
+    /// <summary>
+    /// R27.21. The heap of the region of <typeparamref name="K"/> the enclosing method holds:
+    /// in a postcondition the heap on exit, under <see cref="Old{T}"/> the heap on entry, and
+    /// in a ghost statement or a loop invariant the heap at that point. Snapshot it in a
+    /// <c>Ghost&lt;SpecHeap&lt;K&gt;&gt;</c> local to name an intermediate heap.
+    /// </summary>
+    public static SpecHeap<K> Heap<K>() where K : class => throw Ghost();
+
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 
     /// <summary>Lift a pure proposition into a resource, Pulse's <c>pure</c>.</summary>

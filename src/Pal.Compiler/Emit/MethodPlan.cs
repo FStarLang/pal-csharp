@@ -27,7 +27,8 @@ public sealed class MethodPlan
     private readonly SpecEmitter _spec;
 
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
-        ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default)
+        ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
+        ImmutableArray<IrFieldDecl> openFields = default)
     {
         _spec = spec;
 
@@ -195,7 +196,9 @@ public sealed class MethodPlan
                 // object only through the abstraction, and the representation stays
                 // hidden. Structurally it is the `ref` case with `class_C__inv` in place
                 // of `R.pts_to`, which is why the two read alike.
-                case IrClassType klass:
+                // R27.23. A `ref` region pointer is a cell like any `ref` (R27.3: the
+                // pointer is a value, and what it owns is the region's business).
+                case IrClassType klass when !(p.Plain && p.Mode is ParamMode.Ref or ParamMode.Out):
                 {
                     // R12.1. A `[Plain]` reference is passed and nothing is owned through
                     // it. There is no invariant to name, no model binder to quantify, and
@@ -210,6 +213,43 @@ public sealed class MethodPlan
                         slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
                         pre.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
                         post.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
+                        break;
+                    }
+
+                    // R27.23. An `[Open]` method holds its receiver as the record and the
+                    // heaps its invariant hides, so a caller part-way through a mutation can
+                    // hand it over and its contract can speak of the fields.
+                    if (p.Name == Names.This && method.Open && !openFields.IsDefault)
+                    {
+                        var raw = Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}",
+                            klass.TypeArguments);
+                        binders.Add($"({name}: {Types.Render(p.Type)})");
+                        ghostBinders.Add($"(#pre_{p.Name}: erased ({raw}))");
+                        preResources.Add($"B.pts_to {name} pre_{p.Name}");
+                        postResources.Add($"B.pts_to {name} post_{p.Name}");
+                        postExistentials.Add($"post_{p.Name}");
+                        var openHeaps = heaps.IsDefault ? [] : heaps;
+                        foreach (var k in openHeaps)
+                        {
+                            var hPre = "pre_" + Frontend.Region.HeapBinder(k.Name);
+                            var hPost = "post_" + Frontend.Region.HeapBinder(k.Name);
+                            ghostBinders.Add($"(#{hPre}: erased ({Frontend.Region.Module}.heap {PulseEmitter.RegionRaw(k)}))");
+                            preResources.Add(PulseEmitter.RegionAt(k, "1.0R", hPre));
+                            postResources.Add(PulseEmitter.RegionAt(k, "1.0R", hPost));
+                            postExistentials.Add(hPost);
+                            pre.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {hPre})", TermKind.Other));
+                            post.Bind(Frontend.Region.HeapName(k.Name), new Term(hPost, TermKind.Other));
+                        }
+                        foreach (var f in openFields)
+                        {
+                            var proj = Names.ClassProjection(klass.Name, f.Name);
+                            pre.Bind($"{Names.This}.{f.Name}",
+                                new Term($"(reveal pre_{p.Name}).{proj}", KindOf(f.Type), f.Type));
+                            post.Bind($"{Names.This}.{f.Name}",
+                                new Term($"post_{p.Name}.{proj}", KindOf(f.Type), f.Type));
+                        }
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Object, name)
+                            { Open = true, OpenFields = openFields, OpenHeaps = openHeaps };
                         break;
                     }
 
@@ -345,8 +385,12 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: R.ref {Types.Atom(p.Type)})");
-                    ghostBinders.Add($"(#{preValue}: erased ({Types.Render(p.Type)}))");
+                    // R27.23. A `ref` region pointer's cell holds the nullable pointer, so that
+                    // `ref parent!` passes a `Node?` local's own cell; that it is not null is
+                    // the callee's `[Requires]` business.
+                    var cellType = p.Plain && p.Type is IrClassType { Nullable: false } rk ? rk with { Nullable = true } : p.Type;
+                    binders.Add($"({name}: R.ref {Types.Atom(cellType)})");
+                    ghostBinders.Add($"(#{preValue}: erased ({Types.Render(cellType)}))");
 
                     var refPerm = p.Fraction is null ? "" : $"#{p.Fraction} ";
                     if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");

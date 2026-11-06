@@ -45,6 +45,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     public ImmutableHashSet<string> ObjectFields { get; init; } = [];
 
     /// <summary>
+    /// R27.23. The receiver's fields an <c>[Open]</c> method's contract may name as
+    /// <c>@this.f</c>: such a method holds the fields, not the model.
+    /// </summary>
+    public ImmutableHashSet<string> OpenFields { get; init; } = [];
+
+    /// <summary>
     /// R10.2. The type a name was *declared* at, which for a nullable reference is not the
     /// type the expression has: C#'s flow analysis narrows `t` to non-null inside the
     /// `else` of a null test, and rightly so. The encoding cannot follow it there — the
@@ -196,10 +202,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// <summary>
     /// R27.7. The region intrinsics (`Pal.Tree`, `Pal.Unshared`, ...) take any reference as
     /// <c>object</c> so that one signature serves every <c>[Region]</c> class; the argument is
-    /// the region pointer itself, never a boxing.
+    /// the region pointer itself, never a boxing, in a contract and in a ghost statement alike.
     /// </summary>
     private bool RegionIntrinsicOperand(SyntaxNode? parent) =>
-        SpecPosition && parent is ArgumentSyntax { Parent.Parent: InvocationExpressionSyntax inv } &&
+        parent is ArgumentSyntax { Parent.Parent: InvocationExpressionSyntax inv } &&
         model.GetSymbolInfo(inv).Symbol is IMethodSymbol { ContainingType.Name: "Pal" } m &&
         m.ContainingType.ContainingNamespace?.Name == "PalLang" &&
         m.Name is nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
@@ -1265,6 +1271,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (SpecPosition || !node.IsKind(SyntaxKind.SimpleAssignmentExpression)) return null;
         if (model.GetSymbolInfo(node.Left).Symbol is not IPropertySymbol { IsIndexer: false } prop) return null;
         if (prop.SetMethod is not { } setter) return null;
+        // An auto-property's setter has no body to translate: R3.4 reads the property as
+        // the field it is backed by, so the write is a field write.
+        if (setter.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is
+            AccessorDeclarationSyntax { Body: null, ExpressionBody: null }) return null;
         if (Declarations.Has(prop, known.SpecAttribute) || Declarations.Has(prop, known.ModelAttribute)) return null;
         if (Declarations.KindOf(setter, known) is null) return null;
         IrExpr receiver = node.Left switch
@@ -1460,6 +1470,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             known.IsRegionClass(regionOwner) && symbol is IPropertySymbol rprop &&
             ComputedRead(rprop, loc, Lower(node.Expression)) is { } rcall)
             return rcall;
+
+        if (symbol is IFieldSymbol { IsStatic: false } openField && OpenFields.Contains(openField.Name) &&
+            node.Expression is IdentifierNameSyntax { Identifier.ValueText: Names.This })
+            return new IrField(loc, new IrVar(loc, Names.This), openField.Name);
 
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
         // a caller holds the model and nothing else; a field read here would be a fact
@@ -2233,6 +2247,28 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // difference. An *instance* operation puts the receiver first, which is the same
         // rule a property already followed — `m.Map.Get(k, 0)` and `m.Map.Count` are the
         // same application with a different number of arguments.
+        // R27.22. An operation over a region's nodes: the F* term applied to the region
+        // class's view and links, then to the arguments.
+        if (known.RegionOpName(method) is { } regionOp)
+        {
+            if (method.TypeArguments is not [INamedTypeSymbol rc, ..] ||
+                !Declarations.Has(rc.OriginalDefinition, known.RegionAttribute))
+            {
+                diagnostics.Error("PALCS0706", loc,
+                    $"`{method.Name}` is a `[RegionOp]`, and its first type argument must be a " +
+                    "`[Region]` class (doc/translation.md R27.22).");
+                return new IrLiteral(loc, null);
+            }
+            var regionModule = Names.ClassModule(rc.Name);
+            var fn = $"{regionOp} {regionModule}.{Region.ViewOf(rc.Name)} {regionModule}.{Region.LeftOf(rc.Name)} {regionModule}.{Region.RightOf(rc.Name)}";
+            var lowered = args.Select(a => Lower(a.Expression)).ToImmutableArray();
+            return new IrSpecOp(loc, fn, lowered)
+            {
+                Type = method.ReturnsVoid ? null : known.MapType(method.ReturnType),
+                ParamTypes = SpecParamTypes(method, lowered),
+            };
+        }
+
         if (known.SpecOpName(method) is not null || known.SpecCtorName(method) is not null)
         {
             var ops = ImmutableArray.CreateBuilder<IrExpr>();
@@ -2548,6 +2584,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     { Type = IrPrim.SpecIntType };
             // R27.7. The tree a region pointer reaches, and the region's well-formedness at
             // it: functions of the heap the enclosing method holds, named `$heap_<class>`.
+            // R27.21. The heap the enclosing method holds for a region class's objects.
+            case nameof(PalLang.Pal.Heap):
+            {
+                if (method.TypeArguments is not [INamedTypeSymbol hc] ||
+                    !Declarations.Has(hc.OriginalDefinition, known.RegionAttribute))
+                {
+                    diagnostics.Error("PALCS0707", loc,
+                        $"`Pal.{method.Name}` takes a `[Region]` class as its type argument " +
+                        "(doc/translation.md R27.21).");
+                    return new IrLiteral(loc, null);
+                }
+                return new IrVar(loc, Region.HeapName(hc.Name)) { Type = known.MapType(method.ReturnType) };
+            }
             case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
                 or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped)
                 or nameof(PalLang.Pal.LeftOf) or nameof(PalLang.Pal.RightOf):

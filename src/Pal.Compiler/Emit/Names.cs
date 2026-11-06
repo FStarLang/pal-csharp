@@ -461,6 +461,9 @@ public static class Types
         IrClassType c =>
             Applied($"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}", c.TypeArguments),
         IrSpecListType l => $"list {Atom(l.Element)}",
+        // R27.21. A region's heap maps its boxes to the class's record, not to the class.
+        IrUserSpecType { FStar: "Pulse.Lib.CSharp.Region.heap", Args: [IrClassType k] } =>
+            $"Pulse.Lib.CSharp.Region.heap {Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments)}",
         IrUserSpecType u => u.Args.IsEmpty
             ? u.FStar
             : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
