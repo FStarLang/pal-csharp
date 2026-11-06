@@ -147,6 +147,14 @@ public sealed class WellKnown
     public bool IsPlainLike(ISymbol symbol) =>
         Declarations.Has(symbol, PlainAttribute) || Declarations.Has(symbol, RegionAttribute);
 
+    /// <summary>R27.16. A <c>[Region]</c> class, by its attribute's name (for callers without a <see cref="WellKnown"/>).</summary>
+    public static bool IsRegionDeclaration(INamedTypeSymbol t) =>
+        t.OriginalDefinition.GetAttributes().Any(a => a.AttributeClass?.Name == "RegionAttribute");
+
+    /// <summary>R27.16. A <c>[Region]</c> class, whose annotated members are functions of the region.</summary>
+    public bool IsRegionClass(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class } n && Declarations.Has(n.OriginalDefinition, RegionAttribute);
+
     /// <summary>
     /// R27.3. The type arguments a class type carries: those of every enclosing type, then
     /// its own. A class nested in a generic class is generic in the outer parameters too.
@@ -394,7 +402,9 @@ public sealed class WellKnown
         // R15.1. The declaring type's arguments come first, matching the order the
         // callee's binders were emitted in: a method of `Node<T>` is a function of `T`
         // exactly as a generic method is a function of the parameter it declares itself.
-        var all = method.ContainingType is { TypeArguments.IsEmpty: false } owner
+        var all = method.ContainingType is { } rowner && IsRegionDeclaration(rowner)
+            ? [.. OuterAndOwnTypeArguments(rowner), .. method.TypeArguments]
+            : method.ContainingType is { TypeArguments.IsEmpty: false } owner
             ? owner.TypeArguments.AddRange(method.TypeArguments)
             : method.TypeArguments;
         if (all.IsEmpty) return ImmutableArray<IrType>.Empty;

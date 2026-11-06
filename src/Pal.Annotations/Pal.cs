@@ -415,6 +415,28 @@ public static class Pal
     /// </summary>
     public static bool InRegion(object? node) => throw Ghost();
 
+    /// <summary>
+    /// R27.16. The reference is well-formed in the region the enclosing method holds, and the
+    /// tree it reaches holds no object twice.
+    /// </summary>
+    public static bool Unshared(object? node) => throw Ghost();
+
+    /// <summary>
+    /// R27.16. In a postcondition: every object outside the tree <paramref name="before"/>
+    /// reached on entry is as it was, and the tree <paramref name="after"/> reaches now is
+    /// made of objects of that tree and of objects allocated since.
+    /// </summary>
+    public static bool Reshaped(object? before, object? after) => throw Ghost();
+
+    /// <summary>
+    /// R27.18. The first child link (the left child) of a <c>[Region]</c> object in the region
+    /// the enclosing method holds, or <c>null</c> if the object is not there.
+    /// </summary>
+    public static T? LeftOf<T>(T? node) where T : class => throw Ghost();
+
+    /// <summary>R27.18. The second child link (the right child), as <see cref="LeftOf"/>.</summary>
+    public static T? RightOf<T>(T? node) where T : class => throw Ghost();
+
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 
     /// <summary>Lift a pure proposition into a resource, Pulse's <c>pure</c>.</summary>

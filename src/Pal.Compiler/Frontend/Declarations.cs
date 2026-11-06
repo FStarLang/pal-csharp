@@ -83,7 +83,13 @@ public static class Declarations
         if (known.AnnotatedOnly &&
             method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
             method.ContainingType is { TypeKind: TypeKind.Class } plainOwner &&
-            !known.HasModel(plainOwner))
+            !known.HasModel(plainOwner) && !known.IsRegionClass(plainOwner))
+            return CalleeKind.Method;
+
+        // R27.16. A member of a `[Region]` class is a function of the object and the region.
+        if (method is { IsStatic: false,
+                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet } &&
+            known.IsRegionClass(method.ContainingType))
             return CalleeKind.Method;
 
         // §4.5. An instance method or constructor of a translated class: it carries the
@@ -185,6 +191,14 @@ public static class Declarations
                 model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
                 return true;
 
+            // R27.16. An auto-property of a class is a field (R27.3), however it is written.
+            if (target is not null &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is IPropertySymbol
+                    { IsStatic: false, ContainingType.TypeKind: TypeKind.Class } auto &&
+                auto.ContainingType.GetMembers().OfType<IFieldSymbol>()
+                    .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, auto.OriginalDefinition)))
+                return true;
+
             // R22.21. Assigning an instance property is a call of its setter.
             if (target is not null &&
                 model.GetSymbolInfo(target).Symbol is IPropertySymbol { IsStatic: false, SetMethod: { } setter } &&
@@ -248,7 +262,7 @@ public static class Declarations
         known.AnnotatedOnly &&
         method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
         method.ContainingType is { TypeKind: TypeKind.Class } owner &&
-        !known.HasModel(owner);
+        !known.HasModel(owner) && !known.IsRegionClass(owner);
 
     /// <summary>The R20.12 name a context field is bound to in a receiver-free method.</summary>
     public static string ContextName(ISymbol field) => "this__" + field.Name;

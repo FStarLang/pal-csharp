@@ -46,6 +46,14 @@ let rec insert (#a: Type0) (compare: a -> a -> int) (t: tree a) (v: a)
 let insert_int (t: tree int) (v: int) : tree int =
   insert (fun (x y: int) -> if x < y then (-1) else if x > y then 1 else 0) t v
 
+/// R27.16. The subtrees of a branch; a leaf's are leaves.
+let left (#a: Type0) (t: tree a) : tree a = match t with | Leaf -> Leaf | Branch l _ _ -> l
+let right (#a: Type0) (t: tree a) : tree a = match t with | Leaf -> Leaf | Branch _ _ r -> r
+
+/// R27.16. The root alone, its subtrees dropped.
+let root_only (#a: Type0) (t: tree a) : tree a =
+  match t with | Leaf -> Leaf | Branch _ v _ -> Branch Leaf v Leaf
+
 let rec height (#a: Type0) (t: tree a) : Tot nat (decreases t) =
   match t with
   | Leaf -> 0

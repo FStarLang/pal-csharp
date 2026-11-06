@@ -744,8 +744,8 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
                     ? Argument(a, op.ParamTypes[i], scope)
                     : op.MachineArgs
-                        ? a is IrLiteral { Value: not (null or bool or string or decimal) } l
-                            ? Types.Literal(l.Value, l.Type)
+                        ? a is IrLiteral { Value: not (null or string or decimal) } l
+                            ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)
                             : DecidedEquality(a, scope) ?? Emit(a, scope).Text
                         : AsMath(Emit(a, scope)))).ToList();
         var text = operands.Count == 0
@@ -759,7 +759,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// class's view) is the decidable <c>=</c>, not the proposition <c>==</c>.
     /// </summary>
     private string? DecidedEquality(IrExpr a, SpecScope scope) =>
-        a is IrBinary { Op: BinOp.Eq or BinOp.Ne } b &&
+        // R27.17. A comparison with a constant of a `[SpecType]` enum is its discriminator.
+        a is IrBinary { Op: BinOp.Eq or BinOp.Ne } e &&
+        (e.Left is IrSpecOp { EnumCase: true } || e.Right is IrSpecOp { EnumCase: true })
+            ? (e.Left is IrSpecOp { EnumCase: true } lc ? (lc, e.Right) : ((IrSpecOp)e.Right, e.Left)) is var (k, other)
+                ? $"({(e.Op == BinOp.Eq ? "" : "not ")}({k.Function}? {Emit(other, scope).Text}))"
+                : null
+            : a is IrBinary { Op: BinOp.Eq or BinOp.Ne } b &&
         b.Left.Type is IrPrim { IsMachineInt: true } or IrPrim { IsSpecNumeric: true } &&
         b.Right.Type is IrPrim { IsMachineInt: true } or IrPrim { IsSpecNumeric: true }
             ? $"({AsMath(Emit(b.Left, scope))} {(b.Op == BinOp.Eq ? "=" : "<>")} {AsMath(Emit(b.Right, scope))})"

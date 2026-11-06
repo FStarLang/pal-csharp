@@ -78,6 +78,10 @@ let rec keys_length (#a #b: Type0) (t: T.tree (a & b))
     | T.Branch l _ r -> keys_length l; keys_length r
 
 /// A node's tag is whether it is red.
+/// R27.17. The colour of a red-black node, the image of `NodeColor` (`[SpecType]`): a
+/// field of this type holds one of two values, where a byte would hold any of 256.
+type node_color = | Black | Red
+
 let is_red (#a: Type0) (t: T.tree (a & bool)) : bool =
   match t with
   | T.Branch _ (_, red) _ -> red
@@ -99,6 +103,96 @@ let rec rb (#a: Type0) (t: T.tree (a & bool)) : Tot bool (decreases t) =
 
 /// A red-black tree: `rb`, with a black root.
 let red_black (#a: Type0) (t: T.tree (a & bool)) : bool = rb t && not (is_red t)
+
+(* R27.16. The re-shapings `SortedSet<T>.Node`'s helpers perform, as functions of the tree. *)
+
+/// The tree with its root's colour set.
+let recolor (#a: Type0) (t: T.tree (a & bool)) (red: bool) : T.tree (a & bool) =
+  match t with
+  | T.Leaf -> T.Leaf
+  | T.Branch l (k, _) r -> T.Branch l (k, red) r
+
+/// The root's right child becomes the root.
+let rot_left (#a: Type0) (t: T.tree a) : T.tree a =
+  match t with
+  | T.Branch x v (T.Branch y w z) -> T.Branch (T.Branch x v y) w z
+  | _ -> t
+
+/// The root's left child becomes the root.
+let rot_right (#a: Type0) (t: T.tree a) : T.tree a =
+  match t with
+  | T.Branch (T.Branch x v y) w z -> T.Branch x v (T.Branch y w z)
+  | _ -> t
+
+/// The left child rotated left, then the root rotated right.
+let rot_left_right (#a: Type0) (t: T.tree a) : T.tree a =
+  match t with
+  | T.Branch l v r -> rot_right (T.Branch (rot_left l) v r)
+  | _ -> t
+
+/// The right child rotated right, then the root rotated left.
+let rot_right_left (#a: Type0) (t: T.tree a) : T.tree a =
+  match t with
+  | T.Branch l v r -> rot_left (T.Branch l v (rot_right r))
+  | _ -> t
+
+/// A 4-node split: the root red, its children black.
+let split4 (#a: Type0) (t: T.tree (a & bool)) : T.tree (a & bool) =
+  match t with
+  | T.Leaf -> T.Leaf
+  | T.Branch l (k, _) r -> T.Branch (recolor l false) (k, true) (recolor r false)
+
+/// Two 2-nodes merged: the root black, its children red.
+let merge2 (#a: Type0) (t: T.tree (a & bool)) : T.tree (a & bool) =
+  match t with
+  | T.Leaf -> T.Leaf
+  | T.Branch l (k, _) r -> T.Branch (recolor l true) (k, false) (recolor r true)
+
+/// R27.17. The image of `TreeRotation` (`[SpecType]`, each constant renamed by `[SpecCase]`).
+type tree_rotation = | RotLeft | RotLeftRight | RotRight | RotRightLeft
+
+/// R27.17. `Node.Rotate`: a single rotation blackens the red grandchild it lifts.
+let rotate (#a: Type0) (r: tree_rotation) (t: T.tree (a & bool)) : T.tree (a & bool) =
+  match r, t with
+  | RotRight, T.Branch (T.Branch ll lv lr) v rr -> rot_right (T.Branch (T.Branch (recolor ll false) lv lr) v rr)
+  | RotLeft, T.Branch l v (T.Branch rl rv rr) -> rot_left (T.Branch l v (T.Branch rl rv (recolor rr false)))
+  | RotLeftRight, _ -> rot_left_right t
+  | RotRightLeft, _ -> rot_right_left t
+  | _, _ -> t
+
+/// R27.17. The grandchild the rotation lifts is red.
+let can_rotate (#a: Type0) (r: tree_rotation) (t: T.tree (a & bool)) : bool =
+  match r with
+  | RotRight -> is_red (T.left (T.left t))
+  | RotLeft -> is_red (T.right (T.right t))
+  | RotLeftRight -> is_red (T.right (T.left t))
+  | RotRightLeft -> is_red (T.left (T.right t))
+
+let keys_recolor (#a: Type0) (t: T.tree (a & bool)) (red: bool)
+  : Lemma (ensures keys (recolor t red) == keys t) [SMTPat (keys (recolor t red))]
+  = ()
+
+let keys_rot_left (#a #b: Type0) (t: T.tree (a & b))
+  : Lemma (ensures keys (rot_left t) == keys t) [SMTPat (keys (rot_left t))]
+  = match t with
+    | T.Branch x _ (T.Branch y _ z) ->
+      Seq.lemma_eq_intro (keys (rot_left t)) (keys t)
+    | _ -> ()
+
+let keys_rot_right (#a #b: Type0) (t: T.tree (a & b))
+  : Lemma (ensures keys (rot_right t) == keys t) [SMTPat (keys (rot_right t))]
+  = match t with
+    | T.Branch (T.Branch x _ y) _ z ->
+      Seq.lemma_eq_intro (keys (rot_right t)) (keys t)
+    | _ -> ()
+
+let keys_split4 (#a: Type0) (t: T.tree (a & bool))
+  : Lemma (ensures keys (split4 t) == keys t) [SMTPat (keys (split4 t))]
+  = ()
+
+let keys_merge2 (#a: Type0) (t: T.tree (a & bool))
+  : Lemma (ensures keys (merge2 t) == keys t) [SMTPat (keys (merge2 t))]
+  = ()
 
 let below_all (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (v: a) : prop =
   forall (i: nat). i < Seq.length s ==> O.compare c (Seq.index s i) v < 0

@@ -291,6 +291,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .Where(x => !x.Item2.IsEmpty)
             .GroupBy(x => x.m.Name)
             .ToDictionary(g => g.Key, g => g.First().Item2);
+        _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
         if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
 
@@ -434,6 +435,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                         new Provenance(Frontend.Region.TreeOf(cl.Name), decl.Loc),
                         new Provenance(Frontend.Region.WfOf(cl.Name), decl.Loc),
                         new Provenance(Frontend.Region.ReadOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.UnsharedOf(cl.Name), decl.Loc),
+                        new Provenance(Frontend.Region.ReshapedOf(cl.Name), decl.Loc),
                     ],
                     // R9.14. A leaf adds the forgetting function R9.6 read off its
                     // `[Model]` override, its own invariant at the base's model, and the
@@ -1016,6 +1019,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"let {Frontend.Region.TreeOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) " +
                       $": GTot (Pulse.Lib.CSharp.Tree.tree ({viewType})) = {R}.tree_of {shape} h x");
         sb.AppendLine($"let {Frontend.Region.WfOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) : prop = {R}.wf {lr} h x");
+        // R27.16. The shape facts a method that writes the region states.
+        var RT = Frontend.Region.TreeModule;
+        sb.AppendLine($"let {Frontend.Region.UnsharedOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) : prop = {RT}.unshared {lr} h x");
+        sb.AppendLine($"let {Frontend.Region.ReshapedOf(c.Name)}{tb.Implicit} (h0 h1: {heap}) (x y: {opt}) : prop = {RT}.reshaped {lr} h0 h1 x y");
         sb.AppendLine();
         // R27.5. A read through the region, with the step a descent takes for free.
         sb.AppendLine($"inline_for_extraction noextract");
@@ -1055,6 +1062,70 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
         return regions.Any(k => names.Contains(Frontend.Region.HeapName(k.Name))) ? regions : [];
     }
+
+    /// <summary>
+    /// R27.16. The regions a method that is not an owner's holds itself: those of the region
+    /// classes it is a member of, takes, returns, reads, allocates or calls into, each with
+    /// whether it writes the region (a field write, an allocation, or a call that writes).
+    /// The write set is a fixpoint over the call graph.
+    /// </summary>
+    private Dictionary<string, ImmutableArray<RegionUse>> RegionHeld(ImmutableArray<IrMethod> methods)
+    {
+        bool IsRegion(IrType? t) => t is IrClassType k && _classes.TryGetValue(k.Name, out var d) && d.IsRegion;
+        bool OwnerMethod(IrMethod m) =>
+            m.DeclaringClass is { } dc && _classes.TryGetValue(dc, out var c) && !c.IsPlain &&
+            c.Fields.Any(IsRegionField);
+        var touched = new Dictionary<string, Dictionary<string, IrClassType>>();
+        var writes = new Dictionary<string, HashSet<string>>();
+        var calls = new Dictionary<string, List<string>>();
+        foreach (var m in methods)
+        {
+            if (OwnerMethod(m) || m.IsLemma) continue;
+            var ks = new Dictionary<string, IrClassType>();
+            void Add(IrType? t) { if (IsRegion(t) && !ks.ContainsKey(((IrClassType)t!).Name)) ks[((IrClassType)t!).Name] = ((IrClassType)t!) with { Nullable = false }; }
+            foreach (var p in m.Parameters) Add(p.Type);
+            Add(m.ReturnType);
+            var w = new HashSet<string>();
+            var cs = new List<string>();
+            if (m.Body is not null)
+            {
+                foreach (var st in Passes.Check.Statements(m.Body))
+                {
+                    if (st is IrAssign { Target: IrField { Receiver.Type: IrClassType wk } } && IsRegion(wk))
+                    { Add(wk); w.Add(wk.Name); }
+                    if (st is IrLocalDecl ld) Add(ld.Type);
+                    foreach (var e in Passes.Check.Expressions(st).SelectMany(Passes.Check.Subexpressions))
+                    {
+                        if (e is IrField { Receiver.Type: IrClassType rk } && IsRegion(rk)) Add(rk);
+                        if (e is IrAlloc al && _classes.TryGetValue(al.Class, out var ad) && ad.IsRegion && al.Type is IrClassType at)
+                        { Add(at); w.Add(al.Class); }
+                        if (e is IrCall call) cs.Add(call.Callee);
+                    }
+                }
+            }
+            touched[m.Name] = ks;
+            writes[m.Name] = w;
+            calls[m.Name] = cs;
+        }
+        for (var changed = true; changed;)
+        {
+            changed = false;
+            foreach (var entry in calls)
+                foreach (var callee in entry.Value)
+                {
+                    if (!touched.TryGetValue(callee, out var ck)) continue;
+                    foreach (var kv in ck)
+                        if (!touched[entry.Key].ContainsKey(kv.Key)) { touched[entry.Key][kv.Key] = kv.Value; changed = true; }
+                    foreach (var kn in writes[callee])
+                        if (writes[entry.Key].Add(kn)) changed = true;
+                }
+        }
+        return touched.Where(t => t.Value.Count > 0).ToDictionary(
+            t => t.Key,
+            t => t.Value.Values.Select(k => new RegionUse(k, writes[t.Key].Contains(k.Name))).ToImmutableArray());
+    }
+
+    private Dictionary<string, ImmutableArray<RegionUse>> _regionHeld = [];
 
     private bool IsRegionField(IrFieldDecl f) =>
         f.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var d) && d.IsRegion;
@@ -1147,11 +1218,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // provably non-overflowing.
         foreach (var f in arrays)
             conjuncts.Add($"Seq.length {Names.Contents(f.Name)} <= 2147483647");
-        // R27.4. Every pointer the owner holds into a region is well-formed in it.
+        // R27.4. Every pointer the owner holds into a region is unshared in it (R27.16):
+        // well-formed, and reaching no box twice.
         foreach (var f in regionFields)
         {
             var k = (IrClassType)f.Type;
-            conjuncts.Add($"{Names.ClassModule(k.Name)}.{Frontend.Region.WfOf(k.Name)} " +
+            conjuncts.Add($"{Names.ClassModule(k.Name)}.{Frontend.Region.UnsharedOf(k.Name)} " +
                           $"{Frontend.Region.HeapBinder(k.Name)} r.{Names.Field(f.Name)}");
         }
         conjuncts.AddRange(c.Invariants.Select(i => _spec.AsProp(_spec.Emit(i, repScope))));
@@ -1460,9 +1532,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     private EmittedModule EmitMethod(IrMethod method)
     {
-        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed);
+        var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
+        var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld);
         var plan = new MethodPlan(method, _spec, diagnostics,
-            _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : []);
+            _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");
@@ -1751,3 +1824,6 @@ public static class Preamble
         module NA = Pulse.Lib.CSharp.NullableArray
         """;
 }
+
+/// <summary>R27.16. A region a method holds itself, and whether it writes it.</summary>
+public sealed record RegionUse(IrClassType Region, bool Mutates);

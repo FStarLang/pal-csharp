@@ -227,6 +227,18 @@ public readonly struct SpecTree<T>
     [SpecOp("Pulse.Lib.CSharp.Tree.height")]
     public SpecInt Height => throw Ghost();
 
+    /// <summary>R27.16. The left subtree of a branch; a leaf's is a leaf.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.left")]
+    public SpecTree<T> Left => throw Ghost();
+
+    /// <summary>R27.16. The right subtree of a branch; a leaf's is a leaf.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.right")]
+    public SpecTree<T> Right => throw Ghost();
+
+    /// <summary>R27.16. The root alone, its subtrees dropped; a leaf's is a leaf.</summary>
+    [SpecOp("Pulse.Lib.CSharp.Tree.root_only")]
+    public SpecTree<T> RootOnly => throw Ghost();
+
     /// <summary>True of the empty tree. A discriminator is an ordinary prefix function.</summary>
     [SpecOp("Pulse.Lib.CSharp.Tree.Leaf?")]
     public bool IsLeaf => throw Ghost();

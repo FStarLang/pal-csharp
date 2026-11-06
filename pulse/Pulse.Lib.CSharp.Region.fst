@@ -301,12 +301,16 @@ let rec closed (#a: Type0) (left right: a -> B.box a) (n: nat) (h: heap a) (x: B
 
 let fuel (#a: Type0) (h: heap a) : nat = L.length h + 1
 
-/// R27.7. The whole tree at `x`.
+/// R27.7. The whole tree at `x`. Opaque to the solver, as `wf` is (R27.16): what a proof
+/// knows of either comes from the lemmas below, a step at a time, and not from unrolling a
+/// recursion whose fuel is the size of the heap.
+[@@"opaque_to_smt"]
 let tree_of (#a #v: Type0) (view: B.box a -> a -> v) (left right: a -> B.box a)
     (h: heap a) (x: B.box a) : GTot (T.tree v)
   = tree_n view left right (fuel h) h x
 
 /// R27.4. What an owner's invariant says of the region beside the pointer it holds.
+[@@"opaque_to_smt"]
 let wf (#a: Type0) (left right: a -> B.box a) (h: heap a) (x: B.box a) : prop =
   closed left right (fuel h) h x
 
@@ -336,7 +340,8 @@ let wf_step (#a #v: Type0) (view: B.box a -> a -> v) (left right: a -> B.box a)
                      T.Branch (tree_of view left right h (left (get h x)))
                               (view x (get h x))
                               (tree_of view left right h (right (get h x))))
-  = let r = get h x in
+  = reveal_opaque (`%wf) (wf #a); reveal_opaque (`%tree_of) (tree_of #a #v);
+    let r = get h x in
     closed_mono left right (fuel h - 1) (fuel h) h (left r);
     closed_mono left right (fuel h - 1) (fuel h) h (right r);
     tree_n_mono view left right (fuel h - 1) (fuel h) h (left r);
@@ -346,7 +351,23 @@ let wf_null (#a #v: Type0) (view: B.box a -> a -> v) (left right: a -> B.box a)
     (h: heap a) (x: B.box a)
   : Lemma (requires B.is_null x)
           (ensures wf left right h x /\ tree_of view left right h x == T.Leaf)
-  = ()
+          [SMTPat (tree_of view left right h x)]
+  = reveal_opaque (`%wf) (wf #a); reveal_opaque (`%tree_of) (tree_of #a #v)
+
+/// The root of the tree at a box of the heap, well-formed or not.
+let tree_of_mem (#a #v: Type0) (view: B.box a -> a -> v) (left right: a -> B.box a)
+    (h: heap a) (x: B.box a)
+  : Lemma (requires mem h x /\ not (B.is_null x))
+          (ensures tree_of view left right h x ==
+                   T.Branch (tree_n view left right (L.length h) h (left (get h x)))
+                            (view x (get h x))
+                            (tree_n view left right (L.length h) h (right (get h x))))
+          [SMTPat (tree_of view left right h x)]
+  = reveal_opaque (`%tree_of) (tree_of #a #v)
+
+let wf_null_wf (#a: Type0) (left right: a -> B.box a) (h: heap a) (x: B.box a)
+  : Lemma (requires B.is_null x) (ensures wf left right h x) [SMTPat (wf left right h x)]
+  = reveal_opaque (`%wf) (wf #a)
 
 /// R27.5. `wf_step` in the form a read states it: conditional, so a reader of a pointer
 /// that is not known to be well-formed is not refused.
@@ -365,5 +386,23 @@ let wf_step_if (#a #v: Type0) (view: B.box a -> a -> v) (left right: a -> B.box 
 let mem_of_wf (#a: Type0) (left right: a -> B.box a) (h: heap a) (x: B.box a)
   : Lemma (requires mem h x \/ (wf left right h x /\ not (B.is_null x)))
           (ensures mem h x)
-  = if B.is_null x then () else
+  = reveal_opaque (`%wf) (wf #a);
+    if B.is_null x then () else
     FStar.Classical.move_requires (wf_step #a #unit (fun _ _ -> ()) left right h) x
+
+/// A well-formed non-null pointer is a box of the heap, so the tree at it is a branch.
+let wf_mem (#a: Type0) (left right: a -> B.box a) (h: heap a) (x: B.box a)
+  : Lemma (requires wf left right h x /\ not (B.is_null x)) (ensures mem h x)
+          [SMTPat (wf left right h x)]
+  = mem_of_wf left right h x
+
+/// R27.18. A child link of a node at a heap, `null` for a box the heap does not hold.
+let link_at (#a: Type0) (link: a -> B.box a) (h: heap a) (x: B.box a) : B.box a =
+  match lookup h x with
+  | Some r -> link r
+  | None -> B.null
+
+let link_at_mem (#a: Type0) (link: a -> B.box a) (h: heap a) (x: B.box a)
+  : Lemma (requires mem h x) (ensures link_at link h x == link (get h x))
+          [SMTPat (link_at link h x)]
+  = ()

@@ -94,6 +94,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "quote_lines", "test/quote_l
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "record_cases", "test/record_cases/record_cases.csproj", "{D1DF49DE-E49A-CBAD-55D7-AEF16F5F5C15}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "regionops", "test/regionops/regionops.csproj", "{283E3F8E-DB66-24CC-31B6-E11C97AF6392}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ring_class", "test/ring_class/ring_class.csproj", "{7B160314-91A2-0D9E-4693-DB1FCA6F1E7F}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "shape_hierarchy", "test/shape_hierarchy/shape_hierarchy.csproj", "{82DA1D13-D344-E4A4-FDBC-B7288B7BB2B8}"
@@ -322,6 +324,10 @@ Global
 		{D1DF49DE-E49A-CBAD-55D7-AEF16F5F5C15}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D1DF49DE-E49A-CBAD-55D7-AEF16F5F5C15}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D1DF49DE-E49A-CBAD-55D7-AEF16F5F5C15}.Release|Any CPU.Build.0 = Release|Any CPU
+		{283E3F8E-DB66-24CC-31B6-E11C97AF6392}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{283E3F8E-DB66-24CC-31B6-E11C97AF6392}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{283E3F8E-DB66-24CC-31B6-E11C97AF6392}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{283E3F8E-DB66-24CC-31B6-E11C97AF6392}.Release|Any CPU.Build.0 = Release|Any CPU
 		{7B160314-91A2-0D9E-4693-DB1FCA6F1E7F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{7B160314-91A2-0D9E-4693-DB1FCA6F1E7F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7B160314-91A2-0D9E-4693-DB1FCA6F1E7F}.Release|Any CPU.ActiveCfg = Release|Any CPU

@@ -670,7 +670,7 @@ public static partial class FrontendPass
         // reading it as a method would translate a specification as a program.
         && !(p.IsOverride && OverriddenChainHasModel(p, known))
         && p.ContainingType is { TypeKind: TypeKind.Class } owner
-        && known.HasModel(owner);
+        && (known.HasModel(owner) || known.IsRegionClass(owner));
 
     private static bool IsAuto(IPropertySymbol p) =>
         p.ContainingType.GetMembers().OfType<IFieldSymbol>()
@@ -2158,7 +2158,8 @@ public static partial class FrontendPass
         // R15.1. A generic declaring type cannot be `using static`-imported: the
         // directive names a closed type and there is nothing to close it with. The
         // members it would have imported are reached through a receiver instead.
-        var own = candidate.Symbol.ContainingType.TypeParameters.Length > 0
+        var own = candidate.Symbol.ContainingType.TypeParameters.Length > 0 ||
+                  WellKnown.OuterAndOwnTypeParameters(candidate.Symbol.ContainingType).Any()
             ? null
             : $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
 
@@ -2358,7 +2359,10 @@ public static partial class FrontendPass
     /// </summary>
     private static ImmutableArray<string> MethodTypeParameters(IMethodSymbol symbol) =>
     [
-        .. symbol.ContainingType?.TypeParameters.Select(t => t.Name) ?? [],
+        // R27.16. A region class nested in a generic class is generic in the outer parameters (R27.3).
+        .. (symbol.ContainingType is { } ct && WellKnown.IsRegionDeclaration(ct)
+            ? WellKnown.OuterAndOwnTypeParameters(ct).Select(t => t.Name)
+            : symbol.ContainingType?.TypeParameters.Select(t => t.Name) ?? []),
         .. symbol.TypeParameters.Select(t => t.Name),
     ];
 
@@ -2425,11 +2429,13 @@ public static partial class FrontendPass
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet,
                         ContainingType: { } self } &&
-            known.HasModel(self))
+            (known.HasModel(self) || known.IsRegionClass(self)))
         {
             // R15.3. The receiver of a method of `Node<T>` is a `Node<T>`, not a `Node`.
-            parameters = [new IrParam(loc, Names.This,
-                              known.MapType(self) ?? new IrClassType(self.Name), ParamMode.Value),
+            // R27.16. A region object's receiver is a non-null reference into the region.
+            var selfType = known.MapType(self) ?? new IrClassType(self.Name);
+            if (known.IsRegionClass(self) && selfType is IrClassType st) selfType = st with { Nullable = false };
+            parameters = [new IrParam(loc, Names.This, selfType, ParamMode.Value) { Plain = known.IsRegionClass(self) },
                           .. parameters];
         }
 
@@ -2449,7 +2455,14 @@ public static partial class FrontendPass
             ? owner.Name
             : null;
 
-        var objectFields = symbol.ContainingType is not { } holder || !known.HasModel(holder)
+        var objectFields = symbol.ContainingType is not { } holder ? ImmutableHashSet<string>.Empty
+            // R27.16. A region object's fields, auto-properties included (R27.3), are its own.
+            : known.IsRegionClass(holder) && !symbol.IsStatic
+            ? holder.GetMembers().OfType<IFieldSymbol>()
+                .Where(f => !f.IsStatic && !f.IsConst)
+                .Select(f => f.AssociatedSymbol?.Name ?? f.Name)
+                .ToImmutableHashSet()
+            : !known.HasModel(holder)
             ? ImmutableHashSet<string>.Empty
             // R9.21b. A body inherits the representation of every open base, so a field
             // the class did not declare is still one of its own to read.

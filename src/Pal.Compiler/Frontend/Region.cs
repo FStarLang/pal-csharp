@@ -8,6 +8,9 @@ public static class Region
 {
     public const string Module = "Pulse.Lib.CSharp.Region";
 
+    /// <summary>R27.16. The shape theory of written regions.</summary>
+    public const string TreeModule = "Pulse.Lib.CSharp.RegionTree";
+
     /// <summary>The spec-scope name of the heap a method holds for a region class.</summary>
     public static string HeapName(string regionClass) => "$heap_" + regionClass;
 
@@ -20,4 +23,6 @@ public static class Region
     public static string TreeOf(string c) => "class_" + c + "__tree";
     public static string WfOf(string c) => "class_" + c + "__wf";
     public static string ReadOf(string c) => "class_" + c + "__read";
+    public static string UnsharedOf(string c) => "class_" + c + "__unshared";
+    public static string ReshapedOf(string c) => "class_" + c + "__reshaped";
 }

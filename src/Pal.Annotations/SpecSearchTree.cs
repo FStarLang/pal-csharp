@@ -81,4 +81,48 @@ public static class SpecSearchTree
     /// </summary>
     [SpecOp("Pulse.Lib.CSharp.SearchTree.red_black")]
     public static bool IsRedBlack<T>(SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>R27.16. The root of a colour-tagged tree is red (a leaf is not).</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.is_red")]
+    public static bool IsRed<T>(SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>R27.16. The tree with its root's colour set to red or black.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.recolor")]
+    public static SpecTree<(T, bool)> Recolor<T>(SpecTree<(T, bool)> tree, bool red) => throw Ghost();
+
+    /// <summary>R27.16. The root's right child made the root.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.rot_left")]
+    public static SpecTree<TItem> RotateLeft<TItem>(SpecTree<TItem> tree) => throw Ghost();
+
+    /// <summary>R27.16. The root's left child made the root.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.rot_right")]
+    public static SpecTree<TItem> RotateRight<TItem>(SpecTree<TItem> tree) => throw Ghost();
+
+    /// <summary>R27.16. The left child rotated left, then the root rotated right.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.rot_left_right")]
+    public static SpecTree<TItem> RotateLeftRight<TItem>(SpecTree<TItem> tree) => throw Ghost();
+
+    /// <summary>R27.16. The right child rotated right, then the root rotated left.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.rot_right_left")]
+    public static SpecTree<TItem> RotateRightLeft<TItem>(SpecTree<TItem> tree) => throw Ghost();
+
+    /// <summary>R27.16. A 4-node split: the root red, its children black.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.split4")]
+    public static SpecTree<(T, bool)> Split4<T>(SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>R27.16. Two 2-nodes merged: the root black, its children red.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.merge2")]
+    public static SpecTree<(T, bool)> Merge2<T>(SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>
+    /// R27.17. <c>Node.Rotate</c>'s tree: a single rotation also blackens the red grandchild
+    /// it lifts. <paramref name="rotation"/> is a <c>[SpecType]</c> enum whose image is
+    /// <c>SearchTree.tree_rotation</c>.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.rotate")]
+    public static SpecTree<(T, bool)> Rotate<TRotation, T>(TRotation rotation, SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>R27.17. The grandchild a rotation lifts is red.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.can_rotate")]
+    public static bool CanRotate<TRotation, T>(TRotation rotation, SpecTree<(T, bool)> tree) => throw Ghost();
 }

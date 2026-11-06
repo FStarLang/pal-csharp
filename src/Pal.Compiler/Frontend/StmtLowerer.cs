@@ -747,6 +747,15 @@ public sealed class StmtLowerer(
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
+        // R27.19. `Debug.Fail(m)` is `Debug.Assert(false, m)`: the point is unreachable. A
+        // message may interpolate locals and parameters of primitive or enum type, whose
+        // formatting has no effect the proof could observe.
+        if (method is { Name: "Fail", IsStatic: true } &&
+            method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
+            args.Count == 1 && EffectFreeMessage(args[0].Expression))
+            return new IrGhostStmt(loc, GhostKind.DebugAssert,
+                new IrLiteral(loc, false) { Type = IrPrim.Bool }, null);
+
         // R23.2, R25.7. The BCL's argument guards are the `if … throw` they abbreviate.
         if (ArgumentGuard(method, args, loc) is { } guard)
             return guard;
@@ -1153,4 +1162,15 @@ public sealed class StmtLowerer(
         }
         return null;
     }
+
+    /// <summary>R27.19. A <c>Debug.Fail</c> message whose evaluation has no observable effect.</summary>
+    private bool EffectFreeMessage(ExpressionSyntax e) =>
+        model.GetConstantValue(e).HasValue ||
+        e is InterpolatedStringExpressionSyntax interp &&
+        interp.Contents.OfType<InterpolationSyntax>().All(h =>
+            model.GetConstantValue(h.Expression).HasValue ||
+            h.Expression is IdentifierNameSyntax &&
+            model.GetSymbolInfo(h.Expression).Symbol is ILocalSymbol or IParameterSymbol &&
+            model.GetTypeInfo(h.Expression).Type is { } ht &&
+            (ht.TypeKind == TypeKind.Enum || ht.SpecialType is >= SpecialType.System_Boolean and <= SpecialType.System_Double));
 }

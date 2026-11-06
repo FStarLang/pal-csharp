@@ -7312,6 +7312,108 @@ the other the result and the return flag. They do so after an `&&` whose right o
 a node, which is an `if`-expression whose result carries a refinement. Pulse could not join
 those arms ("cannot find witness"). In tail position no join is needed.
 
+### R27.16 Members of a `[Region]` class
+
+A method or property of a `[Region]` class is translated. It takes `this` as a region pointer,
+and it holds the region `this` lives in: the heap is a ghost binder `$heap_K`.
+
+* A member that writes no node, and calls no member that does, is *read-only*. It takes a
+  fraction of the region and leaves the heap as it was. Every other member takes the whole
+  region and returns it at a new heap. Which members write is computed as a fixpoint over the
+  call graph.
+* Its contract names the heap through `Pal.Tree`, `Pal.WellFormed` and `Pal.InRegion`
+  (R27.7). In `ensures` these mean the post heap, and `Pal.Old(…)` means the pre heap.
+* `x.F = v` on a region pointer, held in a parameter or in a mutable local, is
+  `Region.write x ({class_K__read x with fld_F = v})`. A field read through any expression
+  of region type (`Left!.Left`) reads through the region.
+* An `if` whose arm allocates, writes a node or calls a member that writes one is split at
+  the join (as R25.10 does): Pulse would otherwise generalise the heap afresh and forget what
+  the arm proved about it.
+* `new K(a, b)`, for a `[Region]` class whose constructor only assigns parameters to
+  fields, is `Region.alloc` of the record those assignments build. Fields it does not assign
+  are `null` or the default. Any other constructor body is PALCS0705.
+
+Two predicates describe a re-linking, both from `Pulse.Lib.CSharp.RegionTree`:
+
+| C# | F\* | meaning |
+|---|---|---|
+| `Pal.Unshared(x)` | `unshared left right h x` | `x` is well-formed and the tree it reaches holds no box twice |
+| `Pal.Reshaped(x, y)` (in `ensures`) | `reshaped left right h0 h1 x y` | every box outside the tree `x` reached in `h0` is unchanged, and the tree `y` reaches in `h1` is made of boxes of that tree and of boxes allocated since |
+
+`Pal.Reshaped(null, y)` says `y`'s tree is entirely fresh, as for `ShallowClone`.
+
+`unshared` is what makes in-place updates provable. Writing a node that is in no other part
+of the tree changes only the subtree it roots, so the trees of the other parts survive. The
+owner's invariant (R27.4) now requires its root to be `unshared`, not just `wf`.
+
+`RegionTree` keeps the boxes of a tree as an explicit `ltree` (the tree of `(box, record)`
+pairs). `tree_of` is `vmap view (ltree …)`. Its lemmas are `SMTPat`-triggered. Each fires on
+the term the emitted code produces:
+
+* `upd_outside` / `upd_node` fire on a write.
+* `alloc_outside`, `alloc_node` and `alloc_leaf` fire on an allocation.
+* `unshared_step` unfolds one node.
+* `reshaped_trans` composes two re-linkings.
+* `reshaped_child` re-grafts a child after a call that re-linked it. It gives the sibling
+  and the parent's record unchanged and the new subtree disjoint from both. When the child
+  did not move, it also gives the parent's new tree.
+
+`Region.tree_of` and `Region.wf` are `opaque_to_smt`. With their recursive definitions
+visible, Z3 unrolled them on every heap term and timed out on trivial goals. `wf_step`,
+`tree_of_mem`, `wf_mem` and `wf_null` give their one-step equations instead.
+
+`SpecSearchTree` names the node-level operations on a colour-tagged tree:
+
+* `Recolor`;
+* `RotateLeft`, `RotateRight`, `RotateLeftRight` and `RotateRightLeft`;
+* `Split4` and `Merge2`;
+* `Rotate` and `CanRotate`.
+
+`SearchTree` proves that each preserves `keys`. `SpecTree` gains `Left`, `Right` and
+`RootOnly`.
+
+### R27.17 Closed enums: `NodeColor` and `TreeRotation`
+
+An enum without `[SpecType]` is its byte (R22.2), and a byte has 256 values. `Color ==
+NodeColor.Red` and `Color == NodeColor.Black` are then not complements, so `IsBlack` could not
+be `!IsRed`. The runtime's two enums carry `[SpecType]` (R21.8):
+
+* `NodeColor` is `SearchTree.node_color = Black | Red`;
+* `TreeRotation` is `SearchTree.tree_rotation`, its constants renamed by `[SpecCase]`.
+
+A field of either type holds a constructor. A comparison with a constant of a `[SpecType]`
+enum, in a value position of a specification (a component of a view), is the constant's
+discriminator (`Red? c`), a `bool`.
+
+### R27.18 Child links in contracts
+
+`Pal.LeftOf(x)` and `Pal.RightOf(x)` are the first and second child links of a region object
+in the heap the method holds: `Region.link_at class_K__left $heap_K x`. A box the heap does
+not hold has the link `null`, so the term is total, and `link_at_mem` gives `left (get h x)`
+for a box it does hold.
+
+Contracts compare references with them (`node == Pal.LeftOf(@this)`). In code, `a == b` on
+two region pointers is `RefEq.ref_eq` (R27.8). A null test on a region pointer typed
+non-null is still a pointer test (`Debug.Assert(node != null)`).
+
+A conditional whose test compares references (`x == y ? a : b`) needs decidable equality on
+boxes in a specification. Write it as two `Pal.Implies` instead.
+
+### R27.19 `Debug.Fail`
+
+`Debug.Fail(m)` is `Debug.Assert(false, m)` (R22.19): reaching it is a proof obligation that
+fails. The message may interpolate constants (including `nameof`), and locals or parameters
+of primitive or enum type. Formatting those has no effect the proof could observe.
+
+`Node.Rotate`'s `default:` arm is such a point. `TreeRotation` is closed (R27.17), so the
+arm is unreachable.
+
+### R27.20 A region pointer declared without a value
+
+`Node removeRed;` is a cell of the nullable type, initialised to `null`. C#'s definite
+assignment guarantees a write before every read. F\* proves the value read non-null from that
+write, where the non-null type is needed.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7348,14 +7450,27 @@ ensures that the tree and the comparer are unchanged.
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
 
+**`Node` (R27.16).** Writers require `Pal.Unshared(@this)` and ensure `Pal.Unshared` of the
+result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
+`Pal.Tree<(T, bool)>(@this)`.
+
+| member | ensures |
+|---|---|
+| `IsRed`, `IsBlack`, `IsNonNullRed`, `IsNonNullBlack`, `IsNullOrBlack` | the root's colour (`SpecSearchTree.IsRed`) |
+| `Is2Node`, `Is4Node` (requires `Pal.WellFormed`) | the colours of the root and both children |
+| `ColorBlack`, `ColorRed` | `Recolor(t, …)` |
+| `ShallowClone` | a fresh `t.RootOnly` (`Pal.Reshaped(null, Result)`) |
+| `Split4Node`, `Merge2Nodes` | `Split4(t)`, `Merge2(t)`, under the 2-/4-node shape its `Debug.Assert`s check |
+| `RotateLeft`, `RotateRight`, `RotateLeftRight`, `RotateRightLeft` | the rotation of `t` |
+| `Rotate(rotation)` (requires `CanRotate`) | `Rotate(rotation, t)`, non-null |
+| `GetSibling(node)` | the other child link (`Pal.LeftOf`/`Pal.RightOf`, R27.18) |
+| `GetRotation(current, sibling)` | the rotation its two tests choose, and `CanRotate` of it |
+
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.**
-  * They allocate with `new Node(item, color)`, which R12.4 refuses.
-  * They re-link through mutable locals, and the plain write path takes only value slots.
-  * Their loop invariants must relate the region's heap to the model while it is being
-    re-linked.
+* **`Add`/`AddIfNotPresent`, `Remove`/`DoRemove`, and the set operations.** Their loop
+  invariants must relate the region's heap to the model while the tree is being re-linked.
 * **The enumerator, serialization and `IEnumerable` constructors.** These are out of
   scope.
 

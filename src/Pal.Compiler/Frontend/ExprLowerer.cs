@@ -201,6 +201,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     [ToDeclared(Lower(t.Arguments[0].Expression), pair.Args[0]),
                      ToDeclared(Lower(t.Arguments[1].Expression), pair.Args[1])])
                     { MachineArgs = true, Type = pair },
+            ThisExpressionSyntax when model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { } rself &&
+                                      known.IsRegionClass(rself) => RegionThis(loc, rself),
             ThisExpressionSyntax => new IrVar(loc, Names.This),
             // R23.13. The empty collection expression at a one-dimensional array type is
             // `Array.Empty<T>()` (R23.1).
@@ -512,6 +514,28 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 [.. (node.ArgumentList?.Arguments ?? default).Select(a => Lower(a.Expression))]);
         }
 
+        // R27.16. `new N(args)` on a `[Region]` class whose constructor only stores its
+        // parameters in fields is the record those stores build, allocated in the region.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } region &&
+            known.IsRegionClass(region))
+        {
+            if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol rctor ||
+                RegionConstructorStores(rctor) is not { } stores)
+            {
+                diagnostics.Error("PALCS0705", loc,
+                    $"`new {region.Name}(...)` on a `[Region]` class needs a constructor that only " +
+                    "assigns its parameters to fields (doc/translation.md R27.16).");
+                return new IrLiteral(loc, null);
+            }
+            var args = node.ArgumentList?.Arguments ?? default;
+            var inits = new List<IrFieldInit>();
+            foreach (var (field, param) in stores)
+                inits.Add(new IrFieldInit(field, Lower(args[param].Expression)));
+            if (Construct(loc, region.Name, region.OriginalDefinition, inits) is not IrNew record)
+                return new IrLiteral(loc, null);
+            return new IrAlloc(loc, region.Name, record) { Type = known.MapType(region) ?? new IrClassType(region.Name) };
+        }
+
         // R4.12. `new C(args)` is a call to the constructor's own emitted function. Unlike
         // a struct, a class has a constructor *body* — it allocates — so there is a
         // function to call rather than a record to build.
@@ -587,6 +611,40 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
 
         return Construct(loc, named.Name, named, given);
+    }
+
+    /// <summary>
+    /// R27.16. The stores of a <c>[Region]</c> constructor whose body is nothing but
+    /// <c>Field = parameter;</c> statements: each field with the index of its parameter.
+    /// </summary>
+    private static List<(string Field, int Param)>? RegionConstructorStores(IMethodSymbol ctor)
+    {
+        if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl ||
+            decl.Initializer is not null)
+            return null;
+        IEnumerable<ExpressionSyntax> exprs = decl.ExpressionBody is { } eb ? [eb.Expression]
+            : decl.Body is { } body && body.Statements.All(st => st is ExpressionStatementSyntax)
+                ? body.Statements.Cast<ExpressionStatementSyntax>().Select(st => st.Expression)
+                : [];
+        if (decl.ExpressionBody is null && decl.Body is null) return null;
+        if (decl.Body is { } b2 && !b2.Statements.All(st => st is ExpressionStatementSyntax)) return null;
+        var stores = new List<(string, int)>();
+        foreach (var e in exprs)
+        {
+            if (e is not AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } a)
+                return null;
+            var target = a.Left switch
+            {
+                IdentifierNameSyntax id => id.Identifier.ValueText,
+                MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax, Name: IdentifierNameSyntax n } => n.Identifier.ValueText,
+                _ => null,
+            };
+            if (target is null || a.Right is not IdentifierNameSyntax src) return null;
+            var index = ctor.Parameters.IndexOf(ctor.Parameters.FirstOrDefault(p => p.Name == src.Identifier.ValueText)!);
+            if (index < 0) return null;
+            stores.Add((target, index));
+        }
+        return stores;
     }
 
     /// <summary>
@@ -984,7 +1042,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
         if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
-            return new IrSpecOp(loc, enumCtor, []);
+            return new IrSpecOp(loc, enumCtor, []) { EnumCase = true };
 
         return symbol switch
         {
@@ -1011,9 +1069,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                          .Contains(f, SymbolEqualityComparer.Default) => ContextRead(f),
             IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
                 new IrField(loc, new IrVar(loc, Names.This), node.Identifier.ValueText),
+            // R27.16. A region object's auto-property, read on the implicit receiver.
+            IPropertySymbol { IsStatic: false } rp when known.IsRegionClass(rp.ContainingType) &&
+                                                         ObjectFields.Contains(node.Identifier.ValueText) =>
+                new IrField(loc, RegionThis(loc, rp.ContainingType), node.Identifier.ValueText),
             // R9.20a. `Span` and `this.Span` are the same reference, so they lower to the
             // same node -- writing the receiver out is a style choice, and §7.2 requires
             // that style choices do not reach the emitter.
+            IPropertySymbol rcp when known.IsRegionClass(rcp.ContainingType) &&
+                                     ComputedRead(rcp, loc, RegionThis(loc, rcp.ContainingType)) is { } rcall => rcall,
             IPropertySymbol prop when ComputedRead(prop, loc, new IrVar(loc, Names.This)) is { } call
                 => call,
             _ => Unsupported(node, loc),
@@ -1096,7 +1160,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 [Lower(node.Expression)]) { MachineArgs = true, Type = componentType };
         // R21.8. A constant of a `[SpecType]` enum is its constructor.
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
-            return new IrSpecOp(loc, enumCtor, []);
+            return new IrSpecOp(loc, enumCtor, []) { EnumCase = true };
         // R21.5. A static member bound to an F* term is that term.
         if (symbol is IPropertySymbol { IsStatic: true } or IFieldSymbol { IsStatic: true } &&
             known.SpecOpName(symbol) is { } staticOp)
@@ -1234,6 +1298,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 autoProp.ContainingType.GetMembers().OfType<IFieldSymbol>()
                     .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, autoProp.OriginalDefinition))))
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
+
+        // R27.16. A region object's computed property is a call, as R9.20a's is.
+        if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } regionOwner &&
+            known.IsRegionClass(regionOwner) && symbol is IPropertySymbol rprop &&
+            ComputedRead(rprop, loc, Lower(node.Expression)) is { } rcall)
+            return rcall;
 
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
         // a caller holds the model and nothing else; a field read here would be a fact
@@ -2028,6 +2098,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
                 ? Lower(m.Expression)
                 : new IrVar(loc, Names.This) { Type = Enclosing(node) }
+            // R27.16. A region object's method takes the object first, as any instance method does.
+            : method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+              known.IsRegionClass(method.ContainingType)
+            ? node.Expression is MemberAccessExpressionSyntax rm && rm.Expression is not ThisExpressionSyntax
+                ? NonNull(Lower(rm.Expression))
+                : RegionThis(loc, method.ContainingType!)
             : null;
 
         // R20.12. A receiver-free callee is passed the receiver's readonly fields it reads.
@@ -2066,6 +2142,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 "System.Diagnostics.CodeAnalysis.DoesNotReturnAttribute"),
         };
     }
+
+    /// <summary>R27.16. The receiver of a region class's member: a non-null reference.</summary>
+    private IrVar RegionThis(IrLoc loc, INamedTypeSymbol self) =>
+        new(loc, Names.This)
+        {
+            Type = known.MapType(self) is IrClassType k ? k with { Nullable = false } : new IrClassType(self.Name),
+        };
 
     /// <summary>
     /// R9.18f. The class whose method is being lowered, as the type of a synthesised
@@ -2257,9 +2340,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     { Type = IrPrim.SpecIntType };
             // R27.7. The tree a region pointer reaches, and the region's well-formedness at
             // it: functions of the heap the enclosing method holds, named `$heap_<class>`.
-            case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion):
+            case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
+                or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped)
+                or nameof(PalLang.Pal.LeftOf) or nameof(PalLang.Pal.RightOf):
             {
-                if (model.GetTypeInfo(args[0].Expression).Type is not INamedTypeSymbol
+                var typed = method.Name == nameof(PalLang.Pal.Reshaped) &&
+                            model.GetTypeInfo(args[0].Expression).Type is null ? args[1] : args[0];
+                if (model.GetTypeInfo(typed.Expression).Type is not INamedTypeSymbol
                         { TypeKind: TypeKind.Class } rc ||
                     !Declarations.Has(rc.OriginalDefinition, known.RegionAttribute))
                 {
@@ -2271,6 +2358,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 var heap = new IrVar(loc, Region.HeapName(rc.Name)) { Type = IrPrim.SpecIntType };
                 if (method.Name == nameof(PalLang.Pal.InRegion))
                     return new IrSpecOp(loc, $"{Region.Module}.mem", [heap, Arg(0)])
+                        { Type = IrPrim.Bool, MachineArgs = true };
+                // R27.18. A child link at the heap: `Region.link_at` of the class's projection.
+                if (method.Name is nameof(PalLang.Pal.LeftOf) or nameof(PalLang.Pal.RightOf))
+                    return new IrSpecOp(loc,
+                        $"{Region.Module}.link_at {Names.ClassModule(rc.Name)}." +
+                        (method.Name == nameof(PalLang.Pal.LeftOf) ? Region.LeftOf(rc.Name) : Region.RightOf(rc.Name)),
+                        [heap, Arg(0)])
+                        { Type = known.MapType(method.ReturnType), MachineArgs = true };
+                if (method.Name == nameof(PalLang.Pal.Unshared))
+                    return new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.UnsharedOf(rc.Name)}", [heap, Arg(0)])
+                        { Type = IrPrim.Bool, MachineArgs = true };
+                if (method.Name == nameof(PalLang.Pal.Reshaped))
+                    return new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.ReshapedOf(rc.Name)}",
+                        [new IrOld(loc, heap) { Type = heap.Type }, heap, Arg(0), Arg(1)])
                         { Type = IrPrim.Bool, MachineArgs = true };
                 return method.Name == nameof(PalLang.Pal.Tree)
                     ? new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.TreeOf(rc.Name)}", [heap, Arg(0)])

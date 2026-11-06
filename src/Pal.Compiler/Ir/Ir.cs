@@ -279,6 +279,9 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// </summary>
     public ImmutableArray<IrType?> ParamTypes { get; init; } = [];
 
+    /// <summary>R27.17. The operation is a constant of a <c>[SpecType]</c> enum (R21.8).</summary>
+    public bool EnumCase { get; init; }
+
     /// <summary>
     /// R20.10. The operation models a BCL member over program values, so its arguments
     /// are at their machine types in a contract too -- `set.Contains(i)` asks about the

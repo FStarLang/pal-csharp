@@ -24,7 +24,8 @@ public sealed class CodeEmitter(
     IReadOnlyDictionary<string, string>? overrides = null,
     HashSet<string>? slots = null,
     IReadOnlyDictionary<string, ImmutableHashSet<int>>? consumed = null,
-    IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null)
+    IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null,
+    IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null)
 {
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
@@ -646,7 +647,21 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i))) || CopiesArray(i) ||
-        MutatesClosedReceiver(i);
+        MutatesClosedReceiver(i) || MovesRegion(i);
+
+    /// <summary>
+    /// R27.16. Whether an arm allocates in, writes, or calls a method that writes a region:
+    /// the heap after it is a fresh existential at the join, and what the arm proved about
+    /// it would be lost.
+    /// </summary>
+    private bool MovesRegion(IrStmt s) =>
+        classes is not null &&
+        Check.Statements(s).Any(t =>
+            t is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && IsRegionType(k) ||
+            Check.Expressions(t).SelectMany(Check.Subexpressions)
+                .Any(e => e is IrAlloc ||
+                          e is IrCall c && regionHeld is not null &&
+                          regionHeld.TryGetValue(c.Callee, out var uses) && uses.Any(u => u.Mutates)));
 
     /// <summary>
     /// R25.10. Whether an arm calls a method that moves a receiver's model: the call leaves
@@ -824,7 +839,11 @@ public sealed class CodeEmitter(
         Check.Statements(body).Any(s =>
             s is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && k.Name == regionClass ||
             Check.Expressions(s).SelectMany(Check.Subexpressions)
-                .Any(e => e is IrAlloc al && al.Class == regionClass || e is IrCall));
+                .Any(e => e is IrAlloc al && al.Class == regionClass ||
+                          // R27.16. A call writes the region exactly when its callee does; a
+                          // callee that holds no region of its own is assumed to.
+                          e is IrCall c && (regionHeld is null || !regionHeld.TryGetValue(c.Callee, out var uses) ||
+                                            uses.Any(u => u.Region.Name == regionClass && u.Mutates))));
 
     private static string Inv(IrClassType c) =>
         $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)}";
@@ -2003,6 +2022,13 @@ public sealed class CodeEmitter(
         {
             NullableArray = nullableArray,
         };
+        // R27.20. A region pointer declared without a value starts as `null`: C#'s definite
+        // assignment makes every read see a value assigned since, which F* then proves non-null.
+        if (d.Init is null && d.Type is IrClassType { Nullable: false } unset && IsRegionType(unset))
+        {
+            Line($"let mut {cell} : {Types.Render(unset with { Nullable = true })} = B.null;");
+            return;
+        }
         // A type parameter's default leaves its dictionary to be resolved, and a cell's type
         // is inferred from its initialiser; the annotation resolves it first (R26.2's cell).
         // A tuple's universe is likewise inferred, and `let mut` needs it to be zero.
@@ -2090,6 +2116,24 @@ public sealed class CodeEmitter(
                 Line($"let {wcur} = B.op_Bang {wobj.NonNull};");
                 Line($"B.op_Colon_Equals {wobj.NonNull} " +
                      $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
+                return;
+            }
+
+            // R27.16. Writing a field of a region object held in a mutable local: the same
+            // write as R27.5, through the pointer the local holds now.
+            case IrField { Receiver: IrVar cv } cfield when
+                _slots.TryGetValue(cv.Name, out var cslot)
+                && cslot is { Kind: SlotKind.Cell, Type: IrClassType cc }
+                && classes is not null && classes.TryGetValue(cc.Name, out var cdecl)
+                && cdecl.IsRegion:
+            {
+                var cvalue = Inject(FieldType(cc, cfield.Field), a.Value, Expr(a.Value));
+                var cptr = Fresh();
+                var ccur = Fresh();
+                Line($"let {cptr} = !{cslot.Binder};");
+                Line($"let {ccur} = {Names.ClassModule(cc.Name)}.{Frontend.Region.ReadOf(cc.Name)} {cptr};");
+                Line($"{Frontend.Region.Module}.write {cptr} " +
+                     $"({{ {ccur} with {Names.ClassProjection(cc.Name, cfield.Field)} = {cvalue} }});");
                 return;
             }
 
@@ -2355,8 +2399,10 @@ public sealed class CodeEmitter(
     {
         if (b.Op is not (BinOp.Eq or BinOp.Ne)) return null;
         var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
-        if (tested?.Type is not IrClassType { Nullable: true } k) return null;
+        if (tested?.Type is not IrClassType k) return null;
         if (classes is null || !classes.TryGetValue(k.Name, out var decl) || !decl.IsPlain) return null;
+        // R27.8. A region pointer typed non-null is still tested: the test is a pointer test.
+        if (!k.Nullable && !decl.IsRegion) return null;
         Slot? slot = null;
         if (tested is IrVar v && _slots.TryGetValue(v.Name, out var s) && s.Kind is SlotKind.Value)
             slot = s;
@@ -3554,6 +3600,16 @@ public sealed class CodeEmitter(
                 return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
             }
 
+            // R27.5. A field of a region object reached by any expression (`Left!.Left`) is
+            // read through the region, as from a local.
+            case IrField { Receiver.Type: IrClassType rc } rf when IsRegionType(rc):
+            {
+                var rrecv = Expr(rf.Receiver);
+                var rt = Fresh();
+                Line($"let {rt} = {Names.ClassModule(rc.Name)}.{Frontend.Region.ReadOf(rc.Name)} {Atom(rrecv)};");
+                return $"{rt}.{Names.ClassProjection(rc.Name, rf.Field)}";
+            }
+
             case IrField f:
             {
                 // R3.5. A field read of a value type is a pure projection: no memory is
@@ -3895,6 +3951,12 @@ public sealed class CodeEmitter(
             return $"({(b.Op is BinOp.Eq ? "None?" : "Some?")} {Atom(b.Left is IrNull ? r : l)})";
         if (b.Op is BinOp.Eq or BinOp.Ne && b.Left.Type is IrOptionType or IrUserSpecType)
             return b.Op is BinOp.Eq ? $"({l} = {r})" : $"(not ({l} = {r}))";
+
+        // R27.8. Two references to objects of a `[Region]` class are compared as pointers.
+        if (b.Op is BinOp.Eq or BinOp.Ne && IsRegionType(b.Left.Type) && IsRegionType(b.Right.Type))
+            return b.Op is BinOp.Eq
+                ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
+                : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
 
         // R18.1. R6.4 reads an operator's implementation off its operand type, and this
         // defaulted to `Int32` for an operand that was not primitive at all. `a == b` on

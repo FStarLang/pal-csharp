@@ -27,7 +27,7 @@ public sealed class MethodPlan
     private readonly SpecEmitter _spec;
 
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
-        ImmutableArray<IrClassType> heaps = default)
+        ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default)
     {
         _spec = spec;
 
@@ -400,6 +400,33 @@ public sealed class MethodPlan
         // R9.15 makes this every method's rule, not the constructor's: once a reference
         // conversion can happen at a `return`, an ordinary method can hand back an object
         // too, and the only difference is the name its contract calls it by.
+        // R27.16. A method that is not an owner's holds the regions it touches itself: a
+        // fraction of one it only reads, which it hands back at the same heap, or the whole
+        // of one it writes, which it hands back at whatever heap it leaves. `$heap_K` is
+        // the heap held at each end, so `Pal.Old` reads the one it was given.
+        foreach (var use in held.IsDefault ? [] : held)
+        {
+            var k = use.Region;
+            var heap = Frontend.Region.HeapBinder(k.Name);
+            var postHeap = "post_" + heap;
+            ghostBinders.Add($"(#{heap}: erased ({Frontend.Region.Module}.heap {PulseEmitter.RegionRaw(k)}))");
+            var perm = use.Mutates ? "1.0R" : "p_" + heap;
+            if (!use.Mutates) ghostBinders.Add($"(#{perm}: perm)");
+            preResources.Add(PulseEmitter.RegionAt(k, perm, heap));
+            pre.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {heap})", TermKind.Other));
+            if (use.Mutates)
+            {
+                postResources.Add(PulseEmitter.RegionAt(k, perm, postHeap));
+                postExistentials.Add(postHeap);
+                post.Bind(Frontend.Region.HeapName(k.Name), new Term(postHeap, TermKind.Other));
+            }
+            else
+            {
+                postResources.Add(PulseEmitter.RegionAt(k, perm, heap));
+                post.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {heap})", TermKind.Other));
+            }
+        }
+
         // R19.3. What an exception leaves the caller owning: every parameter, as the
         // postcondition owns it — and nothing the method was to return, since it returns
         // nothing. Snapshotted before the result's conjunct joins.
