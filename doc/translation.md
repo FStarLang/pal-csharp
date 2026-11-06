@@ -7626,6 +7626,75 @@ match taken out and the successor moved into its place.
   the loop holds. Before this, such a loop dropped the region from its invariant, and the
   body could not touch a node.
 
+### R27.32 Building a red-black tree from a sorted array
+
+`SortedSet<T>.ConstructRootFromSortedArray(arr, startIndex, endIndex, redNode)` builds a
+balanced tree over `arr[startIndex..endIndex]` in place. It puts the middle element at the
+root, recurses on each half, and threads a red leaf (`redNode`) that an even-sized parent
+saved down to the leftmost node of the left half. `Pulse.Lib.CSharp.SortedBuild` states and
+proves what it builds:
+
+* `build s lo hi red` is the tree the method builds, as a function of the array's contents.
+  It is exposed as `SpecSearchTree.Build`. `red_arg` (`SpecSearchTree.IsRedLeaf`) says what
+  may be passed as `redNode`: nothing, or a single red node.
+* `keys_build` and `rb_build` give the keys (the slice, in order, with `red`'s key first)
+  and the red-black shape. The black height depends only on the slice's length. `build_ok`
+  (patterned) packages them for `red == Leaf`: keys are the slice, the tree is red-black,
+  and its size is the slice's length.
+* Heap lemmas for a body that only allocates and links fresh nodes. `alloc_fwd`, `upd_fwd`,
+  `upd_left_child`, `tree_upd_node` and `tree_alloc_leaf` fire forward on the heap a step
+  leaves, so no later goal has to name the intermediate heaps. `reshaped_outside`,
+  `reshaped_box` and `reshaped_fresh_leaf` carry facts across a recursive call's
+  `Pal.Reshaped`.
+* Two `[RegionOp]` lemmas (R27.22), called as ghost statements in the default case:
+  * `SpecSearchTree.LinkRight(h0, h3, red, root)`, with `h3` the heap once the left half
+    is linked. Whatever heap `h5` and right root `y` the conditional `size % 2 == 0 ? …
+    : …` produces (`Pal.Reshaped(null, y)` from `h3`, with `reshaped_fresh_leaf` folding
+    in the allocated red node), linking `y` leaves `root` unshared, with
+    `Tree(root) == Branch(left half, root's view, Tree(y))`, re-linking `red` since `h0`.
+    The fact is stated at `h3` and quantified over what follows, so one call before the
+    conditional covers both of its arms.
+  * `SpecSearchTree.BuildSplit(items, lo, hi, mid, even, red)` is one step of `build`, at
+    the midpoint and parity the code computed. Its region type argument is only there to
+    make it callable as a lemma.
+
+The contract:
+
+```csharp
+[Requires("0 <= startIndex && startIndex <= endIndex + 1 && endIndex < arr.Length")]
+[Requires("arr.Length <= 1073741824")]
+[Requires("Pal.Unshared(redNode) && SpecSearchTree.IsRedLeaf(Pal.Tree<(T, bool)>(redNode))")]
+[Requires("startIndex <= endIndex || redNode == null")]
+[Ensures("Pal.Contents(arr) == Pal.Old(Pal.Contents(arr))")]
+[Ensures("Pal.Unshared(Result) && Pal.Reshaped(redNode, Result)")]
+[Ensures("Pal.Tree<(T, bool)>(Result) == SpecSearchTree.Build(Pal.Contents(arr), startIndex, endIndex, Pal.Old(Pal.Tree<(T, bool)>(redNode)))")]
+[Ensures("Pal.Implies(redNode == null, SpecSearchTree.IsRedBlack(Pal.Tree<(T, bool)>(Result)) && SpecSearchTree.Keys(Pal.Tree<(T, bool)>(Result)) == Pal.Slice(Pal.Contents(arr), startIndex, endIndex + 1))")]
+```
+
+The array bound reflects a finding (27.3). The array's frame must be stated: without it the
+post leaves the array's contents unconstrained.
+
+The ghost statements in the body are arithmetic asserts that keep the case analysis cheap,
+`Pal.Assert(Pal.Unshared(root))` after each round of links, and the two lemma calls. `size
+% 2` as the code computes it (`I32.rem`) is linked to the specification's parity by
+`SortedBuild.rem2`.
+
+### R27.33 Writing a field of a field
+
+`root.Left.Left = redNode` writes a field of a region object that the receiver expression
+reaches. The receiver is a pointer value like any other. It is evaluated first (a read of
+`root`, then of its `Left`), as C# evaluates it, and the write goes through the result as
+R27.5 does. Before this, only a field of a local could be written.
+
+### R27.34 A conditional whose arms move a region, assigned to a field
+
+R27.24's split also applies to an assignment to a field of a local, `v.f = c ? f() : g()`.
+C# reads `v` before either arm runs, and no call can assign a local, so reading it in each
+arm is the same. `ConstructRootFromSortedArray`'s `root.Right = size % 2 == 0 ?
+Construct(…, new Node(…)) : Construct(…, null)` is the case. Joined as one expression, the
+arms' differently allocated heaps leave Pulse a `match` on the condition that it cannot
+reduce.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7663,6 +7732,7 @@ ensures that the tree and the comparer are unchanged.
 | `ReplaceChildOrRoot` (`[Open]`) | `SpecTopDown.Replaced`: `parent`'s link, or `root` when `parent` is null, now `newChild` |
 | `DoRemove`, `Remove` | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) >= 0)`; `SpecItems == SpecTopDownRemove.Removed(…)` (the element at `KeyIndex` taken out, or unchanged); comparer unchanged. The owner's invariants are re-established (R27.30) |
 | `ReplaceNode` (`[Open]`) | `SpecTopDownRemove.RnPost` under `RnPre` (R27.30) |
+| `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 The runtime source keeps its expression-bodied `Comparer`, `Min` and `Max`. Their contracts
 are on the properties.
@@ -7693,10 +7763,22 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations.** `RemoveWhere`, `UnionWith`, `IntersectWith` and the rest build
-  on enumeration and on `TreeSubSet`.
-* **The enumerator, serialization and `IEnumerable` constructors.** These are out of
-  scope.
+* **The set operations.** `UnionWith`, `IntersectWith` and the rest build on enumeration
+  and on `TreeSubSet`.
+* **`CopyTo` and `RemoveWhere`.** Both walk the tree with `InOrderTreeWalk`, passing a
+  lambda that captures locals (`index`, `array`, `matches`). A lambda converted to a
+  delegate is PALCS0685, and the walk's callback would need a contract over the region
+  held by its caller.
+* **`DeepClone` and the copy constructor.** `DeepClone` keeps a
+  `Stack<(Node source, Node target)>` of region pointers. A collection whose elements
+  point into a region is outside R27. The copy constructor calls it.
+* **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
+  and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
+  (R27.32).
+* **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>` (a
+  `SortedSet` subclass) with a key-only comparer. It needs subclassing a region owner and
+  an abstraction from pairs to keys, and was not reached.
+* **The enumerator and serialization.** These are out of scope.
 
 ### 27.3 Specification findings
 
@@ -7735,6 +7817,11 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   descent ends at the root's child. In `ReplaceNode`, `successor = match.Left!` is `null` when the match is a leaf, and
   `ReplaceChild`/`ReplaceChildOrRoot` are called with a `null` `newChild`. Each callee
   handles `null`. The verified source marks those parameters `[AllowNull]` (R27.28).
+* **`ConstructRootFromSortedArray`'s midpoint overflows.** `(startIndex + endIndex) / 2`
+  overflows `int` when the sum passes `int.MaxValue`, which needs an array longer than
+  2^30 elements. The verified contract requires `arr.Length <= 2^30`. The usual
+  `startIndex + (endIndex - startIndex) / 2` would not need the bound. The callers pass a
+  deduplicated copy of their input, so such an array is possible in principle on 64-bit.
 * **`++count` can overflow.** `AddIfNotPresent` increments `count` unchecked. The verified
   contract requires `SpecItems.Length < int.MaxValue`. A tree of 2^31 - 1 nodes is out of
   reach in practice, but nothing in the code rules it out.

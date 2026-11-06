@@ -689,6 +689,9 @@ public sealed class CodeEmitter(
             IrReturn r => r.Value, IrLocalDecl d => d.Init,
             // R27.24. `x = c ? f() : g()` with arms that move a region is its `if` too.
             IrAssign { Target: IrVar, Value: IrConditional } asn => asn.Value,
+            // R27.34. So is `v.f = c ? f() : g()`: reading the local `v` first or in each
+            // arm is the same, since no call can assign it.
+            IrAssign { Target: IrField { Receiver: IrVar }, Value: IrConditional } asn => asn.Value,
             _ => null,
         };
         (IrExpr Cond, IrExpr Then, IrExpr Else)? arms = value switch
@@ -2170,6 +2173,24 @@ public sealed class CodeEmitter(
                 Line($"let {ccur} = {Names.ClassModule(cc.Name)}.{Frontend.Region.ReadOf(cc.Name)} {cptr};");
                 Line($"{Frontend.Region.Module}.write {cptr} " +
                      $"({{ {ccur} with {Names.ClassProjection(cc.Name, cfield.Field)} = {cvalue} }});");
+                return;
+            }
+
+            // R27.33. Writing a field of a region object some other expression reaches
+            // (`x.Left.Left = v`): the receiver is a pointer value like any other, so it is
+            // evaluated first, as C# evaluates it, and written through as R27.5.
+            case IrField { Receiver: not IrVar } xfield when
+                xfield.Receiver.Type is IrClassType xc
+                && classes is not null && classes.TryGetValue(xc.Name, out var xdecl)
+                && xdecl.IsRegion:
+            {
+                var xptr = Fresh();
+                Line($"let {xptr} = {Expr(xfield.Receiver)};");
+                var xvalue = Inject(FieldType(xc, xfield.Field), a.Value, Expr(a.Value));
+                var xcur = Fresh();
+                Line($"let {xcur} = {Names.ClassModule(xc.Name)}.{Frontend.Region.ReadOf(xc.Name)} {xptr};");
+                Line($"{Frontend.Region.Module}.write {xptr} " +
+                     $"({{ {xcur} with {Names.ClassProjection(xc.Name, xfield.Field)} = {xvalue} }});");
                 return;
             }
 

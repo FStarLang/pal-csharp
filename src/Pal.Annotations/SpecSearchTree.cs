@@ -125,4 +125,32 @@ public static class SpecSearchTree
     /// <summary>R27.17. The grandchild a rotation lifts is red.</summary>
     [SpecOp("Pulse.Lib.CSharp.SearchTree.can_rotate")]
     public static bool CanRotate<TRotation, T>(TRotation rotation, SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>
+    /// R27.32. The red-black tree built from <paramref name="items"/>[lo..hi] by halving, with
+    /// <paramref name="red"/> (a saved red leaf, or a leaf) under its leftmost node.
+    /// <c>Pulse.Lib.CSharp.SortedBuild</c>.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.SortedBuild.build")]
+    public static SpecTree<(T, bool)> Build<T>(Seq<T> items, SpecInt lo, SpecInt hi, SpecTree<(T, bool)> red) =>
+        throw Ghost();
+
+    /// <summary>R27.32. A leaf, or a single red node: what <see cref="Build{T}"/> takes as its saved node.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SortedBuild.red_arg")]
+    public static bool IsRedLeaf<T>(SpecTree<(T, bool)> tree) => throw Ghost();
+
+    /// <summary>
+    /// R27.32. A lemma: <paramref name="root"/>, linked in <paramref name="h3"/> to its left
+    /// subtree and re-linking <paramref name="red"/> since <paramref name="h0"/>, stays so when
+    /// its right child is then set to the root of a tree new since <paramref name="h3"/>.
+    /// </summary>
+    [RegionOp("Pulse.Lib.CSharp.SortedBuild.link_right")]
+    public static void LinkRight<K, T>(SpecHeap<K> h0, SpecHeap<K> h3, K? red, K? root) where K : class => throw Ghost();
+
+    /// <summary>
+    /// R27.32. A lemma: one step of <see cref="Build{T}"/> on a slice of at least four items, split at <paramref name="mid"/> with parity <paramref name="even"/>.
+    /// It names a region class <typeparamref name="K"/> only to be a <c>[RegionOp]</c> lemma.
+    /// </summary>
+    [RegionOp("Pulse.Lib.CSharp.SortedBuild.build_split")]
+    public static void BuildSplit<K, T>(Seq<T> items, SpecInt lo, SpecInt hi, SpecInt mid, bool even, SpecTree<(T, bool)> red) where K : class => throw Ghost();
 }

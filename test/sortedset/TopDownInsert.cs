@@ -271,6 +271,25 @@ public sealed class RbSet<T>
         }
     }
 
+    // R27.33. A write through a field of a field (`root.Left.Left = leaf`) of fresh nodes.
+    // R27.34. A conditional whose arm allocates, assigned to a field of a local.
+    [Requires("Pal.Unshared(leaf) && SpecSearchTree.IsRedLeaf(Pal.Tree<(T, bool)>(leaf))")]
+    [Ensures("Pal.Unshared(Result)")]
+    [Ensures("Pal.Tree<(T, bool)>(Result).Left.Left == Pal.Old(Pal.Tree<(T, bool)>(leaf))")]
+    [Ensures("Pal.Tree<(T, bool)>(Result).Right.IsLeaf != red")]
+    internal static RbNode Graft(T a, T b, RbNode? leaf, bool red)
+    {
+        RbNode root = new RbNode(b, NodeColor.Black);
+        root.Left = new RbNode(a, NodeColor.Black);
+        Pal.Assert(Pal.Unshared(root));
+        if (leaf != null)
+        {
+            root.Left.Left = leaf;
+        }
+        root.Right = red ? new RbNode(b, NodeColor.Red) : null;
+        return root;
+    }
+
     [Region]
     internal sealed class RbNode
     {
