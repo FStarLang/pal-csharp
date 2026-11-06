@@ -1889,11 +1889,16 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("Pal.Yielded<T>() == Pal.Reverse(@this.SpecItems)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Rlimit(4)]
         public IEnumerable<T> Reverse()
         {
             Enumerator e = new Enumerator(this, reverse: true);
             while (e.MoveNext())
             {
+                Pal.Invariant(e.SpecReady && Pal.Concat(Pal.Yielded<T>(), e.SpecPending) == Pal.Reverse(this.SpecItems));
+                Pal.Decreases(this.SpecItems.Length - Pal.Yielded<T>().Length);
                 yield return e.Current;
             }
         }
@@ -2309,6 +2314,11 @@ namespace System.Collections.Generic
             private Node? _current;
 
             private readonly bool _reverse;
+
+            [Spec] internal Seq<T> SpecPending => SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+            [Spec] internal bool SpecReady =>
+                SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), _stack.Items) &&
+                SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;
 
             [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && !@this._reverse")]
             [Ensures("SpecWalk.Walkable<SortedSet<T>.Node, T>(Pal.Heap<SortedSet<T>.Node>(), @this._stack.Items)")]
