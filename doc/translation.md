@@ -7354,6 +7354,52 @@ A getter written with C#'s `field` keyword has a backing field, so R9.20 does no
 collect it as a computed property. When the backing field's type is a borrowing class, it
 is collected.
 
+### R29.4 `object` is an opaque box
+
+`object`, `IEnumerator`, `IEnumerator<T>` and `IDictionaryEnumerator` are translated as
+`Pulse.Lib.CSharp.Obj.obj`, an abstract type. Every implicit conversion of a translated
+value to one of them becomes `box v` (`val box (#a:Type0) (x:a) : obj`). Nothing is
+assumed of `box`: in particular it is not injective, because two boxes of equal values
+are distinct objects. A contract relates a result to what it boxes with
+`Pal.Boxes(o, v)`, which is `o == box v`.
+
+This is sound because verified code can do nothing with an `obj` but pass it on and
+return it. Everything that would observe it is refused (PALCS0737):
+* `==`, `!=` and `??` on an `obj`, and the `null` literal at type `obj`;
+* `is`, `as`, `is` patterns, `?.`, and casts from `object` (unboxing);
+* reading a field of type `obj` (such a field is not mapped: R25.3).
+
+`Pal.Boxes(Result, e)` therefore pins down which value was boxed, and nothing can
+contradict it. An `obj` result says nothing about the object's identity, which the model
+does not have.
+
+`DictionaryEntry` is a pair of boxes (`tuple2 obj obj`), as `KeyValuePair` is a pair (R29.1).
+
+**Explicit interface members.** A member implementing an interface explicitly
+(`object IEnumerator.Current`, `IEnumerator<T> IEnumerable<T>.GetEnumerator()`) is
+translated when annotated. It is named by its short name; if another member of the type
+has the same short name, by the interface and then the name (`IEnumerator_Current`,
+`IEnumerable1_GetEnumerator`, `IDictionary_GetEnumerator`). Before R29.4 such a member was
+silently dropped even when annotated.
+
+**Self-calls in a borrowing type.** A member of a borrowing struct or class may call
+another *read-only* member of the same type on `this` (`object IEnumerator.Current =>
+Current`). The call passes the borrowed object and `self` on; the callee holds the owner
+at the caller's fraction. A call to a member that writes the struct's fields is still
+refused (PALCS0731). In a `sealed` borrowing type, `((I)this).M()` is the call of the
+type's own implementation of `I.M` (Roslyn's `FindImplementationForInterfaceMember`): no
+subclass can re-implement `I`.
+
+**The shared empty enumerators.** `SZGenericArrayEnumerator<T>.Empty` and
+`EnumerableHelpers.GetEmptyEnumerator<T>()` are bound (`SpecBinding`, in the harnesses)
+to `Pulse.Lib.CSharp.Obj.empty_enumerator T : obj`, an uninterpreted object. This is a
+modelling axiom: it asserts only that the read or call has no effect and does not throw,
+which holds of a static readonly singleton and of `((IEnumerable<T>)[]).GetEnumerator()`.
+
+A conversion is boxed exactly once. Roslyn reports the converted type `object` on a
+parenthesised operand and on the operand of `!` as well as on the expression around it,
+and on the operands of the predefined reference `==`; those are not boxed.
+
 ### R29.5 An array operand is named after the calls that follow it
 
 In `Array.Copy(_dict.keys, 0, array, arrayIndex, _dict.Count)` the operands are evaluated
@@ -7376,3 +7422,53 @@ Under those conditions the re-read yields the value C# read. Otherwise the opera
 left as they were, and the result is at worst a proof failure, never an unsound
 translation.
 
+### What §29 verifies
+
+With §28, the six harnesses verify 101 enumerator and view members:
+
+| Collection | Verified |
+|---|---|
+| `List<T>`, `HashSet<T>`, `Queue<T>` | §28's six, `IEnumerator.Current`, `IEnumerable<T>.GetEnumerator` (8 each) |
+| `Stack<T>` | the same, and `ThrowInvalidVersion` (9) |
+| `PriorityQueue.UnorderedItemsCollection` | the constructor, `Count`, `GetEnumerator`, `IEnumerable<…>.GetEnumerator`, `IEnumerable.GetEnumerator`; its enumerator's constructor, `MoveNext`, `Current`, `IEnumerator.Current`, `Reset`, `Dispose`; the owner's `UnorderedItems` (12) |
+| `SortedList<K,V>.Enumerator` | the constructor, `MoveNext`, `Current` (a `KeyValuePair`), `IEnumerator.Current`, `IDictionaryEnumerator.Key`, `.Value`, `.Entry`, `Reset`, `Dispose` (9) |
+| `SortedList<K,V>` | `GetEnumerator`, `IDictionary.GetEnumerator`, `IEnumerable<…>.GetEnumerator`, `GetKeyListHelper`, `GetValueListHelper` (5) |
+| `SortedListKeyEnumerator`, `SortedListValueEnumerator` | the constructor, `MoveNext`, `Current`, `IEnumerator.Current`, `Reset`, `Dispose` (6 each) |
+| `KeyList`, `ValueList` | the constructor, `Count`, `IsReadOnly`, the indexer's `get` and `set`, `Add`, `Insert`, `Clear`, `Remove`, `RemoveAt` (the mutators throw `NotSupportedException`), `Contains`, `IndexOf`, `CopyTo`, `GetEnumerator`, `IEnumerable.GetEnumerator` (15 each) |
+
+`SortedList.GetEnumerator` is declared to return `IEnumerator<KeyValuePair<K,V>>`; its
+contract states which enumerator it boxes. The concrete construction `new Enumerator(this,
+KeyValuePair)` is translated as written; no translation at the dynamic type was needed.
+
+### Not annotated, and why
+
+* `IEnumerable.GetEnumerator() => ((IEnumerable<T>)this).GetEnumerator()` in `List`,
+  `HashSet`, `Queue`, `Stack` and `SortedList`. The classes are not sealed: a derived
+  class may re-implement `IEnumerable<T>`, so the call is an interface dispatch whose
+  target is not known. (The same member of the sealed `UnorderedItemsCollection` is verified.)
+* `SortedList.Keys`, `Values` and their explicit `IDictionary`/`IReadOnlyDictionary`
+  forms. They return `IList<T>`, `ICollection<T>`, `IEnumerable<T>` or `ICollection`;
+  `IList<T>` is translated as an array elsewhere, so a view converted to it has no
+  translation. Their bodies are `GetKeyListHelper()`/`GetValueListHelper()`, which are verified.
+* `ICollection.CopyTo(Array, int)`, `ICollection.SyncRoot`, `ICollection.IsSynchronized`
+  on the views and the owners: an untyped `Array` and the owner as an `object` (the
+  views' `SyncRoot` casts the owner to `ICollection`).
+
+### Findings (§29)
+
+* An annotated set accessor (`KeyList`'s indexer `set`) was silently dropped, and so
+  were annotated explicit interface members. Both are translated now.
+* A constructor with an expression body crashed the borrowing-constructor analysis.
+* The operand order of R29.5: a call among later operands refolded the owner, and the
+  array's permission was stated about a stale record.
+* Boxing: Roslyn reports `object` as the converted type at several nested positions
+  (parentheses, `!`, reference `==`), which first produced double boxes.
+* `SortedList`'s `IEnumerator.Current` and `IDictionaryEnumerator` members compare
+  `_index` with `Count + 1`, which overflows at `Count == int.MaxValue`; they require
+  `SpecCount < int.MaxValue`, like `MoveNext` (§28).
+
+### Trusted (§29)
+
+`Pulse.Lib.CSharp.Obj` is implemented (`obj = unit`), so its interface carries no
+assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
+only new trust: each says the read or call is pure and does not throw.

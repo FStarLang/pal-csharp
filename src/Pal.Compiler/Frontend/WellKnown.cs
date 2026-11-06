@@ -404,10 +404,34 @@ public sealed class WellKnown
         type is INamedTypeSymbol { TypeArguments.Length: 2 } named &&
         named.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.KeyValuePair<TKey, TValue>";
 
-    /// <summary>R26.8/R29.1. A value tuple of two, or a <c>KeyValuePair</c>.</summary>
-    public static bool IsPairType(ITypeSymbol? type) =>
-        type is INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } || IsKeyValuePair(type);
+    /// <summary>R29.4. <c>DictionaryEntry</c>, a pair of <c>object</c>s.</summary>
+    public static bool IsDictionaryEntry(ITypeSymbol? type) =>
+        type?.ToDisplayString() == "System.Collections.DictionaryEntry";
 
+    /// <summary>R26.8/R29.1. A value tuple of two, a <c>KeyValuePair</c>, or a <c>DictionaryEntry</c>.</summary>
+    public static bool IsPairType(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } || IsKeyValuePair(type) ||
+        IsDictionaryEntry(type);
+
+    /// <summary>R29.4. The F* type of an <c>object</c>: <c>Pulse.Lib.CSharp.Obj</c>'s abstract one.</summary>
+    public const string ObjType = "Pulse.Lib.CSharp.Obj.obj";
+
+    /// <summary>R29.4. The F* function that converts a value to <see cref="ObjType"/>.</summary>
+    public const string BoxFunction = "Pulse.Lib.CSharp.Obj.box";
+
+    public static readonly IrUserSpecType Obj = new("Object", ObjType, []);
+
+    public static bool IsObj(IrType? t) => t is IrUserSpecType { FStar: ObjType };
+
+    /// <summary>
+    /// R29.4. <c>object</c>, and the enumerator interfaces a collection's explicit members
+    /// return: a value of one of them is an <see cref="ObjType"/>.
+    /// </summary>
+    public static bool IsObjectLike(ITypeSymbol? type) =>
+        type is { SpecialType: SpecialType.System_Object } ||
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.IEnumerator"
+            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator";
 
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
@@ -474,6 +498,12 @@ public sealed class WellKnown
                      MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&
                      MapType(kvp.TypeArguments[1]) is { } v && IsPlainValue(v):
                 return new IrUserSpecType("ValueTuple", TupleType, [k, v]);
+            // R29.4. `object` and the enumerator interfaces are F*'s abstract `obj`, and a
+            // `DictionaryEntry` is a pair of them.
+            case { } o when IsObjectLike(o):
+                return Obj;
+            case { } de when IsDictionaryEntry(de):
+                return new IrUserSpecType("ValueTuple", TupleType, [Obj, Obj]);
             // R20.3. A delegate is held, passed on, and nothing else.
             case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del when CallableDelegate(del) is { } callable:
                 return callable;

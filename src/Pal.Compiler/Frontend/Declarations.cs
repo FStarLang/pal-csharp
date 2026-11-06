@@ -94,9 +94,13 @@ public static class Declarations
         // object's invariant, which is what makes it translatable at all. R9.20 adds the
         // getter of a computed property, which is a nullary instance method that C# spells
         // differently; every rule downstream of here already speaks about it.
-        return method is { IsStatic: false,
-                           MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                       or MethodKind.PropertyGet or MethodKind.PropertySet }
+        // R29.4. An explicit interface implementation (`IEnumerator IEnumerable.GetEnumerator()`)
+        // is one when it carries a contract: nothing calls it, but it is code to verify.
+        return (method is { IsStatic: false,
+                            MethodKind: MethodKind.Ordinary or MethodKind.Constructor
+                                        or MethodKind.PropertyGet or MethodKind.PropertySet } ||
+                method is { IsStatic: false, MethodKind: MethodKind.ExplicitInterfaceImplementation } &&
+                IsAnnotated(method, known))
                && method.ContainingType is { TypeKind: TypeKind.Class } owner
                && known.HasModel(owner)
             ? CalleeKind.Method

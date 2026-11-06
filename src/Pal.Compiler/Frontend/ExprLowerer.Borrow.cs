@@ -121,6 +121,8 @@ public sealed partial class ExprLowerer
         IrExpr Operand(ExpressionSyntax e)
         {
             var lowered = Lower(e);
+            // R29.4. The operands are converted to `object`; identity is of the reference itself.
+            lowered = Unboxed(lowered);
             switch (lowered)
             {
                 case IrVar { Type: IrClassType } v when model.GetSymbolInfo(e).Symbol is IParameterSymbol || v.Name == Names.This:
@@ -137,6 +139,38 @@ public sealed partial class ExprLowerer
         var args = node.ArgumentList.Arguments;
         return new IrBinary(loc, BinOp.Eq, Operand(args[0].Expression), Operand(args[1].Expression))
             { Type = IrPrim.Bool };
+    }
+
+    /// <summary>
+    /// R29.4. A call, inside a member of a borrowing type, of another member of the same
+    /// type that does not write its state (<c>object IEnumerator.Current =&gt; Current</c>):
+    /// the callee's translation applied to the same borrowed object and the same value of
+    /// the struct or record. <c>null</c> when the call is not one.
+    /// </summary>
+    private IrExpr? BorrowingSelfCall(IMethodSymbol callee, IReadOnlyList<ExpressionSyntax> args, IrLoc loc)
+    {
+        if (Borrow is not { Constructor: false } bw || SpecPosition) return null;
+        if (callee is { IsStatic: true } or { MethodKind: MethodKind.Constructor }) return null;
+        if (!SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition))
+            return null;
+        if (!Borrowing.IsMember(callee, known) || Declarations.KindOf(callee, known) is null) return null;
+        if (callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not { } decl) return null;
+        // A property getter's declaring syntax may be its accessor or its arrow clause; the
+        // property is the unit whose body R28.4's test reads.
+        if (decl.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
+        if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
+        if (Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), bw.Struct)) return null;
+
+        var targs = WellKnown.AllTypeArguments(bw.Struct).Select(known.MapType).ToList();
+        return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), SelfExpr(loc), .. args.Select(Lower)])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = known.MapType(callee.ReturnType),
+            HasReceiver = true,
+            ParamTypes = [null, null, .. callee.Parameters.Select(p => known.MapType(p.Type))],
+            TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
+            MutatesReceiver = false,
+        };
     }
 
     /// <summary>

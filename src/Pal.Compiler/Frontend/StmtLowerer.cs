@@ -1102,7 +1102,7 @@ public sealed class StmtLowerer(
         IrExpr test;
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
         {
-            var value = _code.Lower(args[0].Expression);
+            var value = ExprLowerer.Unboxed(_code.Lower(args[0].Expression));
             if (!Sorted.HasOpaqueNull(value.Type)) return null;
             test = Sorted.IsNull(loc, value);
         }

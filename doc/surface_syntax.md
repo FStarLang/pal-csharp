@@ -122,6 +122,7 @@ Both forms lower to the same thing. Mix them freely.
 | `ReferenceEquals(a, b)` | `a` and `b` are the same reference; each is a class-typed parameter (or `@this`) or an enumerator's borrowing field (R28.3) |
 | `s.Length`, `s[i]` on a `Seq<T>` | length and indexing of a ghost sequence |
 | `Same(a, b)` | `a == b`, where C# refuses `==` — an unconstrained type parameter |
+| `Boxes(o, v)` | the `object` `o` is `v` converted to `object` (R29.4); `o` is otherwise opaque |
 | `Live(x)` | ownership of `x`, when inference cannot see it |
 | `PtsTo(p, v)`, `Pure(p)`, `ExistsProp(v => …)` | separation-logic resources |
 
@@ -742,6 +743,25 @@ public struct Enumerator
 
 Members may write the struct's fields but not the borrowed object (PALCS0734). Verified
 code cannot call them yet (PALCS0731). The rules are in `translation.md` §28.
+
+A `sealed` class with such a field (a view: `SortedList.KeyList`, a key enumerator) is
+borrowing too, and is translated the same way (R29.3). An owner may cache its view with
+`f ??= new View(this)` (R29.3b). `KeyValuePair<K,V>` is a pair (R29.1).
+
+Members returning `object`, `IEnumerator`, `IEnumerator<T>` or `IDictionaryEnumerator` —
+`object IEnumerator.Current`, an explicit `IEnumerable<T>.GetEnumerator()` — return an
+opaque box (R29.4). Their contracts relate it to what was boxed:
+
+```csharp
+[Ensures("Boxes(Result, @this._current)")]
+object? IEnumerator.Current => Current;
+
+[Ensures("Implies(@this.SpecCount != 0, Exists((List<T>.Enumerator e) => Boxes(Result, e) && " +
+    "ReferenceEquals(e._list, @this) && e._version == @this.SpecVersion && e._index == 0))")]
+IEnumerator<T> IEnumerable<T>.GetEnumerator() => …;
+```
+Nothing else may be done with an `object`: type tests, casts from it, `==` and `?.` on it
+are refused (PALCS0737).
 
 ## 4. Specification functions
 

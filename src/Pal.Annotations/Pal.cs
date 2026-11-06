@@ -179,6 +179,13 @@ public static class Pal
     /// </summary>
     public static bool Same<T>(T left, T right) => throw Ghost();
 
+    /// <summary>
+    /// R29.4. <c>o</c> is <c>value</c> converted to <c>object</c> or to an interface: a boxed
+    /// value, or a reference seen at an interface type. Nothing more can be said of an
+    /// <c>object</c>, and nothing can be recovered from it.
+    /// </summary>
+    public static bool Boxes<T>(object? o, T value) => throw Ghost();
+
     public static bool Forall<T1>(Func<T1, bool> body) => throw Ghost();
     public static bool Forall<T1, T2>(Func<T1, T2, bool> body) => throw Ghost();
     public static bool Forall<T1, T2, T3>(Func<T1, T2, T3, bool> body) => throw Ghost();

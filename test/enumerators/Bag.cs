@@ -15,7 +15,7 @@ public struct BagModel<T>
 
 [Invariant("0 <= _size")]
 [Invariant("_size <= _items.Length")]
-public class Bag<T>
+public class Bag<T> : IEnumerable
 {
     private T[] _items;
     private int _size;
@@ -47,6 +47,13 @@ public class Bag<T>
 
     [Ensures("ReferenceEquals(Result._list, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
     public Enumerator GetEnumerator() => new Enumerator(this);
+
+    // R29.4. The boxed enumerator is related to the struct it boxes, not compared.
+    [Ensures("Pal.Exists((Bag<T>.Enumerator e) => Pal.Boxes(Result, e) && ReferenceEquals(e._list, @this) && e._version == @this.SpecVersion && e._index == 0)")]
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    [Ensures("Pal.Boxes(Result.Key, key) && Pal.Boxes(Result.Value, value)")]
+    public static DictionaryEntry Entry(int key, T value) => new DictionaryEntry(key, value);
 
     public struct Enumerator : IEnumerator
     {
@@ -106,6 +113,8 @@ public class Bag<T>
         [Ensures("Pal.Same(Result, @this._current)")]
         public T Current => _current!;
 
+        // R29.4: a self-call of a borrowing reader, then a box.
+        [Ensures("Pal.Boxes(Result, @this._current)")]
         object? IEnumerator.Current => Current;
 
         [Ensures("@this._index == 0")]
