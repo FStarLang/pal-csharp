@@ -7500,3 +7500,422 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
   read them, so those members were "verified" against `true`. The `SortedList` sample had
   the same problem. R27.12 fixes the compiler. The runtime source keeps its original
   property syntax, with the attributes on the properties.
+
+## 28. Enumerators: structs that borrow their collection
+
+A collection's enumerator is a struct that refers to the collection without owning it:
+```csharp
+public struct Enumerator : IEnumerator<T>
+{
+    private readonly List<T> _list;      // borrowed
+    private readonly int _version;       // the list's version when enumeration began
+    private int _index;
+    private T? _current;
+}
+```
+The list may change between two `MoveNext` calls. When it does, `_version` no longer
+matches and `MoveNext` throws `InvalidOperationException`. §28 translates such a struct
+soundly, so that a contract can say what `MoveNext` does:
+* when the versions agree, it steps through `Items`: it sets `Current` to `Items[i]` and
+  returns `true`, or it returns `false` at the end;
+* when they differ, it throws.
+
+The harnesses are `pal/List`, `pal/Queue`, `pal/Stack`, `pal/HashSet`, `pal/PriorityQueue`
+and `pal/SortedList` in the runtime checkout. `test/enumerators` pins the rules on smaller
+code:
+* `Bag.cs`: R28.1 to R28.5 and R28.4's loop facts;
+* `Pairs.cs`: a struct nested in a class nested in a generic class, whose `Current` is a
+  pair.
+
+### R28.1 Borrowing structs
+
+A struct is *borrowing* when:
+* it is nested in a class `C` with a `[Model]` (directly, or through nested classes);
+* it has exactly one instance field whose type is such an enclosing class;
+* that field is `readonly`.
+
+That field is the struct's *borrowing field*. Its value is a reference that the struct
+does not own. The struct's other fields are its own state: plain values, a pair of them
+(R26.10), or a type parameter.
+
+### R28.2 A member is a method of the borrowed object's class
+
+Each annotated member `M` of a borrowing struct `S` is translated as a read-only instance
+method of `C`. The receiver is the borrowed object, shared at a fraction like any other
+read-only receiver (§3). The struct is a second parameter:
+```
+fn func_S_M (ty…) (this: C) (self: S) …                       // reads only its fields
+fn func_S_M (ty…) (this: C) (self: ref S) …                   // writes one of them
+  requires inv this ** pure (self.borrowing_field == this) …
+```
+
+Two further requirements:
+* the method requires that the borrowing field holds the receiver, and when it writes
+  the struct it also ensures this;
+* the method is generic in the type parameters of every enclosing type. These are
+  gathered through enclosing classes as well as structs, so
+  `PriorityQueue<E,P>.UnorderedItemsCollection.Enumerator` is generic in `E` and `P`.
+
+Inside the member:
+* `_list`, or a local bound to it and never written (`List<T> list = _list;`), is the
+  receiver;
+* the receiver's fields (`_list._items`, `_list._size`) are read under its invariant, as
+  in any method of `C`;
+* a call on it (`_list.Count`) is a call of `C`'s method on the receiver;
+* the struct's own fields are read and written through `self`;
+* a ref local of an array of the receiver (`ref Entry e = ref _hashSet._entries![_index++]`)
+  is a read of that array.
+
+A ghost statement in the body may name the receiver's fields as well. Its contract names
+the receiver's spec members.
+
+Getters and `void IEnumerator.Reset()` are named as R22 names them. The explicit interface
+name is shortened to `Reset`.
+
+### R28.3 Contracts name the struct's state and the reference
+
+A contract of a borrowing member, or of a member of `C` that returns `S`, names the
+struct's private fields (`@this._index`, `Result._version`). It also names the borrowed
+object's spec members (`@this._list.Items`, `@this._list.SpecVersion`).
+
+`ReferenceEquals(a, b)` in a contract is identity of two references. Each side must be one
+of:
+* a parameter of class type, including `@this`, which is the Pulse binder of the
+  reference;
+* a borrowing field.
+
+Anything else is refused (PALCS0733). This is how `GetEnumerator` says which collection
+the enumerator walks:
+```csharp
+[Ensures("ReferenceEquals(Result._list, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
+public Enumerator GetEnumerator() => new Enumerator(this);
+```
+
+### R28.4 Construction, and what a member keeps
+
+The constructor `S(C owner, …)` is a function of `C`. The receiver is the parameter that
+the constructor assigns to the borrowing field. The function returns the struct, and it
+ensures that the struct's borrowing field holds the receiver. `new S(this)` inside `C` is a
+call of that function on `this`. A borrowing struct is created only that way: an object
+initializer is refused, and so is a constructor that does not take the object it borrows
+(PALCS0730).
+
+A member that writes the struct also ensures that it leaves each `readonly` value field
+unchanged (`_version`). A caller therefore keeps `_version == list.SpecVersion` across
+`MoveNext` calls.
+
+A loop inside a member sees only its invariant. So a member that contains a loop takes a
+snapshot of each `readonly` value field on entry, and every loop invariant implicitly
+includes:
+* the borrowing field still holds the receiver;
+* each `readonly` field still equals its snapshot.
+
+`HashSet<T>.Enumerator.MoveNext` is the case: it skips free slots.
+
+### R28.5 The constructor's body
+
+The constructor is translated as the value it builds. Its body assigns each field at most
+once, and does nothing else. Each right-hand side may read the parameters and the borrowed
+object, but not another field of the struct (PALCS0732). A field that the constructor does
+not assign takes its type's `default`; for a type parameter, that is the caller's default
+(R14.2a). A constructor that chains to another is refused (PALCS0730).
+
+### R28.6 Calls
+
+No verified code calls a member of a borrowing struct. `foreach` is not translated, and a
+caller would also have to pass the borrowed object, which is not designed. Such a call is
+refused (PALCS0731). The members are verified, and their contracts are the specification
+that a `foreach` translation would use.
+
+### R28.7 The borrowed object is not written
+
+A borrowing member writes only the struct's own fields, by assignment, `++` or `--`.
+Writing a field of any other object is refused (PALCS0734). The null-forgiving `x!` is not
+a write.
+
+### R28.8 Versions
+
+Each collection's model gains `Version`, which is `_version` (and `version` in
+`SortedList`), and a spec member `SpecVersion`. The counter stays `[Wrapping]`. Nothing
+else about the existing specifications changed: mutators still say nothing about
+`SpecVersion`.
+
+As a result, after a mutation an enumerator's `_version == SpecVersion` is unknown, so a
+caller cannot prove that `MoveNext` will not throw. This is the specification that the BCL
+promises, because it calls fail-fast "best effort". Because the counter wraps, 2^32
+mutations bring the version back to its old value. The enumerator then continues over the
+new contents without throwing, so fail-fast is not a guarantee. The contracts here do not
+claim that it is.
+
+### R28.9 Contracts on a getter
+
+`[Ensures]` and the other contract attributes may be placed on a property's `get`
+accessor instead of on the property:
+```csharp
+public int Count
+{
+    [Ensures("Result == @this.SpecCount")]
+    get => _size;
+}
+```
+Previously such contracts were silently dropped. When neither the property nor the getter
+carries a contract, the member is not annotated, as before.
+
+### What was verified
+
+The harnesses verify 34 members:
+
+| Collection | Verified |
+|---|---|
+| `List<T>` | `GetEnumerator`, and the enumerator's constructor, `MoveNext`, `Current`, `Reset` and `Dispose` |
+| `Queue<T>` | the same six |
+| `Stack<T>` | the same six, and `ThrowInvalidVersion` |
+| `HashSet<T>` | the same six |
+| `PriorityQueue<E,P>.UnorderedItemsCollection.Enumerator` | the constructor, `MoveNext`, `Current`, `Reset` and `Dispose` |
+| `SortedList<K,V>.Enumerator` (private) | the constructor, `MoveNext`, `Reset` and `Dispose` |
+
+`MoveNext`'s contract has this shape (List):
+```csharp
+[Throws(typeof(InvalidOperationException), "@this._version != @this._list.SpecVersion")]
+[Ensures("@this._version == @this._list.SpecVersion")]
+[Ensures("Result == (0 <= Old(@this._index) && Old(@this._index) < @this._list.SpecCount)")]
+[Ensures("Implies(Result, @this._index == Old(@this._index) + 1 && Same(@this._current, @this._list.Items[Old(@this._index)]))")]
+[Ensures("Implies(!Result, @this._index == -1)")]
+```
+
+The other collections differ in these ways:
+* **Stack** enumerates from the top. `_index` starts at `Count` and counts down, and
+  `MoveNext` sets `Current` to `Items[_index]` after the step. `-1` means finished.
+* **Queue**'s cursor `_i` starts at `-1`, and `-2` means finished.
+* **SortedList**'s `_index` runs from `0` to `Count + 1`. `MoveNext` sets `_key` and
+  `_value` from `SpecKeys` and `SpecValues`.
+* **HashSet** steps over free slots. Its model gains:
+  * `Slots`, which is `_count`;
+  * `Prefixes`, the sequence whose element `i` is the live items among the first `i`
+    slots (`HashSetChain.prefixes`, proved).
+
+  `MoveNext` ensures that on `true` it moved from `Old(_index)` to `_index`, and that
+  `Prefixes[_index]` is `Prefixes[Old(_index)]` followed by `_current`. On `false` there
+  were no more items. The lemma `HashSetChain.items_step` is proved.
+
+§29 extends this to `KeyValuePair`, to classes that borrow, and to their caches; what is
+still not annotated, and why, is listed at the end of §29.
+
+### Findings
+
+* `Stack<T>.Enumerator.MoveNext` checks the step against `_stack._array.Length`, not
+  `Count`. That is correct only because the version check has already passed, which a
+  `Debug.Assert` records. The contract requires `-1 <= _index <= SpecCount`. To be proved, `ThrowInvalidVersion` needed
+  `[DoesNotReturn]` (the only change beyond pal attributes and ghost code).
+* `SortedList`'s enumerator sets `_index = Count + 1` at the end. At `Count ==
+  int.MaxValue` that would overflow, so `MoveNext` requires `SpecCount < int.MaxValue`
+  (unreachable in practice).
+* `Queue<T>.Enumerator` computes `_q._head + _i`, which overflows when `head + Count`
+  exceeds `int.MaxValue`; it can when the capacity is above 2^30. `MoveNext` requires
+  `SpecHead + SpecCount <= int.MaxValue` and `_i < int.MaxValue`.
+* Fail-fast is incomplete because the version counter wraps (R28.8).
+
+### Trusted
+
+Nothing new. The proofs rely on the `ThrowHelper` stubs in `pal/common`, as every harness
+does. There is no `admit` or `assume`.
+
+## 29. Completing the enumerators: pairs, borrowing classes, caches
+
+§28 left out the members that need a `KeyValuePair`, the views that are classes rather
+than structs, and the caches that hold those views. §29 adds them. `test/enumerators/Pairs.cs`
+pins each rule; the runtime harnesses are those of §28.
+
+### R29.1 `KeyValuePair<K,V>` is a pair
+
+`KeyValuePair<K,V>` is a value type with two fields and no behaviour, so it is translated
+as the pair R26.10 gives a value tuple: F*'s `tuple2 K V`. The two are the same type in
+the model, which is sound because no verified code can tell them apart: neither has
+identity, and both compare only through their components.
+
+| C# | F* |
+|---|---|
+| `new KeyValuePair<K,V>(k, v)`, `KeyValuePair.Create(k, v)` | `Mktuple2 k v` |
+| `p.Key`, `p.Value` | `fst p`, `snd p` |
+| `default(KeyValuePair<K,V>)` | the pair of the components' defaults (R14.2a) |
+
+`SortedList<K,V>.Enumerator.Current` builds one, and its contract is
+`Same(Result.Key, @this._key) && Same(Result.Value, @this._value)`.
+
+### R29.3 Classes that borrow
+
+A class is *borrowing* when it satisfies R28.1, with *class* for *struct*, and also:
+* it is `sealed` and derives directly from `object`;
+* it has no `[Model]` and is not `[Plain]`.
+
+`SortedList.KeyList`, `ValueList`, `SortedListKeyEnumerator`, `SortedListValueEnumerator`
+and `PriorityQueue.UnorderedItemsCollection` are borrowing classes.
+
+Such a class is translated exactly as a borrowing struct: it is the record of its fields,
+its members are methods of the owner's class taking the record as `self` (R28.2), and its
+constructor returns the record (R28.4, R28.5). The object's identity is dropped. That is
+sound because verified code cannot observe it:
+* it cannot call the class's members (R28.6, PALCS0731), so it never holds a reference
+  to one from which to observe sharing;
+* it cannot compare references to one: `ReferenceEquals` accepts only class-typed
+  parameters and borrowing fields (R28.3), and the class is neither;
+* a member writes only the class's own fields (R28.7), and the class is `sealed`, so no
+  override can do otherwise.
+
+A member that writes the object's fields (`MoveNext`) takes `self` by reference, as for a
+struct. Within one call, therefore, the record stands for the object's state, owned for
+the call.
+
+A property's `set` accessor is a member too. `KeyList`'s indexer setter is the method
+`set_Item`, which throws `NotSupportedException`; its contract is `[Throws(…)]
+[Ensures("false")]`. A constructor with an expression body (`=> _queue = queue`) is read
+as its single assignment.
+
+### R29.3b A view cache is outside the representation
+
+An owner often caches its view:
+```csharp
+private KeyList GetKeyListHelper() => keyList ??= new KeyList(this);
+public UnorderedItemsCollection UnorderedItems => field ??= new UnorderedItemsCollection(this);
+```
+A field whose type is a borrowing class is never part of a class's representation. Its
+record names the owner, so including it would make the owner's type depend on itself.
+Reading or writing such a field is refused (as R25.3 refuses an unmapped field), with
+one exception, a *fill*. `f ??= new V(this)` is a fill when:
+* `f` is an instance field (or a `field` backing field) whose type is a borrowing class
+  `V`;
+* `V`'s owner is the class declaring `f`;
+* the right-hand side is exactly `new V(this)`;
+* every write to `f` in its class is a fill of that form.
+
+A fill is translated as `new V(this)`, and it does not count as a write in R4.11's
+analysis, so the getter is read-only. This is sound for the following reasons:
+* By the last condition, `f` only ever holds `null` or a `V` built from `this`.
+* As a record (R29.3), that `V` is equal to the one `new V(this)` builds. Both
+  branches of the `??=` therefore yield the same value.
+* The write it performs changes nothing the model or the representation contains.
+
+A `??=` on such a field that is not a fill is refused (PALCS0735).
+
+A getter written with C#'s `field` keyword has a backing field, so R9.20 does not
+collect it as a computed property. When the backing field's type is a borrowing class, it
+is collected.
+
+### R29.4 `object` is an opaque box
+
+`object`, `IEnumerator`, `IEnumerator<T>` and `IDictionaryEnumerator` are translated as
+`Pulse.Lib.CSharp.Obj.obj`, an abstract type. Every implicit conversion of a translated
+value to one of them becomes `box v` (`val box (#a:Type0) (x:a) : obj`). Nothing is
+assumed of `box`: in particular it is not injective, because two boxes of equal values
+are distinct objects. A contract relates a result to what it boxes with
+`Pal.Boxes(o, v)`, which is `o == box v`.
+
+This is sound because verified code can do nothing with an `obj` but pass it on and
+return it. Everything that would observe it is refused (PALCS0737):
+* `==`, `!=` and `??` on an `obj`, and the `null` literal at type `obj`;
+* `is`, `as`, `is` patterns, `?.`, and casts from `object` (unboxing);
+* reading a field of type `obj` (such a field is not mapped: R25.3).
+
+`Pal.Boxes(Result, e)` therefore pins down which value was boxed, and nothing can
+contradict it. An `obj` result says nothing about the object's identity, which the model
+does not have.
+
+`DictionaryEntry` is a pair of boxes (`tuple2 obj obj`), as `KeyValuePair` is a pair (R29.1).
+
+**Explicit interface members.** A member implementing an interface explicitly
+(`object IEnumerator.Current`, `IEnumerator<T> IEnumerable<T>.GetEnumerator()`) is
+translated when annotated. It is named by its short name; if another member of the type
+has the same short name, by the interface and then the name (`IEnumerator_Current`,
+`IEnumerable1_GetEnumerator`, `IDictionary_GetEnumerator`). Before R29.4 such a member was
+silently dropped even when annotated.
+
+**Self-calls in a borrowing type.** A member of a borrowing struct or class may call
+another *read-only* member of the same type on `this` (`object IEnumerator.Current =>
+Current`). The call passes the borrowed object and `self` on; the callee holds the owner
+at the caller's fraction. A call to a member that writes the struct's fields is still
+refused (PALCS0731). In a `sealed` borrowing type, `((I)this).M()` is the call of the
+type's own implementation of `I.M` (Roslyn's `FindImplementationForInterfaceMember`): no
+subclass can re-implement `I`.
+
+**The shared empty enumerators.** `SZGenericArrayEnumerator<T>.Empty` and
+`EnumerableHelpers.GetEmptyEnumerator<T>()` are bound (`SpecBinding`, in the harnesses)
+to `Pulse.Lib.CSharp.Obj.empty_enumerator T : obj`, an uninterpreted object. This is a
+modelling axiom: it asserts only that the read or call has no effect and does not throw,
+which holds of a static readonly singleton and of `((IEnumerable<T>)[]).GetEnumerator()`.
+
+A conversion is boxed exactly once. Roslyn reports the converted type `object` on a
+parenthesised operand and on the operand of `!` as well as on the expression around it,
+and on the operands of the predefined reference `==`; those are not boxed.
+
+### R29.5 An array operand is named after the calls that follow it
+
+In `Array.Copy(_dict.keys, 0, array, arrayIndex, _dict.Count)` the operands are evaluated
+in order:
+1. The emitter reads `_dict`'s record to name `keys`.
+2. The call `_dict.Count` refolds `_dict`'s invariant.
+3. The next unfold names a fresh record.
+
+The array's permission is then stated about a record that Pulse cannot relate to the
+first one.
+
+The fix applies to an array primitive (`Array.Copy`, `IndexOf`, `BinarySearch`, …). An
+array-field operand of such a primitive is read again after the last operand when:
+* every call among the later operands is a read-only instance call (R4.11b), which holds
+  its receiver at an arbitrary fraction and so cannot write the object;
+* no such call passes a reference or an array;
+* nothing among the later operands runs statements.
+
+Under those conditions the re-read yields the value C# read. Otherwise the operands are
+left as they were, and the result is at worst a proof failure, never an unsound
+translation.
+
+### What §29 verifies
+
+With §28, the six harnesses verify 101 enumerator and view members:
+
+| Collection | Verified |
+|---|---|
+| `List<T>`, `HashSet<T>`, `Queue<T>` | §28's six, `IEnumerator.Current`, `IEnumerable<T>.GetEnumerator` (8 each) |
+| `Stack<T>` | the same, and `ThrowInvalidVersion` (9) |
+| `PriorityQueue.UnorderedItemsCollection` | the constructor, `Count`, `GetEnumerator`, `IEnumerable<…>.GetEnumerator`, `IEnumerable.GetEnumerator`; its enumerator's constructor, `MoveNext`, `Current`, `IEnumerator.Current`, `Reset`, `Dispose`; the owner's `UnorderedItems` (12) |
+| `SortedList<K,V>.Enumerator` | the constructor, `MoveNext`, `Current` (a `KeyValuePair`), `IEnumerator.Current`, `IDictionaryEnumerator.Key`, `.Value`, `.Entry`, `Reset`, `Dispose` (9) |
+| `SortedList<K,V>` | `GetEnumerator`, `IDictionary.GetEnumerator`, `IEnumerable<…>.GetEnumerator`, `GetKeyListHelper`, `GetValueListHelper` (5) |
+| `SortedListKeyEnumerator`, `SortedListValueEnumerator` | the constructor, `MoveNext`, `Current`, `IEnumerator.Current`, `Reset`, `Dispose` (6 each) |
+| `KeyList`, `ValueList` | the constructor, `Count`, `IsReadOnly`, the indexer's `get` and `set`, `Add`, `Insert`, `Clear`, `Remove`, `RemoveAt` (the mutators throw `NotSupportedException`), `Contains`, `IndexOf`, `CopyTo`, `GetEnumerator`, `IEnumerable.GetEnumerator` (15 each) |
+
+`SortedList.GetEnumerator` is declared to return `IEnumerator<KeyValuePair<K,V>>`; its
+contract states which enumerator it boxes. The concrete construction `new Enumerator(this,
+KeyValuePair)` is translated as written; no translation at the dynamic type was needed.
+
+### Not annotated, and why
+
+* `IEnumerable.GetEnumerator() => ((IEnumerable<T>)this).GetEnumerator()` in `List`,
+  `HashSet`, `Queue`, `Stack` and `SortedList`. The classes are not sealed: a derived
+  class may re-implement `IEnumerable<T>`, so the call is an interface dispatch whose
+  target is not known. (The same member of the sealed `UnorderedItemsCollection` is verified.)
+* `SortedList.Keys`, `Values` and their explicit `IDictionary`/`IReadOnlyDictionary`
+  forms. They return `IList<T>`, `ICollection<T>`, `IEnumerable<T>` or `ICollection`;
+  `IList<T>` is translated as an array elsewhere, so a view converted to it has no
+  translation. Their bodies are `GetKeyListHelper()`/`GetValueListHelper()`, which are verified.
+* `ICollection.CopyTo(Array, int)`, `ICollection.SyncRoot`, `ICollection.IsSynchronized`
+  on the views and the owners: an untyped `Array` and the owner as an `object` (the
+  views' `SyncRoot` casts the owner to `ICollection`).
+
+### Findings (§29)
+
+* An annotated set accessor (`KeyList`'s indexer `set`) was silently dropped, and so
+  were annotated explicit interface members. Both are translated now.
+* A constructor with an expression body crashed the borrowing-constructor analysis.
+* The operand order of R29.5: a call among later operands refolded the owner, and the
+  array's permission was stated about a stale record.
+* Boxing: Roslyn reports `object` as the converted type at several nested positions
+  (parentheses, `!`, reference `==`), which first produced double boxes.
+* `SortedList`'s `IEnumerator.Current` and `IDictionaryEnumerator` members compare
+  `_index` with `Count + 1`, which overflows at `Count == int.MaxValue`; they require
+  `SpecCount < int.MaxValue`, like `MoveNext` (§28).
+
+### Trusted (§29)
+
+`Pulse.Lib.CSharp.Obj` is implemented (`obj = unit`), so its interface carries no
+assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
+only new trust: each says the read or call is pure and does not throw.

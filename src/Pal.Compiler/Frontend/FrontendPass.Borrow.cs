@@ -1,0 +1,150 @@
+using System.Collections.Immutable;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Emit;
+using Pal.Compiler.Ir;
+
+namespace Pal.Compiler.Frontend;
+
+public static partial class FrontendPass
+{
+    /// <summary>
+    /// §28. A member of a borrowing struct (R28.1) is translated as a read-only instance
+    /// method of the borrowed object's class (R28.2): the object is its receiver, shared
+    /// at a fraction; the struct is a second parameter, <c>ref</c> when the member writes
+    /// it (R28.4); and the borrowing field is required to hold the receiver.
+    /// </summary>
+    private static IrDecl? LowerBorrowingMember(
+        Candidate candidate, SemanticModel model, WellKnown known,
+        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics, IrLoc loc)
+    {
+        // The candidate's symbol is of the compilation before the spec shims were added;
+        // the borrowing context is compared against symbols of this one.
+        var symbol = model.GetDeclaredSymbol(candidate.Syntax) switch
+        {
+            IMethodSymbol m => m,
+            IPropertySymbol p => p.GetMethod,
+            _ => null,
+        } ?? candidate.Symbol;
+        var self = symbol.ContainingType;
+        var owner = Borrowing.OwnerField(self, known)!;
+        if (known.MapType(owner.Type) is not IrClassType ownerType || known.MapType(self) is not { } selfType)
+        {
+            diagnostics.Unsupported(loc, $"The borrowing struct `{self.Name}`");
+            return null;
+        }
+        var isCtor = symbol.MethodKind == MethodKind.Constructor;
+        var ownerParameter = isCtor ? Borrowing.OwnerParameter(symbol, owner) : null;
+        if (isCtor && ownerParameter is null)
+        {
+            diagnostics.Error("PALCS0730", loc,
+                $"The constructor of `{self.Name}` does not assign `{owner.Name}` from a parameter. A " +
+                "borrowing struct's constructor takes the object it borrows (doc/translation.md R28.4).");
+            return null;
+        }
+        var borrow = new BorrowContext(self, owner, selfType, ownerType, isCtor, ownerParameter);
+
+        // R28.7. The borrowed object is shared: nothing of it is written.
+        foreach (var node in candidate.Syntax.DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax p when Borrowing.IsStep(p) => p.Operand,
+                PostfixUnaryExpressionSyntax p when Borrowing.IsStep(p) => p.Operand,
+                _ => null,
+            };
+            if (target is null || model.GetSymbolInfo(target).Symbol is not IFieldSymbol { IsStatic: false } wf ||
+                borrow.IsState(wf)) continue;
+            diagnostics.Error("PALCS0734", Locations.From(target),
+                $"`{target}` is written in a member of `{self.Name}`, which borrows `{owner.Name}`. A " +
+                "borrowing struct reads the object it borrows and never writes it (doc/translation.md R28.7).");
+            return null;
+        }
+
+        var specs = ReadSpecs(candidate.Symbol, candidate.Declaration, known, bound, diagnostics, borrow);
+        var parameters = LowerParameters(symbol, model, known, diagnostics)
+            .Where(p => ownerParameter is null || p.Name != ownerParameter.Name);
+        var writes = !isCtor && Borrowing.WritesState(candidate.Syntax, model, self);
+        IrParam[] leading = isCtor
+            ? [new IrParam(loc, Names.This, ownerType, ParamMode.Value)]
+            : [new IrParam(loc, Names.This, ownerType, ParamMode.Value),
+               new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value)];
+
+        var returnType = isCtor ? selfType : known.MapType(symbol.ReturnType);
+        if (returnType is null)
+        {
+            diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
+            return null;
+        }
+
+        // R28.2. The borrowing field holds the receiver, before and after.
+        IrExpr Holds(IrExpr structValue) =>
+            new IrBinary(loc, BinOp.Eq,
+                new IrField(loc, structValue, owner.Name) { Type = ownerType },
+                new IrRefOf(loc, Names.This) { Type = ownerType }) { Type = IrPrim.Bool };
+        var selfVar = new IrVar(loc, BorrowContext.Self) { Type = selfType };
+        var requires = isCtor ? [] : ImmutableArray.Create(Holds(selfVar));
+        var ensures = ImmutableArray.CreateBuilder<IrExpr>();
+        if (isCtor) ensures.Add(Holds(new IrResult(loc) { Type = selfType }));
+        else if (writes)
+        {
+            ensures.Add(Holds(selfVar));
+            // R28.4. A readonly field of the struct is not written by its members.
+            foreach (var f in self.GetMembers().OfType<IFieldSymbol>())
+            {
+                if (f.IsStatic || f.IsConst || !f.IsReadOnly || borrow.IsOwner(f) ||
+                    known.MapType(f.Type) is not IrPrim fieldType) continue;
+                var field = new IrField(loc, selfVar, f.Name) { Type = fieldType };
+                ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
+                    { Type = IrPrim.Bool });
+            }
+        }
+
+        var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
+        IrStmt? body;
+        ImmutableArray<IrExpr> bodyRequires = [], bodyEnsures = [];
+        if (isCtor)
+        {
+            if (candidate.Syntax is not ConstructorDeclarationSyntax { Initializer: null } c)
+            {
+                diagnostics.Error("PALCS0730", loc,
+                    $"The constructor of `{self.Name}` chains to another. A borrowing struct's constructor " +
+                    "assigns its fields (doc/translation.md R28.5).");
+                return null;
+            }
+            body = lowerer.Expressions.BorrowingConstructorBody(c, loc);
+        }
+        else
+        {
+            body = LowerBody(candidate.Syntax, lowerer);
+            var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: true);
+            bodyRequires = br;
+            bodyEnsures = be;
+            body = trimmed ?? body;
+            if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
+                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
+                body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);
+        }
+
+        ImmutableArray<string> typeParameters =
+            [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
+        return new IrMethod(
+            loc, Naming.Of(symbol), [.. leading, .. parameters], returnType,
+            [.. requires, .. specs.Requires, .. bodyRequires],
+            [.. ensures, .. specs.Ensures, .. bodyEnsures],
+            specs.Decreases, body)
+        {
+            Preserves = specs.Preserves,
+            Throws = specs.Throws,
+            DeclaringClass = ((INamedTypeSymbol)owner.Type).Name,
+            IsReadOnly = true,
+            TypeParameters = typeParameters,
+            DefaultedTypeParameters = [.. typeParameters.Where(lowerer.Defaulted)],
+            RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
+                ? factor : null,
+        };
+    }
+}

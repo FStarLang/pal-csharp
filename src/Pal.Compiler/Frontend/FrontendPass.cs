@@ -221,12 +221,18 @@ public static partial class FrontendPass
         };
 
         /// <summary>The declaration the contract is read from: R9.20c's property, or the
-        /// method itself.</summary>
+        /// method itself — which for a property is its getter when the attributes are
+        /// written on the <c>get</c>.</summary>
         public ISymbol Declaration => ContractOverride ??
-            (Syntax is PropertyDeclarationSyntax && Symbol.AssociatedSymbol is { } p ? p : Symbol);
+            (Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
+            !(Getter(pd) is { } g && g.AttributeLists.SelectMany(l => l.Attributes).Any(IsContractAttribute)) ? p : Symbol);
 
         /// <summary>R27.12. The `get` accessor, when the contract was written there.</summary>
         public ISymbol? ContractOverride { get; init; }
+
+        private static bool IsContractAttribute(AttributeSyntax a) =>
+            a.Name.ToString().Split('.')[^1].Replace("Attribute", "") is
+                "Requires" or "Ensures" or "Preserves" or "PreservesValue" or "Throws" or "Decreases";
 
         public static AccessorDeclarationSyntax? Getter(PropertyDeclarationSyntax p) =>
             p.AccessorList?.Accessors.FirstOrDefault(
@@ -380,6 +386,8 @@ public static partial class FrontendPass
                 // A class the frontend now translates, and its members, are not dropped.
                 var owner = symbol as INamedTypeSymbol ?? symbol.ContainingType;
                 if (owner is not null && translated.Contains(owner)) continue;
+                // R29.3. A borrowing class's members are translated with it as a record.
+                if (Borrowing.IsBorrowingClass(owner, known)) continue;
 
                 // A [Spec]/[Lemma] member is collected on its own terms; only genuinely
                 // dropped members are reported here.
@@ -487,7 +495,7 @@ public static partial class FrontendPass
     private sealed record StructField(ISymbol Symbol, string Name, ITypeSymbol Type, IrType Mapped);
 
     private sealed record StructCandidate(
-        StructDeclarationSyntax Syntax,
+        TypeDeclarationSyntax Syntax,
         INamedTypeSymbol Symbol,
         ImmutableArray<StructField> Fields,
         ImmutableArray<string> Usings,
@@ -540,8 +548,18 @@ public static partial class FrontendPass
                     var isPredicate = member is IMethodSymbol { IsStatic: true } pm &&
                         SymbolEqualityComparer.Default.Equals(pm.ReturnType, known.SlProp);
 
+                    // R29.4. Nor does a static one producing an `object`: it reads no
+                    // specification type, and an `obj` is no type's to own.
+                    var producesObject = member.IsStatic && WellKnown.IsObjectLike(member switch
+                    {
+                        IMethodSymbol om => om.ReturnType,
+                        IPropertySymbol op => op.Type,
+                        IFieldSymbol of => of.Type,
+                        _ => null,
+                    });
+
                     if (known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
-                        !isPredicate &&
+                        !isPredicate && !producesObject &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
                             $"`[SpecOp]` on `{type.Name}.{member.Name}`, but `{type.Name}` is not a " +
@@ -577,9 +595,12 @@ public static partial class FrontendPass
         foreach (var tree in compilation.SyntaxTrees)
         {
             var model = compilation.GetSemanticModel(tree);
-            foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<StructDeclarationSyntax>())
+            foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
+                if (syntax is not (StructDeclarationSyntax or ClassDeclarationSyntax)) continue;
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
+                // R29.3. A borrowing class is represented by the record of its fields.
+                if (syntax is ClassDeclarationSyntax && !Borrowing.IsBorrowingClass(symbol, known)) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
                 if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
                 // R20.1. Under `[TranslateAnnotatedOnly]` a struct is translated only when it
@@ -626,7 +647,11 @@ public static partial class FrontendPass
                     if (name is null || type is null) continue;
 
                     var mapped = known.MapType(type);
-                    if (mapped is null || !(specOnly ? IsSpecField(mapped) : IsValueField(mapped)))
+                    // R28.1. The one readonly field typed at an enclosing class is a
+                    // borrowed reference: the record holds the box and owns nothing.
+                    var borrowed = mapped is IrClassType &&
+                        SymbolEqualityComparer.Default.Equals(Borrowing.OwnerField(symbol, known), member);
+                    if (mapped is null || !(borrowed || (specOnly ? IsSpecField(mapped) : IsValueField(mapped))))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
                         // predicate discipline this rule exists to avoid.
@@ -662,22 +687,31 @@ public static partial class FrontendPass
     /// </summary>
     private static bool IsComputed(IPropertySymbol p, WellKnown known) =>
         p is { IsStatic: false, IsIndexer: false, GetMethod: not null, SetMethod: null }
-        && !IsAuto(p)
+        // R29.3b. A `field ??= new V(this)` getter caches a view; its backing field is in
+        // no representation, and the getter is the method its body is.
+        && (!IsAuto(p) || p.ContainingType.GetMembers().OfType<IFieldSymbol>().Any(f =>
+                SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p) && Borrowing.IsBorrowingClass(f.Type, known)))
         && !Declarations.IsAnnotatedDeclaration(p, known)
         // R9.6's forgetting function is written as `override SpecInt Area => ...`, and
         // carries no attribute of its own: it inherits its meaning from the `[Model]` it
         // overrides. It is a spec-level definition, not code over the representation, so
         // reading it as a method would translate a specification as a program.
         && !(p.IsOverride && OverriddenChainHasModel(p, known))
-        && p.ContainingType is { TypeKind: TypeKind.Class } owner
-        && (known.HasModel(owner) || known.IsRegionClass(owner));
+        && (p.ContainingType is { TypeKind: TypeKind.Class } owner &&
+               (known.HasModel(owner) || known.IsRegionClass(owner))
+            // R28.2. A borrowing struct's getter is a member of the borrowed object's class.
+            // R29.4. An explicit one (`object IEnumerator.Current`) when it carries a contract.
+            || Borrowing.IsBorrowing(p.ContainingType, known) &&
+               (p.ExplicitInterfaceImplementations.IsEmpty || Declarations.IsAnnotated(p, known)));
 
     private static bool IsAuto(IPropertySymbol p) =>
         p.ContainingType.GetMembers().OfType<IFieldSymbol>()
             .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p));
 
     /// <summary>R3.4: the field types a struct may hold.</summary>
-    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType or IrTypeParamType;
+    /// <summary>R3.4; and a pair of such values (R26.10), which an enumerator's <c>Current</c> may be (R28).</summary>
+    private static bool IsValueField(IrType type) => type is IrPrim or IrNamedType or IrTypeParamType ||
+        type is IrUserSpecType { FStar: WellKnown.TupleType, Args: var args } && args.All(IsValueField);
 
     /// <summary>
     /// R3.9a: the field types a <c>[Spec]</c> struct may hold. Wider than R3.4 by exactly
@@ -766,7 +800,7 @@ public static partial class FrontendPass
     }
 
     private static ImmutableArray<string> BuildTypeUsings(
-        StructDeclarationSyntax syntax, INamedTypeSymbol symbol)
+        TypeDeclarationSyntax syntax, INamedTypeSymbol symbol)
     {
         var fileUsings = syntax.SyntaxTree.GetRoot()
             .DescendantNodes()
@@ -1001,7 +1035,8 @@ public static partial class FrontendPass
 
                     // R20.1a. Under `[TranslateAnnotatedOnly]` such a method is translated
                     // receiver-free instead.
-                    if (annotated && !known.AnnotatedOnly)
+                    // R29.3. A borrowing class has its owner's model.
+                    if (annotated && !known.AnnotatedOnly && !Borrowing.IsBorrowingClass(symbol, known))
                         diagnostics.Error("PALCS0524", Locations.From(syntax.Identifier),
                             $"`{symbol.Name}` is specified but declares no `[Model]` member. " +
                             "A class needs a model for its invariant and its contracts to relate the " +
@@ -1114,8 +1149,10 @@ public static partial class FrontendPass
                 _ => (null, null),
             };
             if (name is null || type is null) continue;
+            if (Borrowing.IsBorrowingClass(type, known)) continue;   // R29.3
 
-            if (known.MapType(type) is not { } mapped)
+            // R29.4. An `object` field is not a value the scheme holds: it is not translated.
+            if (known.MapType(type) is not { } mapped || WellKnown.IsObj(mapped))
             {
                 diagnostics.Error("PALCS0500",
                     Locations.From(member.Locations.FirstOrDefault() ?? Location.None),
@@ -1342,7 +1379,14 @@ public static partial class FrontendPass
             };
             if (name is null || type is null) continue;
 
+            // R29.3. A cached view object that borrows this class (`keyList ??= new KeyList(this)`)
+            // is not part of its representation either.
+            // A read or write of it is refused as for R25.3, except the fill of R29.3b.
+            if (Borrowing.IsBorrowingClass(type, known)) continue;
             var mapped = known.MapType(type);
+            // R29.4. An `object` field (a `_syncRoot`) is not part of the representation:
+            // `obj` is a translation of values in flight, not of state.
+            if (WellKnown.IsObj(mapped)) mapped = null;
             // R25.3. Under `[TranslateAnnotatedOnly]` a field whose type has no translation
             // -- a cache of an unannotated view object, say -- is left out of the
             // representation, as an unannotated method is left out of the class. A read or
@@ -2121,8 +2165,13 @@ public static partial class FrontendPass
                     Parameters: ShimParameters(candidate.Symbol, compilation, known, wantsResult),
                     Usings: usings)
                 {
-                    TypeParameters = MethodTypeParameters(candidate.Symbol),
-                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private,
+                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    // R28.3. A contract about a borrowing struct names its private state.
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              Borrowing.IsMember(candidate.Symbol, known) ||
+                              Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known) ||
+                              // R29.4. A boxed result is described by the state of what it boxes.
+                              WellKnown.IsObjectLike(candidate.Symbol.ReturnType),
                 });
             }
 
@@ -2139,7 +2188,9 @@ public static partial class FrontendPass
                                  new SpecParam(ThrownParameter, thrown)],
                     Usings: usings)
                 {
-                    TypeParameters = MethodTypeParameters(candidate.Symbol),
+                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              Borrowing.IsMember(candidate.Symbol, known),
                 });
             }
         }
@@ -2158,7 +2209,7 @@ public static partial class FrontendPass
         // R15.1. A generic declaring type cannot be `using static`-imported: the
         // directive names a closed type and there is nothing to close it with. The
         // members it would have imported are reached through a receiver instead.
-        var own = candidate.Symbol.ContainingType.TypeParameters.Length > 0 ||
+        var own = candidate.Symbol.ContainingType.IsGenericType ||
                   WellKnown.OuterAndOwnTypeParameters(candidate.Symbol.ContainingType).Any()
             ? null
             : $"using static {candidate.Symbol.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)};";
@@ -2366,6 +2417,13 @@ public static partial class FrontendPass
         .. symbol.TypeParameters.Select(t => t.Name),
     ];
 
+    /// <summary>R28.2. A borrowing struct's member is generic in its enclosing types' parameters.</summary>
+    private static ImmutableArray<string> SiteTypeParameters(IMethodSymbol symbol, WellKnown known) =>
+        Borrowing.IsMember(symbol, known)
+            ? [.. WellKnown.AllTypeParameters(symbol.ContainingType).Select(t => t.Name),
+               .. symbol.TypeParameters.Select(t => t.Name)]
+            : MethodTypeParameters(symbol);
+
     private static bool Same(ISymbol? a, ISymbol b) => SymbolEqualityComparer.Default.Equals(a, b);
 
     /// <summary>
@@ -2387,7 +2445,9 @@ public static partial class FrontendPass
         // through `Result` instead.
         if (symbol is { IsStatic: false,
                         MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                    or MethodKind.PropertyGet or MethodKind.PropertySet })
+                                    or MethodKind.PropertyGet or MethodKind.PropertySet
+                                    or MethodKind.ExplicitInterfaceImplementation } ||
+            Borrowing.IsMember(symbol, known))
             result.Add(new SpecParam(Names.This, symbol.ContainingType));
 
         foreach (var p in symbol.Parameters)
@@ -2420,6 +2480,10 @@ public static partial class FrontendPass
         var symbol = candidate.Symbol;
         var loc = Locations.From(candidate.Identifier);
 
+        // §28. A member of a borrowing struct is a member of the borrowed object's class.
+        if (Borrowing.IsMember(symbol, known))
+            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc);
+
         var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, model, known, diagnostics);
         // R20.12. A receiver-free method takes the receiver's readonly fields it reads.
@@ -2427,7 +2491,8 @@ public static partial class FrontendPass
             parameters = [.. parameters, .. Declarations.ContextFields(symbol.ContainingType, model.Compilation, known)
                 .Select(f => new IrParam(loc, Declarations.ContextName(f), known.MapType(Declarations.ContextType(f))!, ParamMode.Value) { IsContext = true })];
         if (symbol is { IsStatic: false,
-                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet,
+                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet
+                                    or MethodKind.ExplicitInterfaceImplementation,
                         ContainingType: { } self } &&
             (known.HasModel(self) || known.IsRegionClass(self)))
         {
@@ -2533,7 +2598,7 @@ public static partial class FrontendPass
             IsReadOnly = declaringClass is not null &&
                 symbol.MethodKind != MethodKind.Constructor &&
                 (Declarations.Has(symbol, known.FracAttribute) ||
-                 (!symbol.IsAbstract && !Declarations.Mutates(candidate.Syntax, model))),
+                 (!symbol.IsAbstract && !Declarations.Mutates(candidate.Syntax, model, known))),
             IsAbstract = symbol.IsAbstract,
             // R14.2. Type parameters become binders ahead of every value parameter. The
             // constrained case never reaches here: MapType declines a constrained type
@@ -2689,7 +2754,8 @@ public static partial class FrontendPass
 
     private static Specs ReadSpecs(
         IMethodSymbol symbol, ISymbol declaration, WellKnown known,
-        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics)
+        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
+        BorrowContext? borrow = null)
     {
         var requires = ImmutableArray.CreateBuilder<IrExpr>();
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
@@ -2702,7 +2768,7 @@ public static partial class FrontendPass
             if (!bound.TryGetValue(key, out var spec)) continue;
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) };
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;
@@ -2731,7 +2797,7 @@ public static partial class FrontendPass
             }
             if (!bound.TryGetValue($"{Naming.Of(symbol)}_throws_{k}", out var spec)) continue;
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known) }
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow }
                 .Lower(spec.Expression);
             throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
         }

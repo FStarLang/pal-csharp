@@ -17,6 +17,8 @@ namespace System.Collections.Generic
         public SpecInt Capacity;
         /// <summary>The whole backing store, of which <c>Items</c> is a prefix.</summary>
         public Seq<T> Store;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
     }
 
     // Implements a variable-size List that uses an array of objects to store the
@@ -51,6 +53,7 @@ namespace System.Collections.Generic
             Items = Pal.Slice(Pal.Contents(_items), 0, _size),
             Capacity = _items.Length,
             Store = Pal.Contents(_items),
+            Version = _version,
         };
 
         /// <summary>The elements, in order.</summary>
@@ -65,6 +68,9 @@ namespace System.Collections.Generic
 
         [Spec]
         public Seq<T> SpecStore => Model.Store;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
 
         // Constructs a List. The list is initially empty and has a capacity
         // of zero. Upon adding the first element to the list the capacity is
@@ -845,8 +851,11 @@ namespace System.Collections.Generic
         // while an enumeration is in progress, the MoveNext and
         // GetObject methods of the enumerator will throw an exception.
         //
+        [Ensures("ReferenceEquals(Result._list, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((List<T>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._list, @this) && e._version == @this.SpecVersion && e._index == 0))")]
         IEnumerator<T> IEnumerable<T>.GetEnumerator() =>
             Count == 0 ? SZGenericArrayEnumerator<T>.Empty :
             GetEnumerator();
@@ -1471,16 +1480,23 @@ namespace System.Collections.Generic
             private int _index;
             private T? _current;
 
+            [Ensures("ReferenceEquals(@this._list, list) && @this._version == list.SpecVersion && @this._index == 0")]
             internal Enumerator(List<T> list)
             {
                 _list = list;
                 _version = list._version;
             }
 
+            [Ensures("true")]
             public void Dispose()
             {
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._list.SpecVersion")]
+            [Ensures("@this._version == @this._list.SpecVersion")]
+            [Ensures("Result == (0 <= Pal.Old(@this._index) && Pal.Old(@this._index) < @this._list.SpecCount)")]
+            [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && Pal.Same(@this._current, @this._list.Items[Pal.Old(@this._index)]))")]
+            [Ensures("Pal.Implies(!Result, @this._index == -1)")]
             public bool MoveNext()
             {
                 List<T> localList = _list;
@@ -1502,8 +1518,11 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._current)")]
             public T Current => _current!;
 
+            [Throws(typeof(InvalidOperationException), "@this._index <= 0")]
+            [Ensures("Pal.Boxes(Result, @this._current)")]
             object? IEnumerator.Current
             {
                 get
@@ -1517,6 +1536,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._list.SpecVersion")]
+            [Ensures("@this._version == @this._list.SpecVersion && @this._index == 0")]
             void IEnumerator.Reset()
             {
                 if (_version != _list._version)

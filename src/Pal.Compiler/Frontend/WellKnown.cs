@@ -431,6 +431,40 @@ public sealed class WellKnown
     /// <summary>R26.8. The F* type of a value tuple <c>(T1, T2)</c>.</summary>
     public const string TupleType = "tuple2";
 
+    /// <summary>R29.1. <c>KeyValuePair&lt;K, V&gt;</c>, which is a pair too.</summary>
+    public static bool IsKeyValuePair(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeArguments.Length: 2 } named &&
+        named.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.KeyValuePair<TKey, TValue>";
+
+    /// <summary>R29.4. <c>DictionaryEntry</c>, a pair of <c>object</c>s.</summary>
+    public static bool IsDictionaryEntry(ITypeSymbol? type) =>
+        type?.ToDisplayString() == "System.Collections.DictionaryEntry";
+
+    /// <summary>R26.8/R29.1. A value tuple of two, a <c>KeyValuePair</c>, or a <c>DictionaryEntry</c>.</summary>
+    public static bool IsPairType(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } || IsKeyValuePair(type) ||
+        IsDictionaryEntry(type);
+
+    /// <summary>R29.4. The F* type of an <c>object</c>: <c>Pulse.Lib.CSharp.Obj</c>'s abstract one.</summary>
+    public const string ObjType = "Pulse.Lib.CSharp.Obj.obj";
+
+    /// <summary>R29.4. The F* function that converts a value to <see cref="ObjType"/>.</summary>
+    public const string BoxFunction = "Pulse.Lib.CSharp.Obj.box";
+
+    public static readonly IrUserSpecType Obj = new("Object", ObjType, []);
+
+    public static bool IsObj(IrType? t) => t is IrUserSpecType { FStar: ObjType };
+
+    /// <summary>
+    /// R29.4. <c>object</c>, and the enumerator interfaces a collection's explicit members
+    /// return: a value of one of them is an <see cref="ObjType"/>.
+    /// </summary>
+    public static bool IsObjectLike(ITypeSymbol? type) =>
+        type is { SpecialType: SpecialType.System_Object } ||
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.IEnumerator"
+            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator";
+
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
 
@@ -491,6 +525,17 @@ public sealed class WellKnown
                 when MapType(tuple.TupleElements[0].Type) is { } t1 && IsPlainValue(t1) &&
                      MapType(tuple.TupleElements[1].Type) is { } t2 && IsPlainValue(t2):
                 return new IrUserSpecType("ValueTuple", TupleType, [t1, t2]);
+            // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
+            case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
+                     MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&
+                     MapType(kvp.TypeArguments[1]) is { } v && IsPlainValue(v):
+                return new IrUserSpecType("ValueTuple", TupleType, [k, v]);
+            // R29.4. `object` and the enumerator interfaces are F*'s abstract `obj`, and a
+            // `DictionaryEntry` is a pair of them.
+            case { } o when IsObjectLike(o):
+                return Obj;
+            case { } de when IsDictionaryEntry(de):
+                return new IrUserSpecType("ValueTuple", TupleType, [Obj, Obj]);
             // R20.3. A delegate is held, passed on, and nothing else.
             case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del when CallableDelegate(del) is { } callable:
                 return callable;
@@ -552,6 +597,9 @@ public sealed class WellKnown
             // R12.1. A `[Plain]` class is translated too, and is translated for the same
             // reason: it has a representation. What it does not have is a model, so it is
             // recognised by the attribute rather than by the `[Model]` member.
+            // R29.3. A class that borrows its owner is the record of its fields.
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } borrowing when Borrowing.IsBorrowingClass(borrowing, this):
+                return NamedStruct(borrowing);
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
                 when HasModel(named) || IsPlainLike(named.OriginalDefinition):
             {
@@ -627,17 +675,25 @@ public sealed class WellKnown
     /// R24.6. A struct nested in a generic type (`HashSet&lt;T&gt;.Entry`) is implicitly
     /// generic in the outer parameters, so they lead its own; and two such structs may
     /// share a simple name (`HashSet&lt;T&gt;.Entry`, `Dictionary&lt;K,V&gt;.Entry`), so its
-    /// name is qualified by the outer type's.
+    /// name is qualified by the outer type's. A class between the struct and the generic type
+    /// (`PriorityQueue&lt;E, P&gt;.UnorderedItemsCollection.Enumerator`, R28) passes the
+    /// outer parameters through, after adding its own.
     /// </summary>
     public static ImmutableArray<ITypeSymbol> AllTypeArguments(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)
-            ? [.. AllTypeArguments(outer), .. named.TypeArguments]
+            ? [.. EnclosingArguments(outer), .. named.TypeArguments]
             : named.TypeArguments;
 
     public static ImmutableArray<ITypeParameterSymbol> AllTypeParameters(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)
-            ? [.. AllTypeParameters(outer), .. named.TypeParameters]
+            ? [.. EnclosingParameters(outer), .. named.TypeParameters]
             : named.TypeParameters;
+
+    private static ImmutableArray<ITypeSymbol> EnclosingArguments(INamedTypeSymbol t) =>
+        t.ContainingType is { } o ? [.. EnclosingArguments(o), .. t.TypeArguments] : t.TypeArguments;
+
+    private static ImmutableArray<ITypeParameterSymbol> EnclosingParameters(INamedTypeSymbol t) =>
+        t.ContainingType is { } o ? [.. EnclosingParameters(o), .. t.TypeParameters] : t.TypeParameters;
 
     public static string StructName(INamedTypeSymbol named) =>
         named.ContainingType is { } outer && OuterGeneric(named)
@@ -645,6 +701,6 @@ public sealed class WellKnown
             : named.Name;
 
     private static bool OuterGeneric(INamedTypeSymbol named) =>
-        named.TypeKind == TypeKind.Struct &&
+        named.TypeKind is TypeKind.Struct or TypeKind.Class &&
         named.ContainingType is { } outer && (outer.IsGenericType || OuterGeneric(outer));
 }

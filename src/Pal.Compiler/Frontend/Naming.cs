@@ -29,7 +29,13 @@ public static class Naming
         // `Func_C_P` — injective, because C# forbids a property and a method of one name
         // in one type.
         var name = Mangle(symbol);
-        var qualified = symbol.ContainingType is { } type ? $"{type.Name}_{name}" : name;
+        // R28.2. A member of a struct nested in a class is qualified by both: every
+        // collection declares its own `Enumerator`.
+        var qualified = symbol.ContainingType is { } type
+            ? type is { TypeKind: TypeKind.Struct, ContainingType: { } outer }
+                ? $"{outer.Name}_{type.Name}_{name}"
+                : $"{type.Name}_{name}"
+            : name;
         return qualified + Overload(symbol, name);
     }
 
@@ -64,10 +70,35 @@ public static class Naming
     private static string Mangle(ISymbol symbol) => symbol switch
     {
         IMethodSymbol { MethodKind: MethodKind.Constructor } => "_ctor",
+        // R29.4. `object IEnumerator.Current` is named `System.Collections.IEnumerator.Current`.
+        IMethodSymbol { MethodKind: MethodKind.PropertyGet,
+                        AssociatedSymbol: IPropertySymbol { IsIndexer: false, ExplicitInterfaceImplementations: [var ip, ..] } p }
+            => Explicit(p, ip),
         // R22.13. An indexer's C# name is `this[]`; its accessors keep `get_Item`/`set_Item`.
         IMethodSymbol { MethodKind: MethodKind.PropertyGet, AssociatedSymbol: IPropertySymbol { IsIndexer: false } p } => p.Name,
+        // R28.2. `void IEnumerator.Reset()` is named `System.Collections.IEnumerator.Reset`.
+        IMethodSymbol { MethodKind: MethodKind.ExplicitInterfaceImplementation, ExplicitInterfaceImplementations: [var im, ..] } e =>
+            Explicit(e, im),
         _ => symbol.Name,
     };
+
+    /// <summary>
+    /// R28.2/R29.4. An explicit interface implementation is named by its short name, and is
+    /// qualified by its interface -- with the interface's arity, since `IEnumerable` and
+    /// `IEnumerable&lt;T&gt;` both declare `GetEnumerator` -- when another member of its type
+    /// has that short name too: `IEnumerator_Current` beside the public `Current`.
+    /// </summary>
+    private static string Explicit(ISymbol member, ISymbol implemented)
+    {
+        var shortName = implemented.Name;
+        var clash = member.ContainingType.GetMembers()
+            .Any(m => !SymbolEqualityComparer.Default.Equals(m, member) && ShortName(m) == shortName);
+        if (!clash) return shortName;
+        var iface = implemented.ContainingType;
+        return $"{iface.Name}{(iface.Arity > 0 ? iface.Arity.ToString() : "")}_{shortName}";
+    }
+
+    private static string ShortName(ISymbol m) => m.Name[(m.Name.LastIndexOf('.') + 1)..];
 
     /// <summary>
     /// R2.1a. A type's C# spelling with every non-identifier character replaced by `_`, so

@@ -1857,7 +1857,7 @@ public sealed class CodeEmitter(
 
             case IrArrayOp c:
             {
-                var args = c.Args.Select(a => Atom(Expr(a))).ToList();
+                var args = Operands(c.Args);
                 var fn = c.Op switch
                 {
                     ArrayOpKind.Copy => "copy",
@@ -2352,6 +2352,40 @@ public sealed class CodeEmitter(
     /// ordinary operation needs <c>A.pts_to</c>, which <c>elim</c> gives back for a
     /// non-null array -- the obligation the C# null test discharges.
     /// </summary>
+    /// <summary>
+    /// R29.5. The operands of an array primitive, evaluated left to right. An operand that
+    /// reads an array field of an object (<c>_dict.keys</c>) and is followed by a call
+    /// (<c>_dict.Count</c>) names the array through a record read before that call, while
+    /// the call refolds the object's invariant and the next unfold names a fresh one; the
+    /// array's permission is then stated about a record Pulse cannot relate to the first.
+    /// The field is therefore read again after the last operand. That is the value C# read
+    /// exactly when nothing in between can have written the object's box, and the rereading
+    /// is done only then: every call among the later operands is a read-only instance call
+    /// (R4.11b: held at an arbitrary fraction, so it cannot write) whose other arguments
+    /// hold no reference, and none of them runs statements of its own.
+    /// </summary>
+    private List<string> Operands(IReadOnlyList<IrExpr> operands)
+    {
+        var texts = operands.Select(a => Atom(Expr(a))).ToList();
+        for (var i = 0; i < operands.Count; i++)
+        {
+            if (operands[i] is not IrField { Receiver: IrVar ov, Type: IrArrayType } f
+                || !_slots.TryGetValue(ov.Name, out var obj)
+                || obj is not { Kind: SlotKind.Object, Type: IrClassType oc }) continue;
+            var later = operands.Skip(i + 1).SelectMany(Check.Subexpressions).ToList();
+            var calls = later.OfType<IrCall>().ToList();
+            if (calls.Count == 0) continue;
+            var readOnly = calls.All(k => k.HasReceiver && !k.MutatesReceiver
+                    && k.Args.Skip(1).All(a => a.Type is not (IrClassType or IrArrayType)))
+                && !later.Any(e => e is IrStmtExpr or IrRaise);
+            if (!readOnly) continue;
+            var t = Fresh();
+            Line($"let {t} = B.op_Bang {obj.NonNull};");
+            texts[i] = $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
+        }
+        return texts;
+    }
+
     private void WithArrays(IEnumerable<(IrExpr Expr, string Text)> arrays, Action op)
     {
         var nullable = arrays.Where(a => IsNullableArray(a.Expr)).Select(a => a.Text).Distinct().ToList();
@@ -3494,10 +3528,8 @@ public sealed class CodeEmitter(
             // R22.25. A search reads the array and yields a position.
             case IrArraySearch se:
             {
-                var array = Atom(Expr(se.Array));
-                var item = Atom(Expr(se.Item));
-                var start = Atom(Expr(se.Start));
-                var count = Atom(Expr(se.Count));
+                var ops = Operands([se.Array, se.Item, se.Start, se.Count]);
+                var (array, item, start, count) = (ops[0], ops[1], ops[2], ops[3]);
                 var t = Fresh();
                 var fn = se.Last ? "last_index_of" : "index_of";
                 Line($"let {t} = Pulse.Lib.CSharp.Array.{fn} {array} {item} {start} {count};");
@@ -3506,11 +3538,8 @@ public sealed class CodeEmitter(
 
             case IrArrayBinarySearch bs:
             {
-                var array = Atom(Expr(bs.Array));
-                var start = Atom(Expr(bs.Start));
-                var count = Atom(Expr(bs.Count));
-                var item = Atom(Expr(bs.Item));
-                var comparer = Atom(Expr(bs.Comparer));
+                var ops = Operands([bs.Array, bs.Start, bs.Count, bs.Item, bs.Comparer]);
+                var (array, start, count, item, comparer) = (ops[0], ops[1], ops[2], ops[3], ops[4]);
                 var t = Fresh();
                 Line($"let {t} = Pulse.Lib.CSharp.Sorted.range_search_array {array} {start} {count} {item} {comparer};");
                 return t;

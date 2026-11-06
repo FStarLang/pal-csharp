@@ -20,6 +20,8 @@ namespace System.Collections.Generic
         public SpecInt Capacity;
         public Seq<T> Store;
         public SpecInt Head;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
     }
 
     /// <summary>
@@ -56,6 +58,7 @@ namespace System.Collections.Generic
             Capacity = _array.Length,
             Store = Pal.Contents(_array),
             Head = _head,
+            Version = _version,
         };
 
         /// <summary>The elements, oldest first: the next to be dequeued is the first.</summary>
@@ -67,6 +70,12 @@ namespace System.Collections.Generic
 
         [Spec]
         public SpecInt SpecCapacity => Model.Capacity;
+
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
+
+        [Spec]
+        public SpecInt SpecHead => Model.Head;
 
         // Creates a queue with room for capacity objects. The default initial
         // capacity and grow factor are used.
@@ -239,9 +248,12 @@ namespace System.Collections.Generic
 
         // GetEnumerator returns an IEnumerator over this Queue.  This
         // Enumerator will support removing.
+        [Ensures("ReferenceEquals(Result._queue, @this) && Result._version == @this.SpecVersion && Result._i == -1")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
         /// <internalonly/>
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((Queue<T>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._queue, @this) && e._version == @this.SpecVersion && e._i == -1))")]
         IEnumerator<T> IEnumerable<T>.GetEnumerator() =>
             Count == 0 ? SZGenericArrayEnumerator<T>.Empty :
             GetEnumerator();
@@ -521,6 +533,7 @@ namespace System.Collections.Generic
             private int _i;
             private T? _currentElement;
 
+            [Ensures("ReferenceEquals(@this._queue, queue) && @this._version == queue.SpecVersion && @this._i == -1")]
             internal Enumerator(Queue<T> queue)
             {
                 _queue = queue;
@@ -529,12 +542,20 @@ namespace System.Collections.Generic
                 _currentElement = default;
             }
 
+            [Ensures("@this._i == -2")]
             public void Dispose()
             {
                 _i = -2;
                 _currentElement = default;
             }
 
+            [Requires("@this._i < int.MaxValue")]
+            [Requires("@this._queue.SpecHead + @this._queue.SpecCount <= int.MaxValue")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._queue.SpecVersion")]
+            [Ensures("@this._version == @this._queue.SpecVersion")]
+            [Ensures("Result == (0 <= Pal.Old(@this._i) + 1 && Pal.Old(@this._i) + 1 < @this._queue.SpecCount)")]
+            [Ensures("Pal.Implies(Result, @this._i == Pal.Old(@this._i) + 1 && Pal.Same(@this._currentElement, @this._queue.Items[@this._i]))")]
+            [Ensures("Pal.Implies(!Result, @this._i == -2)")]
             public bool MoveNext()
             {
                 if (_version != _queue._version)
@@ -574,10 +595,14 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._currentElement)")]
             public T Current => _currentElement!;
 
+            [Ensures("Pal.Boxes(Result, @this._currentElement)")]
             object? IEnumerator.Current => Current;
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._queue.SpecVersion")]
+            [Ensures("@this._version == @this._queue.SpecVersion && @this._i == -1")]
             void IEnumerator.Reset()
             {
                 if (_version != _queue._version)

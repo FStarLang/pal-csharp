@@ -20,6 +20,12 @@ namespace System.Collections.Generic
         public Seq<T> Items;
         /// <summary>The comparer the set was built with; null means the default comparer.</summary>
         public IEqualityComparer<T>? Comparer;
+        /// <summary>The modification counter an enumerator checks.</summary>
+        public SpecInt Version;
+        /// <summary>The entries in use, live or free: an enumerator walks <c>[0, Slots)</c>.</summary>
+        public SpecInt Slots;
+        /// <summary><c>Prefixes[i]</c> is the live elements among the first <c>i</c> entries, for <c>0 &lt;= i &lt;= Slots</c>.</summary>
+        public Seq<Seq<T>> Prefixes;
     }
 
     [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
@@ -74,6 +80,9 @@ namespace System.Collections.Generic
             Count = _count - _freeCount,
             Items = ItemsOf(Pal.Contents(_entries), _count),
             Comparer = _comparer,
+            Version = _version,
+            Slots = _count,
+            Prefixes = PrefixesOf(Pal.Contents(_entries), _count),
         };
 
         /// <summary>The elements.</summary>
@@ -84,6 +93,15 @@ namespace System.Collections.Generic
         [Spec]
         public IEqualityComparer<T>? SpecComparer => Model.Comparer;
 
+        [Spec]
+        public SpecInt SpecVersion => Model.Version;
+
+        [Spec]
+        public SpecInt SpecSlots => Model.Slots;
+
+        [Spec]
+        public Seq<Seq<T>> SpecPrefixes => Model.Prefixes;
+
         // The hash table's theory (pal/HashSet/HashSetChain.fst, Pulse.Lib.CSharp.HashChain).
         [Spec]
         [PulseBody("HashSetChain.wf $(buckets) $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
@@ -93,6 +111,18 @@ namespace System.Collections.Generic
         [Spec]
         [PulseBody("HashSetChain.items $(entries) $(count)")]
         private static Seq<T> ItemsOf(Seq<Entry> entries, SpecInt count) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("0 <= i && i < entries.Length")]
+        [Ensures("Pal.Implies(entries[i].Next >= -1, HashSet<T>.ItemsOf(entries, i + 1) == Pal.Snoc(HashSet<T>.ItemsOf(entries, i), entries[i].Value))")]
+        [Ensures("Pal.Implies(entries[i].Next < -1, HashSet<T>.ItemsOf(entries, i + 1) == HashSet<T>.ItemsOf(entries, i))")]
+        [PulseBody("HashSetChain.items_step $(entries) $(i)")]
+        [Conditional("PAL")]
+        private static void ItemsStep(Seq<Entry> entries, SpecInt i) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.prefixes $(entries) $(count)")]
+        private static Seq<Seq<T>> PrefixesOf(Seq<Entry> entries, SpecInt count) => throw new InvalidOperationException();
 
         /// <summary>Some element of <paramref name="items"/> is equal to <paramref name="item"/> at <paramref name="comparer"/>.</summary>
         [Spec]
@@ -894,8 +924,11 @@ namespace System.Collections.Generic
 
         #region IEnumerable methods
 
+        [Ensures("ReferenceEquals(Result._hashSet, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((HashSet<T>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._hashSet, @this) && e._version == @this.SpecVersion && e._index == 0))")]
         IEnumerator<T> IEnumerable<T>.GetEnumerator() =>
             Count == 0 ? SZGenericArrayEnumerator<T>.Empty :
             GetEnumerator();
@@ -2072,6 +2105,7 @@ namespace System.Collections.Generic
             private int _index;
             private T _current;
 
+            [Ensures("ReferenceEquals(@this._hashSet, hashSet) && @this._version == hashSet.SpecVersion && @this._index == 0")]
             internal Enumerator(HashSet<T> hashSet)
             {
                 _hashSet = hashSet;
@@ -2080,6 +2114,16 @@ namespace System.Collections.Generic
                 _current = default!;
             }
 
+            [Requires("0 <= @this._index && @this._index <= @this._hashSet.SpecSlots + 1")]
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._hashSet.SpecVersion")]
+            [Ensures("@this._version == @this._hashSet.SpecVersion")]
+            [Ensures("0 <= @this._index && @this._index <= @this._hashSet.SpecSlots + 1")]
+            [Ensures("@this._hashSet.SpecPrefixes.Length == @this._hashSet.SpecSlots + 1")]
+            [Ensures("Pal.Implies(Result, Pal.Old(@this._index) < @this._index && @this._index <= @this._hashSet.SpecSlots && " +
+                "@this._hashSet.SpecPrefixes[@this._index] == Pal.Snoc(@this._hashSet.SpecPrefixes[Pal.Old(@this._index)], @this._current))")]
+            [Ensures("Pal.Implies(!Result, @this._index == @this._hashSet.SpecSlots + 1)")]
+            [Ensures("Pal.Implies(!Result && Pal.Old(@this._index) <= @this._hashSet.SpecSlots, " +
+                "@this._hashSet.SpecPrefixes[@this._hashSet.SpecSlots] == @this._hashSet.SpecPrefixes[Pal.Old(@this._index)])")]
             public bool MoveNext()
             {
                 if (_version != _hashSet._version)
@@ -2087,11 +2131,21 @@ namespace System.Collections.Generic
                     ThrowHelper.ThrowInvalidOperationException_InvalidOperation_EnumFailedVersion();
                 }
 
+                Ghost<int> index0 = _index;
+                Ghost<Seq<T>> before = ItemsOf(Pal.Contents(_hashSet._entries), Math.Min(_index, _hashSet._count));
                 // Use unsigned comparison since we set index to dictionary.count+1 when the enumeration ends.
                 // dictionary.count+1 could be negative if dictionary.count is int.MaxValue
                 while ((uint)_index < (uint)_hashSet._count)
                 {
+                    Pal.Invariant(index0.Value <= _index && _index <= _hashSet._count + 1);
+                    Pal.Invariant(Pal.Implies(index0.Value <= _hashSet._count, _index <= _hashSet._count));
+                    Pal.Invariant(Pal.Implies(!Pal.Returned() && index0.Value <= _hashSet._count,
+                        ItemsOf(Pal.Contents(_hashSet._entries), _index) == before.Value));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && index0.Value < _index &&
+                        ItemsOf(Pal.Contents(_hashSet._entries), _index) == Pal.Snoc(before.Value, _current)));
+                    Pal.Decreases(_hashSet._count - _index);
                     ref Entry entry = ref _hashSet._entries![_index++];
+                    ItemsStep(Pal.Contents(_hashSet._entries), _index - 1);
                     if (entry.Next >= -1)
                     {
                         _current = entry.Value;
@@ -2104,10 +2158,14 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            [Ensures("Pal.Same(Result, @this._current)")]
             public T Current => _current;
 
+            [Ensures("true")]
             public void Dispose() { }
 
+            [Throws(typeof(InvalidOperationException), "@this._index == 0 || @this._index == @this._hashSet.SpecSlots + 1")]
+            [Ensures("Pal.Boxes(Result, @this._current)")]
             object? IEnumerator.Current
             {
                 get
@@ -2121,6 +2179,8 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Throws(typeof(InvalidOperationException), "@this._version != @this._hashSet.SpecVersion")]
+            [Ensures("@this._version == @this._hashSet.SpecVersion && @this._index == 0")]
             void IEnumerator.Reset()
             {
                 if (_version != _hashSet._version)

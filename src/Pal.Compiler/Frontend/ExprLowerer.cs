@@ -123,6 +123,94 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return declared is null ? null : known.MapType(declared);
     }
 
+    private ITypeSymbol? BorrowedIdentity(ExpressionSyntax node, TypeInfo info)
+    {
+        ITypeSymbol? Borrowed(ExpressionSyntax e) =>
+            model.GetTypeInfo(e).Type is { } t && Borrowing.IsBorrowingClass(t, known) ? t : null;
+        return node switch
+        {
+            BinaryExpressionSyntax b when b.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression
+                or SyntaxKind.CoalesceExpression
+                => Borrowed(b.Left) ?? Borrowed(b.Right),
+            IsPatternExpressionSyntax p => Borrowed(p.Expression),
+            ConditionalAccessExpressionSyntax c => Borrowed(c.Expression),
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.NullLiteralExpression) &&
+                info.ConvertedType is { } ct && Borrowing.IsBorrowingClass(ct, known) => ct,
+            _ => null,
+        };
+    }
+
+    private static ExpressionSyntax Unparenthesized(ExpressionSyntax e)
+    {
+        while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+        return e;
+    }
+
+    /// <summary>R29.4. What C# converted to <c>object</c>, when the conversion is not translated.</summary>
+    public static IrExpr Unboxed(IrExpr e) =>
+        e is IrSpecOp { Function: WellKnown.BoxFunction, Args: [var inner] } ? inner : e;
+
+    /// <summary>R29.4. <c>Obj.box v</c>, at <c>v</c>'s machine type.</summary>
+    private static IrExpr Box(IrLoc loc, IrExpr value) =>
+        new IrSpecOp(loc, WellKnown.BoxFunction, [value]) { Type = WellKnown.Obj, MachineArgs = true };
+
+    /// <summary>
+    /// R29.4. An <c>object</c> is held, returned and passed on. Comparing one, testing it
+    /// for null, or converting it back observes what the model leaves abstract.
+    /// </summary>
+    private string? ObservedObject(ExpressionSyntax node, TypeInfo info)
+    {
+        bool IsObj(ExpressionSyntax e) => WellKnown.IsObj(known.MapType(model.GetTypeInfo(e).Type));
+        return node switch
+        {
+            BinaryExpressionSyntax b when b.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression
+                    or SyntaxKind.CoalesceExpression && (IsObj(b.Left) || IsObj(b.Right))
+                => "compares an `object`",
+            BinaryExpressionSyntax b when b.Kind() is SyntaxKind.AsExpression or SyntaxKind.IsExpression && IsObj(b.Left)
+                => "tests the type of an `object`",
+            IsPatternExpressionSyntax p when IsObj(p.Expression) => "matches an `object`",
+            ConditionalAccessExpressionSyntax c when IsObj(c.Expression) => "tests an `object` for null",
+            CastExpressionSyntax c when IsObj(c.Expression) && !WellKnown.IsObj(known.MapType(info.Type))
+                => "converts an `object` back",
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.NullLiteralExpression) && !ReferenceEqualityOperand(l) &&
+                WellKnown.IsObj(known.MapType(info.ConvertedType)) => "is a null `object`",
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// R29.4. C# types the operands of the predefined reference <c>==</c> as <c>object</c>;
+    /// that is the operator's signature, not a conversion of the operand.
+    /// The same is true of a whole specification, which the binding shim (SpecBinder)
+    /// returns as an <c>object</c>.
+    /// </summary>
+    private bool ReferenceEqualityOperand(ExpressionSyntax node)
+    {
+        SyntaxNode? parent = node.Parent;
+        while (parent is ParenthesizedExpressionSyntax) parent = parent.Parent;
+        return parent is BinaryExpressionSyntax b && b.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression ||
+               SpecPosition && parent is ReturnStatementSyntax ||
+               RegionIntrinsicOperand(parent);
+    }
+
+    /// <summary>
+    /// R27.7. The region intrinsics (`Pal.Tree`, `Pal.Unshared`, ...) take any reference as
+    /// <c>object</c> so that one signature serves every <c>[Region]</c> class; the argument is
+    /// the region pointer itself, never a boxing.
+    /// </summary>
+    private bool RegionIntrinsicOperand(SyntaxNode? parent) =>
+        SpecPosition && parent is ArgumentSyntax { Parent.Parent: InvocationExpressionSyntax inv } &&
+        model.GetSymbolInfo(inv).Symbol is IMethodSymbol { ContainingType.Name: "Pal" } m &&
+        m.ContainingType.ContainingNamespace?.Name == "PalLang" &&
+        m.Name is nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
+            or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped);
+
+    private IrExpr Refused(string id, IrLoc loc, string message)
+    {
+        diagnostics.Error(id, loc, message);
+        return new IrLiteral(loc, null);
+    }
+
     public IrExpr Lower(ExpressionSyntax node)
     {
         var loc = Locations.From(node);
@@ -158,6 +246,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", [])
                 { TypeArgs = nullCmp.Args, Type = nullCmp };
 
+        // R29.3. A borrowing class is its record: whether a reference to one is null, or
+        // is the same as another, is not in the model.
+        if (BorrowedIdentity(node, info) is { } observed)
+            return Refused("PALCS0736", loc,
+                $"`{node}` observes the identity or nullness of a `{observed.Name}`, a class that " +
+                "borrows and is translated as the record of its fields; neither is in that model " +
+                "(doc/translation.md R29.3).");
+
+        if (ObservedObject(node, info) is { } what)
+            return Refused("PALCS0737", loc,
+                $"`{node}` {what}. An `object` (or enumerator interface) value is translated as " +
+                "an abstract box: it may be returned and passed on, and nothing else (doc/translation.md R29.4).");
+
         IrExpr result = node switch
         {
             // R17.5. The implicit `T[]` -> `Span<T>` conversion is a *borrow*, so it is
@@ -167,6 +268,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                    known.IsAnySpan(info.ConvertedType)
                 => LowerImplicitBorrow(node, loc),
             ParenthesizedExpressionSyntax p => Lower(p.Expression),
+            // R29.3b. `cache ??= new View(this)` is the view it would return.
+            AssignmentExpressionSyntax fill when Borrowing.IsViewCacheFill(fill, model, known)
+                => Lower(fill.Right),
+            AssignmentExpressionSyntax cache when cache.IsKind(SyntaxKind.CoalesceAssignmentExpression) &&
+                model.GetSymbolInfo(cache.Left).Symbol is IFieldSymbol { Type: var ct } &&
+                Borrowing.IsBorrowingClass(ct, known)
+                => Refused("PALCS0735", loc,
+                    $"`{cache}` fills a cache of the view `{ct.Name}`, which is in no representation " +
+                    "(doc/translation.md R29.3b). Such a fill is translated as the view it yields only " +
+                    "when it is `f ??= new V(this)` and every write of `f` is a fill of that form."),
             // R24.15. `typeof(T)` is the opaque handle of R24.13's `type_of`, when `System.Type`
             // has a binding (the hashing harness's) to ask it questions with.
             TypeOfExpressionSyntax typeOf when known.MapType(model.GetTypeInfo(typeOf.Type).Type) is { } denoted &&
@@ -197,13 +308,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R26.8. A pair is built by F*'s constructor; its components keep their types.
             TupleExpressionSyntax t when t.Arguments.Count == 2 &&
                 known.MapType(info.ConvertedType ?? info.Type) is IrUserSpecType { FStar: WellKnown.TupleType } pair =>
-                new IrSpecOp(loc, "Mktuple2",
-                    [ToDeclared(Lower(t.Arguments[0].Expression), pair.Args[0]),
-                     ToDeclared(Lower(t.Arguments[1].Expression), pair.Args[1])])
-                    { MachineArgs = true, Type = pair },
+                Pair(loc, pair, t.Arguments[0].Expression, t.Arguments[1].Expression),
             ThisExpressionSyntax when model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { } rself &&
                                       known.IsRegionClass(rself) => RegionThis(loc, rself),
-            ThisExpressionSyntax => new IrVar(loc, Names.This),
+            ThisExpressionSyntax => Borrow is not null ? SelfExpr(loc) : new IrVar(loc, Names.This),
             // R23.13. The empty collection expression at a one-dimensional array type is
             // `Array.Empty<T>()` (R23.1).
             CollectionExpressionSyntax { Elements.Count: 0 } ce when !SpecPosition &&
@@ -299,6 +407,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (type is not null and not IrOptionType && result is not IrNull &&
             known.MapType(info.ConvertedType) is IrOptionType wrapped)
             result = new IrOptionOp(loc, OptionOpKind.Some, result) { Type = wrapped };
+
+        // R29.4. A conversion to `object` or to an enumerator interface -- a boxing, or a
+        // reference seen at an interface type -- is `box`, at exactly the positions C#
+        // inserts it.
+        // `(x)` and `x!` are transparent, and C# reports the conversion on the operand too.
+        if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) &&
+            node.Parent is not (ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression }) &&
+            WellKnown.IsObj(known.MapType(info.ConvertedType)))
+            result = Box(loc, result);
 
         // R9.15. C# inserts a reference conversion silently wherever a derived reference
         // meets a base-typed context — an argument, a `return`, an assignment. The scheme's
@@ -420,7 +537,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case CastExpressionSyntax c: return IsMessageArgument(c.Expression);
             case IdentifierNameSyntax:
                 return model.GetSymbolInfo(e).Symbol is IParameterSymbol or ILocalSymbol;
-            case MemberAccessExpressionSyntax:
+            case MemberAccessExpressionSyntax ma:
+                // Bound ignoring accessibility (R24.3), `SR` may name the program's and a
+                // framework assembly's internal class at once, and then binds to neither:
+                // a member of every candidate class `SR` is a resource string.
+                if (model.GetSymbolInfo(ma.Expression) is { Symbol: null, CandidateReason: CandidateReason.Ambiguous } amb &&
+                    amb.CandidateSymbols.All(x => x is INamedTypeSymbol { Name: "SR" }))
+                    return true;
                 return model.GetSymbolInfo(e).Symbol is IPropertySymbol { IsStatic: true } sr &&
                        sr.ContainingType.Name == "SR";
             case InvocationExpressionSyntax inv when model.GetSymbolInfo(inv).Symbol is IMethodSymbol m:
@@ -437,6 +560,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        // R29.1. `new KeyValuePair<K, V>(k, v)` is the pair `(k, v)`.
+        // R29.4. So is `new DictionaryEntry(k, v)`, a pair of boxes.
+        if (model.GetTypeInfo(node).Type is { } kvpType &&
+            (WellKnown.IsKeyValuePair(kvpType) || WellKnown.IsDictionaryEntry(kvpType)) &&
+            node is { Initializer: null, ArgumentList.Arguments.Count: 2 } &&
+            known.MapType(kvpType) is IrUserSpecType kvpPair)
+            return Pair(loc, kvpPair, node.ArgumentList.Arguments[0].Expression, node.ArgumentList.Arguments[1].Expression);
+
         // R21.1. A case record is built by its F* constructor.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol caseType &&
             known.CaseConstructor(caseType) is { } caseCtor)
@@ -589,6 +720,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrAlloc(loc, plain.Name, record) { Type = known.MapType(plain) ?? new IrClassType(plain.Name) };
         }
 
+        // R28.4. `new Enumerator(this)`: the constructor of a borrowing struct is a method
+        // of the borrowed object's class, which returns the struct. R29.3: so is a
+        // borrowing class's, which returns the record of the new object's fields.
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol bnamed &&
+            model.GetSymbolInfo(node).Symbol is IMethodSymbol bctor && Borrowing.IsMember(bctor, known))
+            return BorrowingConstruction(node, bctor, bnamed, loc);
+
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
             return Unsupported(node, loc);
 
@@ -671,7 +809,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 fields.Add(supplied with { FieldType = declared });
                 continue;
             }
-            if (Zero(loc, type) is not { } zero)
+            // R28.5. A borrowing struct's constructor leaves a field of type `T` at the
+            // caller's default (R14.2a).
+            if ((Borrow is not null ? DefaultValue(type, loc) : Zero(loc, type)) is not { } zero)
             {
                 diagnostics.Unsupported(loc, $"The default value of `{name}.{field}`");
                 return new IrLiteral(loc, null);
@@ -710,7 +850,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     public IrExpr? DefaultValue(ITypeSymbol type, IrLoc loc)
     {
         if (Zero(loc, type) is { } zero) return zero;
-        if (type is ITypeParameterSymbol or INamedTypeSymbol { IsTupleType: true } &&
+        if ((type is ITypeParameterSymbol || WellKnown.IsPairType(type)) &&
             known.MapType(type) is { } tpType)
         {
             foreach (var tp in WellKnown.DefaultedIn(type)) DefaultedTypeParameters.Add(tp.Name);
@@ -1038,6 +1178,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal))
             return new IrResult(loc);
 
+        // R28.2. Inside a borrowing struct's member.
+        if (BorrowedIdentifier(symbol, node, loc) is { } borrowed) return borrowed;
+
         // R21.3. A pattern variable is the expression it was bound to.
         // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
         if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
@@ -1078,6 +1221,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // that style choices do not reach the emitter.
             IPropertySymbol rcp when known.IsRegionClass(rcp.ContainingType) &&
                                      ComputedRead(rcp, loc, RegionThis(loc, rcp.ContainingType)) is { } rcall => rcall,
+            IPropertySymbol { GetMethod: { } selfGetter } when BorrowingSelfCall(selfGetter, [], loc) is { } selfRead
+                => selfRead,
             IPropertySymbol prop when ComputedRead(prop, loc, new IrVar(loc, Names.This)) is { } call
                 => call,
             _ => Unsupported(node, loc),
@@ -1097,6 +1242,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (Declarations.Has(prop, known.SpecAttribute)) return null;
         if (Declarations.Has(prop, known.ModelAttribute)) return null;
         if (Declarations.KindOf(getter, known) is null) return null;
+        // R28.6. A borrowing member is called only as R29.4's self-call.
+        if (Borrowing.IsMember(getter, known)) return null;
 
         return new IrCall(loc, Naming.Of(getter), [receiver])
         {
@@ -1136,7 +1283,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             HasReceiver = true,
             ParamTypes = Declarations.ParamTypes(setter, known, true),
             TypeArguments = known.TypeArguments(setter),
-            MutatesReceiver = !Declarations.IsReadOnly(setter, model.Compilation),
+            MutatesReceiver = !Declarations.IsReadOnly(setter, model.Compilation, known),
         };
     }
 
@@ -1146,6 +1293,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var receiverType = model.GetTypeInfo(node.Expression).Type;
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
+        if (BorrowedMember(node, symbol, loc) is { } borrowedMember) return borrowedMember;
         // R25.1. `Comparer<T>.Default` is the default comparer at `T`.
         if (symbol is IPropertySymbol { IsStatic: true, Name: "Default" } dp &&
             Sorted.IsComparerSymbol(dp.ContainingType) &&
@@ -1158,6 +1307,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             known.MapType(component.Type) is { } componentType)
             return new IrSpecOp(loc, (component.CorrespondingTupleField ?? component).Name == "Item1" ? "fst" : "snd",
                 [Lower(node.Expression)]) { MachineArgs = true, Type = componentType };
+        // R29.1. `kvp.Key` and `kvp.Value` are the pair's projections.
+        if (symbol is IPropertySymbol { IsStatic: false, Name: "Key" or "Value" } kvpMember &&
+            (WellKnown.IsKeyValuePair(kvpMember.ContainingType) || WellKnown.IsDictionaryEntry(kvpMember.ContainingType)) &&
+            known.MapType(kvpMember.Type) is { } kvpComponent)
+            return new IrSpecOp(loc, kvpMember.Name == "Key" ? "fst" : "snd",
+                [Lower(node.Expression)]) { MachineArgs = true, Type = kvpComponent };
         // R21.8. A constant of a `[SpecType]` enum is its constructor.
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []) { EnumCase = true };
@@ -1269,7 +1424,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
         }
 
-        if (symbol is IFieldSymbol or IPropertySymbol && receiverType?.TypeKind == TypeKind.Struct)
+        if (symbol is IFieldSymbol or IPropertySymbol &&
+            (receiverType?.TypeKind == TypeKind.Struct || Borrowing.IsBorrowingClass(receiverType, known)))
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
 
         // `this.f` and a bare `f` are the same reference, so they must lower to the same
@@ -1345,6 +1501,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // requires of a style choice. In a specification it is not, and falls through
             // to PALCS0523 below: a contract reads the model, and a computed property is
             // code over the representation, exactly as an ordinary method is.
+            if (symbol is IPropertySymbol { GetMethod: { } selfGetter } && node.Expression is ThisExpressionSyntax &&
+                BorrowingSelfCall(selfGetter, [], loc) is { } selfRead)
+                return selfRead;
             if (symbol is IPropertySymbol prop
                 && ComputedRead(prop, loc, Lower(node.Expression)) is { } call)
                 return call;
@@ -1888,14 +2047,57 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return n;
     }
 
+    /// <summary>R26.8/R29.1. A pair is built by F*'s constructor; its components keep their types.</summary>
+    private IrExpr Pair(IrLoc loc, IrUserSpecType pair, ExpressionSyntax first, ExpressionSyntax second) =>
+        new IrSpecOp(loc, "Mktuple2",
+            [ToDeclared(Lower(first), pair.Args[0]), ToDeclared(Lower(second), pair.Args[1])])
+            { MachineArgs = true, Type = pair };
+
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return Unsupported(node, loc);
 
         var args = node.ArgumentList.Arguments;
 
+        // R29.1. `KeyValuePair.Create(k, v)`.
+        if (method is { IsStatic: true, Name: "Create", Parameters.Length: 2 } &&
+            method.ContainingType?.ToDisplayString() == "System.Collections.Generic.KeyValuePair" &&
+            known.MapType(method.ReturnType) is IrUserSpecType created)
+            return Pair(loc, created, args[0].Expression, args[1].Expression);
+
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+
+        // R28.3. Reference identity, in a contract.
+        if (SpecPosition && method is { IsStatic: true, Name: "ReferenceEquals", Parameters.Length: 2 } &&
+            method.ContainingType?.SpecialType == SpecialType.System_Object)
+            return LowerReferenceEquals(node, loc);
+
+        // R28.6. A borrowing struct's member is translated, and called from nowhere: what a
+        // call would pass for the borrowed object is not designed.
+        // R29.4. `((I)this).M()` in a sealed borrowing type is the call of its own
+        // implementation of `I.M`: no subclass can re-implement the interface.
+        if (Borrow is { Struct: { } selfType } &&
+            node.Expression is MemberAccessExpressionSyntax { Expression: var castee } &&
+            Unparenthesized(castee) is CastExpressionSyntax { Expression: var casted } &&
+            Unparenthesized(casted) is ThisExpressionSyntax &&
+            (selfType.IsSealed || selfType.TypeKind == TypeKind.Struct) &&
+            method.ContainingType?.TypeKind == TypeKind.Interface &&
+            selfType.FindImplementationForInterfaceMember(method) is IMethodSymbol impl &&
+            BorrowingSelfCall(impl, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } dispatched)
+            return dispatched;
+        if (Borrowing.IsMember(method, known) && method.MethodKind != MethodKind.Constructor &&
+            (node.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
+            BorrowingSelfCall(method, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } selfCall)
+            return selfCall;
+        if (Borrowing.IsMember(method, known) && method.MethodKind != MethodKind.Constructor)
+        {
+            diagnostics.Error("PALCS0731", loc,
+                $"A call to `{method.ContainingType!.Name}.{method.Name}`, a member of a struct that " +
+                "borrows its collection. Such members are verified, but calling one from verified code " +
+                "is not supported (doc/translation.md R28.6).");
+            return new IrLiteral(loc, null);
+        }
 
         // R26.1. Calling a callable delegate, `d(x)` or `d.Invoke(x)`, is applying the pure
         // function that models it, in code and in a contract alike.
@@ -2137,7 +2339,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ParamTypes = [.. Declarations.ParamTypes(method, known, receiver is not null),
                           .. context.Select(f => (IrType?)known.MapType(Declarations.ContextType(f)))],
             TypeArguments = known.TypeArguments(method),
-            MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation),
+            MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation, known),
             DoesNotReturn = method.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() ==
                 "System.Diagnostics.CodeAnalysis.DoesNotReturnAttribute"),
         };
@@ -2233,6 +2435,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case nameof(PalLang.Pal.Iff): return new IrBinary(loc, BinOp.Iff, Arg(0), Arg(1));
             // R15.6. The same equality `==` denotes everywhere else in spec position.
             case nameof(PalLang.Pal.Same): return new IrBinary(loc, BinOp.Eq, Arg(0), Arg(1));
+            // R29.4. `o` is the box of `v`: the only fact there is about an `object`.
+            case nameof(PalLang.Pal.Boxes):
+            {
+                var boxed = Arg(1);
+                return new IrBinary(loc, BinOp.Eq, Arg(0), WellKnown.IsObj(boxed.Type) ? boxed : Box(loc, boxed));
+            }
             case nameof(PalLang.Pal.Contents): return new IrContents(loc, Arg(0));
             // R20.5. The position of a `foreach` iteration variable: the loop's counter.
             case nameof(PalLang.Pal.Index):

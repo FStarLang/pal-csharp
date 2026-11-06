@@ -130,3 +130,21 @@ let remove_ok (#t: Type0) (bs bs': seq I32.t) (es es': seq (entry t)) (n fl fc: 
                    mem c (items es n) x /\ removed c (items es n) (items es' n) x)
   = HC.remove_ok (ops t) (eff c) bs bs' es es' n fl fc x i q last;
     HC.wf_count (ops t) (eff c) bs' es' n i (fc + 1)
+
+(* ---------------------------------------------------------------------------------- *)
+(* Enumerator *)
+
+/// `prefixes es n` at `i` is the live elements among the first `i` entries, `i <= n`.
+let prefixes (#t: Type0) (es: seq (entry t)) (n: int) : seq (seq t) =
+  if 0 <= n && n <= Seq.length es
+  then Seq.init (n + 1) (fun (i: nat{i < n + 1}) -> items es i)
+  else Seq.empty
+
+/// One step of the walk: entry `i` adds its value when it is live.
+let items_step (#t: Type0) (es: seq (entry t)) (i: int)
+  : Lemma (requires 0 <= i /\ i < Seq.length es)
+          (ensures items es (i + 1) ==
+                   (if I32.v (Seq.index es i).E.fld_Next >= -1
+                    then Seq.snoc (items es i) (Seq.index es i).E.fld_Value
+                    else items es i))
+  = ()

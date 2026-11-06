@@ -20,7 +20,15 @@ those files to Pulse and checks them with F*. The files keep their upstream path
 | `SortedList<TKey,TValue>` | `System.Collections/.../Generic/SortedList.cs` | 22 members and the class invariant (keys strictly sorted) |
 | `HashSet<T>` | `System.Private.CoreLib/.../Generic/HashSet.cs` | `Clear`, `Count`, `Contains`, `FindItemIndex`, `Remove`, against an invariant that the hash chains are well formed |
 
-Members that are not annotated, and why, are recorded in `doc/translation.md` §22–§26.
+**Enumerators and views.** Every collection's enumerator is verified as well:
+`GetEnumerator`, `MoveNext`, `Current`, `Reset` and `Dispose`, plus the boxing
+`IEnumerator.Current` and the explicit `IEnumerable<T>.GetEnumerator`. When the
+collection's version is unchanged, `MoveNext` steps through the model; when it has changed,
+`MoveNext` throws. Also verified: `PriorityQueue.UnorderedItemsCollection`, and
+`SortedList`'s `KeyList`/`ValueList` views with their enumerators. In all, 101 enumerator
+and view members are verified (`doc/translation.md` §28–§29).
+
+Members that are not annotated, and why, are recorded in `doc/translation.md` §22–§29.
 The other `.cs` files under `src/` are unmodified upstream files that the annotated ones
 need in order to compile.
 
@@ -31,7 +39,8 @@ Besides the pal-csharp attributes and `Pal.*` ghost calls:
 - each collection's version counter is marked `[Wrapping]`, because it is allowed to
   overflow;
 - in `List<T>.RemoveAll`, two one-line `while` loops were given block bodies, so that they
-  can hold loop invariants.
+  can hold loop invariants;
+- `Stack<T>.Enumerator.ThrowInvalidVersion` is marked `[DoesNotReturn]`.
 
 ## Layout
 

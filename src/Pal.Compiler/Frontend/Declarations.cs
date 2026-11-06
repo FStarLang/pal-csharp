@@ -92,13 +92,21 @@ public static class Declarations
             known.IsRegionClass(method.ContainingType))
             return CalleeKind.Method;
 
+        // R28.2. A member of a struct that borrows an enclosing object is a member of that
+        // object's class: it carries the class's invariant, read-only.
+        if (Borrowing.IsMember(method, known)) return CalleeKind.Method;
+
         // §4.5. An instance method or constructor of a translated class: it carries the
         // object's invariant, which is what makes it translatable at all. R9.20 adds the
         // getter of a computed property, which is a nullary instance method that C# spells
         // differently; every rule downstream of here already speaks about it.
-        return method is { IsStatic: false,
-                           MethodKind: MethodKind.Ordinary or MethodKind.Constructor
-                                       or MethodKind.PropertyGet or MethodKind.PropertySet }
+        // R29.4. An explicit interface implementation (`IEnumerator IEnumerable.GetEnumerator()`)
+        // is one when it carries a contract: nothing calls it, but it is code to verify.
+        return (method is { IsStatic: false,
+                            MethodKind: MethodKind.Ordinary or MethodKind.Constructor
+                                        or MethodKind.PropertyGet or MethodKind.PropertySet } ||
+                method is { IsStatic: false, MethodKind: MethodKind.ExplicitInterfaceImplementation } &&
+                IsAnnotated(method, known))
                && method.ContainingType is { TypeKind: TypeKind.Class } owner
                && known.HasModel(owner)
             ? CalleeKind.Method
@@ -127,11 +135,11 @@ public static class Declarations
     /// permissive direction would be unsound — a caller would be told the model did not
     /// move when it did — so every case that is not demonstrably read-only is not.
     /// </remarks>
-    public static bool IsReadOnly(IMethodSymbol method, Compilation compilation) =>
-        IsReadOnly(method, compilation, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default));
+    public static bool IsReadOnly(IMethodSymbol method, Compilation compilation, WellKnown? known = null) =>
+        IsReadOnly(method, compilation, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
 
     private static bool IsReadOnly(
-        IMethodSymbol method, Compilation compilation, HashSet<IMethodSymbol> visiting)
+        IMethodSymbol method, Compilation compilation, HashSet<IMethodSymbol> visiting, WellKnown? known)
     {
         if (method.MethodKind == MethodKind.Constructor) return false;
 
@@ -152,7 +160,7 @@ public static class Declarations
             if (syntax is null || !compilation.ContainsSyntaxTree(syntax.SyntaxTree)) return false;
             var model = compilation.GetSemanticModel(syntax.SyntaxTree);
 
-            return !Mutates(syntax, model, visiting);
+            return !Mutates(syntax, model, visiting, known);
         }
         finally
         {
@@ -166,14 +174,18 @@ public static class Declarations
     /// its model as a scalar field is (R3.10a) — and calling an instance method or handing
     /// an owned array to a callee that might write it.
     /// </summary>
-    public static bool Mutates(SyntaxNode syntax, SemanticModel model) =>
-        Mutates(syntax, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default));
+    public static bool Mutates(SyntaxNode syntax, SemanticModel model, WellKnown? known = null) =>
+        Mutates(syntax, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
 
     private static bool Mutates(
-        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting)
+        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known)
     {
         foreach (var node in syntax.DescendantNodes())
         {
+            // R29.3b. Filling a view cache writes a field outside the representation.
+            if (known is not null && node is AssignmentExpressionSyntax fill &&
+                Borrowing.IsViewCacheFill(fill, model, known))
+                continue;
             var target = node switch
             {
                 AssignmentExpressionSyntax a => a.Left,
@@ -202,14 +214,14 @@ public static class Declarations
             // R22.21. Assigning an instance property is a call of its setter.
             if (target is not null &&
                 model.GetSymbolInfo(target).Symbol is IPropertySymbol { IsStatic: false, SetMethod: { } setter } &&
-                !IsReadOnly(setter, model.Compilation, visiting))
+                !IsReadOnly(setter, model.Compilation, visiting, known))
                 return true;
 
             if (node is InvocationExpressionSyntax call)
             {
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
-                    !IsReadOnly(callee, model.Compilation, visiting))
+                    !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 
                 // An owned array handed to a callee may come back written. Assuming it
