@@ -1657,7 +1657,12 @@ namespace System.Collections.Generic
             return result.UniqueCount < Count && result.UnfoundCount == 0;
         }
 
-        public bool SetEquals(IEnumerable<T> other)
+        // Two strictly sorted sequences are position by position equal under the comparer
+        // exactly when they hold the same set (`SetCompare.same_keys_members`).
+        [Requires("@this.SpecComparer == other.SpecComparer")]
+        [Ensures("Result == SpecSetCompare.SameKeys(@this.SpecComparer, @this.SpecItems, other.SpecItems)")]
+        [Rlimit(8)]
+        public bool SetEquals([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
 
@@ -1668,8 +1673,29 @@ namespace System.Collections.Generic
                 Enumerator theirs = asSorted.GetEnumerator();
                 bool mineEnded = !mine.MoveNext();
                 bool theirsEnded = !theirs.MoveNext();
+                SpecSetCompare.SameKeysWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 while (!mineEnded && !theirsEnded)
                 {
+                    Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
+                                  (Pal.Returned()
+                                      ? !Pal.ReturnValue<bool>() && !SpecSetCompare.SameKeys(this.SpecComparer, this.SpecItems, asSorted.SpecItems)
+                                      : Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
+                                        Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
+                                        mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
+                                        theirs.SpecPending == Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length) &&
+                                        Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
+                                            Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                                     this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
+                                        Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < asSorted.SpecItems.Length &&
+                                            Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                                     asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
+                                        SpecSetCompare.SameKeys(this.SpecComparer, this.SpecItems, asSorted.SpecItems) ==
+                                        SpecSetCompare.SameKeys(this.SpecComparer,
+                                            Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1), this.SpecItems.Length),
+                                            Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1), asSorted.SpecItems.Length))));
+                    Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1));
+                    SpecSetCompare.SameKeysStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
+                        this.SpecItems.Length - mine.SpecPending.Length - 1, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1);
                     if (Comparer.Compare(mine.Current, theirs.Current) != 0)
                     {
                         return false;
@@ -1677,8 +1703,15 @@ namespace System.Collections.Generic
                     mineEnded = !mine.MoveNext();
                     theirsEnded = !theirs.MoveNext();
                 }
+                SpecSetCompare.SameKeysStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
+                    this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1),
+                    asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1));
                 return mineEnded && theirsEnded;
             }
+
+            // The contract requires `other` to be a SortedSet<T> with this set's comparer,
+            // so the branch above was taken (doc/translation.md R27.46-R27.49).
+            Pal.Unreachable();
 
             // Worst case: I mark every element in my set and see if I've counted all of them. O(size of the other collection).
             ElementCount result = CheckUniqueAndUnfoundElements(other, true);
@@ -2356,6 +2389,8 @@ namespace System.Collections.Generic
             private readonly bool _reverse;
 
             [Spec] internal Seq<T> SpecPending => SpecWalk.Pending<Node, T>(_reverse, Pal.Heap<Node>(), _stack.Items);
+            [Spec] internal SpecTree<(T, bool)> SpecCurrentTree => Pal.Tree<(T, bool)>(_current);
+            [Spec] internal bool SpecCurrentIn => _current != null && Pal.InRegion(_current);
             [Spec] internal bool SpecReady =>
                 SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), _stack.Items) &&
                 SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;

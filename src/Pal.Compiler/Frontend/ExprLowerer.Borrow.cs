@@ -33,6 +33,12 @@ public sealed record BorrowContext(
     /// </summary>
     public string SelfName { get; init; } = Self;
 
+    /// <summary>
+    /// R27.49. The IR name of the borrowed object: <c>this</c>, or, for a struct an owner's
+    /// method holds of another object of its class, that object's parameter.
+    /// </summary>
+    public string OwnerName { get; init; } = Names.This;
+
     /// <summary>R27.41. The local each owned field's object is held in, when not the parameter's name.</summary>
     public ImmutableDictionary<string, string> OwnedNames { get; init; } = ImmutableDictionary<string, string>.Empty;
 
@@ -67,7 +73,11 @@ public sealed partial class ExprLowerer
     /// </summary>
     public bool BorrowBody { get; init; }
 
-    private IrVar BorrowedObject(IrLoc loc) => new(loc, Names.This) { Type = Borrow!.OwnerType };
+    private IrVar BorrowedObject(IrLoc loc) => new(loc, Borrow!.OwnerName) { Type = Borrow!.OwnerType };
+
+    /// <summary>R27.49. The heap of a region class: the borrowed object's, inside a held struct of another owner.</summary>
+    private string HeapVarName(string regionClass) =>
+        Region.HeapNameOf(regionClass, Borrow?.OwnerName ?? Names.This);
 
     private IrVar OwnedObject(IFieldSymbol f, IrLoc loc) =>
         new(loc, Borrow!.OwnedLocal(f)) { Type = known.MapType(f.Type) };
@@ -508,7 +518,7 @@ public static class BorrowFacts
         var self = new IrVar(loc, borrow.SelfName) { Type = borrow.StructType };
         yield return new IrBinary(loc, BinOp.Eq,
             new IrField(loc, self, borrow.Owner.Name) { Type = borrow.OwnerType },
-            new IrRefOf(loc, Pal.Compiler.Emit.Names.This) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
+            new IrRefOf(loc, borrow.OwnerName) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
         // R27.37. Each owned field holds its parameter.
         foreach (var f in borrow.Owned)
             if (known.MapType(f.Type) is IrClassType ot)

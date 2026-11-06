@@ -2757,7 +2757,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         "(doc/translation.md R27.21).");
                     return new IrLiteral(loc, null);
                 }
-                return new IrVar(loc, Region.HeapName(hc.Name)) { Type = known.MapType(method.ReturnType) };
+                return new IrVar(loc, HeapVarName(hc.Name)) { Type = known.MapType(method.ReturnType) };
             }
             case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
                 or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped)
@@ -2774,7 +2774,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         "(doc/translation.md R27.7).");
                     return new IrLiteral(loc, null);
                 }
-                var heap = new IrVar(loc, Region.HeapName(rc.Name)) { Type = IrPrim.SpecIntType };
+                var heap = new IrVar(loc, HeapVarName(rc.Name)) { Type = IrPrim.SpecIntType };
                 if (method.Name == nameof(PalLang.Pal.InRegion))
                     return new IrSpecOp(loc, $"{Region.Module}.mem", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };

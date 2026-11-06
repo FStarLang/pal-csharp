@@ -89,8 +89,10 @@ public static class Normalize
                 case IrIf f when LoopReturn(f):
                     result.Add(f with
                     {
-                        Then = new IrBlock(f.Then.Loc, Sink([.. Stmts(f.Then), .. rest])),
-                        Else = new IrBlock(f.Else?.Loc ?? f.Loc, Sink([.. Stmts(f.Else), .. rest])),
+                        // A branch that already returns at its end is not followed by `rest`.
+                        Then = new IrBlock(f.Then.Loc, Sink([.. Stmts(f.Then), .. (EndsInReturn(f.Then) ? ImmutableArray<IrStmt>.Empty : rest)])),
+                        Else = new IrBlock(f.Else?.Loc ?? f.Loc,
+                            Sink([.. Stmts(f.Else), .. (f.Else is not null && EndsInReturn(f.Else) ? ImmutableArray<IrStmt>.Empty : rest)])),
                     });
                     return [.. result];
                 default:

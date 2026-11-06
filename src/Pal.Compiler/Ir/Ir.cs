@@ -614,6 +614,9 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     /// holds it, the local the object is held in, and its class.
     /// </summary>
     public ImmutableArray<(string Field, string Local, IrClassType Type)> Owned { get; init; } = [];
+
+    /// <summary>R27.49. For a borrowing struct held of another object of the class: that object's parameter.</summary>
+    public string? HeldOwner { get; init; }
 }
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);

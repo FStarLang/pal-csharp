@@ -398,6 +398,7 @@ public sealed class WalkSet<T>
     [Ensures("ReferenceEquals(Result._tree, @this) && Result._version == @this.SpecVersion && !Result._reverse")]
     [Ensures("SpecWalk.Walkable<WalkSet<T>.WNode, T>(Pal.Heap<WalkSet<T>.WNode>(), Result._stack.Items)")]
     [Ensures("SpecWalk.Pending<WalkSet<T>.WNode, T>(false, Pal.Heap<WalkSet<T>.WNode>(), Result._stack.Items) == @this.SpecItems")]
+    [Ensures("Result._stack.SpecCapacity == @this.SpecCount")]
     public Enumerator GetEnumerator() => new Enumerator(this, false);
 
     // R27.41. A method that holds an enumerator of its own set and calls its members.
@@ -415,6 +416,82 @@ public sealed class WalkSet<T>
             n++;
         }
         return n;
+    }
+
+    // R27.49. A method that holds an enumerator of its own set and one of another set.
+    [Ensures("Result <= @this.SpecItems.Length && Result <= other.SpecItems.Length")]
+    [Ensures("Result == @this.SpecItems.Length || Result == other.SpecItems.Length")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(8)]
+    internal int CountPairs(WalkSet<T> other)
+    {
+        Enumerator mine = GetEnumerator();
+        Enumerator theirs = other.GetEnumerator();
+        int n = 0;
+        bool mineEnded = !mine.MoveNext();
+        bool theirsEnded = !theirs.MoveNext();
+        while (!mineEnded && !theirsEnded)
+        {
+            Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
+                          n + (mineEnded ? 0 : 1) + mine.SpecPending.Length == this.SpecItems.Length &&
+                          n + (theirsEnded ? 0 : 1) + theirs.SpecPending.Length == other.SpecItems.Length &&
+                          (!mineEnded || mine.SpecPending.Length == 0) && (!theirsEnded || theirs.SpecPending.Length == 0));
+            Pal.Decreases(this.SpecItems.Length - n);
+            n++;
+            mineEnded = !mine.MoveNext();
+            theirsEnded = !theirs.MoveNext();
+        }
+        return n;
+    }
+
+    // R27.49. Two enumerators walked in step, declared in a nested block: the sets'
+    // in-order sequences compare equal position by position.
+    [Ensures("Pal.Implies(walk, Result == SpecSetCompare.SameKeys(c, @this.SpecItems, other.SpecItems))")]
+    [Rlimit(8)]
+    internal bool SameKeysAs(WalkSet<T> other, IComparer<T> c, bool walk)
+    {
+        if (walk)
+        {
+            Enumerator mine = GetEnumerator();
+            Enumerator theirs = other.GetEnumerator();
+            bool mineEnded = !mine.MoveNext();
+            bool theirsEnded = !theirs.MoveNext();
+            SpecSetCompare.SameKeysWhole(c, this.SpecItems, other.SpecItems);
+            while (!mineEnded && !theirsEnded)
+            {
+                Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
+                              (Pal.Returned()
+                                  ? !Pal.ReturnValue<bool>() && !SpecSetCompare.SameKeys(c, this.SpecItems, other.SpecItems)
+                                  : Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
+                                    Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
+                                    mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
+                                    theirs.SpecPending == Pal.Slice(other.SpecItems, other.SpecItems.Length - theirs.SpecPending.Length, other.SpecItems.Length) &&
+                                    Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
+                                        Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                                 this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
+                                    Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < other.SpecItems.Length &&
+                                        Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, other.SpecItems[other.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                                 other.SpecItems[other.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
+                                    SpecSetCompare.SameKeys(c, this.SpecItems, other.SpecItems) ==
+                                    SpecSetCompare.SameKeys(c,
+                                        Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1), this.SpecItems.Length),
+                                        Pal.Slice(other.SpecItems, other.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1), other.SpecItems.Length))));
+                Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1));
+                SpecSetCompare.SameKeysStep(c, this.SpecItems, other.SpecItems,
+                    this.SpecItems.Length - mine.SpecPending.Length - 1, other.SpecItems.Length - theirs.SpecPending.Length - 1);
+                if (c.Compare(mine.Current, theirs.Current) != 0)
+                {
+                    return false;
+                }
+                mineEnded = !mine.MoveNext();
+                theirsEnded = !theirs.MoveNext();
+            }
+            SpecSetCompare.SameKeysStep(c, this.SpecItems, other.SpecItems,
+                this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1),
+                other.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1));
+            return mineEnded && theirsEnded;
+        }
+        return false;
     }
 
     // R27.42. An iterator method: verified as one whole enumeration of what it yields.
@@ -443,6 +520,8 @@ public sealed class WalkSet<T>
 
         // R27.41. What a holder of the enumerator states of it.
         [Spec] internal Seq<T> SpecPending => SpecWalk.Pending<WNode, T>(_reverse, Pal.Heap<WNode>(), _stack.Items);
+        [Spec] internal SpecTree<(T, bool)> SpecCurrentTree => Pal.Tree<(T, bool)>(_current);
+        [Spec] internal bool SpecCurrentIn => _current != null && Pal.InRegion(_current);
         [Spec] internal bool SpecReady =>
             SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), _stack.Items) && _stack.SpecCapacity == _tree.SpecCount &&
             SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;

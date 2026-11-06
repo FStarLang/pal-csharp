@@ -1705,7 +1705,7 @@ public sealed class CodeEmitter(
     /// abstraction function applied to the representation it has just written — the same
     /// expression the class module puts in the invariant, evaluated at the post-state.
     /// </summary>
-    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0 || _windows.Count > 0;
+    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0 || _windows.Count > 0 || _heldPeers.Count > 0;
 
     /// <summary>
     /// R4.14. Discards the invariant of every object this method allocated and did not
@@ -1731,8 +1731,15 @@ public sealed class CodeEmitter(
         // resource-naming bracket, which would otherwise assert `pts_to` for a cell whose
         // Pulse binder no longer exists.
         var declared = new HashSet<string>(_slots.Keys);
+        var peers = _heldPeers.Count;
         if (dropAtEnd) _closingBlocks++;
         emit();
+        // R27.49. A peer held at its heaps in this block is held plain again past it: the
+        // block's tail handed it back (R27.41 refuses a held struct in a non-tail block).
+        foreach (var peer in _heldPeers.Skip(peers))
+            if (_slots.TryGetValue(peer.Name, out var now) && now.Binder == peer.Binder)
+                _slots[peer.Name] = now with { Heaps = [] };
+        if (_heldPeers.Count > peers) _heldPeers.RemoveRange(peers, _heldPeers.Count - peers);
         if (dropAtEnd)
         {
             _closingBlocks--;
@@ -1781,6 +1788,9 @@ public sealed class CodeEmitter(
         for (var i = _windows.Count - 1; i >= 0; i--) Line(_windows[i]);
 
         foreach (var obj in _objects) CloseObject(method, obj);
+        // R27.49. Another object held at its heaps is handed back as it was received.
+        foreach (var peer in _heldPeers)
+            Line($"{Names.ClassModule(((IrClassType)peer.Type).Name)}.{Names.ClassOfHeap(((IrClassType)peer.Type).Name)} {peer.Binder};");
     }
 
     /// <summary>R4.11a. Re-establishes one open object's invariant.</summary>
@@ -2334,6 +2344,7 @@ public sealed class CodeEmitter(
                 "R27.41 holds a borrowing struct in a local of the method's own block.");
             return;
         }
+        if (d.HeldOwner is { } peer) HoldPeerAtHeaps(peer, d.Loc);
         var t = Fresh();
         if (d.Init is IrCall { Kind: CalleeKind.Method } call) Call(call, t);
         else Line($"let {t} = {Expr(d.Init)};");
@@ -2353,6 +2364,37 @@ public sealed class CodeEmitter(
         _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Cell, cell);
         Line($"let mut {cell} : {Types.Render(d.Type)} = {t};");
     }
+
+    /// <summary>
+    /// R27.49. Another object of the receiver's class, of which the method holds a borrowing
+    /// struct, is held from here on at its heaps (<c>class_C__to_heap</c>), named as they are
+    /// now, so the struct's facts about them survive the calls of its members. The epilogue
+    /// gives the plain invariant back (<see cref="CloseObjects"/>).
+    /// </summary>
+    private void HoldPeerAtHeaps(string peer, IrLoc loc)
+    {
+        if (!_slots.TryGetValue(peer, out var slot) ||
+            slot is not { Kind: SlotKind.Object, Type: IrClassType { Nullable: false } oc, Index: null, ViewBase: null } ||
+            _objects.Any(o => o.Name == peer) || !classes!.TryGetValue(oc.Name, out var decl))
+        {
+            diagnostics.Unsupported(loc, $"A borrowing struct of `{peer}` here",
+                "R27.49 holds a struct of a parameter the method holds closed, at the parameter's class type.");
+            return;
+        }
+        if (!slot.Heaps.IsEmpty) return;
+        var regions = RegionsOf(decl).ToList();
+        if (regions.Count == 0) return;
+        var hs = regions.Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
+        Line($"{Names.ClassModule(oc.Name)}.{Names.ClassToHeap(oc.Name)} {slot.Binder};");
+        Line($"with {string.Join(" ", hs)}. assert ({InvHeap(oc)} {slot.Binder} {slot.PermArg}{slot.PreModel} {string.Join(" ", hs)});");
+        var held = slot with { Heaps = [.. regions.Select((k, i) => (k, hs[i], hs[i]))] };
+        _slots[peer] = held;
+        _heldPeers.Add(held);
+        for (var i = 0; i < regions.Count; i++)
+            _plan!.PreScope.Bind(Frontend.Region.HeapNameOf(regions[i].Name, peer), new Term(hs[i], TermKind.Other));
+    }
+
+    private readonly List<Slot> _heldPeers = [];
 
     /// <summary>
     /// R22.10. <c>new T[n]</c>. A literal zero length needs no element to fill with, so it
@@ -2944,8 +2986,8 @@ public sealed class CodeEmitter(
                 heaps.Add(hv);
                 if (!still) existentials.Add(hv);
                 else stillHeaps.Add(hv);
-                scope.Bind(Frontend.Region.HeapName(h.Region.Name), new Term(hv, TermKind.Other));
-                measureScope.Bind(Frontend.Region.HeapName(h.Region.Name), still
+                scope.Bind(Frontend.Region.HeapNameOf(h.Region.Name, held.Name), new Term(hv, TermKind.Other));
+                measureScope.Bind(Frontend.Region.HeapNameOf(h.Region.Name, held.Name), still
                     ? new Term(hv, TermKind.Other)
                     : new Term($"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(h.Region)}) ())", TermKind.Other));
             }
@@ -3642,6 +3684,18 @@ public sealed class CodeEmitter(
         foreach (var slot in owned)
         {
             var value = FreshValue(slot.Name);
+            // R27.49. An object held at its heaps (outside a loop) is named at them as they are now.
+            if (slot is { Kind: SlotKind.Object, Type: IrClassType hc, Open: false, Index: null, Heaps.IsEmpty: false } &&
+                slot.LoopHeaps.IsDefaultOrEmpty)
+            {
+                var hs = slot.Heaps.Select(h => FreshValue(Frontend.Region.HeapBinder(h.Region.Name))).ToList();
+                named.Add((string.Join(" ", [value, .. hs]),
+                    $"{InvHeap(hc)} {slot.Binder} {slot.PermArg}{value} {string.Join(" ", hs)}"));
+                scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+                for (var i = 0; i < hs.Count; i++)
+                    scope.Bind(Frontend.Region.HeapNameOf(slot.Heaps[i].Region.Name, slot.Name), new Term(hs[i], TermKind.Other));
+                continue;
+            }
             named.Add((value, slot.Resource(value)));
             scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
             // R27.23. An `[Open]` receiver's fields and heaps, as held right now.

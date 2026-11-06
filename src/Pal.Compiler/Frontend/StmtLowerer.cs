@@ -569,19 +569,44 @@ public sealed class StmtLowerer(
         var args = creation?.ArgumentList?.Arguments ?? default;
         var op = creation is not null && model.GetSymbolInfo(creation).Symbol is IMethodSymbol ctor
             ? Borrowing.OwnerParameter(ctor, owner, known.Compilation) : null;
-        var ownerArg = op is null || creation?.ArgumentList is null ? null
+        ExpressionSyntax? ownerArg = op is null || creation?.ArgumentList is null ? null
             : args.FirstOrDefault(a => a.NameColon?.Name.Identifier.ValueText == op.Name)?.Expression ??
               (op.Ordinal < args.Count && args[op.Ordinal].NameColon is null ? args[op.Ordinal].Expression : null);
-        if (creation is null || ownerArg is not ThisExpressionSyntax ||
+        // R27.49. `x.GetEnumerator()`: a method of the owner class that returns the struct,
+        // called on `this` or on another object of the class.
+        ExpressionSyntax? init = creation;
+        if (creation is null && v.Initializer?.Value is InvocationExpressionSyntax inv &&
+            model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false } getter &&
+            SymbolEqualityComparer.Default.Equals(getter.ReturnType.OriginalDefinition, st.OriginalDefinition) &&
+            SymbolEqualityComparer.Default.Equals(getter.ContainingType.OriginalDefinition, owner.Type.OriginalDefinition))
+        {
+            init = inv;
+            ownerArg = inv.Expression is MemberAccessExpressionSyntax ma ? ma.Expression : SyntaxFactory.ThisExpression();
+        }
+        // R27.49. The owner: `this`, or a parameter of the owner class (or a local naming one).
+        string? ownerName = ownerArg is ThisExpressionSyntax ? Pal.Compiler.Emit.Names.This
+            : ownerArg is IdentifierNameSyntax && _code.Lower(ownerArg) is IrVar { Name: var ov } &&
+              self?.Parameters.FirstOrDefault(q => q.Name == ov) is { } oq &&
+              (SymbolEqualityComparer.Default.Equals(oq.Type.OriginalDefinition, owner.Type.OriginalDefinition) ||
+               SymbolEqualityComparer.Default.Equals(
+                   FrontendPass.ExactParameter(oq, known.Compilation, known)?.OriginalDefinition, owner.Type.OriginalDefinition))
+                ? ov : null;
+        if (init is null || ownerName is null ||
             self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
             !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
             known.MapType(owner.Type) is not IrClassType ownerType ||
-            v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax { Parent: BaseMethodDeclarationSyntax or AccessorDeclarationSyntax } })
+            v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax } decl ||
+            decl.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
+                .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or
+                          CommonForEachStatementSyntax or AnonymousFunctionExpressionSyntax or
+                          LocalFunctionStatementSyntax or TryStatementSyntax or SwitchSectionSyntax))
         {
             diagnostics.Error("PALCS0710", loc,
                 $"The local `{v.Identifier.ValueText}` holds a struct that borrows its collection. Such a " +
-                "local is declared in the method's own block of an instance method of the borrowed class, " +
-                "and initialised by the struct's constructor applied to `this` (doc/translation.md R27.41).");
+                "local is declared in a block of an instance method of the borrowed class, outside any loop, " +
+                "lambda or `try`, " +
+                "and initialised by the struct's constructor, or a method of the class returning it, applied " +
+                "to `this` or to a parameter of the class (doc/translation.md R27.41, R27.49).");
             return true;
         }
         var name = v.Identifier.ValueText;
@@ -590,12 +615,17 @@ public sealed class StmtLowerer(
         {
             Owned = owned,
             SelfName = name,
+            OwnerName = ownerName,
             OwnedNames = owned.ToImmutableDictionary(f => f.Name, f => $"__pal_own_{name}{f.Name}"),
         };
         var ownedLocals = ImmutableArray.CreateBuilder<(string, string, IrClassType)>();
         foreach (var f in owned)
             if (known.MapType(f.Type) is IrClassType ot) ownedLocals.Add((f.Name, held.OwnedLocal(f), ot));
-        statements.Add(new IrLocalDecl(loc, name, type, _code.Lower(creation)) { Owned = ownedLocals.ToImmutable() });
+        statements.Add(new IrLocalDecl(loc, name, type, _code.Lower(init))
+        {
+            Owned = ownedLocals.ToImmutable(),
+            HeldOwner = ownerName == Pal.Compiler.Emit.Names.This ? null : ownerName,
+        });
         _code.Hold(symbol, held);
         _spec.Hold(symbol, held);
         return true;

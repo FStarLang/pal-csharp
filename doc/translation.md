@@ -8249,6 +8249,35 @@ The copy constructor uses it for its fallback branch, which enumerates an arbitr
 and the fallback is dead. `ArgumentNullException.ThrowIfNull(p)` on an `[Exactly]`
 parameter is nothing, as at a non-nullable class type (R23.2).
 
+### R27.49 A borrowing struct of another object; `SetEquals`
+
+R27.41's held struct may borrow an object other than `this`: its initialiser may be the
+struct's constructor, or an instance method of the owner class returning the struct
+(`x.GetEnumerator()`), applied to `this` or to a parameter of the owner class (an
+`[Exactly]` parameter of it included, R27.46, or a local naming one). The local may be
+declared in any block of the method, outside any loop, lambda, local function, `try` or
+`switch` section (PALCS0710 otherwise).
+
+* At the declaration, a peer held closed is converted to its heap form
+  (`class_C__to_heap`) at fresh heap names, which `Pal.Heap<K>()` and the region
+  predicates in the struct's specs then resolve to (`$heap_K$peer`, R27.44). Its members
+  are called with the peer as their borrowed owner, and loops carry its heaps as they carry
+  the receiver's (R27.41).
+* Where the block that converted it ends (the method's tail, R5.5b), the plain invariant
+  is given back (`class_C__of_heap`); the other arm of an `if` still holds the plain form.
+* A ghost statement's naming bracket names an object held at its heaps at them, as they
+  are now (`inv_heap … h…`), and binds the heap names to the witnesses.
+* R24.14's sinking of a loop's return guard into an `if` no longer appends the statements
+  after the `if` to a branch that already ends in a `return`.
+
+`SetEquals` walks two enumerators in step. The library `Pulse.Lib.CSharp.SetCompare`
+(`SpecSetCompare` in C#) defines `same_keys c s t` (equal lengths, and equal under `c`
+position by position), its walk lemmas `same_keys_step` and `same_keys_whole`, and proves
+`same_keys_members`: on two strictly sorted sequences, `same_keys` is equality of the sets
+they hold under `c`. The enumerator exposes `SpecCurrentTree` and `SpecCurrentIn` for the
+holder's invariant: the current node is in the region with the key just yielded at its
+root.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8300,6 +8329,7 @@ ensures that the tree and the comparer are unchanged.
 | `CopyTo(array)`, `CopyTo(array, index)` | `array == Pal.Splice(Old(array), index, index + SpecItems.Length, SpecItems)` |
 | `BreadthFirstTreeWalk([Callback] action)` | `SpecWalk.BfWalked(SpecItems, Trace(action), Result)` (R27.40): every call was on a member, all but the last returned true, and a true result means every member was called on |
 | `RemoveWhere(match)` | `SpecItems == Pal.RemoveAll(Old(SpecItems), match)`, `Result == Old(SpecItems).Length - SpecItems.Length`, comparer unchanged (R27.40) |
+| `SetEquals(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetCompare.SameKeys(SpecComparer, SpecItems, other.SpecItems)`, which on the two strictly sorted sets is set equality (R27.49). The fallback branch is proved dead (R27.48) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 **`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
@@ -8322,7 +8352,8 @@ well-formed.
 So, while the version is unchanged, `MoveNext` yields `SpecItems` in order (or in reverse)
 one key at a time.
 
-`SpecPending` and `SpecReady` (R27.41) name the pending keys and the state a holder keeps.
+`SpecPending` and `SpecReady` (R27.41) name the pending keys and the state a holder keeps;
+`SpecCurrentTree` and `SpecCurrentIn` (R27.49) the current node.
 
 | member | ensures |
 |---|---|
@@ -8358,8 +8389,8 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations.** `UnionWith`, `IntersectWith` and the rest build on enumeration
-  and on `TreeSubSet`.
+* **The set operations other than `SetEquals`.** `UnionWith`, `IntersectWith` and the
+  rest build on enumeration and on `TreeSubSet`.
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
