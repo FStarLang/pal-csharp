@@ -97,6 +97,10 @@ public sealed partial class ExprLowerer
         if (bw.IsOwner(f) && model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } sp &&
             IsShim(sp.ContainingSymbol) && !bw.Constructor)
             return BorrowedObject(loc);
+        // R29.3. `@this.f` in a contract of a borrowing class's member: a field of the record.
+        if (bw.Struct.TypeKind == TypeKind.Class && (bw.IsState(f) || bw.IsOwner(f)) &&
+            model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } cp && IsShim(cp.ContainingSymbol))
+            return new IrField(loc, SelfExpr(loc), f.Name) { Type = known.MapType(f.Type) };
         if (SpecPosition && !BorrowBody) return null;
         if (SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, bw.Owner.Type.OriginalDefinition) &&
             Lower(node.Expression) is IrVar { Name: Names.This })
@@ -182,15 +186,16 @@ public sealed partial class ExprLowerer
     {
         var bw = Borrow!;
         var given = new List<IrFieldInit>();
-        IEnumerable<StatementSyntax> statements = ctor.Body?.Statements ?? default(SyntaxList<StatementSyntax>);
-        if (ctor.ExpressionBody is { } eb)
-            statements = [Microsoft.CodeAnalysis.CSharp.SyntaxFactory.ExpressionStatement(eb.Expression)];
-        foreach (var st in statements)
+        // An expression-bodied constructor (`=> _queue = queue`) is its one expression; it is
+        // read in place, because a statement synthesised around it is in no syntax tree.
+        IEnumerable<(SyntaxNode Node, ExpressionSyntax? Expr)> steps = ctor.ExpressionBody is { } eb
+            ? [(eb, eb.Expression)]
+            : (ctor.Body?.Statements ?? default).Select(st =>
+                ((SyntaxNode)st, st is ExpressionStatementSyntax es ? es.Expression : null));
+        foreach (var (node, expr) in steps)
         {
-            if (st is ExpressionStatementSyntax
-                {
-                    Expression: AssignmentExpressionSyntax { Left: var left, Right: var right } a
-                } && a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
+            if (expr is AssignmentExpressionSyntax { Left: var left, Right: var right } a &&
+                a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
                 (left is IdentifierNameSyntax || left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
                 model.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) &&
                 given.All(g => g.Field != f.Name))
@@ -198,12 +203,12 @@ public sealed partial class ExprLowerer
                 given.Add(new IrFieldInit(f.Name, Lower(right)));
                 continue;
             }
-            if (st is ExpressionStatementSyntax { Expression: InvocationExpressionSyntax inv } &&
+            if (expr is InvocationExpressionSyntax inv &&
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
                 continue;
-            diagnostics.Error("PALCS0730", Locations.From(st),
-                $"`{st.ToString().Trim()}` in the constructor of `{bw.Struct.Name}`. A borrowing struct's " +
+            diagnostics.Error("PALCS0730", Locations.From(node),
+                $"`{node.ToString().Trim()}` in the constructor of `{bw.Struct.Name}`. A borrowing type's " +
                 "constructor assigns each field at most once, and does nothing else (doc/translation.md R28.5).");
         }
         var value = Construct(loc, WellKnown.StructName(bw.Struct), bw.Struct, given);

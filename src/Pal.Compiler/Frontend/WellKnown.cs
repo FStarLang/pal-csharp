@@ -399,6 +399,16 @@ public sealed class WellKnown
     /// <summary>R26.8. The F* type of a value tuple <c>(T1, T2)</c>.</summary>
     public const string TupleType = "tuple2";
 
+    /// <summary>R29.1. <c>KeyValuePair&lt;K, V&gt;</c>, which is a pair too.</summary>
+    public static bool IsKeyValuePair(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeArguments.Length: 2 } named &&
+        named.OriginalDefinition.ToDisplayString() == "System.Collections.Generic.KeyValuePair<TKey, TValue>";
+
+    /// <summary>R26.8/R29.1. A value tuple of two, or a <c>KeyValuePair</c>.</summary>
+    public static bool IsPairType(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } || IsKeyValuePair(type);
+
+
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
 
@@ -459,6 +469,11 @@ public sealed class WellKnown
                 when MapType(tuple.TupleElements[0].Type) is { } t1 && IsPlainValue(t1) &&
                      MapType(tuple.TupleElements[1].Type) is { } t2 && IsPlainValue(t2):
                 return new IrUserSpecType("ValueTuple", TupleType, [t1, t2]);
+            // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
+            case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
+                     MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&
+                     MapType(kvp.TypeArguments[1]) is { } v && IsPlainValue(v):
+                return new IrUserSpecType("ValueTuple", TupleType, [k, v]);
             // R20.3. A delegate is held, passed on, and nothing else.
             case INamedTypeSymbol { TypeKind: TypeKind.Delegate } del when CallableDelegate(del) is { } callable:
                 return callable;
@@ -520,6 +535,9 @@ public sealed class WellKnown
             // R12.1. A `[Plain]` class is translated too, and is translated for the same
             // reason: it has a representation. What it does not have is a model, so it is
             // recognised by the attribute rather than by the `[Model]` member.
+            // R29.3. A class that borrows its owner is the record of its fields.
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } borrowing when Borrowing.IsBorrowingClass(borrowing, this):
+                return NamedStruct(borrowing);
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
                 when HasModel(named) || Declarations.Has(named.OriginalDefinition, PlainAttribute):
             {
@@ -620,6 +638,6 @@ public sealed class WellKnown
             : named.Name;
 
     private static bool OuterGeneric(INamedTypeSymbol named) =>
-        named.TypeKind == TypeKind.Struct &&
+        named.TypeKind is TypeKind.Struct or TypeKind.Class &&
         named.ContainingType is { } outer && (outer.IsGenericType || OuterGeneric(outer));
 }

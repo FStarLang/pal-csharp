@@ -7251,21 +7251,8 @@ The other collections differ in these ways:
   `Prefixes[_index]` is `Prefixes[Old(_index)]` followed by `_current`. On `false` there
   were no more items. The lemma `HashSetChain.items_step` is proved.
 
-These members are not annotated:
-* `object IEnumerator.Current`, `IDictionaryEnumerator.Entry`, `Key` and `Value`: they box
-  the value into `object`, which the translation does not have;
-* the explicit `IEnumerable<T>.GetEnumerator()` and `IEnumerable.GetEnumerator()`: they
-  box the struct into an interface, and the translation has no interface values. For the
-  same reason `SortedList.GetEnumerator()`, which returns `IEnumerator<KeyValuePair<K,V>>`,
-  is not annotated;
-* `SortedList.Enumerator.Current`: it builds a `KeyValuePair<K,V>` with its constructor,
-  which the translation does not support (PALCS0001);
-* `SortedList`'s `SortedListKeyEnumerator` and `SortedListValueEnumerator`, and
-  `KeyList` and `ValueList`: these are classes that hold the list, not structs. A class
-  that borrows is not designed;
-* `PriorityQueue.UnorderedItems` and `UnorderedItemsCollection.GetEnumerator`:
-  `UnorderedItemsCollection` is a class with no model, and its `_queue` field cannot be
-  named in a contract.
+§29 extends this to `KeyValuePair`, to classes that borrow, and to their caches; what is
+still not annotated, and why, is listed at the end of §29.
 
 ### Findings
 
@@ -7285,3 +7272,107 @@ These members are not annotated:
 
 Nothing new. The proofs rely on the `ThrowHelper` stubs in `pal/common`, as every harness
 does. There is no `admit` or `assume`.
+
+## 29. Completing the enumerators: pairs, borrowing classes, caches
+
+§28 left out the members that need a `KeyValuePair`, the views that are classes rather
+than structs, and the caches that hold those views. §29 adds them. `test/enumerators/Pairs.cs`
+pins each rule; the runtime harnesses are those of §28.
+
+### R29.1 `KeyValuePair<K,V>` is a pair
+
+`KeyValuePair<K,V>` is a value type with two fields and no behaviour, so it is translated
+as the pair R26.10 gives a value tuple: F*'s `tuple2 K V`. The two are the same type in
+the model, which is sound because no verified code can tell them apart: neither has
+identity, and both compare only through their components.
+
+| C# | F* |
+|---|---|
+| `new KeyValuePair<K,V>(k, v)`, `KeyValuePair.Create(k, v)` | `Mktuple2 k v` |
+| `p.Key`, `p.Value` | `fst p`, `snd p` |
+| `default(KeyValuePair<K,V>)` | the pair of the components' defaults (R14.2a) |
+
+`SortedList<K,V>.Enumerator.Current` builds one, and its contract is
+`Same(Result.Key, @this._key) && Same(Result.Value, @this._value)`.
+
+### R29.3 Classes that borrow
+
+A class is *borrowing* when it satisfies R28.1, with *class* for *struct*, and also:
+* it is `sealed` and derives directly from `object`;
+* it has no `[Model]` and is not `[Plain]`.
+
+`SortedList.KeyList`, `ValueList`, `SortedListKeyEnumerator`, `SortedListValueEnumerator`
+and `PriorityQueue.UnorderedItemsCollection` are borrowing classes.
+
+Such a class is translated exactly as a borrowing struct: it is the record of its fields,
+its members are methods of the owner's class taking the record as `self` (R28.2), and its
+constructor returns the record (R28.4, R28.5). The object's identity is dropped. That is
+sound because verified code cannot observe it:
+* it cannot call the class's members (R28.6, PALCS0731), so it never holds a reference
+  to one from which to observe sharing;
+* it cannot compare references to one: `ReferenceEquals` accepts only class-typed
+  parameters and borrowing fields (R28.3), and the class is neither;
+* a member writes only the class's own fields (R28.7), and the class is `sealed`, so no
+  override can do otherwise.
+
+A member that writes the object's fields (`MoveNext`) takes `self` by reference, as for a
+struct. Within one call, therefore, the record stands for the object's state, owned for
+the call.
+
+A property's `set` accessor is a member too. `KeyList`'s indexer setter is the method
+`set_Item`, which throws `NotSupportedException`; its contract is `[Throws(…)]
+[Ensures("false")]`. A constructor with an expression body (`=> _queue = queue`) is read
+as its single assignment.
+
+### R29.3b A view cache is outside the representation
+
+An owner often caches its view:
+```csharp
+private KeyList GetKeyListHelper() => keyList ??= new KeyList(this);
+public UnorderedItemsCollection UnorderedItems => field ??= new UnorderedItemsCollection(this);
+```
+A field whose type is a borrowing class is never part of a class's representation. Its
+record names the owner, so including it would make the owner's type depend on itself.
+Reading or writing such a field is refused (as R25.3 refuses an unmapped field), with
+one exception, a *fill*. `f ??= new V(this)` is a fill when:
+* `f` is an instance field (or a `field` backing field) whose type is a borrowing class
+  `V`;
+* `V`'s owner is the class declaring `f`;
+* the right-hand side is exactly `new V(this)`;
+* every write to `f` in its class is a fill of that form.
+
+A fill is translated as `new V(this)`, and it does not count as a write in R4.11's
+analysis, so the getter is read-only. This is sound for the following reasons:
+* By the last condition, `f` only ever holds `null` or a `V` built from `this`.
+* As a record (R29.3), that `V` is equal to the one `new V(this)` builds. Both
+  branches of the `??=` therefore yield the same value.
+* The write it performs changes nothing the model or the representation contains.
+
+A `??=` on such a field that is not a fill is refused (PALCS0735).
+
+A getter written with C#'s `field` keyword has a backing field, so R9.20 does not
+collect it as a computed property. When the backing field's type is a borrowing class, it
+is collected.
+
+### R29.5 An array operand is named after the calls that follow it
+
+In `Array.Copy(_dict.keys, 0, array, arrayIndex, _dict.Count)` the operands are evaluated
+in order:
+1. The emitter reads `_dict`'s record to name `keys`.
+2. The call `_dict.Count` refolds `_dict`'s invariant.
+3. The next unfold names a fresh record.
+
+The array's permission is then stated about a record that Pulse cannot relate to the
+first one.
+
+The fix applies to an array primitive (`Array.Copy`, `IndexOf`, `BinarySearch`, …). An
+array-field operand of such a primitive is read again after the last operand when:
+* every call among the later operands is a read-only instance call (R4.11b), which holds
+  its receiver at an arbitrary fraction and so cannot write the object;
+* no such call passes a reference or an array;
+* nothing among the later operands runs statements.
+
+Under those conditions the re-read yields the value C# read. Otherwise the operands are
+left as they were, and the result is at worst a proof failure, never an unsound
+translation.
+
