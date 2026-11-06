@@ -112,10 +112,38 @@ public sealed class MethodPlan
 
             if (p.IsGhost)
             {
-                ghostBinders.Add($"(#{name}: erased ({Types.Render(p.Type)}))");
+                // R27.39. A lifted lambda's ghosts are passed, not inferred: the trace and a
+                // captured `Ghost<T>` are named only in its pure conjuncts.
+                if (p.ExplicitGhost) binders.Add($"({name}: erased ({Types.Render(p.Type)}))");
+                else ghostBinders.Add($"(#{name}: erased ({Types.Render(p.Type)}))");
                 var term = new Term($"(reveal {name})", KindOf(p.Type), p.Type);
                 pre.Bind(p.Name, term);
                 post.Bind(p.Name, term);
+                slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
+                continue;
+            }
+
+            // R27.39. A `[Callback]` parameter: the caller's protocol over the trace, and the
+            // callback that keeps it. The trace starts empty; the method gives back the
+            // protocol at whatever trace it leaves.
+            if (p.Callback is { } cb)
+            {
+                var entry = new IrUserSpecType("ValueTuple", Frontend.WellKnown.TupleType, [cb.View, cb.Result]);
+                var traceType = new IrSeqType(entry);
+                var e = Types.Atom(entry);
+                var protocol = "p_" + name;
+                var trace = Frontend.ExprLowerer.TraceName(p.Name);
+                var postTrace = "post_" + Names.Local(trace);
+                binders.Add($"({protocol}: Seq.seq {e} -> slprop)");
+                binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
+                            $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
+                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol})");
+                preResources.Add($"{protocol} (Seq.empty #{e})");
+                postResources.Add($"{protocol} {postTrace}");
+                postExistentials.Add(postTrace);
+                pre.Bind(trace, new Term($"(Seq.empty #{e})", TermKind.Seq, traceType));
+                post.Bind(trace, new Term(postTrace, TermKind.Seq, traceType));
+                slots[trace] = new Slot(trace, traceType, SlotKind.Trace, protocol);
                 slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
                 continue;
             }
@@ -468,6 +496,8 @@ public sealed class MethodPlan
         // fraction of one it only reads, which it hands back at the same heap, or the whole
         // of one it writes, which it hands back at whatever heap it leaves. `$heap_K` is
         // the heap held at each end, so `Pal.Old` reads the one it was given.
+        ParamBinders = [.. binders];
+        ParamPreResources = [.. preResources];
         foreach (var use in held.IsDefault ? [] : held)
         {
             var k = use.Region;
@@ -539,7 +569,9 @@ public sealed class MethodPlan
         PreScope = pre;
         PostScope = post;
         Slots = slots.ToImmutable();
-        SlotOrder = [.. method.Parameters.Select(p => p.Name).Where(slots.ContainsKey)];
+        SlotOrder = [.. method.Parameters.SelectMany(p => p.Callback is null
+                ? [p.Name] : new[] { p.Name, Frontend.ExprLowerer.TraceName(p.Name) })
+            .Where(slots.ContainsKey)];
 
         // R12.2. A contract clause whose type is `SlProp` is an *ownership* clause, so it
         // joins the resources rather than the `pure`. This is the whole of what §12 adds to
@@ -580,6 +612,7 @@ public sealed class MethodPlan
                 UnderPrecondition(preConjuncts, [ThrowsProp(Thrown)]), raisesExistentials) + ")";
         }
 
+        PreConjuncts = preConjuncts;
         Requires = Clause(preResources.ToImmutable(), preConjuncts, []);
         Ensures = Clause(postResources.ToImmutable(), [.. unconditional, .. UnderPrecondition(preConjuncts, postConjuncts)
             .Select(c => unconditional.IsEmpty ? c : $"({c})")],
@@ -599,6 +632,15 @@ public sealed class MethodPlan
     public ImmutableArray<(string Field, string Projection)> ResultOwned { get; } = [];
 
     public ImmutableArray<string> Binders { get; }
+
+    /// <summary>
+    /// R27.39. The explicit binders (type parameters and parameters), the resources the
+    /// parameters are required at, and the pure preconditions: what a lifted lambda's
+    /// protocol predicate is assembled from.
+    /// </summary>
+    public ImmutableArray<string> ParamBinders { get; }
+    public ImmutableArray<string> ParamPreResources { get; }
+    public ImmutableArray<string> PreConjuncts { get; }
     /// <summary>By-value parameters that must be rebound as cells (R4.2).</summary>
     public ImmutableArray<(string Cell, string Source)> Prologue { get; }
     public string Requires { get; }

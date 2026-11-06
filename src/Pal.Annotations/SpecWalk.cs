@@ -57,4 +57,31 @@ public static class SpecWalk
     /// <summary>A lemma: a walkable stack owes at least one key per pointer.</summary>
     [RegionOp("Pulse.Lib.CSharp.RegionWalk.walkable_length")]
     public static void Length<K, T>(bool reverse, SpecHeap<K> h, Seq<K> stack) where K : class => throw Ghost();
+
+    // R27.39. The trace of a walk's callback (Pal.Trace): each entry is the view of the node
+    // the callback was called on and what it returned.
+
+    /// <summary>The callback was called on <paramref name="keys"/>[0..|tr|), in order, and returned true each time.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.visited")]
+    public static bool Visited<T, X>(Seq<T> keys, Seq<((T, X), bool)> tr) => throw Ghost();
+
+    /// <summary>
+    /// A walk over <paramref name="keys"/> that returned <paramref name="res"/>: the callback was
+    /// called on a prefix of the keys, in order, returned true on all calls but possibly the
+    /// last, and the walk returned true exactly when it went through every key.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.walked")]
+    public static bool Walked<T, X>(Seq<T> keys, Seq<((T, X), bool)> tr, bool res) => throw Ghost();
+
+    /// <summary>
+    /// The protocol of a callback copying keys into an array from <paramref name="i0"/> up to
+    /// <paramref name="hi"/>, starting from contents <paramref name="a0"/>, its cursor now at
+    /// <paramref name="idx"/>.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.copied")]
+    public static bool Copied<T, X>(Seq<((T, X), bool)> tr, Seq<T> a0, Seq<T> a, SpecInt i0, SpecInt hi, SpecInt idx) => throw Ghost();
+
+    /// <summary><paramref name="a"/> is <paramref name="a0"/> with the first min(|keys|, hi - i0) keys at <paramref name="i0"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionWalk.copy_result")]
+    public static bool CopyResult<T>(Seq<T> keys, Seq<T> a0, Seq<T> a, SpecInt i0, SpecInt hi) => throw Ghost();
 }

@@ -38,6 +38,7 @@ public sealed class WellKnown
         PreservesValueAttribute = Type("PreservesValueAttribute");
         DecreasesAttribute = Type("DecreasesAttribute");
         ConsumesAttribute = Type("ConsumesAttribute");
+        CallbackAttribute = Type("CallbackAttribute");
         PlainAttribute = Type("PlainAttribute");
         RegionAttribute = Type("RegionAttribute");
         WrappingAttribute = Type("WrappingAttribute");
@@ -140,6 +141,8 @@ public sealed class WellKnown
     public INamedTypeSymbol PreservesValueAttribute { get; }
     public INamedTypeSymbol DecreasesAttribute { get; }
     public INamedTypeSymbol ConsumesAttribute { get; }
+    /// <summary>R27.39. <c>[Callback]</c>: a delegate parameter called with region pointers.</summary>
+    public INamedTypeSymbol CallbackAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
 
     /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>

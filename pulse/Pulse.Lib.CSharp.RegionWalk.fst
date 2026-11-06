@@ -184,3 +184,82 @@ let pop_at (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B
     in
     FStar.Classical.forall_intro aux;
     Seq.lemma_eq_intro rest (Seq.slice ks (n + 1) (Seq.length ks))
+
+/// R27.39. The trace of a walk's callback: each entry is the view of the node it was called
+/// on and what it returned; `tkey` is the node's key.
+let tkey (#a #b #c: Type0) (e: (a & b) & c) : a = fst (fst e)
+
+/// The callback has been called on `keys[0..|tr|)`, in order, and returned true each time.
+let visited (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) : prop =
+  Seq.length tr <= Seq.length keys /\
+  (forall (i: nat). i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i /\ snd (Seq.index tr i) == true)
+
+/// A walk over `keys` that returned `res`: the callback was called on a prefix of `keys`, in
+/// order; it returned true on all but possibly the last call; and the walk returned true
+/// exactly when it went through all of `keys`, false when the last call returned false.
+let walked (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) (res: bool) : prop =
+  Seq.length tr <= Seq.length keys /\
+  (forall (i: nat). i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i) /\
+  (forall (i: nat). i + 1 < Seq.length tr ==> snd (Seq.index tr i) == true) /\
+  (res == true ==> Seq.length tr == Seq.length keys /\ (forall (i: nat). i < Seq.length tr ==> snd (Seq.index tr i) == true)) /\
+  (res == false ==> Seq.length tr > 0 /\ snd (Seq.index tr (Seq.length tr - 1)) == false)
+
+let visited_empty (#a #b: Type0) (keys: Seq.seq a)
+  : Lemma (visited #a #b keys Seq.empty)
+          [SMTPat (visited #a #b keys Seq.empty)]
+  = ()
+
+/// One more call, on the next key: a true result extends the visit, a false one ends the walk.
+let visited_snoc (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) (e: (a & b) & bool)
+  : Lemma (requires visited keys tr /\ Seq.length tr < Seq.length keys /\ tkey e == Seq.index keys (Seq.length tr))
+          (ensures (snd e == true ==> visited keys (Seq.snoc tr e)) /\
+                   (snd e == false ==> walked keys (Seq.snoc tr e) false))
+          [SMTPatOr [[SMTPat (visited keys (Seq.snoc tr e))]; [SMTPat (walked keys (Seq.snoc tr e) false)]]]
+  = let tr' = Seq.snoc tr e in
+    assert (forall (i: nat). i < Seq.length tr ==> Seq.index tr' i == Seq.index tr i);
+    assert (Seq.index tr' (Seq.length tr) == e)
+
+/// A visit of every key is a walk that returned true.
+let visited_all (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool))
+  : Lemma (requires visited keys tr /\ Seq.length tr == Seq.length keys)
+          (ensures walked keys tr true)
+          [SMTPat (walked keys tr true)]
+  = ()
+
+let imin (x y: int) : int = if x <= y then x else y
+
+/// R27.39. The protocol of a callback copying keys into `a` from `i0` up to `hi`, starting
+/// from contents `a0`, now at `idx`: it copied the first `min(|tr|, hi - i0)` keys it was
+/// called on, and returned true exactly on the calls that copied.
+let copied (#t #b: Type0) (tr: Seq.seq ((t & b) & bool)) (a0 a: Seq.seq t) (i0 hi idx: int) : prop =
+  0 <= i0 /\ i0 <= hi /\ hi <= Seq.length a0 /\ Seq.length a == Seq.length a0 /\
+  idx - i0 == imin (Seq.length tr) (hi - i0) /\
+  (forall (k: nat). k < Seq.length tr ==> snd (Seq.index tr k) == (i0 + k < hi)) /\
+  (forall (j: nat). j < Seq.length a ==>
+     Seq.index a j == (if i0 <= j && j < idx then tkey (Seq.index tr (j - i0)) else Seq.index a0 j))
+
+/// What a copy leaves: `a` is `a0` with the first `min(|keys|, hi - i0)` keys at `i0`.
+let copy_result (#t: Type0) (keys a0 a: Seq.seq t) (i0 hi: int) : prop =
+  0 <= i0 /\ Seq.length a == Seq.length a0 /\
+  (forall (j: nat). j < Seq.length a ==>
+     Seq.index a j == (if i0 <= j && j < i0 + imin (Seq.length keys) (hi - i0)
+                       then Seq.index keys (j - i0) else Seq.index a0 j))
+
+let copied_walked (#t #b: Type0) (keys: Seq.seq t) (tr: Seq.seq ((t & b) & bool)) (res: bool)
+    (a0 a: Seq.seq t) (i0 hi idx: int)
+  : Lemma (requires walked keys tr res /\ copied tr a0 a i0 hi idx)
+          (ensures copy_result keys a0 a i0 hi)
+          [SMTPat (walked keys tr res); SMTPat (copied tr a0 a i0 hi idx)]
+  = if res then ()
+    else begin
+      let n = Seq.length tr in
+      assert (snd (Seq.index tr (n - 1)) == false);
+      if n >= 2 then assert (snd (Seq.index tr (n - 2)) == true)
+    end
+
+/// A copy of every key is a splice of the keys into the array.
+let copy_result_splice (#t: Type0) (keys a0 a: Seq.seq t) (i0 hi: int)
+  : Lemma (requires copy_result keys a0 a i0 hi /\ hi == i0 + Seq.length keys /\ hi <= Seq.length a0)
+          (ensures a == CS.splice a0 i0 hi keys)
+          [SMTPat (copy_result keys a0 a i0 hi)]
+  = Seq.lemma_eq_intro a (CS.splice a0 i0 hi keys)

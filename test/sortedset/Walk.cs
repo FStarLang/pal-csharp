@@ -69,6 +69,8 @@ public sealed class PtrStack<T>
     }
 }
 
+internal delegate bool WalkPredicate<T>(WalkSet<T>.WNode node);
+
 [Spec]
 public struct WalkModel<T>
 {
@@ -201,6 +203,101 @@ public sealed class WalkSet<T>
         Pal.Assert(Pal.Slice(Pal.Contents(array), 0, n) == SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)));
     }
 
+
+    // R27.39. A walk that calls back: what the callback was called on, and what it returned,
+    // is the trace the caller's protocol is kept over.
+    [Ensures("SpecWalk.Walked(@this.SpecItems, Pal.Trace<(T, bool), bool>(action), Result)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(4)]
+    internal bool InOrderTreeWalk([Callback] WalkPredicate<T> action)
+    {
+        if (root == null)
+        {
+            return true;
+        }
+        var stack = new PtrStack<WNode>(count);
+        WNode? current = root;
+        SpecWalk.Empty<WNode, T>(false, Pal.Heap<WNode>(), stack.Items);
+        while (current != null)
+        {
+            Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
+            Pal.Invariant(Pal.WellFormed(current) && SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), stack.Items) &&
+                          stack.SpecCapacity == count && SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                          Pal.Trace<(T, bool), bool>(action).Length == 0 &&
+                          Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(current)),
+                                     SpecWalk.Pending<WNode, T>(false, Pal.Heap<WNode>(), stack.Items)) ==
+                          SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)));
+            SpecWalk.Descend<WNode, T>(false, Pal.Heap<WNode>(), stack.Items, current);
+            stack.Push(current);
+            current = current.Left;
+        }
+
+        int n = 0;
+        while (stack.Count != 0)
+        {
+            Pal.Decreases(count - n);
+            Pal.Invariant(SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), stack.Items) && stack.SpecCapacity == count &&
+                          0 <= n && n <= count &&
+                          SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                          (Pal.Returned()
+                              ? !Pal.ReturnValue<bool>() &&
+                                SpecWalk.Walked(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action), false)
+                              : Pal.Trace<(T, bool), bool>(action).Length == n &&
+                                SpecWalk.Visited(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action)) &&
+                                SpecWalk.Pending<WNode, T>(false, Pal.Heap<WNode>(), stack.Items) ==
+                                Pal.Slice(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), n, count)));
+            SpecWalk.PopAt<WNode, T>(false, Pal.Heap<WNode>(), stack.Items, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), n);
+            current = stack.Pop();
+            if (!action(current))
+            {
+                return false;
+            }
+            n++;
+            WNode? node = current.Right;
+            while (node != null)
+            {
+                Pal.Decreases(Pal.Tree<(T, bool)>(node).Size);
+                Pal.Invariant(Pal.WellFormed(node) && SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), stack.Items) &&
+                              stack.SpecCapacity == count && 0 < n && n <= count &&
+                              SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length == count &&
+                              Pal.Trace<(T, bool), bool>(action).Length == n &&
+                              SpecWalk.Visited(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), Pal.Trace<(T, bool), bool>(action)) &&
+                              Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(node)),
+                                         SpecWalk.Pending<WNode, T>(false, Pal.Heap<WNode>(), stack.Items)) ==
+                              Pal.Slice(SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), n, count));
+                SpecWalk.Descend<WNode, T>(false, Pal.Heap<WNode>(), stack.Items, node);
+                Pal.Assert(stack.Items.Length < count - n);
+                stack.Push(node);
+                node = node.Left;
+            }
+        }
+        return true;
+    }
+
+    // R27.39. `SortedSet<T>.CopyTo(T[], int, int)`: a lambda that writes a captured index.
+    [Requires("0 <= index && 0 <= count && index <= array.Length - count")]
+    [Ensures("SpecWalk.CopyResult(@this.SpecItems, Pal.Old(Pal.Contents(array)), Pal.Contents(array), index, index + count)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    internal void CopyTo(T[] array, int index, int count)
+    {
+        if (index > array.Length - count)
+        {
+            throw new System.ArgumentException();
+        }
+        count += index;
+        Ghost<SpecInt> i0 = (SpecInt)index;
+        Ghost<Seq<T>> a0 = Pal.Contents(array);
+        InOrderTreeWalk(node =>
+        {
+            Pal.Protocol<(T, bool), bool>(tr => SpecWalk.Copied(tr, a0.Value, Pal.Contents(array), i0.Value, count, index));
+            if (index >= count)
+            {
+                return false;
+            }
+            array[index++] = node.Item;
+            return true;
+        });
+    }
 
     [Ensures("ReferenceEquals(Result._tree, @this) && Result._version == @this.SpecVersion && !Result._reverse")]
     [Ensures("SpecWalk.Walkable<WalkSet<T>.WNode, T>(Pal.Heap<WalkSet<T>.WNode>(), Result._stack.Items)")]

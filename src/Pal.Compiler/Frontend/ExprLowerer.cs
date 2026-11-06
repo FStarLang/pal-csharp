@@ -1978,6 +1978,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrField f => [f.Receiver],
             IrNew n => [.. n.Fields.Select(f => f.Value)],
             IrRefArg r => [r.Operand],
+            IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],
@@ -2002,6 +2003,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// the reference must survive lowering; without this the callee would be handed a
     /// snapshot of the value and the write it performs would be lost.
     /// </summary>
+    /// <summary>R27.39. An argument at a <c>[Callback]</c> parameter is a lifted lambda.</summary>
+    private IrExpr LowerCallArgument(ArgumentSyntax arg, int i, IMethodSymbol method) =>
+        !SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
+        CallbackOf(method.Parameters[i], known, diagnostics) is { } cb
+            ? LowerCallbackArgument(arg, cb, Locations.From(arg))
+            : LowerArgument(arg);
+
     public IrExpr LowerArgument(ArgumentSyntax arg)
     {
         var inner = Lower(arg.Expression);
@@ -2130,6 +2138,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 "is not supported (doc/translation.md R28.6).");
             return new IrLiteral(loc, null);
         }
+
+        // R27.39. Calling a `[Callback]` parameter.
+        if (LowerCallbackInvoke(method, node, loc) is { } callback) return callback;
 
         // R26.1. Calling a callable delegate, `d(x)` or `d.Invoke(x)`, is applying the pure
         // function that models it, in code and in a contract alike.
@@ -2397,8 +2408,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         return new IrCall(loc, Naming.Of(method),
             receiver is null
-                ? [.. args.Select(LowerArgument), .. omitted, .. context.Select(ContextRead)]
-                : [receiver, .. args.Select(LowerArgument), .. omitted])
+                ? [.. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted, .. context.Select(ContextRead)]
+                : [receiver, .. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted])
         {
             Kind = kind.Value,
             ResultType = known.MapType(method.ReturnType),
@@ -2667,6 +2678,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     : new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.WfOf(rc.Name)}", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };
             }
+            case nameof(PalLang.Pal.Trace):
+                return LowerTrace(method, args, loc);
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             // R26.2. The cells a `return` inside a loop leaves its outcome in.

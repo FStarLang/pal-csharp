@@ -7823,6 +7823,87 @@ The runtime `SortedSet<T>.Enumerator` is verified with these rules (27.2). It us
 runtime's own verified `Stack<T>` as its stack of region pointers (R27.35), and
 `BitOperations.Log2` is a trusted binding (27.1).
 
+### R27.39 Lambdas passed to a callback over a region
+
+A delegate parameter marked `[Callback]` takes a pointer into a region its method holds:
+```csharp
+internal delegate bool TreeWalkPredicate<T>(SortedSet<T>.Node node);
+internal virtual bool InOrderTreeWalk([Callback] TreeWalkPredicate<T> action) { … }
+```
+The parameter's type must be a delegate with one non-`ref` parameter, of a region class
+with a `[Model]`, and a non-`void` result. Anything else is PALCS0708.
+
+**The callee.** The delegate is `Callback.region_cb view p`, together with the caller's
+protocol `p : Seq.seq (v & r) -> slprop`. Here `v` is the region class's view and `r` the
+result. A call `action(x)` needs `x` non-null and in the heap. It takes `p tr` and the
+region, at any fraction and heap, and gives back the region unchanged and
+`p (snoc tr (view x, result))`. So a call never writes the region (R27.5), and a loop that
+calls back keeps its heap named.
+
+In the callee's contract, invariants and ghost code, `Pal.Trace<V, R>(action)` names `tr`:
+* its precondition holds `p` at the empty trace;
+* its postcondition holds `p` at an existential trace, which is the one its ensures
+  mention;
+* in a loop the trace is carried like a cell, and a `decreases` reads it with
+  `Callback.trace_now`, as `Region.current` reads a heap.
+
+Nothing is said of what `action` does. `RegionWalk.walked keys tr res` says that the walk
+called back on the keys in order and stopped at the first `false`:
+* `res` is true and every call returned true, with `tr`'s keys exactly `keys`; or
+* `res` is false and `tr`'s keys are a prefix of `keys` whose last call alone returned
+  false.
+
+**The caller.** A lambda passed for a `[Callback]` parameter is a block whose first
+statement states its protocol:
+```csharp
+InOrderTreeWalk(node =>
+{
+    Pal.Protocol<(T, bool), bool>(tr => SpecWalk.Copied(tr, a0.Value, Pal.Contents(array), i0.Value, count, index));
+    …
+});
+```
+The lambda is lifted to a method of the enclosing type, `{Method}_Lambda{n}`. Its
+parameters are, in order:
+1. the trace, ghost;
+2. its captures, in source order. A local the lambda writes is passed by reference, and an
+   array by its contents. A `Ghost<T>` capture is ghost, with machine integers read as
+   `SpecInt`;
+3. the node, at the region type.
+
+The lifted method requires the protocol at `tr` and the node in the heap. It ensures the
+protocol at `snoc tr (view node, Result)`. It is verified as any other method, holding the
+region read-only.
+
+Two wrappers follow it:
+* `protocol_L caps tr` is the protocol as an slprop: the captures' resources at existential
+  values, and the formula;
+* `callback_L caps` is a `region_cb` that unfolds the protocol, calls the lifted method,
+  and folds the protocol at the extended trace.
+
+At the call site the caller folds `protocol_L caps` at the empty trace and passes
+`protocol_L caps` and `callback_L caps`. After the call it unfolds the protocol at the
+trace the callee ensures, so the captured locals and arrays come back with what the
+protocol says of them.
+
+A lambda that does not start with `Pal.Protocol`, or that captures `this` or an object, is
+refused (PALCS0709).
+
+This is sound because the callee is verified against every protocol: `p` is a parameter,
+and the only access it has to `p` is through the callback. The caller supplies a callback
+that keeps its own protocol. Nothing is trusted.
+
+**Conversions to `SpecInt`.** R13.2 read a conversion from a machine integer to `SpecInt`
+as a truncation, because `SpecInt` has no width. `(SpecInt)index` was `index % 2^32`.
+Every machine integer is a `SpecInt`, so the conversion is now the identity. No earlier
+contract relied on the truncation.
+
+The runtime's `InOrderTreeWalk` and its three `CopyTo` overloads are verified with this
+rule (27.2). The walk's stack is the runtime's own `Stack<Node>` (R27.35). `Count + 1` in
+its capacity may wrap, so the method is `[Wrapping]`, like the enumerator's constructor
+(R27.38). `CopyTo(array, index, count)`'s lambda writes the captured `index` and
+`array`. `RegionWalk.copied_walked` turns its protocol and the walk's `walked` into
+`CopyResult`: the first `min(count, Count)` items, in order, at `index`.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -7863,6 +7944,9 @@ ensures that the tree and the comparer are unchanged.
 | `ReplaceChildOrRoot` (`[Open]`) | `SpecTopDown.Replaced`: `parent`'s link, or `root` when `parent` is null, now `newChild` |
 | `DoRemove`, `Remove` | `Result == (KeyIndex(Old(SpecComparer), Old(SpecItems), item) >= 0)`; `SpecItems == SpecTopDownRemove.Removed(…)` (the element at `KeyIndex` taken out, or unchanged); comparer unchanged. The owner's invariants are re-established (R27.30) |
 | `ReplaceNode` (`[Open]`) | `SpecTopDownRemove.RnPost` under `RnPre` (R27.30) |
+| `InOrderTreeWalk([Callback] action)` | `SpecWalk.Walked(SpecItems, Trace(action), Result)` (R27.39): `action` was called on the items in order and the walk stopped at the first `false` |
+| `CopyTo(array, index, count)` | throws on a negative `index` or `count` or too short an array; otherwise `SpecWalk.CopyResult(SpecItems, Old(array), array, index, index + count)`: the first `min(count, Count)` items at `index`, the rest of the array unchanged |
+| `CopyTo(array)`, `CopyTo(array, index)` | `array == Pal.Splice(Old(array), index, index + SpecItems.Length, SpecItems)` |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 **`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
@@ -7916,10 +8000,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **`TreeSubSet`.** It constructs a second object that shares the region.
 * **The set operations.** `UnionWith`, `IntersectWith` and the rest build on enumeration
   and on `TreeSubSet`.
-* **`CopyTo` and `RemoveWhere`.** Both walk the tree with `InOrderTreeWalk`, passing a
-  lambda that captures locals (`index`, `array`, `matches`). A lambda converted to a
-  delegate is PALCS0685, and the walk's callback would need a contract over the region
-  held by its caller.
+* **`RemoveWhere`.** See R27.39's follow-up below.
+* **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
+  `T[]` or `object[]`, which pal-csharp does not model.
 * **`DeepClone` and the copy constructor.** `DeepClone` keeps a
   `Stack<(Node source, Node target)>` of pairs of pointers into two regions, the source
   set's and the clone's. The copy constructor calls it.

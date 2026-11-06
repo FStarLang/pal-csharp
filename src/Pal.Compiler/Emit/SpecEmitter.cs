@@ -327,7 +327,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // and what the code does is truncate (R13.1, F48). Reporting it as the
                 // identity would let a user prove `(byte)300 == 300`.
                 if (cv.Operand.Type is IrPrim { Kind: var src } && cv.Target is IrPrim { Kind: var dst }
-                    && src != dst && !Types.RangeFits(src, dst))
+                    && src != dst && dst != PrimKind.SpecInt && !Types.RangeFits(src, dst))
                 {
                     var v = Math(cv.Operand, scope);
                     var bits = Types.Width(dst);

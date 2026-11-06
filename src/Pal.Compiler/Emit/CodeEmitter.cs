@@ -863,7 +863,8 @@ public sealed class CodeEmitter(
                 .Any(e => e is IrAlloc al && al.Class == regionClass ||
                           // R27.16. A call writes the region exactly when its callee does; a
                           // callee that holds no region of its own is assumed to.
-                          e is IrCall c && (regionHeld is null || !regionHeld.TryGetValue(c.Callee, out var uses) ||
+                          // R27.39. A callback is handed the region at a fixed heap and gives it back.
+                          e is IrCall c && c.Kind != CalleeKind.Callback && (regionHeld is null || !regionHeld.TryGetValue(c.Callee, out var uses) ||
                                             uses.Any(u => u.Region.Name == regionClass && u.Mutates))));
 
     private static string Inv(IrClassType c) =>
@@ -3326,7 +3327,10 @@ public sealed class CodeEmitter(
         var scope = new SpecScope();
         foreach (var (name, slot) in _slots)
         {
-            var text = slot.Kind is SlotKind.Cell or SlotKind.RefParam ? $"!{slot.Binder}" : slot.Binder;
+            var text = slot.Kind is SlotKind.Cell or SlotKind.RefParam ? $"!{slot.Binder}"
+                // R27.39. A trace is read from its protocol, as a heap is from its region.
+                : slot.Kind is SlotKind.Trace ? $"(Pulse.Lib.CSharp.Callback.trace_now {slot.Binder} ())"
+                : slot.Binder;
             // Here an array denotes the live array, not its contents: a measure may
             // dereference a mutable local (F3) but may not mention the invariant's
             // existentials, which is where the contents live.
@@ -3883,6 +3887,31 @@ public sealed class CodeEmitter(
             case IrCall { Kind: CalleeKind.Method } call:
                 return Call(call, Fresh());
 
+            // R27.39. A `[Callback]` parameter is called with the node alone: the trace and
+            // the region it is held at are the callback type's ghost arguments.
+            case IrCall { Kind: CalleeKind.Callback } cb when _slots.TryGetValue(cb.Callee, out var cbSlot):
+            {
+                var node = Expr(cb.Args[1]);
+                var t = Fresh();
+                Line($"let {t} = {cbSlot.Binder} {node};");
+                return t;
+            }
+
+            // R27.39. A lifted lambda is passed as its protocol and its callback, both
+            // applied to what it captures; the protocol is folded at the empty trace here,
+            // and unfolded at whatever trace the callee left it, after the call.
+            case IrLambdaRef lr:
+            {
+                var caps = lr.Captures.Select(Expr).ToList();
+                var applied = string.Join(" ", lr.TypeArguments.Select(Types.Atom).Concat(caps));
+                var protocol = $"({Names.LambdaProtocol(lr.Method)} {applied})".Replace(" )", ")");
+                var e = Types.Atom(new IrUserSpecType("ValueTuple", Frontend.WellKnown.TupleType,
+                    [lr.Callback.View, lr.Callback.Result]));
+                Line($"fold ({protocol} (Seq.empty #{e}));");
+                _lambdaProtocols.Add(protocol);
+                return $"{protocol} ({Names.LambdaCallback(lr.Method)} {applied})".Replace(" )", ")");
+            }
+
             case IrConvert cv:
                 return Convert(cv);
 
@@ -3924,6 +3953,9 @@ public sealed class CodeEmitter(
     }
 
     /// <summary>Emits a call, binding its result to <paramref name="binder"/>.</summary>
+    /// <summary>R27.39. The protocols of the lambdas passed to the call being emitted.</summary>
+    private readonly List<string> _lambdaProtocols = [];
+
     private string Call(IrCall call, string binder)
     {
         var declared = PulseEmitter.DispatchOwner(classes, slots, call.Callee);
@@ -4029,6 +4061,13 @@ public sealed class CodeEmitter(
         if (convert is not null)
             Line($"{convert}{(wantsHeap ? Names.ClassToHeap(recvClass!) : Names.ClassOfHeap(recvClass!))} {raw[0]};");
         Line($"let {binder} = {callee} {applied};");
+        foreach (var protocol in _lambdaProtocols)
+        {
+            var tr = FreshValue("trace");
+            Line($"with {tr}. assert ({protocol} {tr});");
+            Line($"unfold ({protocol} {tr});");
+        }
+        _lambdaProtocols.Clear();
         foreach (var o in bracketed) Line(Unfold(o) + ";");
         if (convert is not null && closedRecv is not null)
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");

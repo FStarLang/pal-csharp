@@ -391,7 +391,15 @@ public sealed record IrNewException(IrLoc Loc, string Class, ImmutableArray<IrEx
 
 public sealed record IrAlloc(IrLoc Loc, string Class, IrNew Record) : IrExpr(Loc);
 
-public enum CalleeKind { Method, Spec, Lemma }
+public enum CalleeKind
+{
+    Method, Spec, Lemma,
+    /// <summary>
+    /// R27.39. A call of a <c>[Callback]</c> parameter: <c>Callee</c> is the parameter, the
+    /// first argument the variable naming its trace and the second the node.
+    /// </summary>
+    Callback,
+}
 
 /// <summary>A call to a user method, <c>[Spec]</c> function, or <c>[Lemma]</c>.</summary>
 public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
@@ -452,6 +460,29 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
 /// <em>cell</em> rather than the cell's current contents.
 /// </summary>
 public sealed record IrRefArg(IrLoc Loc, IrExpr Operand) : IrExpr(Loc);
+
+/// <summary>
+/// R27.39. A lambda passed to a <c>[Callback]</c> parameter, lifted to the method
+/// <c>Method</c>: its captured variables, in the order of the lifted method's parameters
+/// (after the trace), each an <see cref="IrRefArg"/> when the lambda writes it.
+/// </summary>
+public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr> Captures) : IrExpr(Loc)
+{
+    public ImmutableArray<IrType> TypeArguments { get; init; } = [];
+    public IrCallback Callback { get; init; } = null!;
+}
+
+/// <summary>
+/// R27.39. What a <c>[Callback]</c> delegate is called with and returns: a pointer into
+/// <c>Region</c>, recorded in the trace by its <c>[Model]</c> view <c>View</c>.
+/// </summary>
+public sealed record IrCallback(IrClassType Region, IrType View, IrType Result);
+
+/// <summary>
+/// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
+/// first clause of its contract each way is the protocol.
+/// </summary>
+public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback);
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);
@@ -751,6 +782,10 @@ public sealed record IrParam(
     public bool Plain { get; init; }
     /// <summary>Fractional-permission variable name (<c>[Frac("p")]</c>), if any.</summary>
     public string? Fraction { get; init; }
+    /// <summary>R27.39. A <c>[Callback]</c> delegate parameter.</summary>
+    public IrCallback? Callback { get; init; }
+    /// <summary>R27.39. A ghost parameter passed explicitly (a lifted lambda's trace and ghost captures).</summary>
+    public bool ExplicitGhost { get; init; }
 }
 
 public abstract record IrDecl(IrLoc Loc, string Name);
@@ -767,6 +802,8 @@ public sealed record IrMethod(
     IrStmt? Body) : IrDecl(Loc, Name)
 {
     public bool IsLemma { get; init; }
+    /// <summary>R27.39. Set on a lambda lifted from a <c>[Callback]</c> argument.</summary>
+    public IrLambdaInfo? Lambda { get; init; }
     public string? PulseBody { get; init; }
 
     /// <summary>

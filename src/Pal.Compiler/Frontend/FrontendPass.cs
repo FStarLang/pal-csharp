@@ -45,8 +45,11 @@ public static partial class FrontendPass
             // The semantic model must be re-fetched: adding the shim trees produced a
             // new compilation, and models are not portable across compilations.
             var model = compilation.GetSemanticModel(candidate.Syntax.SyntaxTree);
-            var decl = LowerDeclaration(candidate, model, known, bound, diagnostics);
+            var lifted = new List<IrMethod>();
+            var decl = LowerDeclaration(candidate, model, known, bound, diagnostics, lifted);
             if (decl is not null) declarations.Add(decl);
+            if (decl is IrMethod enclosing)
+                declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor }));
         }
 
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
@@ -2485,7 +2488,7 @@ public static partial class FrontendPass
         SemanticModel model,
         WellKnown known,
         ImmutableDictionary<string, BoundSpec> bound,
-        DiagnosticBag diagnostics)
+        DiagnosticBag diagnostics, List<IrMethod>? lifted = null)
     {
         var symbol = candidate.Symbol;
         var loc = Locations.From(candidate.Identifier);
@@ -2547,6 +2550,8 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
+        lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
+        lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
 
         // R20.2. An `[Admit]`ted body is not translated: its contract is assumed, so the
         // body is never looked at, and refusing a construct in it would be refusing
@@ -2584,6 +2589,7 @@ public static partial class FrontendPass
             return null;
         }
 
+        lifted?.AddRange(lowerer.Expressions.Lifted);
         return new IrMethod(
             loc, Naming.Of(symbol), parameters, returnType,
             [.. specs.Requires, .. bodyRequires],
@@ -2874,6 +2880,7 @@ public static partial class FrontendPass
             result.Add(new IrParam(loc, p.Name, type, mode)
             {
                 IsGhost = isGhost,
+                Callback = ExprLowerer.CallbackOf(p, known, diagnostics),
                 Consumes = Declarations.Has(p, known.ConsumesAttribute),
                 // R12.1. A parameter is plain either because it says so, or because its
                 // *class* does: a `[Plain]` class has no derived invariant to own it

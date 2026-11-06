@@ -455,3 +455,13 @@ public sealed class IncludePulseFileAttribute(string path) : Attribute
 /// </summary>
 [AttributeUsage(AttributeTargets.Assembly)]
 public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
+
+/// <summary>
+/// R27.39. A delegate parameter the method calls back with pointers into a region it holds.
+/// The delegate takes one reference to a <c>[Region]</c> class and returns a value; the method
+/// lends it the region at a fraction and states its contract about the calls through
+/// <c>Pal.Trace</c>. An argument at this position is a lambda whose first statement is
+/// <c>Pal.Protocol</c>, the invariant it keeps over the trace.
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter)]
+public sealed class CallbackAttribute : Attribute;

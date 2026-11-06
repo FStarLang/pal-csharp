@@ -452,6 +452,20 @@ public static class Pal
     /// </summary>
     public static SpecHeap<K> Heap<K>() where K : class => throw Ghost();
 
+    /// <summary>
+    /// R27.39. The calls made so far through the <c>[Callback]</c> parameter
+    /// <paramref name="action"/>: for each, the <c>[Model]</c> view of the node it was given
+    /// and what it returned. Empty on entry; in a postcondition, the calls the method made.
+    /// </summary>
+    public static Seq<(TV, TR)> Trace<TV, TR>(Delegate action) => throw Ghost();
+
+    /// <summary>
+    /// R27.39. The first statement of a lambda passed to a <c>[Callback]</c> parameter: the
+    /// invariant the lambda keeps over the trace of its calls. It holds on the empty trace when
+    /// the lambda is passed, each call extends it, and it holds after the call returns.
+    /// </summary>
+    public static void Protocol<TV, TR>(Func<Seq<(TV, TR)>, bool> invariant) => throw Ghost();
+
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 
     /// <summary>Lift a pure proposition into a resource, Pulse's <c>pure</c>.</summary>

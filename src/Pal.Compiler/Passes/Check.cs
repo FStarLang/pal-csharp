@@ -257,7 +257,8 @@ public static class Check
         var seenGhost = false;
         foreach (var p in m.Parameters)
         {
-            var ghost = p.IsGhost || p.Type is IrGhostType;
+            // R27.39. A lifted lambda's ghosts are explicit: its callback passes them.
+            var ghost = (p.IsGhost || p.Type is IrGhostType) && !p.ExplicitGhost;
             if (ghost) seenGhost = true;
             else if (seenGhost)
                 diagnostics.Error("PALCS0505", p.Loc,
@@ -551,6 +552,7 @@ public static class Check
             IrField f => [f.Receiver],
             IrNew n => [.. n.Fields.Select(f => f.Value)],
             IrRefArg r => [r.Operand],
+            IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],

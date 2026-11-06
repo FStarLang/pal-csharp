@@ -29,7 +29,11 @@ public static class Normalize
         // exception.
         IrMethod m when m.Body is not null => m with
         {
-            Body = Statement(LoopReturns(m.Body), [.. m.Parameters.Select(p => p.Name)], diagnostics),
+            // R27.39. A `[Callback]` parameter's trace is in scope as the parameter is.
+            Body = Statement(LoopReturns(m.Body),
+                [.. m.Parameters.Select(p => p.Name),
+                 .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name))],
+                diagnostics),
         },
         _ => decl,
     };
@@ -428,6 +432,7 @@ public static class Normalize
             case IrField f: Free(f.Receiver, into); return;
             case IrNew n: foreach (var f in n.Fields) Free(f.Value, into); return;
             case IrRefArg r: Free(r.Operand, into); return;
+            case IrLambdaRef l: foreach (var c in l.Captures) Free(c, into); return;
             case IrCall call: foreach (var a in call.Args) Free(a, into); return;
             case IrConvert cv: Free(cv.Operand, into); return;
             case IrStmtExpr se: foreach (var s in se.Prelude) Free(s, into); Free(se.Value, into); return;
@@ -604,6 +609,14 @@ public static class Normalize
             case IrConvert cv: MutatedIn(cv.Operand, into); return;
             case IrStmtExpr se: foreach (var s in se.Prelude) Mutated(s, into); MutatedIn(se.Value, into); return;
             case IrRefArg ra: MutatedIn(ra.Operand, into); return;
+            // R27.39. The lifted lambda is called by the callee: what it captures, it may change.
+            case IrLambdaRef l:
+                foreach (var c in l.Captures)
+                {
+                    if (c is IrVar or IrRefArg { Operand: IrVar }) into.Add(c is IrVar v ? v.Name : ((IrVar)((IrRefArg)c).Operand).Name);
+                    MutatedIn(c, into);
+                }
+                return;
             case IrElement el: MutatedIn(el.Array, into); MutatedIn(el.Index, into); return;
             case IrField f: MutatedIn(f.Receiver, into); return;
             default: return;
@@ -702,6 +715,13 @@ public static class Normalize
                 }
                 return;
             case IrRefArg r: AssignedByCalls(r.Operand, into); return;
+            case IrLambdaRef l:
+                foreach (var c in l.Captures)
+                {
+                    if (c is IrVar or IrRefArg { Operand: IrVar }) into.Add(c is IrVar v ? v.Name : ((IrVar)((IrRefArg)c).Operand).Name);
+                    AssignedByCalls(c, into);
+                }
+                return;
             case IrUnary u: AssignedByCalls(u.Operand, into); return;
             case IrBinary b: AssignedByCalls(b.Left, into); AssignedByCalls(b.Right, into); return;
             case IrConditional c:

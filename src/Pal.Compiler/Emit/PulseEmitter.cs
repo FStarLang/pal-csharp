@@ -183,11 +183,13 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
             $"{(Fraction ?? "1.0R")} {value}",
         SlotKind.Object when Type is IrClassType c =>
             $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} {Binder} {Perm}{value}",
+        // R27.39. A callback's trace is owned through its protocol.
+        SlotKind.Trace => $"{Binder} {value}",
         _ => "",
     };
 
     public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
-        or SlotKind.Span or SlotKind.Object;
+        or SlotKind.Span or SlotKind.Object or SlotKind.Trace;
 }
 
 public enum SlotKind
@@ -207,6 +209,11 @@ public enum SlotKind
     /// <c>class_C__inv</c> rather than a <c>pts_to</c> (R3.8, R4.10).
     /// </summary>
     Object,
+    /// <summary>
+    /// R27.39. The trace of a <c>[Callback]</c> parameter, owned through the protocol the
+    /// caller passed with it.
+    /// </summary>
+    Trace,
 }
 
 /// <summary>
@@ -471,6 +478,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                         new Provenance(Names.ClassAsBase(cl.Name, cl.BaseClass) + "_share", decl.Loc),
                         new Provenance(Names.ClassAsBase(cl.Name, cl.BaseClass) + "_gather", decl.Loc),
                     ],
+                ],
+                // R27.39. A lifted lambda adds its protocol and its callback, both from the lambda.
+                IrMethod { Lambda: not null } lm =>
+                [
+                    new Provenance(construct, decl.Loc),
+                    new Provenance(Names.LambdaProtocol(lm.Name), decl.Loc),
+                    new Provenance(Names.LambdaCallback(lm.Name), decl.Loc),
                 ],
                 _ => [new Provenance(construct, decl.Loc)],
             };
@@ -1731,11 +1745,87 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
 
         sb.AppendLine("}");
+        if (method.Lambda is { } lambda) EmitLambdaWrapper(sb, method, lambda, plan);
 
         return new EmittedModule(Names.FunctionModule(method.Name), sb.ToString())
         {
             Origins = origins.ToImmutable(),
         };
+    }
+
+    /// <summary>
+    /// R27.39. A lifted lambda's protocol and callback. The protocol at a trace owns what the
+    /// lambda captures, at values its protocol clause holds of; the callback is the lambda
+    /// at the type of a <c>[Callback]</c> parameter, opening the protocol around one call.
+    /// </summary>
+    private void EmitLambdaWrapper(StringBuilder sb, IrMethod method, IrLambdaInfo lambda, MethodPlan plan)
+    {
+        static string BinderName(string b) =>
+            System.Text.RegularExpressions.Regex.Match(b, @"^[\(\{]\|?\s*#?([^:\s]+)").Groups[1].Value;
+        var tyCount = method.TypeParameters.Length + method.DefaultedTypeParameters.Length;
+        var tys = plan.ParamBinders.Take(tyCount).ToList();
+        var tyNames = tys.Select(BinderName).Where(n => n != "_").ToList();
+        var own = plan.ParamBinders.Skip(tyCount).ToList();
+        // The trace leads and the node closes the lifted method's parameters.
+        var traceBinder = own[0];
+        var captures = own.Skip(1).Take(own.Count - 2).ToList();
+        var captureNames = captures.Select(BinderName).ToList();
+        var ghosts = new List<string>();
+        foreach (var p in method.Parameters.Skip(1).Take(method.Parameters.Length - 2))
+        {
+            if (p.IsGhost) continue;
+            switch (p.Type)
+            {
+                case IrArrayType a: ghosts.Add($"(pre_{p.Name}: erased (Seq.seq {Types.Atom(a.Element)}))"); break;
+                case IrSpanType sp: ghosts.Add($"(pre_{p.Name}: erased (Seq.seq {Types.Atom(sp.Element)}))"); break;
+                case var t when p.Mode is ParamMode.Ref:
+                    ghosts.Add($"(pre_{p.Name}: erased ({Types.Render(t)}))"); break;
+                case IrClassType { Plain: false }:
+                    diagnostics.Error("PALCS0709", p.Loc,
+                        $"A lambda passed to a `[Callback]` parameter captures the object `{p.Name}` " +
+                        "(doc/translation.md R27.39): only values, arrays and locals it writes are carried.");
+                    break;
+            }
+        }
+        var cb = lambda.Callback;
+        var entry = Types.Atom(new IrUserSpecType("ValueTuple", Frontend.WellKnown.TupleType, [cb.View, cb.Result]));
+        var raw = RegionRaw(cb.Region);
+        var view = $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)}";
+        var traceName = BinderName(traceBinder);
+        var protocol = Names.LambdaProtocol(method.Name);
+        var applied = string.Join(" ", tyNames.Concat(captureNames));
+        string P(string trace) => $"({protocol} {applied} {trace})".Replace("  ", " ");
+        var conjuncts = plan.PreConjuncts.Take(plan.PreConjuncts.Length - 1).Where(c => c.Length > 0).ToList();
+        var parts = plan.ParamPreResources.Where(r => r.Length > 0).ToList();
+        if (conjuncts.Count > 0) parts.Add($"pure ({SpecEmitter.Conjunction([.. conjuncts])})");
+        if (parts.Count == 0) parts.Add("emp");
+
+        sb.AppendLine();
+        sb.Append($"let {protocol}");
+        foreach (var b in tys.Where(b => !b.StartsWith("{|"))) sb.Append(' ').Append(b);
+        foreach (var b in captures) sb.Append(' ').Append(b);
+        sb.AppendLine($" (tr_raw: Seq.seq {entry}) : slprop =");
+        sb.AppendLine($"  let {traceName} : erased (Seq.seq {entry}) = hide tr_raw in");
+        sb.AppendLine(ghosts.Count > 0
+            ? $"  exists* {string.Join(" ", ghosts)}. {string.Join(" ** ", parts)}"
+            : $"  {string.Join(" ** ", parts)}");
+        sb.AppendLine();
+
+        sb.Append($"fn {Names.LambdaCallback(method.Name)}");
+        foreach (var b in tys) sb.Append(' ').Append(b);
+        foreach (var b in captures) sb.Append(' ').Append(b);
+        sb.AppendLine($" (#tr: erased (Seq.seq {entry})) (#q: perm) (#h: erased ({Frontend.Region.Module}.heap {raw}))");
+        sb.AppendLine($"  (x: B.box {raw} {{ not (B.is_null x) /\\ {Frontend.Region.Module}.mem h x }})");
+        var after = $"(Seq.snoc (reveal tr) ({view} x ({Frontend.Region.Module}.get h x), r))";
+        sb.AppendLine($"  requires {P("(reveal tr)")} ** {Frontend.Region.Module}.region #{raw} #q h");
+        sb.AppendLine($"  returns r: {Types.Render(cb.Result)}");
+        sb.AppendLine($"  ensures {P(after)} ** {Frontend.Region.Module}.region #{raw} #q h");
+        sb.AppendLine("{");
+        sb.AppendLine($"  unfold {P("(reveal tr)")};");
+        sb.AppendLine($"  let r = {Names.Function(method.Name)} {string.Join(" ", tyNames.Append("tr").Concat(captureNames).Append("x"))};");
+        sb.AppendLine($"  fold {P(after)};");
+        sb.AppendLine("  r");
+        sb.AppendLine("}");
     }
 
     /// <summary>
@@ -1855,6 +1945,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             switch (e)
             {
                 case null: return;
+                case IrCall { Kind: CalleeKind.Callback } cb:
+                    foreach (var a in cb.Args) CollectExpr(a);
+                    return;
+                case IrLambdaRef lr:
+                    names.Add(Names.FunctionModule(lr.Method));
+                    foreach (var a in lr.Captures) CollectExpr(a);
+                    return;
                 case IrCall c:
                     names.Add(c.Kind is CalleeKind.Spec or CalleeKind.Lemma
                         ? Names.SpecModule(c.Callee)
