@@ -43,6 +43,8 @@ public sealed class CodeEmitter(
     /// reopened it after (R22.15), with the regions the callee held it at (R27.13).
     /// </summary>
     private (Slot Self, ImmutableArray<IrClassType>? Heaps)? _lastReopen;
+    // R27.52. Whether the loop being emitted holds the receiver at an existential model.
+    private bool _receiverRenamed;
     // R27.50. The lines of the last reopening after a callee that kept the receiver at its
     // model (start and end in `_lines`): an arm that ends with them may drop them instead.
     private (int Start, int End)? _keptReopen;
@@ -182,6 +184,7 @@ public sealed class CodeEmitter(
         _method = method;
         _receiverDirty = false;
         _lastReopen = null;
+        _receiverRenamed = false;
         _keptReopen = null;
         _raises.Add(plan.ThrowsProp);
         // In declaration order, not `plan.Slots`': see MethodPlan.SlotOrder. `_slots` is
@@ -1082,6 +1085,21 @@ public sealed class CodeEmitter(
             // R27.50. The receiver is at its model throughout, so a measure reads it there.
             if (receiver.PreModel is { } pm)
                 measureScope.Bind(receiver.Name, new Term($"(reveal {pm})", TermKind.Math, receiver.Type));
+        }
+        // R27.52. A loop that changes the receiver through calls on it, and reads its fields
+        // in between, holds it open at a record its invariant abstracts at some model; the
+        // invariant names the receiver's specs at that model.
+        else if (reopened && !unchanged && receiver.ViewBase is null && heapsOfRecord.Count > 0 &&
+                 decl.Invariants.IsEmpty &&
+                 decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
+        {
+            var m = FreshValue(klass.Name);
+            var args = $"{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
+            existentials.Add($"({m}: {PulseEmitter.SubModelType(klass)})");
+            resources.Add($"pure ({m} == {Names.ClassModule(klass.Name)}.{Names.ClassAbsModel(klass.Name)} {args})");
+            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbsRep(klass.Name)} {args}");
+            scope.Bind(receiver.Name, new Term(m, TermKind.Math, receiver.Type));
+            _receiverRenamed = true;
         }
 
         foreach (var f in decl.Fields)
@@ -2241,7 +2259,8 @@ public sealed class CodeEmitter(
                 _pristineLoops.Push(RegionOwner && (_pristineLoops.Count == 0 || _pristineLoops.Peek()) &&
                                     !_receiverDirty && !DirtiesReceiver(w.Body));
                 if (DirtiesReceiver(w)) _receiverDirty = true;
-                try { While(w, plan); } finally { _pristineLoops.Pop(); }
+                var renamed = _receiverRenamed;
+                try { While(w, plan); } finally { _pristineLoops.Pop(); _receiverRenamed = renamed; }
                 return;
 
             case IrGhostStmt g:
@@ -3275,7 +3294,11 @@ public sealed class CodeEmitter(
         if (brkCell is null && contCell is null &&
             (w.Step.IsEmpty || w.Body is IrBlock sb && SplitAt([.. sb.Statements, .. w.Step]) is not null) ||
             w.Step.IsEmpty && SplitsRecordWrite(w.Body) ||
-            w.Step.IsEmpty && contCell is null && brkCell is not null)
+            w.Step.IsEmpty && contCell is null && brkCell is not null ||
+            // R27.52. A receiver held at an existential model is reopened by a call in one
+            // arm at a record of its own, and Pulse's join keeps nothing relating that record
+            // to the one the other arm left: each arm meets the invariant instead.
+            w.Step.IsEmpty && _receiverRenamed)
         {
             UnitTail(w.Step.IsEmpty ? w.Body
                 : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan);

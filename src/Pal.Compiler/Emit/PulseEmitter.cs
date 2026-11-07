@@ -468,6 +468,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassInvHeap(cl.Name), decl.Loc),
                     new Provenance(Names.ClassToHeap(cl.Name), decl.Loc),
                     new Provenance(Names.ClassOfHeap(cl.Name), decl.Loc),
+                    // R27.52. The abstraction split into representation and model.
+                    new Provenance(Names.ClassAbsRep(cl.Name), decl.Loc),
+                    new Provenance(Names.ClassAbsModel(cl.Name), decl.Loc),
                     // R27.38. The pure half of the invariant, for a class with no array or
                     // object field.
                     new Provenance(Names.ClassAbs(cl.Name), decl.Loc),
@@ -1470,6 +1473,21 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                               $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)}) ")) +
                           $"(m: {tb.App(Names.ClassModel(c.Name))}) : prop =");
             sb.AppendLine($"  {SpecEmitter.Conjunction(conjuncts)}");
+
+            // R27.52. With no [Invariant] clause to type it, the abstraction is a function of
+            // the record and the heaps, and the rest of the relation a prop of them: a loop
+            // that changes the object names its model by the equation.
+            if (c.Invariants.IsEmpty)
+            {
+                var heapParams = string.Concat(regions.Select(k =>
+                    $" ({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)})"));
+                sb.AppendLine();
+                sb.AppendLine($"let {Names.ClassAbsRep(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} : prop =");
+                sb.AppendLine($"  {SpecEmitter.Conjunction([.. conjuncts.Take(conjuncts.Count - 1).DefaultIfEmpty("True")])}");
+                sb.AppendLine();
+                sb.AppendLine($"let {Names.ClassAbsModel(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} =");
+                sb.AppendLine($"  {abstraction}");
+            }
         }
 
         // R27.13. The same invariant with its heaps as indices rather than existentials, so

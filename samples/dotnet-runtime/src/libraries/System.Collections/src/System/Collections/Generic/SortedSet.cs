@@ -1481,7 +1481,13 @@ namespace System.Collections.Generic
             }
         }
 
-        public void ExceptWith(IEnumerable<T> other)
+        // The range test and the early `break` are sound only when `other` is sorted by this
+        // set's comparer, so the contract requires the same comparer (doc/translation.md R27.47).
+        [Requires("@this.SpecComparer == other.SpecComparer")]
+        [Ensures("@this.SpecItems == SpecSetOps.Except(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), Pal.Old(other.SpecItems))")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer) && other.SpecItems == Pal.Old(other.SpecItems) && other.SpecComparer == Pal.Old(other.SpecComparer)")]
+        [Rlimit(8)]
+        public void ExceptWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
 
@@ -1503,18 +1509,42 @@ namespace System.Collections.Generic
                 {
                     T? min = Min;
                     T? max = Max;
+                    Ghost<Seq<T>> s0 = this.SpecItems;
+                    SpecSetOps.ExceptWhole(this.SpecComparer, s0.Value, asSorted.SpecItems);
                     foreach (T item in other)
                     {
+                        Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
+                                      Pal.Enumerator<Enumerator>(item).SpecPending ==
+                                          Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length, asSorted.SpecItems.Length) &&
+                                      s0.Value.Length > 0 && Pal.Same(min, s0.Value[0]) && Pal.Same(max, s0.Value[s0.Value.Length - 1]) &&
+                                      this.SpecComparer == Pal.Old(this.SpecComparer) &&
+                                      this.SpecItems == SpecSetOps.Except(this.SpecComparer, s0.Value,
+                                          Pal.Slice(asSorted.SpecItems, 0, asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length)) &&
+                                      Pal.Implies(Pal.Broke(), this.SpecItems == SpecSetOps.Except(this.SpecComparer, s0.Value, asSorted.SpecItems)));
+                        Pal.Decreases(Pal.Enumerator<Enumerator>(item).SpecPending.Length);
+                        SpecSetOps.ExceptStep(this.SpecComparer, s0.Value, asSorted.SpecItems,
+                            asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length - 1);
+                        SpecSetOps.ExceptSkip(this.SpecComparer, s0.Value, asSorted.SpecItems,
+                            asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length - 1);
+                        SpecSetOps.ExceptBreak(this.SpecComparer, s0.Value, asSorted.SpecItems,
+                            asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length - 1);
                         if (comparer.Compare(item, min) < 0)
                             continue;
                         if (comparer.Compare(item, max) > 0)
                             break;
                         Remove(item);
                     }
+                    SpecSetOps.ExceptWhole(this.SpecComparer, s0.Value, asSorted.SpecItems);
+                }
+                else
+                {
+                    SpecSetOps.ExceptDisjoint(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 }
             }
             else
             {
+                // The contract requires `other` to be a SortedSet<T> with this set's comparer.
+                Pal.Unreachable();
                 RemoveAllElements(other);
             }
         }

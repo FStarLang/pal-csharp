@@ -8370,6 +8370,45 @@ callee is read-only. `Contains` and `FindNode` call the comparer, an interface m
 the write-set scan counts as a write. So they are marked `[Frac("p")]`, which their write
 sets allow.
 
+### R27.52 A receiver changed by calls inside a loop; `ExceptWith`
+
+`ExceptWith` enumerates another set with `foreach` and, for each element in range, calls
+`Remove` on `this`. Between those calls it reads `this`'s fields (`comparer`). So the loop
+holds the receiver open (R4.10), and every call closes and reopens it at a new model
+(R22.15). R27.38 carries the receiver's model across a loop only when the loop leaves the
+receiver unchanged. R27.52 covers a loop that changes it.
+
+* **The model across the loop.** Take a class with regions, no `[Invariant]`, and no
+  array or object fields. The class module defines `class_C__abs_rep r heaps`, which is
+  every conjunct of `class_C__abs` except the model equation. It also defines
+  `class_C__abs_model r heaps`, the model that the record and heaps abstract. A loop
+  that reopens such a receiver and does not leave it unchanged carries:
+  * an existential model `m` of the class's refined model type;
+  * the resource `pure (m == class_C__abs_model r heaps)`, which tells Pulse what `m` is;
+  * the conjunct `class_C__abs_rep r heaps`.
+
+  `this` in the loop's `Pal.Invariant` then names `m`, the model at the current
+  iteration, and not the model on entry.
+* **Each arm meets the invariant.** A call in one arm of an `if` reopens the receiver at
+  a record of its own. Pulse's join keeps what that arm knows of the record only under
+  the arm's condition. It keeps nothing that relates the joined record to the record
+  the other arm left untouched. So a loop body (with no `for` step) under this rule is
+  emitted in tail position (R5.8d). Each arm, and each escape guard's arm (R5.10), is
+  then checked against the invariant directly, and nothing is joined.
+
+`ExceptWith` (with `other` `[Exactly]` a `SortedSet<T>` of the same comparer) ensures
+`SpecItems == SpecSetOps.Except(c, old SpecItems, other.SpecItems)`. Here
+`except c s t` removes the elements of `t` from `s` one at a time, in order, each by
+`TopDownRemove.removed`, which is `Remove`'s own specification. The library proves:
+
+| lemma | statement |
+|---|---|
+| `except_step`, `except_whole` | one more element of `t`; the whole of `t` is its prefix of full length |
+| `except_skip` | an element outside the range of `s` removes nothing (the `continue`, and the element that triggers the `break`) |
+| `except_break` | once an element is above `s`'s maximum, so is every later one, and nothing more is removed (the `break`) |
+| `except_disjoint` | two strictly sorted sequences with disjoint ranges: nothing is removed (the shortcut when the ranges do not overlap) |
+| `except_empty` | removing from an empty `s` leaves `s` (a pattern) |
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8423,6 +8462,7 @@ ensures that the tree and the comparer are unchanged.
 | `RemoveWhere(match)` | `SpecItems == Pal.RemoveAll(Old(SpecItems), match)`, `Result == Old(SpecItems).Length - SpecItems.Length`, comparer unchanged (R27.40) |
 | `SetEquals(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetCompare.SameKeys(SpecComparer, SpecItems, other.SpecItems)`, which on the two strictly sorted sets is set equality (R27.49). The fallback branch is proved dead (R27.48) |
 | `Overlaps(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetOps.Overlaps(SpecComparer, SpecItems, other.SpecItems)`: some element of `other` is a member; both sets unchanged (R27.51) |
+| `ExceptWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `SpecItems == SpecSetOps.Except(c, old SpecItems, other.SpecItems)`: each element of `other` removed in turn, as `Remove` specifies; comparer and `other` unchanged (R27.52) |
 | `IntersectWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers and at most 2^30 elements, for `ConstructRootFromSortedArray`) | `SpecItems == SpecSetInter.Inter(SpecComparer, Old(SpecItems), Old(other.SpecItems))`, the elements of `other` that compare equal to one of this set's; comparers and `other` unchanged (R27.50) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
@@ -8483,9 +8523,10 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations other than `SetEquals`, `IntersectWith` and `Overlaps`.**
-  `UnionWith` and the rest build on enumeration and on `TreeSubSet`. `IntersectWith` and
-  `Overlaps` are verified only on their `SortedSet` branches (R27.50, R27.51).
+* **The set operations other than `SetEquals`, `IntersectWith`, `Overlaps` and
+  `ExceptWith`.** `UnionWith` and the rest build on enumeration and on `TreeSubSet`.
+  `IntersectWith`, `Overlaps` and `ExceptWith` are verified only on their `SortedSet`
+  branches (R27.50–R27.52).
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
@@ -8588,7 +8629,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   not be sorted under its own comparer.
   `Overlaps` relies on `Equals` too: it answers `false` without enumerating when the two
   ranges are disjoint under `this.Comparer`, which with a lying `Equals` can be wrong.
-  Its contract therefore requires the same comparer as well (R27.51).
+  Its contract therefore requires the same comparer as well (R27.51). So does
+  `ExceptWith`'s, whose `Min`/`Max` shortcut and in-range `break` likewise read `other`'s
+  order as `this.Comparer`'s (R27.52).
 
 ## 28. Enumerators: structs that borrow their collection
 

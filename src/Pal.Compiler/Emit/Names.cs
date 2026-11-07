@@ -97,6 +97,8 @@ public static class Names
 
     /// <summary>R27.38. The pure half of a class's invariant: a record, its heaps, its model.</summary>
     public static string ClassAbs(string name) => "class_" + name + "__abs";
+    public static string ClassAbsRep(string name) => "class_" + name + "__abs_rep";
+    public static string ClassAbsModel(string name) => "class_" + name + "__abs_model";
     public static string ClassToHeap(string name) => "class_" + name + "__to_heap";
     public static string ClassOfHeap(string name) => "class_" + name + "__of_heap";
 

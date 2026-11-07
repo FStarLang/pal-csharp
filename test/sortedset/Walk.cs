@@ -464,6 +464,36 @@ public sealed class WalkSet<T>
         return n;
     }
 
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes) && @this.SpecVersion == 0")]
+    internal void ResetVersion() { version = 0; }
+
+    // R27.52. A loop that reads the receiver's fields and calls a method that writes it,
+    // with an arm that skips the call and one that leaves the loop.
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Ensures("Result <= other.SpecItems.Length")]
+    [Rlimit(8)]
+    internal int ResetPerItem(WalkSet<T> other)
+    {
+        int n = 0;
+        foreach (T item in other)
+        {
+            Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady && this.SpecNodes == Pal.Old(this.SpecNodes) &&
+                          n + Pal.Enumerator<Enumerator>(item).SpecPending.Length <= other.SpecItems.Length);
+            Pal.Decreases(Pal.Enumerator<Enumerator>(item).SpecPending.Length);
+            if (count == 0)
+            {
+                continue;
+            }
+            if (n >= count)
+            {
+                break;
+            }
+            ResetVersion();
+            n++;
+        }
+        return n;
+    }
+
     // R27.50. Two owners held whole are distinct objects, so `other == this` is false;
     // the loop calls a method on the receiver, whose model the loop keeps because the
     // method has not written it yet; the write comes after.
