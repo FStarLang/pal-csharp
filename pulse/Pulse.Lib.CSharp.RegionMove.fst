@@ -300,3 +300,34 @@ ghost fn move (#a: Type0) (left right: a -> B.box a) (h0: erased (heap a)) (h1 i
   fold (region #a #1.0R (moved_from left right h1 x));
   fold (region #a #1.0R (moved_into left right h1 x into));
 }
+
+/// R27.55. The whole tree of an owner that is being discarded joins another region: the
+/// target holds the tree, and every tree it held is as it was. Unlike `move`, nothing is
+/// said of what the source keeps, since its owner is not closed again.
+ghost fn adopt (#a: Type0) (left right: a -> B.box a) (h1 into: heap a) (x: B.box a)
+  requires region #a #1.0R h1 ** region #a #1.0R into **
+           pure (unshared left right h1 x)
+  ensures  region #a #1.0R (moved_from left right h1 x) **
+           region #a #1.0R (moved_into left right h1 x into) **
+           pure (unshared left right (moved_into left right h1 x into) x /\
+                 ltree left right (moved_into left right h1 x into) x == ltree left right h1 x /\
+                 (forall (y: B.box a). {:pattern unshared left right (moved_into left right h1 x into) y \/
+                                                 ltree left right (moved_into left right h1 x into) y}
+                    unshared left right into y ==>
+                    unshared left right (moved_into left right h1 x into) y /\
+                    ltree left right (moved_into left right h1 x into) y == ltree left right into y))
+{
+  unfold (region #a #1.0R h1);
+  unfold (region #a #1.0R into);
+  apart h1 into;
+  arrives left right h1 into x;
+  FStar.Classical.forall_intro (FStar.Classical.move_requires (kept left right h1 into x));
+  split (reach left right h1 x) h1;
+  join (keep (reach left right h1 x) h1) into;
+  rewrite (cells 1.0R (drop (reach left right h1 x) h1))
+       as (cells 1.0R (moved_from left right h1 x));
+  rewrite (cells 1.0R (keep (reach left right h1 x) h1 `L.append` into))
+       as (cells 1.0R (moved_into left right h1 x into));
+  fold (region #a #1.0R (moved_from left right h1 x));
+  fold (region #a #1.0R (moved_into left right h1 x into));
+}

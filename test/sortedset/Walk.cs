@@ -522,6 +522,53 @@ public sealed class WalkSet<T>
         return n;
     }
 
+    // R27.54. `if` without `else`, last in a loop body, calling a method that writes the receiver.
+    [Ensures("Result == other.SpecItems.Length")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(8)]
+    internal int TouchSome(WalkSet<T> other)
+    {
+        int n = 0;
+        foreach (T item in other)
+        {
+            Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady && this.SpecNodes == Pal.Old(this.SpecNodes) &&
+                          n + Pal.Enumerator<Enumerator>(item).SpecPending.Length == other.SpecItems.Length);
+            Pal.Decreases(Pal.Enumerator<Enumerator>(item).SpecPending.Length);
+            n++;
+            if (n % 2 == 0)
+                ZeroVersion();
+        }
+        return n;
+    }
+
+    // R27.54. One of two enumerators, chosen by a condition, finished by a `do` loop.
+    [Ensures("Result == (@this.SpecItems.Length > 0 ? @this.SpecItems.Length : other.SpecItems.Length)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(8)]
+    internal int CountRest(WalkSet<T> other)
+    {
+        Enumerator mine = GetEnumerator();
+        Enumerator theirs = other.GetEnumerator();
+        int n = 0;
+        bool mineEnded = !mine.MoveNext();
+        bool theirsEnded = !theirs.MoveNext();
+        if (!mineEnded || !theirsEnded)
+        {
+            Enumerator remaining = mineEnded ? theirs : mine;
+            do
+            {
+                Pal.Invariant(Pal.Broke()
+                    ? n == (this.SpecItems.Length > 0 ? this.SpecItems.Length : other.SpecItems.Length)
+                    : remaining.SpecReady && n + 1 + remaining.SpecPending.Length ==
+                      (this.SpecItems.Length > 0 ? this.SpecItems.Length : other.SpecItems.Length));
+                Pal.Decreases(remaining.SpecPending.Length);
+                n++;
+            }
+            while (remaining.MoveNext());
+        }
+        return n;
+    }
+
     // R27.50. Two owners held whole are distinct objects, so `other == this` is false;
     // the loop calls a method on the receiver, whose model the loop keeps because the
     // method has not written it yet; the write comes after.

@@ -8440,6 +8440,56 @@ specification. The library proves:
 | `sym_except_step`, `sym_except_whole` | one more element of `t`; the whole of `t` is its prefix of full length |
 | `sym_except_length` | after `i` elements, the length is at most `s`'s length plus `i`. This is what keeps `Add`'s `count` from overflowing, under the requirement that the two lengths sum to at most `int.MaxValue` |
 
+### R27.54 `do`-`while`; choosing between borrowing locals; a loop that breaks inside an arm
+
+* **`do S while (c);`** is lowered to `while (true) { S; if (!c) break; }`. Its invariant
+  and `Pal.Decreases` are the first statements of `S`, as for `while`. They are checked on
+  entry, before `S` has run once, and after every iteration, including the one that breaks.
+  So an invariant names the break with `Pal.Broke()` (R5.8), typically as
+  `Pal.Implies(!Pal.Broke(), …)`. A `continue` aimed at the `do` loop is refused (it would
+  skip the test).
+* **`S x = c ? a : b;` over borrowing structs.** When `a` and `b` are held borrowing-struct
+  locals (R28) that the rest of the method never names again, and `x` is never assigned, the
+  copy is an alias. The rest of the block is lowered twice, under `if (c)`, with `x` standing
+  for `a` in one arm and for `b` in the other. Every use of `x` is then a use of the original
+  holder, which keeps its borrow and its owned state. The syntactic check that the originals
+  are dead after the declaration is what makes the alias sound: no write through `x` can be
+  observed through `a` or `b`.
+* **A loop that breaks, inside an arm.** A non-tail `if` whose arm contains a loop with a
+  `break` (whose flag is a `let mut`) cannot be joined by Pulse without an annotated
+  postcondition. The emitter pushes the rest of the block into both arms, as for R27.53.
+* **A loop-tail `if` without `else`** whose arm calls a method that may change its receiver
+  is emitted as a tail with an empty `else`, so its facts are not lost at the join.
+
+`test/sortedset/Walk.cs` (`CountRest`, `TouchSome`) exercises all four.
+
+### R27.55 Adopting a local owner's tree; `UnionWith`
+
+* **`this.f = d.g` where `d` is a local object of the same owner class** (R27.44) and `g`
+  is its region field. The region of `d` is moved into the receiver's
+  (`RegionMove.adopt`): `d`'s tree arrives unchanged and unshared, and every unshared tree
+  already in the receiver's region is kept. `d` is then *open*: its later field reads are
+  plain reads and its end of scope drops its bare fields. Its region is gone, so a method
+  call on `d` after the adoption fails verification, which is sound. `UnionWith`'s
+  empty-set branch (`root = dummy.root; count = dummy.count;` after a copy construction)
+  is the use.
+* **`UnionWith(other)`** (`other` `[Exactly]` a `SortedSet<T>` of the same comparer, and at
+  most 2^30 elements together, for `ConstructRootFromSortedArray`) has three branches. An
+  empty set copies `other`. When `other` is more than half this set's size, the two
+  in-order enumerations are merged into an array (keeping `other`'s element on ties), and
+  the tree is rebuilt from it. Otherwise each of `other`'s elements is `Add`ed
+  (`AddAllElements`). `SpecSetOps.Union` is the merge and `SpecSetOps.AddAll` the
+  repeated insertion; the library (`SetUnion`) proves the merge strictly sorted and its
+  length at most the sum, and the loop lemmas the invariants use.
+
+### R27.56 The comparer is not null
+
+`Comparer<T>.Default` is not the null reference (a modeling axiom,
+`Order.default_comparer_not_null`). Every constructor stores `comparer ?? Comparer<T>.Default`,
+so the model refines `Result.Comparer != null`. `UnionWith` passes its own comparer to the
+copy constructor, which requires `(comparer ?? Default) == collection.SpecComparer`. That
+holds only because the comparer is not null.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8447,6 +8497,7 @@ specification. The library proves:
 * Exact-type verification (R27.1) is a soundness argument rather than an axiom. It holds as
   long as verified code obtains every `SortedSet` it holds from a translated constructor.
 * Comparers are R22.30's total preorder.
+* `Order.default_comparer_not_null` (R27.56): `Comparer<T>.Default` is not null.
 * `ComparerIdentity.same` (R27.47): a comparer value stands for one object, so `==` on
   comparers is equality of values. `ComparerIdentity.equals` is a function of its
   arguments and nothing more.
@@ -8495,6 +8546,9 @@ ensures that the tree and the comparer are unchanged.
 | `Overlaps(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetOps.Overlaps(SpecComparer, SpecItems, other.SpecItems)`: some element of `other` is a member; both sets unchanged (R27.51) |
 | `ExceptWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `SpecItems == SpecSetOps.Except(c, old SpecItems, other.SpecItems)`: each element of `other` removed in turn, as `Remove` specifies; comparer and `other` unchanged (R27.52) |
 | `IntersectWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers and at most 2^30 elements, for `ConstructRootFromSortedArray`) | `SpecItems == SpecSetInter.Inter(SpecComparer, Old(SpecItems), Old(other.SpecItems))`, the elements of `other` that compare equal to one of this set's; comparers and `other` unchanged (R27.50) |
+| `SymmetricExceptWithSameComparer(SortedSet<T> other)` (requires equal comparers and the two sizes to sum to at most `int.MaxValue`) | `SpecItems == SpecSetOps.SymmetricExcept(c, Old(SpecItems), other.SpecItems)` (R27.53) |
+| `AddAllElements(collection)` (`[Exactly]`; requires equal comparers and the sizes to sum to at most `int.MaxValue`) | `SpecItems == SpecSetOps.AddAll(c, Old(SpecItems), collection.SpecItems)`: each element `Add`ed in turn (R27.55) |
+| `UnionWith(other)` (`[Exactly]`; requires equal comparers and the sizes to sum to at most 2^30) | `SpecItems` is `SpecSetOps.Union(c, Old(SpecItems), other.SpecItems)` when the set was empty or `other` is more than half its size, and `SpecSetOps.AddAll(…)` otherwise (R27.55; see 27.3 for why the two differ) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 **`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
@@ -8554,10 +8608,10 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations other than `SetEquals`, `IntersectWith`, `Overlaps` and
-  `ExceptWith`.** `UnionWith` and the rest build on enumeration and on `TreeSubSet`.
-  `IntersectWith`, `Overlaps` and `ExceptWith` are verified only on their `SortedSet`
-  branches (R27.50–R27.52).
+* **The set operations other than `SetEquals`, `IntersectWith`, `Overlaps`, `ExceptWith`,
+  `UnionWith` and `SymmetricExceptWith`'s helper.** `IsSubsetOf`, `IsSupersetOf` and their
+  proper forms call `GetViewBetween`, which builds a `TreeSubSet`. The verified operations
+  are verified only on their `SortedSet` branches (R27.50–R27.55).
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
@@ -8588,6 +8642,12 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings
+
+* **`UnionWith` keeps a different representative depending on sizes.** When an element of
+  `other` compares equal to one of this set's, the merge branch stores `other`'s element and
+  the `Add` branch keeps this set's. With a comparer that identifies distinct values (for
+  example case-insensitive strings), the result depends on the two sizes. The contract
+  states the branch condition.
 
 * **A `[Throws]` method cannot call a raising method while it owns a local object.** A
   callee's raise path leaves the caller's local objects behind, and the caller's raise

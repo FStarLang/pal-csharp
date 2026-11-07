@@ -52,6 +52,7 @@ public sealed class StmtLowerer(
             WhileStatementSyntax w when OutDeclarations(w.Condition, loc) is { IsEmpty: false } outs =>
                 new IrBlock(loc, [.. outs, LowerWhile(w, loc)]) { Splice = true },
             WhileStatementSyntax w => LowerWhile(w, loc),
+            DoStatementSyntax d => LowerDo(d, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
@@ -150,8 +151,70 @@ public sealed class StmtLowerer(
     }
 
     private IrBlock LowerBlock(BlockSyntax block) =>
-        new(Locations.From(block), [.. ReachableStatements(block.Statements).Select(Lower)
-            .SelectMany(s => s is IrBlock { Splice: true } b ? b.Statements : [s])]);
+        new(Locations.From(block), LowerStatements([.. ReachableStatements(block.Statements)]));
+
+    private ImmutableArray<IrStmt> LowerStatements(IReadOnlyList<StatementSyntax> statements)
+    {
+        var lowered = ImmutableArray.CreateBuilder<IrStmt>();
+        for (var i = 0; i < statements.Count; i++)
+        {
+            if (HeldChoice(statements[i]) is var (x, cond, a, b))
+            {
+                var rest = statements.Skip(i + 1).ToList();
+                var loc = Locations.From(statements[i]);
+                lowered.Add(new IrIf(loc, _code.Lower(cond),
+                    new IrBlock(loc, Aliased(x, a, () => LowerStatements(rest))),
+                    new IrBlock(loc, Aliased(x, b, () => LowerStatements(rest)))));
+                break;
+            }
+            var s = Lower(statements[i]);
+            if (s is IrBlock { Splice: true } spliced) lowered.AddRange(spliced.Statements);
+            else lowered.Add(s);
+        }
+        return lowered.ToImmutable();
+    }
+
+    /// <summary>
+    /// R27.54. <c>S x = c ? a : b;</c>, where <c>a</c> and <c>b</c> are locals holding
+    /// borrowing structs (R27.41) that nothing after the declaration names: the rest of the
+    /// block runs once with <c>x</c> another name for <c>a</c> and once for <c>b</c>, under
+    /// <c>if (c)</c>. <c>x</c> is a copy of the chosen struct, but as the original is never
+    /// read again, updating the original in place is indistinguishable.
+    /// </summary>
+    private (ILocalSymbol X, ExpressionSyntax Cond, ILocalSymbol A, ILocalSymbol B)? HeldChoice(StatementSyntax statement)
+    {
+        if (statement is not LocalDeclarationStatementSyntax
+            {
+                Declaration.Variables: [{ Initializer.Value: var init } v]
+            } decl ||
+            Unparenthesized(init) is not ConditionalExpressionSyntax cond ||
+            model.GetDeclaredSymbol(v) is not ILocalSymbol { RefKind: RefKind.None } x ||
+            x.Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } st || !Borrowing.IsBorrowing(st, known) ||
+            model.GetSymbolInfo(Unparenthesized(cond.WhenTrue)).Symbol is not ILocalSymbol a ||
+            model.GetSymbolInfo(Unparenthesized(cond.WhenFalse)).Symbol is not ILocalSymbol b ||
+            !_code.Holds(a) || !_code.Holds(b))
+            return null;
+        var body = decl.Ancestors().FirstOrDefault(n => n is BaseMethodDeclarationSyntax or AccessorDeclarationSyntax) ?? decl.Parent!;
+        var later = body.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(n => n.SpanStart > decl.Span.End)
+            .Select(n => model.GetSymbolInfo(n).Symbol);
+        if (later.Any(sym => SymbolEqualityComparer.Default.Equals(sym, a) || SymbolEqualityComparer.Default.Equals(sym, b)))
+            return null;
+        var written = body.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Any(w => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(w.Left).Symbol, x));
+        return written ? null : (x, cond.Condition, a, b);
+    }
+
+    private static ExpressionSyntax Unparenthesized(ExpressionSyntax e) =>
+        e is ParenthesizedExpressionSyntax p ? Unparenthesized(p.Expression) : e;
+
+    private T Aliased<T>(ILocalSymbol x, ILocalSymbol target, Func<T> f)
+    {
+        _code.Alias(x, target);
+        _spec.Alias(x, target);
+        try { return f(); }
+        finally { _code.Unalias(x); _spec.Unalias(x); }
+    }
 
     /// <summary>
     /// R27.48. The statements of a block up to and including a <c>Pal.Unreachable()</c>.
@@ -1113,6 +1176,35 @@ public sealed class StmtLowerer(
             return new IrFor(loc, effect, test, effect, invariants, decreases, body);
         return new IrWhile(loc, cond, invariants, decreases, body);
     }, loc);
+
+    /// <summary>
+    /// R27.54. <c>do S while (c);</c> is <c>while (true) { S; if (!c) break; }</c>: the body
+    /// runs before the first test, and the loop's specification describes the state at the
+    /// top of the body, as it does for a <c>while</c>. A <c>continue</c> would skip the test,
+    /// so one aimed at this loop is refused.
+    /// </summary>
+    private IrStmt LowerDo(DoStatementSyntax node, IrLoc loc)
+    {
+        if (node.Statement.DescendantNodesAndSelf(n => n == node.Statement ||
+                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or
+                          AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
+                .OfType<ContinueStatementSyntax>().FirstOrDefault() is { } cont)
+        {
+            diagnostics.Unsupported(Locations.From(cont), "A `continue` in a `do` loop",
+                "pal-csharp translates `do S while (c)` as `while (true) { S; if (!c) break; }` " +
+                "(doc/translation.md R27.54), where a `continue` would skip the test.");
+            return new IrBlock(loc, []);
+        }
+        return AfterLoop(() =>
+        {
+            var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
+            var test = new IrIf(loc, new IrUnary(loc, UnOp.Not, _code.Lower(node.Condition)) { Type = IrPrim.Bool },
+                new IrBreak(loc), null);
+            var stmts = body is IrBlock b ? b.Statements : [body];
+            return new IrWhile(loc, new IrLiteral(loc, true) { Type = IrPrim.Bool }, invariants, decreases,
+                new IrBlock(loc, [.. stmts, test]));
+        }, loc);
+    }
 
     /// <summary>
     /// R26.11. Splits a guard whose leftmost operand is an effectful expression ending in

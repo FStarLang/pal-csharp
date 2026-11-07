@@ -89,6 +89,17 @@ public sealed class RbSet<T>
         version++;
     }
 
+    // R27.55. The tree of a set built in a local, adopted into this one.
+    [Requires("other.SpecComparer == @this.SpecComparer")]
+    [Ensures("@this.SpecItems == other.SpecItems && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+    public void Adopt(RbSet<T> other)
+    {
+        RbSet<T> dummy = new RbSet<T>(other);
+        root = dummy.root;
+        count = dummy.count;
+        version++;
+    }
+
     [Requires("@this.SpecItems.Length < int.MaxValue")]
     [Ensures("Result == (Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item) < 0)")]
     [Ensures("Pal.Implies(Result, @this.SpecItems == SpecTopDown.Inserted(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item))")]

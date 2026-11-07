@@ -103,8 +103,20 @@ public sealed partial class ExprLowerer
     /// <summary>R27.51. Records that the `foreach` declaring <paramref name="variable"/> holds the enumerator <paramref name="held"/>.</summary>
     public void HoldForEach(ILocalSymbol variable, BorrowContext held) => _foreachHeld[variable] = held;
 
+    // R27.54. Locals standing for a held local, in one arm of a choice between two.
+    private readonly Dictionary<ISymbol, ILocalSymbol> _aliases = new(SymbolEqualityComparer.Default);
+
+    /// <summary>R27.41. Whether <paramref name="local"/> holds a borrowing struct.</summary>
+    public bool Holds(ILocalSymbol local) => _held.ContainsKey(local);
+
+    /// <summary>R27.54. Makes <paramref name="x"/> another name for the held local <paramref name="target"/>.</summary>
+    public void Alias(ILocalSymbol x, ILocalSymbol target) => _aliases[x] = target;
+
+    public void Unalias(ILocalSymbol x) => _aliases.Remove(x);
+
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
-        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l && _held.TryGetValue(l, out var c) ? c
+        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
+        (_aliases.TryGetValue(l0, out var l) ? l : l0) is var l1 && _held.TryGetValue(l1, out var c) ? c
         : ForEachEnumerator(Unparenthesized(e));
 
     /// <summary>R27.51. <c>Pal.Enumerator&lt;E&gt;(x)</c>, in a contract: the enumerator of the `foreach` over <c>x</c>.</summary>

@@ -68,4 +68,64 @@ public static class SpecSetOps
     /// <summary>A lemma: flipping the first <paramref name="i"/> elements of <paramref name="t"/> adds at most <paramref name="i"/> elements.</summary>
     [SpecOp("Pulse.Lib.CSharp.SetOps.sym_except_length")]
     public static void SymmetricExceptLength<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i) => throw Ghost();
+
+    /// <summary>The merge of <paramref name="s"/> and <paramref name="t"/>, in order; of two elements that compare equal, the one of <paramref name="t"/> (<c>UnionWith</c>'s merge).</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union")]
+    public static Seq<T> Union<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: one step of the merge, over the suffixes from <paramref name="i"/> and <paramref name="j"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_step")]
+    public static void UnionStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+    /// <summary>A lemma: with <paramref name="t"/> used up (<c>j == t.Length</c>), the rest of the merge is the rest of <paramref name="s"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_rest_left")]
+    public static void UnionRestLeft<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+    /// <summary>A lemma: with <paramref name="s"/> used up (<c>i == s.Length</c>), the rest of the merge is the rest of <paramref name="t"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_rest_right")]
+    public static void UnionRestRight<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+    /// <summary>A lemma: the merge of the whole sequences, as suffixes from 0.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_whole")]
+    public static void UnionWhole<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: the merge with an empty <paramref name="s"/> is <paramref name="t"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_left_empty")]
+    public static void UnionLeftEmpty<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: the merge of two strictly sorted sequences is strictly sorted and no longer than both.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_sorted")]
+    public static void UnionSorted<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: writing <c>x</c> at <paramref name="k"/> of <paramref name="m"/> moves it from the front of <c>x :: r</c> to the prefix.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.push_prefix")]
+    public static void PushPrefix<T>(Seq<T> m, SpecInt k, T x, Seq<T> r) => throw Ghost();
+
+    /// <summary>A lemma: writing <c>s[i]</c> at <paramref name="k"/> of <paramref name="m"/> moves it from the suffix of <paramref name="s"/> from <paramref name="i"/> to the prefix.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.push_rest")]
+    public static void PushRest<T>(Seq<T> m, SpecInt k, Seq<T> s, SpecInt i) => throw Ghost();
+
+    /// <summary><paramref name="s"/> after adding each element of <paramref name="t"/>, first to last, unless a member compares equal to it (<c>AddAllElements</c>).</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.add_all")]
+    public static Seq<T> AddAll<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: adding <c>t[i]</c> extends the prefix <c>t[0..i)</c> by one.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.add_all_step")]
+    public static void AddAllStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: the whole of <paramref name="t"/> is its prefix of its length.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.add_all_whole")]
+    public static void AddAllWhole<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: adding the first <paramref name="i"/> elements of <paramref name="t"/> adds at most <paramref name="i"/> elements.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.add_all_length")]
+    public static void AddAllLength<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: when one side is used up (<c>i == s.Length</c> or <c>j == t.Length</c>), the rest of the merge is the rest of the other.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.union_rest")]
+    public static void UnionRest<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+    /// <summary>A lemma: <paramref name="p"/> followed by the empty suffix of <paramref name="s"/> is <paramref name="p"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.rest_done")]
+    public static void RestDone<T>(Seq<T> p, Seq<T> s) => throw Ghost();
 }

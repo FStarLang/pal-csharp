@@ -767,7 +767,14 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
-        MutatesClosedReceiver(i) || MovesRegion(i);
+        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i);
+
+    /// <summary>
+    /// R27.54. An arm with a loop that breaks: the break flag is a mutable local, which Pulse
+    /// allocates only where the post-condition is known, that is, in tail position.
+    /// </summary>
+    private static bool BreaksLoop(IrStmt s) =>
+        Check.Statements(s).Any(t => t is IrWhile { Body: var b } && Check.Statements(b).Any(u => u is IrBreak));
 
     /// <summary>
     /// R27.38. `if (c) throw …;` with nothing else: Pulse's join of the arms keeps no pure
@@ -1774,6 +1781,59 @@ public sealed class CodeEmitter(
 
     private const string MoveModule = "Pulse.Lib.CSharp.RegionMove";
 
+    /// <summary>
+    /// R27.55. <c>f = o.g;</c>, with <c>f</c> a region field of the receiver and <c>o</c> an
+    /// object local of an owner class whose <c>g</c> is a pointer of the same region class:
+    /// the receiver adopts <c>o</c>'s tree. <c>o</c> is opened for good: its record is held
+    /// bare from here on, so its other fields can still be read, and the boxes of the tree
+    /// <c>g</c> roots move into the receiver's region (<c>RegionMove.adopt</c>, which needs
+    /// the tree unshared, as <c>o</c>'s invariant says it is). What remains of <c>o</c>'s
+    /// regions is dropped; <c>o</c> is never closed again, so nothing can call its methods.
+    /// </summary>
+    private void Adopt(IrAssign a)
+    {
+        if (a.Target is not IrField { Receiver: IrVar { Name: Names.This } } tf || !IsRegionType(tf.Type) ||
+            a.Value is not IrField { Receiver: IrVar dv } df || dv.Name == Names.This ||
+            !IsRegionType(df.Type) || df.Type is not IrClassType k ||
+            !_slots.TryGetValue(dv.Name, out var ds) || ds is not { Kind: SlotKind.Object, Type: IrClassType dc, Open: false } ||
+            _peerOpen.Contains(dv.Name) || !_objectLocals.Any(l => l.Name == dv.Name && l.Binder == ds.Binder) ||
+            !classes!.TryGetValue(dc.Name, out var ddecl))
+            return;
+        k = k with { Nullable = false };
+        var regions = RegionsOf(ddecl).ToList();
+        if (!regions.Any(r => r.Name == k.Name)) return;
+        var into = FreshValue(Frontend.Region.HeapBinder(k.Name));
+        Line($"with {into}. assert ({PulseEmitter.RegionAt(k, "1.0R", into)});");
+        Line($"{MoveModule}.park {into};");
+        var hs = regions.Select(r => FreshValue(Frontend.Region.HeapBinder(r.Name))).ToList();
+        var model = FreshValue(dv.Name);
+        var module = Names.ClassModule(dc.Name);
+        Line($"{module}.{Names.ClassToHeap(dc.Name)} {ds.Binder};");
+        var args = $"{ds.Binder} {model} {string.Join(" ", hs)}";
+        Line($"with {model} {string.Join(" ", hs)}. assert ({InvHeap(dc)} {args});");
+        Line($"unfold {InvHeap(dc)} {args};");
+        var t = Fresh();
+        Line($"let {t} = B.op_Bang {ds.Binder};");
+        Line($"{MoveModule}.unpark {into};");
+        var lr = RegionShape(k);
+        var x = $"{t}.{Names.ClassProjection(dc.Name, df.Field)}";
+        for (var i = 0; i < regions.Count; i++)
+        {
+            var r = regions[i];
+            if (r.Name == k.Name)
+            {
+                Line($"{MoveModule}.adopt {lr} {hs[i]} {into} {x};");
+                Line($"drop_ ({PulseEmitter.RegionAt(r, "1.0R", $"({MoveModule}.moved_from {lr} {hs[i]} {x})")});");
+            }
+            else
+                Line($"drop_ ({PulseEmitter.RegionAt(r, "1.0R", hs[i])});");
+        }
+        var opened = ds with { Open = true };
+        _slots[dv.Name] = opened;
+        var at = _objectLocals.FindIndex(l => l.Name == dv.Name && l.Binder == ds.Binder);
+        _objectLocals[at] = opened;
+    }
+
     /// <summary>R27.44. The child projections of a region class, applied to its type arguments.</summary>
     private static string RegionShape(IrClassType k)
     {
@@ -2556,6 +2616,7 @@ public sealed class CodeEmitter(
     /// <summary>R5.3.</summary>
     private void Assign(IrAssign a)
     {
+        Adopt(a);
         switch (a.Target)
         {
             case IrVar v when _objectLocals.Any(l => l.Name == v.Name && l.Kind == SlotKind.Array):
@@ -3704,6 +3765,14 @@ public sealed class CodeEmitter(
                 Scoped(() => UnitTailSequence(b.Statements, plan), dropAtEnd: false);
                 return;
 
+            // R27.54. `if (c) S` last in a loop body, where `S` calls a method that changes its
+            // receiver: Pulse's join of `S` with the empty arm keeps neither arm's facts about
+            // the receiver, so the arms are tails, each proving the invariant.
+            case IrIf { Else: null } bare when NullTest(bare.Cond) is null &&
+                                              Check.Statements(bare.Then).SelectMany(Check.Expressions).Any(MovesReceiver):
+                UnitTail(bare with { Else = new IrBlock(bare.Loc, []) }, plan);
+                return;
+
             case IrIf { Else: not null } i when NullTest(i.Cond) is null:
             {
                 if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
@@ -4280,7 +4349,7 @@ public sealed class CodeEmitter(
             {
                 if (!Reachable(obj, f.Loc, f.Field)) return "()";
                 var t = Fresh();
-                if (f.Peer && ov.Name != Names.This && !_objects.Any(o => o.Name == ov.Name) && !_peerOpen.Contains(ov.Name))
+                if (f.Peer && ov.Name != Names.This && !obj.Open && !_objects.Any(o => o.Name == ov.Name) && !_peerOpen.Contains(ov.Name))
                 {
                     PeerOpen(obj, oc, () => Line($"let {t} = B.op_Bang {obj.NonNull};"));
                     return $"{t}.{Names.ClassProjection(oc.Name, f.Field)}";
