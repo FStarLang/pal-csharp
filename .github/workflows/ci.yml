@@ -117,9 +117,10 @@ jobs:
       # compiles its C# with the stock compiler and verifies the Pulse that `palcs`
       # generates from it, followed by the seven lints. This is the root target rather
       # than `make -C test`, so the lints also see what the emitter produced for the
-      # examples.
+      # examples. It runs one F* job per core: the samples alone are over an hour
+      # sequentially.
       - name: Test
-        run: make test
+        run: make -j"$(nproc)" test
 
       # `make test` has already run these; naming the two anti-contortion detectors
       # (doc/translation.md §7.2) separately is for the CI summary, where "the compiler
