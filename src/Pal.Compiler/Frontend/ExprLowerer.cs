@@ -961,7 +961,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var fromArray = sourceType is IArrayTypeSymbol { Rank: 1 };
 
         var expected = fromSpan ? "Slice" : "AsSpan";
-        if (method.Name != expected || (!fromSpan && !fromArray) || args.Count > 2) return null;
+        if (!known.IsSpanBorrow(method) || method.Name != expected ||
+            (!fromSpan && !fromArray) || method.Parameters.Length != args.Count ||
+            args.Where((a, i) => a.NameColon is { } name &&
+                name.Name.Identifier.ValueText != method.Parameters[i].Name).Any())
+            return null;
 
         var source = Lower(access.Expression);
         var origin = fromSpan ? SpanOrigin.SpanRange : SpanOrigin.ArrayRange;
@@ -2268,12 +2272,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrSpecOp(loc, "Pulse.Lib.CSharp.Bcl.is_reference_or_contains_references", [])
                 { TypeArgs = [refType], Type = IrPrim.Bool };
 
-        // R17.5. The two ways to borrow a window by name. Both are recognised by
-        // *shape* -- the name, the argument count, and the fact that the result is a span
-        // -- rather than by symbol identity, because `AsSpan` is an extension method on
-        // `MemoryExtensions` while `Slice` is an instance method on the span itself, and
-        // requiring the frontend to know which is which would make the rule about the BCL
-        // rather than about C#.
+        // R17.5. Framework AsSpan and Slice share the borrow lowering, not their identity.
+        // A user or library member with the same shape need not borrow the same memory.
         if (known.IsAnySpan(method.ReturnType) &&
             node.Expression is MemberAccessExpressionSyntax borrow &&
             LowerBorrow(method, borrow, args, loc) is { } window)

@@ -5332,6 +5332,13 @@ takes that ownership. Five C# forms, three library operations, one receipt each:
 | `a.AsSpan(i)`, `a.AsSpan(i, n)` | `Span.of_array_range a i n` | `Span.is_range_of a w p i j v` |
 | `s.Slice(i)`, `s.Slice(i, n)`, `s[i..j]` | `Span.sub s i n` | `Span.is_sub_of s w p i j v` |
 
+The method forms name the framework's array overloads of `System.MemoryExtensions.AsSpan`
+and integer overloads of `System.Span<T>.Slice` or `System.ReadOnlySpan<T>.Slice`, checked
+by resolved symbol (including an extension method's unreduced declaration). A user or
+referenced library's method with the same name and signature is not thereby a borrow and
+is refused under R17.7. Arguments must be in parameter order; reordered named arguments
+are refused rather than given different bounds.
+
 The one-argument forms synthesise the missing length as `source.Length - start`, so
 `s.Slice(i)` and `s.Slice(i, s.Length - i)` translate to the same term — two spellings of
 one operation, which is what §0's structure-preservation rule requires of them.
