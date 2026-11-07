@@ -19,7 +19,8 @@ those files to Pulse and checks them with F*. The files keep their upstream path
 | `PriorityQueue<TElement,TPriority>` | `System.Collections/.../Generic/PriorityQueue.cs` | 20 members: `Enqueue`, `Dequeue`, `Peek`, the `Try*` forms, `DequeueEnqueue`, `EnqueueDequeue`, `Clear`, capacity management, and sift up/down for both comparer paths |
 | `SortedList<TKey,TValue>` | `System.Collections/.../Generic/SortedList.cs` | 22 members and the class invariant (keys strictly sorted) |
 | `HashSet<T>` | `System.Private.CoreLib/.../Generic/HashSet.cs` | `Clear`, `Count`, `Contains`, `FindItemIndex`, `Remove`, against an invariant that the hash chains are well formed |
-| `SortedSet<T>` | `System.Collections/.../Generic/SortedSet.cs` | the red-black tree: constructors, `Count`, `Comparer`, `Clear`, `Contains`, `TryGetValue`, `Min`/`Max`, `FindNode`, `FindRange`, `InternalIndexOf`, `Add` and `Remove` (top-down insertion and deletion), `ConstructRootFromSortedArray`, its enumerator, the in-order and breadth-first walks with their callbacks, the three `CopyTo`s, `RemoveWhere`, `Reverse` (an iterator), and every `Node` helper (rotations, `Split4Node`, `Merge2Nodes`, …). The invariant: items strictly sorted under the comparer, red-black colouring, `Count` equal to the size |
+| `SortedSet<T>` | `System.Collections/.../Generic/SortedSet.cs` | the red-black tree: constructors, `Count`, `Comparer`, `Clear`, `Contains`, `TryGetValue`, `Min`/`Max`, `FindNode`, `FindRange`, `InternalIndexOf`, `Add` and `Remove` (top-down insertion and deletion), `ConstructRootFromSortedArray`, its enumerator, the in-order and breadth-first walks with their callbacks, the three `CopyTo`s, `RemoveWhere`, `Reverse` (an iterator), `DeepClone`, the copy constructors, the set operations `UnionWith`, `IntersectWith`, `ExceptWith`, `SymmetricExceptWith`, `SetEquals` and `Overlaps` (against another `SortedSet<T>` with the same comparer), and every `Node` helper (rotations, `Split4Node`, `Merge2Nodes`, …). The invariant: items strictly sorted under the comparer, red-black colouring, `Count` equal to the size |
+| `SortedDictionary<TKey,TValue>` | `System.Collections/.../Generic/SortedDictionary.cs` | over its `TreeSet` (a `SortedSet` of pairs ordered by key): constructors, `Count`, `Clear`, `ContainsKey`, `TryGetValue`, the indexer `get`, `Add`, `Remove`, `CopyTo`; verified in the `SortedSet` harness |
 
 **Enumerators and views.** Every collection's enumerator is verified as well:
 `GetEnumerator`, `MoveNext`, `Current`, `Reset` and `Dispose`, plus the boxing
@@ -31,9 +32,11 @@ and view members are verified (`doc/translation.md` §28–§29).
 
 Members that are not annotated, and why, are recorded in `doc/translation.md` §22–§29.
 
-`SortedSet<T>` is verified at its exact type (R27.1): its subclass `TreeSubSet` (the view
-`GetViewBetween` returns) is not annotated, so verified code only ever holds a
-`SortedSet<T>` it constructed.
+`SortedSet<T>` is verified at its exact type (R27.1, R27.57): its view subclass
+`TreeSubSet` (returned by `GetViewBetween`) is not annotated, so verified code only ever
+holds a `SortedSet<T>` (or `TreeSet`) that it constructed. `GetViewBetween` and the
+`IsSubsetOf` family are therefore not verified.
+
 The other `.cs` files under `src/` are unmodified upstream files that the annotated ones
 need in order to compile.
 
@@ -68,9 +71,6 @@ make -C samples/dotnet-runtime/pal/List     # one
 ```
 
 `make test` at the repository root runs them too.
-
-`SortedDictionary<TKey,TValue>` is verified in the `SortedSet` harness, as far as
-§27.2 lists.
 
 Not included: `LinkedList<T>` and `Dictionary<TKey,TValue>`, which still need translator
 support (see §23 and §25).
