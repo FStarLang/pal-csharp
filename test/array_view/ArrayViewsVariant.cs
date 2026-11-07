@@ -44,6 +44,19 @@ public static class ArrayViewsVariant
     [Ensures("Result == Contents(v)[p]")]
     public static int Peek(ReadOnlySpan<int> v, int p) => v[p];
 
+    [Requires("0 <= p && p < Contents(v).Length")]
+    [Ensures("Contents(v).Length == Old(Contents(v)).Length")]
+    [Ensures("Contents(v).Length > p && p >= 0 && Result == Contents(v)[p]")]
+    public static int PeekSuffix(int[] v, int p)
+    {
+        ReadOnlySpan<int> whole = v.AsSpan();
+        ReadOnlySpan<int> tail = whole.Slice(start: p, length: whole.Length - p);
+        int got = tail[0];
+        Pal.Restore(tail);
+        Pal.Restore(whole);
+        return got;
+    }
+
     /// <summary>Two read-only windows, possibly of the same array: each parameter carries
     /// its own fraction (R17.2), so a caller may lend the same memory twice.</summary>
     [Requires("Contents(v).Length > 0 && Contents(w).Length > 0")]
