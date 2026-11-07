@@ -509,7 +509,7 @@ public static class Types
     /// A nullary application is left bare, so every pre-M9 emission is unchanged.
     /// </summary>
     public static string Applied(string head, ImmutableArray<IrType> args) =>
-        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Render))})";
+        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Atom))})";
 
     /// <summary>The literal syntax for a value of a machine-integer type.</summary>
     /// <summary>R20.3. An F* string literal. F* strings are UTF-8; only the escapes it reads are used.</summary>

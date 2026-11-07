@@ -466,6 +466,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.Implies(Result, @this.SpecItems == SpecTopDown.Inserted(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item))")]
         [Ensures("Pal.Implies(!Result, @this.SpecItems == Pal.Old(@this.SpecItems))")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Throws(typeof(ArgumentException), "Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0", At = typeof(TreeSet<>))]
         public bool Add(T item) => AddIfNotPresent(item); // Hack so the implementation can be made virtual
 
         void ICollection<T>.Add(T item) => Add(item);

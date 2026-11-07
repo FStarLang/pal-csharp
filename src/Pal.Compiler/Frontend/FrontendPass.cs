@@ -52,6 +52,35 @@ public static partial class FrontendPass
                 declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor }));
         }
 
+        // R27.57. The replicas the bodies asked for, each a base body verified again at a
+        // representation-sharing subclass; a replica's own calls may ask for more.
+        Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
+        while (known.ReplicaDemand.Count > 0)
+        {
+            var request = known.ReplicaDemand.Dequeue();
+            var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
+            if (source is null)
+            {
+                diagnostics.Error("PALCS0715", Locations.From(request.At.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{request.Source}` would have to be verified again at `{request.At.Name}`, whose override it " +
+                    "reaches, but it is not translated (doc/translation.md R27.57).");
+                continue;
+            }
+            var model = compilation.GetSemanticModel(source.Syntax.SyntaxTree);
+            var lifted = new List<IrMethod>();
+            known.Replica = request;
+            var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
+            known.Replica = null;
+            if (decl is not IrMethod replica) continue;
+            declarations.Add(replica with
+            {
+                Name = request.Name,
+                Throws = [.. replica.Throws, .. replica.AtThrows.Where(t => t.At == request.At.Name).Select(t => t.Throws)],
+                AtThrows = [],
+            });
+            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor }));
+        }
+
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
             declarations.Add(include);
 
@@ -561,7 +590,9 @@ public static partial class FrontendPass
                         _ => null,
                     });
 
-                    if (known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
+                    // R27.58. A nested class bound by R21.5 is a type, not an operation.
+                    if (member is not ITypeSymbol &&
+                        known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
                         !isPredicate && !producesObject &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
@@ -917,6 +948,8 @@ public static partial class FrontendPass
                 // hierarchy the translator has to encode: the base is verified at its exact
                 // type (see `ExactType`).
                 if (UntranslatedSubclass(symbol, known)) continue;
+                // R27.57. A representation-sharing subclass is its base's class.
+                if (Subclasses.IsAlias(symbol, known)) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R18.1. Every class the collector *looks at* is one it has spoken about:
@@ -1105,13 +1138,14 @@ public static partial class FrontendPass
     /// <c>C</c>, and every virtual call on it binds to <c>C</c>'s own body.
     /// </summary>
     private static bool ExactType(INamedTypeSymbol symbol, WellKnown known) =>
-        known.AnnotatedOnly && !symbol.IsAbstract && !symbol.IsSealed &&
+        !symbol.IsAbstract && !symbol.IsSealed &&
         symbol.TypeParameters.Length > 0 &&
         known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
             .OfType<INamedTypeSymbol>()
             .Where(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition))
             .ToList() is { Count: > 0 } subs &&
-        subs.All(t => UntranslatedSubclass(t, known));
+        // R27.57. A subclass sharing the representation is verified at its own exact type.
+        subs.All(t => UntranslatedSubclass(t, known) || Subclasses.IsAlias(t, known));
 
     /// <summary>
     /// R22.5. Under <c>[TranslateAnnotatedOnly]</c>, a class that is not <c>sealed</c> but
@@ -2573,7 +2607,7 @@ public static partial class FrontendPass
         }
 
         var declaringClass = symbol is { IsStatic: false, ContainingType: { } owner } && known.HasModel(owner)
-            ? owner.Name
+            ? Subclasses.AliasBase(owner, known)?.Name ?? owner.Name
             : null;
 
         var objectFields = symbol.ContainingType is not { } holder ? ImmutableHashSet<string>.Empty
@@ -2593,7 +2627,7 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Replica?.Name ?? Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
         if (iterated is not null) lowerer.Iterate(iterated);
 
@@ -2652,6 +2686,7 @@ public static partial class FrontendPass
             Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
             Throws = specs.Throws,
+            AtThrows = specs.AtThrows,
             DeclaringClass = declaringClass,
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
             // R4.11b derives this from the write set. R9.7: an abstract method has no
@@ -2669,7 +2704,8 @@ public static partial class FrontendPass
             // parameter, so the signature that mentions it is refused first.
             TypeParameters = MethodTypeParameters(symbol),
             DefaultedTypeParameters = [.. MethodTypeParameters(symbol).Where(lowerer.Defaulted)],
-            Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
+            Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName } &&
+                        !Subclasses.IsAlias(symbol.ContainingType, known)
                 ? baseName
                 : null,
         };
@@ -2779,6 +2815,10 @@ public static partial class FrontendPass
             if (c.Initializer is { } chained)
                 stmts.Add(new IrExprStmt(Locations.From(chained),
                     lowerer.Expressions.LowerConstructorInitializer(chained)));
+            else if (lowerer.Expressions.ImplicitBaseConstructor(c) is { } implicitBase)
+                // R27.57. A representation-sharing subclass's constructor without an
+                // initializer runs `: base()`, which builds the object.
+                stmts.Add(new IrExprStmt(Locations.From(c), implicitBase));
             else
                 // R4.12d. A field initialiser is the assignment C# would run here, and it
                 // runs in *this* constructor precisely when this constructor does not chain
@@ -2838,6 +2878,7 @@ public static partial class FrontendPass
         IrExpr? Decreases)
     {
         public ImmutableArray<IrThrows> Throws { get; init; } = [];
+        public ImmutableArray<(string At, IrThrows Throws)> AtThrows { get; init; } = [];
     }
 
     private static Specs ReadSpecs(
@@ -2869,6 +2910,7 @@ public static partial class FrontendPass
         }
 
         var throws = ImmutableArray.CreateBuilder<IrThrows>();
+        var atThrows = ImmutableArray.CreateBuilder<(string, IrThrows)>();
         var throwsIndex = 0;
         foreach (var attribute in declaration.GetAttributes())
         {
@@ -2888,12 +2930,18 @@ public static partial class FrontendPass
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
                 { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow }
                 .Lower(spec.Expression);
-            throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
+            var clause = new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when);
+            // R27.57. A clause for the replica at a subclass is not the member's own.
+            if (attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value is INamedTypeSymbol at)
+                atThrows.Add((at.Name, clause));
+            else
+                throws.Add(clause);
         }
 
         return new Specs(requires.ToImmutable(), ensures.ToImmutable(), preserves.ToImmutable(), decreases)
         {
             Throws = throws.ToImmutable(),
+            AtThrows = atThrows.ToImmutable(),
         };
     }
 

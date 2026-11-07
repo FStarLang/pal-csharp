@@ -69,5 +69,8 @@ make -C samples/dotnet-runtime/pal/List     # one
 
 `make test` at the repository root runs them too.
 
-Not included: `SortedDictionary<TKey,TValue>`, `LinkedList<T>` and
-`Dictionary<TKey,TValue>`, which still need translator support (see §23, §25 and §27).
+`SortedDictionary<TKey,TValue>` is verified in the `SortedSet` harness, as far as
+§27.2 lists.
+
+Not included: `LinkedList<T>` and `Dictionary<TKey,TValue>`, which still need translator
+support (see §23 and §25).

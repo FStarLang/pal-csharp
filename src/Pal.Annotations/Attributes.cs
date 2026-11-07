@@ -49,6 +49,13 @@ public sealed class ThrowsAttribute(Type exception, string predicate = "true") :
 {
     public Type Exception { get; } = exception;
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R27.57. When set, the clause belongs to the replica of this inherited member that is
+    /// verified at the subclass <c>At</c> (whose override the body reaches), not to the
+    /// member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>Shorthand for <c>[Requires(p)] [Ensures(p)]</c>.</summary>

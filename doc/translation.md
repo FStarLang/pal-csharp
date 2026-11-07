@@ -6810,7 +6810,8 @@ the ones proposed below:
 * R26.2's `return` inside a loop;
 * a returned pointer that the caller only tests against `null`.
 
-Obstacles 7 and 8 still stand. §27.2 lists what is verified.
+Obstacles 7 and 8 still stand. §27.2 lists what is verified. `SortedDictionary`'s core
+members are verified too (R27.57–R27.59).
 
 `SortedDictionary` is a wrapper over `SortedSet<KeyValuePair<TKey,TValue>>` (`TreeSet`), so
 both wait on `SortedSet`. The harness `pal/SortedSet` in the runtime checkout gets
@@ -8494,6 +8495,91 @@ so the model refines `Result.Comparer != null`. `UnionWith` passes its own compa
 copy constructor, which requires `(comparer ?? Default) == collection.SpecComparer`. That
 holds only because the comparer is not null.
 
+### R27.57 Representation-sharing subclasses
+
+A `sealed` class `S` deriving from a class `B` that is verified at its exact type (R27.1),
+and declaring no instance field, `[Model]` or `[Invariant]` of its own, *shares `B`'s
+representation*: its objects are `B` records under `B`'s invariant and `B`'s model. It is
+translated as `B`'s type. Only one thing differs, which body a virtual call reaches, and
+pal-csharp decides that statically. `TreeSet<T>` (`SortedDictionary`'s set, which throws
+on a duplicate key) is the use.
+
+* **Exact types are tracked instead of behavioural subtyping.** pal-csharp does not check
+  overrides against the base's contracts. Each translated object of `S` is known to be an
+  `S` everywhere it is used. A virtual call on an `S` receiver binds to `S`'s override, or
+  to `B`'s member when `S` does not override it, and is checked against that member's own
+  contract. This is sound because:
+  * objects of `S` come only from translated `new S(…)`;
+  * every conversion of an `S` value to another type (an upcast to `B`, an interface, or
+    `object`; a cast, `as` or `is` on it; passing it where another type is expected) is
+    refused with PALCS0715;
+  * a constructor or method of `S` that lets `this` escape at another type is refused too.
+
+  So static class = exact class at every use, as R27.1 already assumes of `B`. An override
+  may therefore strengthen or change its contract freely: `TreeSet.AddIfNotPresent` throws
+  where `SortedSet.AddIfNotPresent` returns `false`.
+* **Replicas.** A member of `B` that `S` inherits, and whose body reaches an override of
+  `S` (through `this`-calls, transitively), is translated a second time with `this` an
+  `S`: `S_member`, verified against `B`'s contract at `S`. The call graph is closed from
+  the root's callees, so a member is not part of its own replica set unless it is really
+  recursive. A replica's `[Throws]` clauses are those of `B`'s member plus the ones marked
+  `[Throws(…, At = typeof(S<>))]`, which apply only at `S`. `SortedSet.Add` declares that
+  at `TreeSet<>` it throws `ArgumentException` when the item is present, and
+  `TreeSet_Add` is verified with that clause.
+* **Constructors.** A constructor of `S` with no initializer calls `B`'s parameterless
+  constructor (C#'s implicit `: base()`). `base.M(…)` in `S` is `this.M` at `B`'s member.
+* `(IComparer<T>?)null` is `null_comparer` (R26.7).
+
+Test: `test/sortedset/Alias.cs`. A `CappedTally<T>` overrides a virtual `BumpCore` to
+throw at a cap, and the inherited `Bump` is replicated with `[Throws(…, At = …)]`.
+`test/diagnostics/cases/AliasUpcast.cs` is the refusal.
+
+### R27.58 `SortedDictionary`: a holder of a region owner; `KeyValuePairComparer`
+
+`SortedDictionary<TKey, TValue>` owns a `TreeSet<KeyValuePair<TKey, TValue>>` (R27.57)
+through its field `_set`. Its model is `{ Pairs, PairComparer, KeyComparer }`, built from
+`_set`'s `SpecItems` and `SpecComparer`, and refined so that `PairComparer` is
+`SpecKeyMap.OfKeys(KeyComparer)`. `SpecKeys` is `SpecKeyMap.Keys(Pairs)`.
+
+* **`KeyValuePairComparer`** is bound (`[SpecBinding]`, as in `pal/SortedSet/Bindings.cs`) to
+  `KeyComparer.pair_comparer`, a comparer on pairs. Its constructor is bound to
+  `KeyComparer.create c = of_keys (c ?? Default)`. `of_keys c` compares two pairs by their
+  keys under `c`, and `key_of (of_keys c) == c`. These are trusted modeling axioms, listed
+  in 27.1. `KeyMap` (proved) relates the pair set to its keys: under `of_keys c`, a
+  strictly sorted pair sequence has strictly sorted keys, and
+  `KeyIndex(of_keys c, ps, (k, v)) == KeyIndex(c, Keys(ps), k)` whatever `v` is. This is
+  what turns `_set`'s pair contracts into `SortedDictionary`'s key contracts.
+* **Binding a nested type** of a generic class applies the outer type arguments
+  (`SortedDictionary<K, V>.KeyValuePairComparer` is `pair_comparer K V`). Type arguments
+  that F* cannot infer are passed explicitly.
+* **A call on an owned field whose contract holds the field at its heaps** (R27.13) is
+  bracketed by `to_heap`/`of_heap` on the field, as on a local (`_set.Count`).
+* **Sharing.** A class whose invariant owns, through an object field, a region owner is
+  not fraction-shareable, because a region owner is not. Read-only members of such a
+  class take the invariant at a fraction without splitting it.
+* **Compound type arguments** in an applied type name are parenthesised
+  (`class_SortedSet (tuple2 k v)`).
+
+Test: `test/sortedset/Holder.cs`.
+
+### R27.59 Reading a region pointer through an owned field
+
+A method of a class that owns, through a field `f`, an object that owns region `K` reaches
+`K` through `f`. It does not hold `K` itself (R27.16). A call on `f` whose contract holds
+`f` at its heaps (R27.13) and returns a `K` pointer leaves `f` *open* at the heap the call
+left it at: `class_O__inv_heap f m h` is unfolded, so the region is in the context at `h`,
+and the facts the contract states of the result at `h` hold of it. The pointer is then read
+through the region like any other (R27.5). The field is closed (`fold inv_heap`, then
+`of_heap`) on every path that closes the receiver, and before the next call on `f`.
+Writes through the pointer are not supported: the field is refolded at the model it was
+opened at.
+
+The rule for a `[Region]` class's auto-property (R27.3) now also matches it on a
+constructed type (`TreeSet<KeyValuePair<K, V>>.Node.Item`).
+
+Uses: `SortedDictionary.TryGetValue` and the indexer's getter read
+`_set.FindNode(…)`'s node. Test: `test/sortedset/Holder.cs`.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8505,6 +8591,11 @@ holds only because the comparer is not null.
 * `ComparerIdentity.same` (R27.47): a comparer value stands for one object, so `==` on
   comparers is equality of values. `ComparerIdentity.equals` is a function of its
   arguments and nothing more.
+* `KeyComparer` (R27.58): `of_keys c` compares pairs by their keys under `c`,
+  `key_of (of_keys c) == c`, and `of_keys c` is not null. The runtime harness binds
+  `SortedDictionary<K, V>.KeyValuePairComparer` and its constructor to this model.
+* Exact types for representation-sharing subclasses (R27.57) are, like R27.1, a soundness
+  argument that rests on PALCS0715's refusals rather than an axiom.
 * The runtime harness binds `BitOperations.Log2(uint)` to `Arith.log2_u32`, the floor of
   the base-2 logarithm with `Log2(0) == 0`. It also binds
   `EnumerableHelpers.GetEmptyEnumerator<T>()` to R29.4's `Obj.empty_enumerator`.
@@ -8610,12 +8701,57 @@ result and `Pal.Reshaped(@this, result)`, with the tree as below. `t` is
 The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recolored`,
 `Split4ed`, `Rotated`), which is what `AddIfNotPresent`'s ghost steps consume.
 
+**`TreeSet<T>` (R27.57)**, the `sealed` subclass `SortedDictionary` uses, shares
+`SortedSet<T>`'s representation.
+
+| member | ensures |
+|---|---|
+| `TreeSet()`, `TreeSet(IComparer<T>?)` | as `SortedSet`'s constructors |
+| `AddIfNotPresent` (override; requires `SpecItems.Length < int.MaxValue`) | `Result`, the item was absent, `SpecItems == SpecTopDown.Inserted(…)`, comparer unchanged; throws `ArgumentException` when the item is present |
+| `Add` (replica `TreeSet_Add` of `SortedSet.Add`) | `SortedSet.Add`'s contract, plus its `[Throws(ArgumentException, …, At = typeof(TreeSet<>))]` |
+
+**`SortedDictionary<TKey, TValue>` (R27.58, R27.59).** `KeyIndex` below is
+`Pal.KeyIndex(SpecKeyComparer, SpecKeys, key)`. Every member throws
+`ArgumentNullException` on a null key where the code checks it.
+
+| member | ensures |
+|---|---|
+| `SortedDictionary()`, `SortedDictionary(IComparer<TKey>?)` | empty, key comparer `comparer ?? Comparer<TKey>.Default` |
+| `Count` | `Result == SpecPairs.Length` |
+| `Clear` | empty, key comparer unchanged |
+| `ContainsKey` | `Result == (KeyIndex >= 0)` |
+| `TryGetValue` | `Result == (KeyIndex >= 0)`, and then `value` is `SpecPairs[KeyIndex].Value`; pairs unchanged |
+| indexer `get` | `SpecPairs[KeyIndex].Value`; throws `KeyNotFoundException` when `KeyIndex < 0` |
+| `Add` (requires a non-null key that is absent, and `SpecPairs.Length < int.MaxValue`) | `SpecPairs == SpecTopDown.Inserted(SpecPairComparer, Old(SpecPairs), (key, value))`, key comparer unchanged |
+| `Remove` | `Result == (Old KeyIndex >= 0)`, `SpecPairs == SpecTopDownRemove.Removed(…, (key, default))`, key comparer unchanged |
+| `CopyTo(array, index)` (requires `index >= 0` and room) | `Contents(array) == Splice(Old(Contents(array)), index, index + SpecPairs.Length, SpecPairs)` |
+
+`Add` and `CopyTo` *require* what makes them not throw, rather than stating `[Throws]`
+(27.3: a holder's raise path).
+
 **Not annotated:**
 
-* **`TreeSubSet` and `GetViewBetween`.** Blocked on subclassing a region owner. A view is
-  a `SortedSet<T>` subclass that inherits the fields and overrides the virtual members
-  (`VersionCheck`, `Contains`, `IsWithinRange`, `MinInternal`, `AddIfNotPresent`,
-  `DoRemove`, …). Four things are missing, each a general feature:
+* **The rest of `SortedDictionary`.**
+  * The indexer's `set` writes `node.Item` through a node of `_set`'s region (R27.59
+    opens the field only for reading). Its model changes in a way that has to be proved
+    to keep `_set`'s invariants: the key and so the order are unchanged.
+  * `ContainsValue` passes capturing delegates to `_set.InOrderTreeWalk` that read nodes
+    of `_set`'s region inside the delegate. It also needs a model of
+    `EqualityComparer<TValue>.Default`.
+  * `Comparer` casts `_set.Comparer` to `KeyValuePairComparer` and reads its field; the
+    binding models the comparer, not its field.
+  * `Keys`, `Values`, `KeyCollection` and `ValueCollection` keep a reference back to the
+    dictionary in a lazily allocated object that the dictionary also points to.
+  * `GetEnumerator` and `Enumerator` wrap `_set`'s enumerator, which borrows a field of
+    the dictionary rather than the dictionary.
+  * The `IDictionary<TKey, TValue>` constructors enumerate an arbitrary dictionary.
+  * The non-generic `IDictionary` members cast `object` keys and values.
+* **`TreeSubSet` and `GetViewBetween`.** Blocked on subclassing a region owner with state
+  of its own. R27.57 covers a subclass that shares its base's representation, and
+  `TreeSubSet` does not. A view is a `SortedSet<T>` subclass that inherits the fields and
+  overrides the virtual members (`VersionCheck`, `Contains`, `IsWithinRange`,
+  `MinInternal`, `AddIfNotPresent`, `DoRemove`, …). Four things are missing, each a
+  general feature:
   1. **A subclass with its own invariant.** The view's `root` is a node *inside* the
      underlying set's region (`FindRange`'s result). Its subtree also holds keys outside
      the range, its `count` is recomputed lazily, and its `version` starts at -1. So none
@@ -8625,8 +8761,10 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
      type (R27.1), which is what lets its virtual calls bind statically.
   2. **Re-verifying inherited bodies at the subclass.** `base.Contains`,
      `InOrderTreeWalk`, `FindNode` and the enumerator run on a view receiver, with
-     `VersionCheck` bound to the view's override. They would have to be translated a second
-     time, at the view's invariant.
+     `VersionCheck` bound to the view's override. R27.57's replicas do this for a subclass
+     with the base's invariant. A view's replicas would run on a different invariant, with
+     the region borrowed from `_underlying` rather than owned. They would also need a
+     library lemma: a search from `FindRange`'s node finds every in-range key.
   3. **A borrowing class that owns mutable fields.** The view borrows the underlying set
      (§28) and also writes its own `root`, `count` and `version` in `VersionCheck`. §28's
      borrowing classes have no such writable state.
@@ -8666,12 +8804,6 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).
-* **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>`, a sealed
-  `SortedSet` subclass that overrides `AddIfNotPresent` to throw on a duplicate key.
-  `SortedSet<T>.Add` then dispatches to the override, so the inherited members must be
-  re-verified at the subclass (item 2 above). It also needs a model of
-  `KeyValuePairComparer`, an `IComparer` that compares keys only, and an abstraction from
-  the pair set to a map. Not reached.
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings
@@ -8682,6 +8814,15 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   example case-insensitive strings), the result depends on the two sizes. The contract
   states the branch condition.
 
+* **A holder cannot pass on a raise from an owned field.** When `SortedDictionary.Add`
+  calls `_set.Add`, which may raise, the raise path leaves `_set`'s invariant at an
+  unknown model. The callee's `raises` states only the throw condition, not that the
+  comparer is unchanged. So the dictionary's invariant, refined by
+  `PairComparer == OfKeys(KeyComparer)`, cannot be re-established for its own `raises`.
+  Proving it would need a postcondition on the raise path. The verified contracts of
+  `Add` and `CopyTo` therefore *require* what rules the throw out (an absent non-null key;
+  a non-negative index with room). A caller relying on the `ArgumentException` for a
+  duplicate key is outside the contract.
 * **A `[Throws]` method cannot call a raising method while it owns a local object.** A
   callee's raise path leaves the caller's local objects behind, and the caller's raise
   clause has no way to drop them ("Leftover resources"). `RemoveWhere` would raise only on

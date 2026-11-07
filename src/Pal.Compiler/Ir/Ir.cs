@@ -840,6 +840,12 @@ public sealed record IrMethod(
     public ImmutableArray<IrThrows> Throws { get; init; } = [];
 
     /// <summary>
+    /// R27.57. <c>[Throws(..., At = typeof(S))]</c> clauses: each belongs to the replica of
+    /// this method verified at the representation-sharing subclass <c>S</c>, by class name.
+    /// </summary>
+    public ImmutableArray<(string At, IrThrows Throws)> AtThrows { get; init; } = [];
+
+    /// <summary>
     /// R14.2. The method's type parameters, in declaration order. They become explicit
     /// <c>Type0</c> binders ahead of every value parameter.
     /// </summary>

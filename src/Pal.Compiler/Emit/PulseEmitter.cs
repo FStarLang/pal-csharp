@@ -1244,6 +1244,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     }
                 }
             }
+            // R27.59. A region that an object the method's class owns through a field owns is
+            // reached through that field, which the body keeps open while it reads the region.
+            if (m.DeclaringClass is { } hc && _classes.TryGetValue(hc, out var hdecl) && !hdecl.IsPlain)
+                foreach (var f in hdecl.Fields)
+                    if (f.Type is IrClassType { } fc && _classes.TryGetValue(fc.Name, out var fdecl) && !fdecl.IsPlain)
+                        foreach (var rf in fdecl.Fields.Where(IsRegionField))
+                            if (rf.Type is IrClassType rk) { ks.Remove(rk.Name); w.Remove(rk.Name); }
             touched[m.Name] = ks;
             writes[m.Name] = w;
             calls[m.Name] = cs;
@@ -1284,6 +1291,19 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     /// <summary>R27.37. The fields of each borrowing struct that own an object.</summary>
     private Dictionary<string, ImmutableArray<IrFieldDecl>> _ownedFields = [];
+
+    /// <summary>
+    /// R27.4, R27.58. Whether a class's invariant can be split into fractions: it owns no
+    /// region, and each object it owns can be split.
+    /// </summary>
+    private bool Shareable(IrClass c, HashSet<string>? visiting = null)
+    {
+        visiting ??= [];
+        if (!visiting.Add(c.Name)) return true;
+        return !c.Fields.Any(IsRegionField) &&
+               c.Fields.All(f => f.Type is not IrClassType { Name: var n } ||
+                                 !_classes.TryGetValue(n, out var owned) || Shareable(owned, visiting));
+    }
 
     private bool IsRegionField(IrFieldDecl f) =>
         f.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var d) && d.IsRegion;
@@ -1554,7 +1574,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R27.4. Two halves of an owner hold two heaps that nothing proves equal, so an
         // owner of a region is held whole and has no share or gather.
-        if (regions.IsEmpty) EmitShareAndGather(sb, c, arrays, objects);
+        // R27.58. So is an owner of one, through the object that holds the heap.
+        if (Shareable(c)) EmitShareAndGather(sb, c, arrays, objects);
 
         // R3.9c: each [Spec] member is a pure function of the model, never of the
         // representation — a caller holds only the model, so an observation it cannot

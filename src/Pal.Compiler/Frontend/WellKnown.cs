@@ -109,6 +109,16 @@ public sealed class WellKnown
     /// annotated declarations of the compilation are translated.
     /// </summary>
     public bool AnnotatedOnly { get; }
+
+    /// <summary>R27.57. A replica the lowering has asked for: <c>Source</c> verified again at <c>At</c>.</summary>
+    public sealed record ReplicaRequest(string Source, INamedTypeSymbol At, string Name);
+
+    /// <summary>R27.57. The replica being lowered, while one is.</summary>
+    public ReplicaRequest? Replica { get; set; }
+
+    /// <summary>R27.57. Replicas asked for and not yet lowered.</summary>
+    public Queue<ReplicaRequest> ReplicaDemand { get; } = new();
+    public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
     public INamedTypeSymbol? Exception { get; }
 
     /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
@@ -637,7 +647,12 @@ public sealed class WellKnown
             case INamedTypeSymbol named when SpecTypeName(named) is { } fstar:
             {
                 var args = ImmutableArray.CreateBuilder<IrType>();
-                foreach (var a in named.TypeArguments)
+                // R27.58. A bound class nested in a generic class is applied to the type
+                // arguments of the classes it is nested in, then its own (R24.6).
+                var applied = Binding(named) is not null
+                    ? AllTypeArguments(named)
+                    : named.TypeArguments;
+                foreach (var a in applied)
                 {
                     if (MapType(a) is not { } mapped) return null;
                     args.Add(mapped);
@@ -661,6 +676,11 @@ public sealed class WellKnown
             // R29.3. A class that borrows its owner is the record of its fields.
             case INamedTypeSymbol { TypeKind: TypeKind.Class } borrowing when Borrowing.IsBorrowingClass(borrowing, this):
                 return NamedStruct(borrowing);
+            // R27.57. A representation-sharing subclass is its base's type.
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } alias when Subclasses.AliasBase(alias, this) is { } aliased:
+                return MapType(aliased) is IrClassType ak
+                    ? ak with { Nullable = alias.NullableAnnotation == NullableAnnotation.Annotated }
+                    : null;
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
                 when HasModel(named) || IsPlainLike(named.OriginalDefinition):
             {

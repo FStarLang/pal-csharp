@@ -352,6 +352,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ThisExpressionSyntax when model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { } rself &&
                                       known.IsRegionClass(rself) => RegionThis(loc, rself),
             ThisExpressionSyntax => Borrow is not null ? SelfExpr(loc) : new IrVar(loc, Names.This),
+            // R27.57. In a representation-sharing subclass, `base` is the same object.
+            BaseExpressionSyntax when Subclasses.IsAlias(model.GetEnclosingSymbol(node.SpanStart)?.ContainingType, known) =>
+                new IrVar(loc, Names.This),
             // R23.13. The empty collection expression at a one-dimensional array type is
             // `Array.Empty<T>()` (R23.1).
             CollectionExpressionSyntax { Elements.Count: 0 } ce when !SpecPosition &&
@@ -395,6 +398,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 new IrLiteral(loc, folded),
             CastExpressionSyntax c when ScaledInt(c) is { } scaled =>
                 new IrSpecOp(loc, "Pulse.Lib.CSharp.Scale.scale_unit", [Lower(scaled)]) { Type = IrPrim.Int },
+            // R26.7. `(IComparer<T>?)null` is the null comparer, as the uncast literal is.
+            CastExpressionSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) &&
+                                        known.MapType(model.GetTypeInfo(c.Type).Type) is IrUserSpecType { FStar: Sorted.ComparerType } castCmp =>
+                new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", []) { TypeArgs = castCmp.Args, Type = castCmp },
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -569,6 +576,31 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             Kind = CalleeKind.Method,
             ResultType = known.MapType(klass) ?? new IrClassType(klass.Name),
+            TypeArguments = known.TypeArguments(ctor),
+        };
+    }
+
+    /// <summary>
+    /// R27.57. The call `: base()` that a constructor of a representation-sharing subclass
+    /// makes when it names no initializer; null for any other constructor.
+    /// </summary>
+    public IrExpr? ImplicitBaseConstructor(ConstructorDeclarationSyntax node)
+    {
+        if (model.GetDeclaredSymbol(node) is not IMethodSymbol { IsStatic: false } self ||
+            !Subclasses.IsAlias(self.ContainingType, known) ||
+            self.ContainingType.BaseType is not { } baseType)
+            return null;
+        var loc = Locations.From(node);
+        var ctor = baseType.InstanceConstructors.FirstOrDefault(k => k.Parameters.Length == 0);
+        if (ctor is null)
+        {
+            diagnostics.Unsupported(loc, $"A constructor of `{self.ContainingType.Name}` without a parameterless base constructor");
+            return new IrLiteral(loc, null);
+        }
+        return new IrCall(loc, Naming.Of(ctor), [])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = known.MapType(baseType) ?? new IrClassType(baseType.Name),
             TypeArguments = known.TypeArguments(ctor),
         };
     }
@@ -1516,7 +1548,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             && known.IsPlainLike(plain.OriginalDefinition)
             && (symbol is IFieldSymbol { IsStatic: false } ||
                 symbol is IPropertySymbol { IsStatic: false } autoProp &&
-                autoProp.ContainingType.GetMembers().OfType<IFieldSymbol>()
+                autoProp.ContainingType.OriginalDefinition.GetMembers().OfType<IFieldSymbol>()
                     .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, autoProp.OriginalDefinition))))
             return new IrField(loc, Lower(node.Expression), node.Name.Identifier.ValueText);
 
@@ -2563,7 +2595,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     known.MapType(dp.Type) is { } dt)
                     omitted.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
 
-        return new IrCall(loc, Naming.Of(method),
+        // R27.57. On an object of a representation-sharing subclass, the module is the one
+        // the subclass's dispatch reaches.
+        var calleeName = Naming.Of(method);
+        if (receiver is not null && !SpecPosition &&
+            Subclasses.ReceiverClass(node.Expression is MemberAccessExpressionSyntax rma ? rma.Expression : null, node, model, known) is { } aliasAt)
+            calleeName = Subclasses.Bind(method, aliasAt,
+                node.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax }, known, model.Compilation);
+
+        return new IrCall(loc, calleeName,
             receiver is null
                 ? [.. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted, .. context.Select(ContextRead)]
                 : [receiver, .. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted])

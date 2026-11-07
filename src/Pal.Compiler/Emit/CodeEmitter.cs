@@ -1981,9 +1981,25 @@ public sealed class CodeEmitter(
         }
     }
 
+    /// <summary>R27.59. The owned fields left open at a heap by a call that returned a region pointer.</summary>
+    private readonly Dictionary<string, (IrClassType Class, string Args)> _fieldOpen = [];
+
+    /// <summary>R27.59. Closes an owned field <see cref="_fieldOpen"/> holds open, back to its invariant.</summary>
+    private void CloseFieldRegion(string field, bool forget = true)
+    {
+        if (!_fieldOpen.TryGetValue(field, out var open)) return;
+        Line($"fold {InvHeap(open.Class)} {open.Args};");
+        Line($"{Names.ClassModule(open.Class.Name)}.{Names.ClassOfHeap(open.Class.Name)} {open.Args.Split(' ')[0]};");
+        if (forget) _fieldOpen.Remove(field);
+    }
+
     /// <summary>R4.11a. Re-establishes one open object's invariant.</summary>
     private void CloseObject(IrMethod method, Slot obj)
     {
+        // R27.59. Every path that closes the receiver closes the fields it holds open; the
+        // record is kept for the other branches, which close them too.
+        if (obj.Name == Names.This)
+            foreach (var field in _fieldOpen.Keys.ToList()) CloseFieldRegion(field, forget: false);
         {
             var klass = (IrClassType)obj.Type;
             // R4.11a. A read-only method re-folds at the binder it was handed; under a
@@ -4598,6 +4614,19 @@ public sealed class CodeEmitter(
             ? $"{Names.ClassModule(((IrClassType)recvSlot.Type).Name)}."
             : null;
         var recvClass = (self ?? closedRecv)?.Type is IrClassType rcls ? rcls.Name : null;
+        // R27.58. A receiver that is an object the receiver of this method owns (a field
+        // read off it, held by its invariant without heaps) is converted the same way.
+        if (convert is null && wantsHeap && !openCallee && self is null && closedRecv is null &&
+            SlotByBinder(raw[0]) is null && call.Args[0] is IrField &&
+            call.Args[0].Type is IrClassType { Nullable: false } frc)
+        {
+            convert = $"{Names.ClassModule(frc.Name)}.";
+            recvClass = frc.Name;
+        }
+        var fieldRecv = convert is not null && self is null && closedRecv is null;
+        // R27.59. A field still open from an earlier call is closed before another call on it.
+        if (call.HasReceiver && call.Args.Length > 0 && call.Args[0] is IrField { Field: var calledField })
+            CloseFieldRegion(calledField);
         var atModel = self is not null && Pristine && self.PreModel is not null && self.ViewBase is null;
         if (atModel) CloseAtModel(self!, null);
         else if (self is not null) CloseObject(_method!, self);
@@ -4621,7 +4650,22 @@ public sealed class CodeEmitter(
         }
         _lambdaProtocols.Clear();
         foreach (var o in bracketed) Line(Unfold(o) + ";");
-        if (convert is not null && closedRecv is not null)
+        // R27.59. A region pointer handed back by a call on an owned field points into the
+        // field's region, at the heap the call left it at: the field is kept open there, so
+        // that the pointer can be read, until the receiver is closed.
+        if (fieldRecv && wantsHeap && call.ResultType is IrClassType { } rpt && IsRegionType(rpt) &&
+            classes is not null && classes.TryGetValue(recvClass!, out var fdecl) &&
+            _objects.FirstOrDefault(o => o.Name == Names.This) is { } holder)
+        {
+            var fk = new IrClassType(recvClass!);
+            var fm = FreshValue(recvClass!);
+            var fhs = RegionsOf(fdecl).Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
+            var fargs = $"{raw[0]} {holder.PermArg}{fm} {string.Join(" ", fhs)}";
+            Line($"with {fm} {string.Join(" ", fhs)}. assert ({InvHeap(fk)} {fargs});");
+            Line($"unfold {InvHeap(fk)} {fargs};");
+            _fieldOpen[((IrField)call.Args[0]).Field] = (fk, fargs);
+        }
+        else if (convert is not null && (closedRecv is not null || fieldRecv))
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");
         if (self is not null)
         {
