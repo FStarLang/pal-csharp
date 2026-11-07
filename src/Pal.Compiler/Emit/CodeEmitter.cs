@@ -27,8 +27,41 @@ public sealed class CodeEmitter(
     IReadOnlyDictionary<string, ImmutableArray<IrClassType>>? heapIndexed = null,
     IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null,
     ISet<string>? openMethods = null,
-    ISet<string>? raising = null)
+    ISet<string>? raising = null,
+    ISet<string>? readOnlyMethods = null)
 {
+    /// <summary>
+    /// R27.50. Whether a statement emitted so far may have changed the receiver's model: a
+    /// field write, a write to its region, or a call on it to a method that is not
+    /// read-only. A loop entered while this is false, which itself leaves the receiver
+    /// alone, holds it at its model on entry.
+    /// </summary>
+    private bool _receiverDirty;
+
+    /// <summary>
+    /// R27.50. The last time a call on the open receiver closed it around itself and
+    /// reopened it after (R22.15), with the regions the callee held it at (R27.13).
+    /// </summary>
+    private (Slot Self, ImmutableArray<IrClassType>? Heaps)? _lastReopen;
+    // R27.50. The lines of the last reopening after a callee that kept the receiver at its
+    // model (start and end in `_lines`): an arm that ends with them may drop them instead.
+    private (int Start, int End)? _keptReopen;
+
+    /// <summary>R27.50. For each loop being emitted, whether it was entered with the receiver unchanged.</summary>
+    private readonly Stack<bool> _pristineLoops = new();
+
+    private bool DirtiesReceiver(IrStmt stmt)
+    {
+        if (ReceiverWrites(stmt).Record) return true;
+        if (_method?.DeclaringClass is { } dc && classes is not null && classes.TryGetValue(dc, out var owner) &&
+            RegionsOf(owner).Any(k => WritesRegion(stmt, k.Name, skipReadOnly: true)))
+            return true;
+        return Check.Statements(stmt).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .OfType<IrCall>()
+            .Any(c => c.HasReceiver && c.Args is [IrVar { Name: Names.This }, ..] &&
+                      readOnlyMethods?.Contains(c.Callee) != true);
+    }
+
     /// <summary>
     /// The output, one line at a time, each remembering the C# it came from.
     ///
@@ -147,6 +180,9 @@ public sealed class CodeEmitter(
     {
         _plan = plan;
         _method = method;
+        _receiverDirty = false;
+        _lastReopen = null;
+        _keptReopen = null;
         _raises.Add(plan.ThrowsProp);
         // In declaration order, not `plan.Slots`': see MethodPlan.SlotOrder. `_slots` is
         // a plain Dictionary, so every later walk of it inherits the order set here.
@@ -203,6 +239,10 @@ public sealed class CodeEmitter(
                 "body cannot have it both ways. Read the field through the method, or inline " +
                 "the callee.");
         }
+
+        // R27.50. Two objects of one class held whole are two objects: said once, on entry,
+        // where each is still held as the contract hands it over.
+        if (classes is not null) EmitDistinct(method, plan);
 
         // The invariant is abstract to the caller, so the body cannot touch a field until
         // it is unfolded, and the matching `fold` on each exit path re-establishes it.
@@ -336,12 +376,14 @@ public sealed class CodeEmitter(
             {
                 if (NullTest(i.Cond) is { } window)
                 {
-                    NullWindow(window, i, branch => Tail(branch!, method, plan), tail: true);
+                    var dirtyAtWindow = _receiverDirty;
+                    NullWindow(window, i, branch => { _receiverDirty = dirtyAtWindow; Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
                 {
-                    PlainNullWindow(ptest, i, branch => Tail(branch!, method, plan), tail: true);
+                    var dirtyAtPlain = _receiverDirty;
+                    PlainNullWindow(ptest, i, branch => { _receiverDirty = dirtyAtPlain; Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 var cond = Expr(i.Cond);
@@ -350,7 +392,10 @@ public sealed class CodeEmitter(
                 // Each arm ends the method, so what one arm moves out of a local (R22.12)
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
+                // R27.50. Likewise the receiver is as dirty in the other arm as before both.
+                var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
+                _receiverDirty = dirty;
                 _objectLocals.Clear();
                 _objectLocals.AddRange(owned);
                 _indent--;
@@ -927,7 +972,10 @@ public sealed class CodeEmitter(
             .GroupBy(k => k.Name).Select(g => g.First());
 
     /// <summary>R27.5. Whether a statement writes a field of an object of a region class.</summary>
-    private bool WritesRegion(IrStmt body, string regionClass) =>
+    // R27.50. With skipReadOnly, a call to a read-only method does not count: it leaves
+    // every region it is handed as it found it. This only decides whether a loop states
+    // an unchanged model, which F* then checks, so erring costs a proof, never soundness.
+    private bool WritesRegion(IrStmt body, string regionClass, bool skipReadOnly = false) =>
         Check.Statements(body).Any(s =>
             s is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && k.Name == regionClass ||
             Check.Expressions(s).SelectMany(Check.Subexpressions)
@@ -935,7 +983,8 @@ public sealed class CodeEmitter(
                           // R27.16. A call writes the region exactly when its callee does; a
                           // callee that holds no region of its own is assumed to.
                           // R27.39. A callback is handed the region at a fixed heap and gives it back.
-                          e is IrCall c && c.Kind != CalleeKind.Callback && (regionHeld is null || !regionHeld.TryGetValue(c.Callee, out var uses) ||
+                          e is IrCall c && c.Kind != CalleeKind.Callback &&
+                          !(skipReadOnly && readOnlyMethods?.Contains(c.Callee) == true) && (regionHeld is null || !regionHeld.TryGetValue(c.Callee, out var uses) ||
                                             uses.Any(u => u.Region.Name == regionClass && u.Mutates))));
 
     private static string Inv(IrClassType c) =>
@@ -974,6 +1023,10 @@ public sealed class CodeEmitter(
     {
         var klass = (IrClassType)receiver.Type;
         var (writesRecord, written) = ReceiverWrites(body);
+        // R27.50. Entered with the receiver unchanged since the method began, and leaving it
+        // alone: the receiver is still at its model on entry.
+        var unchanged = receiver.PostModel == receiver.PreModel ||
+                        _pristineLoops.Count > 0 && _pristineLoops.Peek();
         // R27.38. A call that closes the receiver around itself (R22.15's self-call, or a
         // raising callee's bracket) reopens it at a fresh record: the record cannot be
         // named before the loop. A read-only receiver says instead that the record is still
@@ -1021,10 +1074,15 @@ public sealed class CodeEmitter(
                     $"({Frontend.Region.Module}.current #({PulseEmitter.RegionRaw(k)}) ())", TermKind.Other));
         }
 
-        if (reopened && receiver.PostModel == receiver.PreModel && receiver.ViewBase is null &&
+        if (reopened && unchanged && receiver.ViewBase is null &&
             decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
+        {
             pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {record} " +
                      $"{string.Concat(heapsOfRecord.Select(h => h + " "))}{receiver.PreModel}");
+            // R27.50. The receiver is at its model throughout, so a measure reads it there.
+            if (receiver.PreModel is { } pm)
+                measureScope.Bind(receiver.Name, new Term($"(reveal {pm})", TermKind.Math, receiver.Type));
+        }
 
         foreach (var f in decl.Fields)
         {
@@ -1523,6 +1581,36 @@ public sealed class CodeEmitter(
     /// A constructor is excluded: it builds the representation rather than reading one,
     /// and <see cref="Construct"/> handles it before this point is reached.
     /// </remarks>
+    /// <summary>
+    /// R27.50. For each pair of objects of a class the body compares by reference, both held
+    /// whole (not read-only, not opened, not through a view): <c>class_C__distinct</c>, at the
+    /// heap-indexed form when the class owns regions.
+    /// </summary>
+    private void EmitDistinct(IrMethod method, MethodPlan plan)
+    {
+        foreach (var name in PulseEmitter.ComparedClasses(method, classes!))
+        {
+            if (!classes!.TryGetValue(name, out var decl) || decl.BaseClass is not null) continue;
+            var regions = RegionsOf(decl).Any();
+            var held = plan.SlotOrder.Select(n => plan.Slots[n])
+                .Where(s => s is { Kind: SlotKind.Object, Open: false, ViewBase: null, Index: null, Fraction: null } &&
+                            s.Type is IrClassType { Nullable: false } t && t.Name == name &&
+                            (regions || s.Heaps.IsEmpty))
+                .ToList();
+            var module = Names.ClassModule(name);
+            for (var i = 0; i < held.Count; i++)
+            for (var j = i + 1; j < held.Count; j++)
+            {
+                var (x, y) = (held[i], held[j]);
+                foreach (var s in new[] { x, y })
+                    if (regions && s.Heaps.IsEmpty) Line($"{module}.{Names.ClassToHeap(name)} {s.Binder};");
+                Line($"{module}.{Names.ClassDistinct(name)} {x.Binder} {y.Binder};");
+                foreach (var s in new[] { y, x })
+                    if (regions && s.Heaps.IsEmpty) Line($"{module}.{Names.ClassOfHeap(name)} {s.Binder};");
+            }
+        }
+    }
+
     private bool TouchesFields(IrMethod method) =>
         method.Body is not null
         && Check.Statements(method.Body)
@@ -1793,6 +1881,28 @@ public sealed class CodeEmitter(
             Line($"{Names.ClassModule(((IrClassType)peer.Type).Name)}.{Names.ClassOfHeap(((IrClassType)peer.Type).Name)} {peer.Binder};");
     }
 
+    /// <summary>R22.15. Reopens the receiver a call closed, at whatever model the callee left.</summary>
+    private void Reopen(Slot self, ImmutableArray<IrClassType>? heaps)
+    {
+        var klass = (IrClassType)self.Type;
+        if (heaps is { } regions)
+        {
+            var m = FreshValue(klass.Name);
+            var hs = regions.Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
+            var args2 = $"{self.Binder} {self.PermArg}{m} {string.Join(" ", hs)}";
+            Line($"with {m} {string.Join(" ", hs)}. assert ({InvHeap(klass)} {args2});");
+            Line($"unfold {InvHeap(klass)} {args2};");
+        }
+        else if (self.PostModel == self.PreModel)
+            Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{self.PreModel};");
+        else
+        {
+            var m = FreshValue(klass.Name);
+            Line($"with {m}. assert ({Inv(klass)} {self.Binder} {self.PermArg}{m});");
+            Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{m};");
+        }
+    }
+
     /// <summary>R4.11a. Re-establishes one open object's invariant.</summary>
     private void CloseObject(IrMethod method, Slot obj)
     {
@@ -1931,6 +2041,7 @@ public sealed class CodeEmitter(
         var outer = _loc;
         _loc = stmt.Loc;
         try { StatementCore(stmt, plan); } finally { _loc = outer; }
+        if (!_receiverDirty && DirtiesReceiver(stmt)) _receiverDirty = true;
     }
 
     private void StatementCore(IrStmt stmt, MethodPlan plan)
@@ -2123,7 +2234,14 @@ public sealed class CodeEmitter(
                 return;
 
             case IrWhile w:
-                While(w, plan);
+                // R27.50. A loop that changes the receiver changes it before its own
+                // body runs again, so nothing inside it sees the receiver unchanged.
+                // R27.50. The receiver is at its model on every iteration when nothing before
+                // the loop, in an enclosing loop, or in this loop's body has changed it.
+                _pristineLoops.Push(RegionOwner && (_pristineLoops.Count == 0 || _pristineLoops.Peek()) &&
+                                    !_receiverDirty && !DirtiesReceiver(w.Body));
+                if (DirtiesReceiver(w)) _receiverDirty = true;
+                try { While(w, plan); } finally { _pristineLoops.Pop(); }
                 return;
 
             case IrGhostStmt g:
@@ -4372,7 +4490,9 @@ public sealed class CodeEmitter(
             ? $"{Names.ClassModule(((IrClassType)recvSlot.Type).Name)}."
             : null;
         var recvClass = (self ?? closedRecv)?.Type is IrClassType rcls ? rcls.Name : null;
-        if (self is not null) CloseObject(_method!, self);
+        var atModel = self is not null && Pristine && self.PreModel is not null && self.ViewBase is null;
+        if (atModel) CloseAtModel(self!, null);
+        else if (self is not null) CloseObject(_method!, self);
         // R27.38. A callee that may raise hands its exception, with whatever the caller
         // holds, to the caller's `raises`, which owns the objects closed. An object only
         // read (a borrowing struct's owner) is closed around the call, and reopened at the
@@ -4397,24 +4517,18 @@ public sealed class CodeEmitter(
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");
         if (self is not null)
         {
-            var klass = (IrClassType)self.Type;
-            if (wantsHeap)
-            {
-                var m = FreshValue(klass.Name);
-                var hs = heapIndexed![call.Callee]
-                    .Select(k => FreshValue(Frontend.Region.HeapBinder(k.Name))).ToList();
-                var args2 = $"{self.Binder} {self.PermArg}{m} {string.Join(" ", hs)}";
-                Line($"with {m} {string.Join(" ", hs)}. assert ({InvHeap(klass)} {args2});");
-                Line($"unfold {InvHeap(klass)} {args2};");
-            }
-            else if (self.PostModel == self.PreModel)
-                Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{self.PreModel};");
-            else
-            {
-                var m = FreshValue(klass.Name);
-                Line($"with {m}. assert ({Inv(klass)} {self.Binder} {self.PermArg}{m});");
-                Line($"unfold {Inv(klass)} {self.Binder} {self.PermArg}{m};");
-            }
+            // R27.50. A receiver at its model that the callee took without its heaps is
+            // given them back before it is reopened, so that its heaps are named by the
+            // reopening rather than hidden in it, where a join cannot abstract them.
+            var heapsBack = atModel && convert is not null && !wantsHeap;
+            if (heapsBack) Line($"{convert}{Names.ClassToHeap(recvClass!)} {raw[0]};");
+            _lastReopen = (self, wantsHeap ? [.. heapIndexed![call.Callee]]
+                : heapsBack ? [.. self.Heaps.Select(h => h.Region)] : null);
+            var reopenStart = _lines.Count;
+            Reopen(self, _lastReopen.Value.Heaps);
+            _keptReopen = atModel && readOnlyMethods?.Contains(call.Callee) == true &&
+                          (wantsHeap || heapsBack || self.Heaps.IsEmpty)
+                ? (reopenStart, _lines.Count) : null;
         }
         Close(view);
         // R10.6c. The binder a call produced an object under is the name the context holds
@@ -4535,6 +4649,16 @@ public sealed class CodeEmitter(
 
         // R27.8. Two references to objects of a `[Region]` class are compared as pointers.
         if (b.Op is BinOp.Eq or BinOp.Ne && IsRegionType(b.Left.Type) && IsRegionType(b.Right.Type))
+            return b.Op is BinOp.Eq
+                ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
+                : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
+
+        // R27.50. So is `x == this` of an owner class: each is a box. Other comparisons of
+        // two objects stay refused (R18.1).
+        if (b.Op is BinOp.Eq or BinOp.Ne &&
+            (b.Left is IrVar { Name: Names.This } || b.Right is IrVar { Name: Names.This }) &&
+            b.Left.Type is IrClassType { Nullable: false } lc && b.Right.Type is IrClassType { Nullable: false } rc &&
+            lc.Name == rc.Name && classes is not null && classes.ContainsKey(lc.Name))
             return b.Op is BinOp.Eq
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
                 : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
@@ -4698,7 +4822,8 @@ public sealed class CodeEmitter(
     // Capturing sub-blocks
     // =======================================================================
 
-    private readonly record struct Captured(ImmutableArray<EmittedLine> Lines, string Term);
+    private readonly record struct Captured(ImmutableArray<EmittedLine> Lines, string Term,
+        (Slot Self, ImmutableArray<IrClassType>? Heaps)? Reopened = null, int KeptTail = 0);
 
     /// <summary>
     /// Emits into a scratch buffer, so that a sub-block's let-bindings can be placed
@@ -4713,10 +4838,18 @@ public sealed class CodeEmitter(
     private Captured Capture(Func<string> emit)
     {
         var saved = _lines.Count;
+        var savedReopen = _lastReopen;
+        var savedKept = _keptReopen;
+        _lastReopen = null;
+        _keptReopen = null;
         var term = emit();
+        var reopened = _lastReopen;
+        var keptTail = _keptReopen is { } k && k.Start >= saved && k.End == _lines.Count ? k.End - k.Start : 0;
+        _lastReopen = reopened ?? savedReopen;
+        _keptReopen = savedKept;
         var captured = _lines.GetRange(saved, _lines.Count - saved);
         _lines.RemoveRange(saved, _lines.Count - saved);
-        return new Captured([.. captured], term);
+        return new Captured([.. captured], term, reopened, keptTail);
     }
 
     /// <summary>
@@ -4729,6 +4862,58 @@ public sealed class CodeEmitter(
         Line($"let {t} = {term};");
         return t;
     });
+
+    /// <summary>
+    /// R27.50. An arm that closes the receiver around a call reopens it at a fresh record,
+    /// and Pulse's join of a value-returning <c>if</c> keeps what one arm knows of a record
+    /// only under that arm's condition. Where the receiver is still at its model, each arm
+    /// instead ends with it closed at that model, which is one term on both sides, and the
+    /// receiver is reopened once after the join.
+    /// </summary>
+    private Captured Reclosed(Captured arm, (Slot Self, ImmutableArray<IrClassType>? Heaps) r)
+    {
+        // An arm that ends by reopening the receiver after a callee that kept it at its
+        // model already holds it closed at that model just before: it stops there, so
+        // that nothing it learnt by reopening outlives the arm (Pulse cannot abstract a
+        // heap that only pure facts still mention).
+        if (arm.KeptTail > 0)
+            return arm with { Lines = arm.Lines.RemoveRange(arm.Lines.Length - arm.KeptTail, arm.KeptTail), Reopened = r, KeptTail = 0 };
+        var tail = Capture(() => { CloseAtModel(r.Self, r.Heaps); return arm.Term; });
+        return arm with { Lines = arm.Lines.AddRange(tail.Lines), Reopened = r };
+    }
+
+    /// <summary>R27.50. Whether the open receiver is still at the model it was handed.</summary>
+    private bool Pristine => RegionOwner && (_pristineLoops.Count == 0 || _pristineLoops.Peek()) && !_receiverDirty;
+
+    /// <summary>
+    /// R27.50. Pristine receivers are tracked for region owners only, whose writes
+    /// `DirtiesReceiver` sees (fields and regions); an array field's contents are written
+    /// through aliases it does not follow.
+    /// </summary>
+    private bool RegionOwner =>
+        _method?.DeclaringClass is { } dc && classes is not null && classes.TryGetValue(dc, out var owner) &&
+        RegionsOf(owner).Any() && !owner.Fields.Any(f => f.Type is IrArrayType);
+
+    /// <summary>
+    /// R27.50. Closes a receiver that is still at its model at that model, rather than at
+    /// the abstraction of its record: the two are equal, and the model is one term
+    /// wherever it is closed.
+    /// </summary>
+    private void CloseAtModel(Slot obj, ImmutableArray<IrClassType>? heaps)
+    {
+        var self = obj with { PostModel = obj.PreModel };
+        ImmutableArray<IrClassType>? held = self.Heaps.IsEmpty ? null : [.. self.Heaps.Select(h => h.Region)];
+        if ((heaps ?? held) is { } regions)
+        {
+            var klass = (IrClassType)self.Type;
+            var hs = regions.Select(k => (k, FreshValue(Frontend.Region.HeapBinder(k.Name)))).ToList();
+            foreach (var (k, h) in hs)
+                Line($"with {h}. assert ({PulseEmitter.RegionAt(k, self.Fraction ?? "1.0R", h)});");
+            Line($"fold {InvHeap(klass)} {self.Binder} {self.PermArg}{self.PreModel} " +
+                 $"{string.Join(" ", hs.Select(x => x.Item2))};");
+        }
+        else CloseObject(_method!, self);
+    }
 
     private string Branch(string cond, Captured whenTrue, Captured whenFalse)
     {
@@ -4755,6 +4940,22 @@ public sealed class CodeEmitter(
         if (whenTrue.Lines.Length == 0) whenTrue = Bound(whenTrue.Term);
         if (whenFalse.Lines.Length == 0) whenFalse = Bound(whenFalse.Term);
 
+        // R27.50. An arm that closes the receiver around a call reopens it at a fresh
+        // record, and Pulse's join keeps that arm's facts about the record only under the
+        // arm's condition. The other arm closes and reopens it too, so that on both sides
+        // the record is one the invariant abstracts.
+        var reopened = whenTrue.Reopened ?? whenFalse.Reopened;
+        if (reopened is { } r0 && Pristine && r0.Self.PreModel is not null)
+        {
+            // Closed and reopened through the regions it holds, whichever way the call did.
+            var r = r0.Self.Heaps.IsEmpty || r0.Heaps is not null ? r0
+                : (r0.Self, (ImmutableArray<IrClassType>?)[.. r0.Self.Heaps.Select(h => h.Region)]);
+            reopened = r;
+            whenTrue = Reclosed(whenTrue, r);
+            whenFalse = Reclosed(whenFalse, r);
+        }
+        else reopened = null;
+
         var t = Fresh();
         Line($"let {t} = if ({cond}) {{");
         _indent++;
@@ -4767,6 +4968,11 @@ public sealed class CodeEmitter(
         Line(whenFalse.Term);
         _indent--;
         Line("};");
+        if (reopened is { } ro)
+        {
+            Reopen(ro.Self, ro.Heaps);
+            _lastReopen = ro;
+        }
         return t;
     }
 }

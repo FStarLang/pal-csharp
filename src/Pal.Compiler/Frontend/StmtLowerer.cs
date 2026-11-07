@@ -511,6 +511,17 @@ public sealed class StmtLowerer(
                 _spec.Alias(symbol, new IrVar(Locations.From(v), ap.Name) { Type = pType });
                 continue;
             }
+            // R27.50. `D? x = e as D;`, never written, where R27.46 decided the `as` false
+            // (`this as Sub` on an object of its exact class): `x` is another name for `null`.
+            if (symbol is not null && v.Initializer?.Value is { } nullInit &&
+                ExprLowerer.Unparenthesized(nullInit) is BinaryExpressionSyntax { RawKind: (int)SyntaxKind.AsExpression } &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                _code.Lower(nullInit) is IrNull { Type: IrClassType { Nullable: true } } folded)
+            {
+                _code.Alias(symbol, folded);
+                _spec.Alias(symbol, folded);
+                continue;
+            }
             // R27.41. A borrowing struct of the method's own object, held in a local.
             if (borrow is null && symbol is not null && HeldStruct(v, symbol, type, statements)) continue;
             // R24.19. `T[] a = _field;`, never written, is another name for the field.

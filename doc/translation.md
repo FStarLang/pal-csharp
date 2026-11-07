@@ -8278,6 +8278,58 @@ they hold under `c`. The enumerator exposes `SpecCurrentTree` and `SpecCurrentIn
 holder's invariant: the current node is in the region with the key just yielded at its
 root.
 
+### R27.50 Receivers kept at their model; `IntersectWith`
+
+`IntersectWith` merges `this` with another set and only then rebuilds `this`. Until the
+rebuild, every call on the receiver hands it back unchanged, and the proof needs that
+fact at the merge loop's invariant. R27.50 keeps it in the following ways.
+
+* **Reference equality with the receiver.** `other == this` (or `!=`), on two objects of
+  one translated class, is R27.8's `ref_eq`. Other comparisons of two objects stay
+  refused (R18.1, PALCS0593). Each such class gets a generated ghost `class_C__distinct`, proved
+  from the two full `B.pts_to` it is handed. Where both are held whole, `distinct` makes
+  the comparison false, so `other` and `this` can be open together. It adds no trusted
+  item beyond `ref_eq`.
+* **`as` that folds to null.** `D? x = e as D` is aliased to `null` when the frontend
+  folds the test to `null`, and `null == null` folds to `true`.
+* **Read-only calls do not dirty the receiver.** R27.16 assumes an unknown callee writes
+  the region. The receiver test here skips callees that are read-only (`[Frac]`, or
+  derived from the write set).
+* **Pristine receivers.** A receiver is *pristine* where no statement before (on the
+  emitted path) and, inside a loop, no statement of the loop body, can change it. The
+  two arms of a tail `if` and a null window start from the state at the branch, since
+  R22.12 copies the rest of the block into each arm. Where the receiver is pristine:
+  * a call on it closes it at its pre-model (`fold inv_heap this pre h…`) rather than at
+    the abstraction of its record;
+  * a loop's invariant states `abs` at the pre-model, and its `decreases` reads
+    `this`'s specs through that model;
+  * a value-returning `if` (the `&&` of a condition) whose arm calls the receiver ends
+    each arm with the receiver closed at that model. That is one term on both sides,
+    and the receiver is reopened once after the join. Pulse's join keeps what one arm
+    knows of a fresh record only under that arm's condition, and cannot abstract a
+    heap that only pure facts still mention, so an arm that ends by reopening after a
+    read-only callee drops that reopening instead of closing again. A callee taking the
+    receiver without its heaps gives them back (`to_heap`) before it is reopened.
+* **Read-only methods are heap-indexed.** A read-only method of a region owner is held
+  at its heaps (R27.13), which it gives back as it found them. So a caller part-way
+  through an enumeration keeps what it knew of them across `Max` or `Comparer`.
+
+`IntersectWith` (with `other` `[Exactly]` a `SortedSet<T>` of the same comparer) is
+proved with the library `Pulse.Lib.CSharp.SetInter` (`SpecSetInter` in C#).
+`inter c s t` is the elements of `t` that compare equal to some element of `s`, in
+`t`'s order. The library proves these lemmas:
+
+| lemma | statement |
+|---|---|
+| `inter_step` | one merge step over strictly sorted suffixes |
+| `inter_whole` | the whole sequences are their suffixes from 0 |
+| `inter_finish` | when the merge has stopped, a prefix followed by the suffix intersection is the intersection, so the prefix is |
+| `inter_sorted` | the intersection with a strictly sorted `t` is strictly sorted and no longer than `t` |
+| `inter_left_empty` | nothing intersects an empty `s` |
+| `push_prefix` | writing `x` at `k` extends the prefix `m[0..k)` by `x` |
+
+`HasEqualComparer` is marked `[Frac("p")]`, which its write set already allows.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8330,6 +8382,7 @@ ensures that the tree and the comparer are unchanged.
 | `BreadthFirstTreeWalk([Callback] action)` | `SpecWalk.BfWalked(SpecItems, Trace(action), Result)` (R27.40): every call was on a member, all but the last returned true, and a true result means every member was called on |
 | `RemoveWhere(match)` | `SpecItems == Pal.RemoveAll(Old(SpecItems), match)`, `Result == Old(SpecItems).Length - SpecItems.Length`, comparer unchanged (R27.40) |
 | `SetEquals(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetCompare.SameKeys(SpecComparer, SpecItems, other.SpecItems)`, which on the two strictly sorted sets is set equality (R27.49). The fallback branch is proved dead (R27.48) |
+| `IntersectWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers and at most 2^30 elements, for `ConstructRootFromSortedArray`) | `SpecItems == SpecSetInter.Inter(SpecComparer, Old(SpecItems), Old(other.SpecItems))`, the elements of `other` that compare equal to one of this set's; comparers and `other` unchanged (R27.50) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
 **`Enumerator` (R27.37, R27.38).** The struct borrows the set (`_tree`) and owns its
@@ -8389,8 +8442,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations other than `SetEquals`.** `UnionWith`, `IntersectWith` and the
-  rest build on enumeration and on `TreeSubSet`.
+* **The set operations other than `SetEquals` and `IntersectWith`.** `UnionWith` and the
+  rest build on enumeration and on `TreeSubSet`. `IntersectWith` is verified only on its
+  `SortedSet` branch (R27.50).
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both

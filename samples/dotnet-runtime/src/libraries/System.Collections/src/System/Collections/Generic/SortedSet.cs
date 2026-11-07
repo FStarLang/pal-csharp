@@ -1180,6 +1180,7 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Ensures("other.SpecNodes == Pal.Old(other.SpecNodes)")]
         [Ensures("other.SpecComparer == Pal.Old(other.SpecComparer)")]
+        [Frac("p")]
         private bool HasEqualComparer(SortedSet<T> other)
         {
             // Commonly, both comparers will be the default comparer (and reference-equal). Avoid a virtual method call to Equals() in that case.
@@ -1352,10 +1353,19 @@ namespace System.Collections.Generic
             return root;
         }
 
-        public virtual void IntersectWith(IEnumerable<T> other)
+        // The merge keeps the elements of `other` that compare equal to one of this set's
+        // (`SetInter.inter`, taking them in `other`'s order).
+        [Requires("@this.SpecComparer == other.SpecComparer")]
+        // ConstructRootFromSortedArray's midpoint overflows past 2^30 elements.
+        [Requires("@this.SpecItems.Length <= 1073741824")]
+        [Ensures("@this.SpecItems == SpecSetInter.Inter(@this.SpecComparer, Pal.Old(@this.SpecItems), Pal.Old(other.SpecItems))")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer) && other.SpecItems == Pal.Old(other.SpecItems) && other.SpecComparer == Pal.Old(other.SpecComparer)")]
+        [Rlimit(30)]
+        public virtual void IntersectWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
 
+            SpecSetInter.InterLeftEmpty(this.SpecComparer, this.SpecItems, ((SortedSet<T>)other).SpecItems);
             if (Count == 0)
                 return;
 
@@ -1380,9 +1390,32 @@ namespace System.Collections.Generic
                 Enumerator theirs = asSorted.GetEnumerator();
                 bool mineEnded = !mine.MoveNext(), theirsEnded = !theirs.MoveNext();
                 T? max = Max;
+                SpecSetInter.InterWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
 
                 while (!mineEnded && !theirsEnded && Comparer.Compare(theirs.Current, max) <= 0)
                 {
+                    Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
+                                  Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
+                                  Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
+                                  mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
+                                  theirs.SpecPending == Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length) &&
+                                  Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
+                                      Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                               this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
+                                  Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < asSorted.SpecItems.Length &&
+                                      Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                               asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
+                                  this.SpecItems.Length > 0 && Pal.Same(max, this.SpecItems[this.SpecItems.Length - 1]) &&
+                                  merged.Length == this.SpecItems.Length && 0 <= c &&
+                                  c <= this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1) &&
+                                  Pal.Concat(Pal.Slice(Pal.Contents(merged), 0, c),
+                                      SpecSetInter.Inter(this.SpecComparer,
+                                          Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1), this.SpecItems.Length),
+                                          Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1), asSorted.SpecItems.Length))) ==
+                                  SpecSetInter.Inter(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
+                    Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1) + theirs.SpecPending.Length + (theirsEnded ? 0 : 1));
+                    SpecSetInter.InterStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
+                        this.SpecItems.Length - mine.SpecPending.Length - 1, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1);
                     int comp = Comparer.Compare(mine.Current, theirs.Current);
                     if (comp < 0)
                     {
@@ -1390,6 +1423,10 @@ namespace System.Collections.Generic
                     }
                     else if (comp == 0)
                     {
+                        SpecSetInter.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
+                            SpecSetInter.Inter(this.SpecComparer,
+                                Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length),
+                                Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length)));
                         merged[c++] = theirs.Current;
                         mineEnded = !mine.MoveNext();
                         theirsEnded = !theirs.MoveNext();
@@ -1401,6 +1438,11 @@ namespace System.Collections.Generic
                 }
 
                 // now merged has all c elements
+                SpecSetInter.InterFinish(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
+                    this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1),
+                    asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1),
+                    Pal.Slice(Pal.Contents(merged), 0, c));
+                SpecSetInter.InterSorted(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
 
                 // safe to gc the root, we  have all the elements
                 root = null;
@@ -1411,6 +1453,9 @@ namespace System.Collections.Generic
             }
             else
             {
+                // The contract requires `other` to be a SortedSet<T> with this set's comparer,
+                // and this set is not a view (R27.1), so the branch above was taken.
+                Pal.Unreachable();
                 IntersectWithEnumerable(other);
             }
         }

@@ -100,6 +100,9 @@ public static class Names
     public static string ClassToHeap(string name) => "class_" + name + "__to_heap";
     public static string ClassOfHeap(string name) => "class_" + name + "__of_heap";
 
+    /// <summary>R27.50. Two objects held whole at once are distinct.</summary>
+    public static string ClassDistinct(string name) => "class_" + name + "__distinct";
+
     // R3.10d. The three ghost lemmas that make an object shareable. They are per class,
     // not once in the support library, because their proofs recurse into the class's own
     // fields — each array's `share`, each sub-object's `share` (F22).

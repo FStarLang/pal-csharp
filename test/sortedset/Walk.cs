@@ -444,6 +444,42 @@ public sealed class WalkSet<T>
         return n;
     }
 
+    [Ensures("Result == @this.SpecItems.Length")]
+    public int Count => count;
+
+    // R27.50. Two owners held whole are distinct objects, so `other == this` is false;
+    // the loop calls a method on the receiver, whose model the loop keeps because the
+    // method has not written it yet; the write comes after.
+    [Ensures("Result == -1 || Result == Pal.Old(@this.SpecItems).Length || Result == other.SpecItems.Length")]
+    [Ensures("Result != -1")]
+    [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems)")]
+    [Rlimit(8)]
+    internal int CountPairsThenTouch(WalkSet<T> other)
+    {
+        if (other == this)
+        {
+            return -1;
+        }
+        Enumerator mine = GetEnumerator();
+        Enumerator theirs = other.GetEnumerator();
+        int n = 0;
+        bool mineEnded = !mine.MoveNext();
+        bool theirsEnded = !theirs.MoveNext();
+        while (!mineEnded && !theirsEnded && n < Count)
+        {
+            Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
+                          n + (mineEnded ? 0 : 1) + mine.SpecPending.Length == this.SpecItems.Length &&
+                          n + (theirsEnded ? 0 : 1) + theirs.SpecPending.Length == other.SpecItems.Length &&
+                          (!mineEnded || mine.SpecPending.Length == 0) && (!theirsEnded || theirs.SpecPending.Length == 0));
+            Pal.Decreases(this.SpecItems.Length - n);
+            n++;
+            mineEnded = !mine.MoveNext();
+            theirsEnded = !theirs.MoveNext();
+        }
+        version++;
+        return n;
+    }
+
     // R27.49. Two enumerators walked in step, declared in a nested block: the sets'
     // in-order sequences compare equal position by position.
     [Ensures("Pal.Implies(walk, Result == SpecSetCompare.SameKeys(c, @this.SpecItems, other.SpecItems))")]

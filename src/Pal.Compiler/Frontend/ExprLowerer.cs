@@ -1713,6 +1713,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R27.46. An `[Exactly]` parameter (or a local naming it) is not null.
             if ((right is IrNull && ExactOperand(node.Left)) || (left is IrNull && ExactOperand(node.Right)))
                 return new IrLiteral(loc, op is BinOp.Ne) { Type = IrPrim.Bool };
+            // R27.50. A reference R27.46 decided to be `null`, compared with `null`.
+            if (left is IrNull && right is IrNull &&
+                (left.Type is IrClassType { Nullable: true } || right.Type is IrClassType { Nullable: true }))
+                return new IrLiteral(loc, op is BinOp.Eq) { Type = IrPrim.Bool };
             // R27.47. Two comparers are the same object when their values are equal.
             if (!SpecPosition && left is not IrNull && right is not IrNull &&
                 Sorted.IsComparerSymbol(model.GetTypeInfo(node.Left).Type) &&

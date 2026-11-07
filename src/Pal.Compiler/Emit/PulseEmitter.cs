@@ -268,6 +268,29 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private Dictionary<string, ImmutableArray<IrClassType>> _heapIndexed = [];
     private HashSet<string> _openMethods = [];
 
+    /// <summary>R27.50. The owner classes two references of which some method compares.</summary>
+    private HashSet<string> _compared = [];
+
+    /// <summary>R27.50. The methods R4.11 found read-only.</summary>
+    private HashSet<string> _readOnly = [];
+
+    /// <summary>
+    /// R27.50. The owner classes (not region classes) two non-null references of which the
+    /// method's body compares with <c>==</c> or <c>!=</c>.
+    /// </summary>
+    internal static IEnumerable<string> ComparedClasses(IrMethod method, IReadOnlyDictionary<string, IrClass> classes) =>
+        method.Body is null ? []
+        : Pal.Compiler.Passes.Check.Statements(method.Body)
+            .SelectMany(Pal.Compiler.Passes.Check.Expressions)
+            .SelectMany(Pal.Compiler.Passes.Check.Subexpressions)
+            .OfType<IrBinary>()
+            .Where(b => b.Op is BinOp.Eq or BinOp.Ne &&
+                        b.Left.Type is IrClassType { Nullable: false } l &&
+                        b.Right.Type is IrClassType { Nullable: false } r && l.Name == r.Name &&
+                        classes.TryGetValue(l.Name, out var d) && !d.IsRegion)
+            .Select(b => ((IrClassType)b.Left.Type!).Name)
+            .Distinct();
+
     /// <summary>§9. The <c>abstract</c> methods of each abstract class: its vtable slots.</summary>
     private ILookup<string, IrMethod> _virtuals =
         Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
@@ -321,6 +344,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .GroupBy(x => x.m.Name)
             .ToDictionary(g => g.Key, g => g.First().Item2);
         _openMethods = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
+        _readOnly = [.. program.Declarations.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
+        _compared = [.. program.Declarations.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
         _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         _raising = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
         // R27.38. A call to an owner's method that gives its heaps back writes no region.
@@ -446,6 +471,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     // R27.38. The pure half of the invariant, for a class with no array or
                     // object field.
                     new Provenance(Names.ClassAbs(cl.Name), decl.Loc),
+                    // R27.50. Two whole owners of the class are distinct.
+                    new Provenance(Names.ClassDistinct(cl.Name), decl.Loc),
                     .. cl.Observations.Select(o =>
                         new Provenance(Names.Observation(cl.Name, o.Name), o.Loc)),
                     // §10. A recursive class states its invariant at the option (R10.3) and
@@ -1117,6 +1144,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 Passes.Check.Expressions(st).SelectMany(Passes.Check.Subexpressions)
                     .OfType<IrVar>().Any(v => regions.Any(k => v.Name == Frontend.Region.HeapName(k.Name)))))
             return regions;
+        // R27.50. A read-only method gives its heaps back as it found them, so a caller
+        // keeps what it knew of them across the call.
+        if (m.IsReadOnly && !m.IsAbstract) return regions;
         return _heapsKept.Contains(m.Name) ? regions : [];
     }
 
@@ -1479,6 +1509,31 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine("}");
         }
 
+        // R27.50. Two objects of the class whose invariants are both held whole are two
+        // objects: each owns its box at full permission. Stated of the heap-indexed form
+        // when the class owns a region, so that folding back finds each region by its heap.
+        if (_compared.Contains(c.Name) && c.BaseClass is null)
+        {
+            var ty = tb.App(Names.ClassType(c.Name));
+            var model = tb.App(Names.ClassModel(c.Name));
+            var form = regions.IsEmpty ? Names.ClassInv(c.Name) : Names.ClassInvHeap(c.Name);
+            string Heaps(string who) => string.Concat(regions.Select(k => $" {Frontend.Region.HeapBinder(k.Name)}_{who}"));
+            var heapBinders = string.Concat(new[] { "x", "y" }.SelectMany(who => regions.Select(k =>
+                $" (#{Frontend.Region.HeapBinder(k.Name)}_{who}: {Frontend.Region.Module}.heap {RegionRaw(k)})")));
+            var both = $"{form} x m_x{Heaps("x")} ** {form} y m_y{Heaps("y")}";
+            sb.AppendLine();
+            sb.AppendLine($"ghost fn {Names.ClassDistinct(c.Name)}{tb.Implicit} (x y: {ty}) (#m_x #m_y: {model}){heapBinders}");
+            sb.AppendLine($"  requires {both}");
+            sb.AppendLine($"  ensures {both} ** pure (~(x == y))");
+            sb.AppendLine("{");
+            sb.AppendLine($"  unfold ({form} x m_x{Heaps("x")});");
+            sb.AppendLine($"  unfold ({form} y m_y{Heaps("y")});");
+            sb.AppendLine("  Pulse.Lib.CSharp.Distinct.boxes_distinct x y;");
+            sb.AppendLine($"  fold ({form} x m_x{Heaps("x")});");
+            sb.AppendLine($"  fold ({form} y m_y{Heaps("y")})");
+            sb.AppendLine("}");
+        }
+
         // R27.4. Two halves of an owner hold two heaps that nothing proves equal, so an
         // owner of a region is held whole and has no share or gather.
         if (regions.IsEmpty) EmitShareAndGather(sb, c, arrays, objects);
@@ -1672,7 +1727,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
         var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld,
-            _openMethods, _raising);
+            _openMethods, _raising, _readOnly);
         var plan = new MethodPlan(method, _spec, diagnostics,
             _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held,
             method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
