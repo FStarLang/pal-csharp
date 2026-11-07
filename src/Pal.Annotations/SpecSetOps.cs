@@ -93,6 +93,11 @@ public static class SpecSetOps
     [SpecOp("Pulse.Lib.CSharp.SetUnion.union_left_empty")]
     public static void UnionLeftEmpty<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
+    /// <summary>A lemma: for an empty <paramref name="s"/> and a strictly sorted <paramref name="t"/>,
+    /// <see cref="SymmetricExcept"/> is <see cref="Union"/>, both being <paramref name="t"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetUnion.sym_except_union_empty")]
+    public static void SymmetricExceptUnionEmpty<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
     /// <summary>A lemma: the merge of two strictly sorted sequences is strictly sorted and no longer than both.</summary>
     [SpecOp("Pulse.Lib.CSharp.SetUnion.union_sorted")]
     public static void UnionSorted<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();

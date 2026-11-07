@@ -8481,6 +8481,10 @@ specification. The library proves:
   (`AddAllElements`). `SpecSetOps.Union` is the merge and `SpecSetOps.AddAll` the
   repeated insertion; the library (`SetUnion`) proves the merge strictly sorted and its
   length at most the sum, and the loop lemmas the invariants use.
+* **`SymmetricExceptWith(other)`** calls `UnionWith` on an empty set. Its specification is
+  nevertheless `SpecSetOps.SymmetricExcept` throughout: flipping the elements of a strictly
+  sorted `other` into the empty set inserts each at the end, and so gives `other`, which is
+  also the union (`SetUnion.sym_except_union_empty`).
 
 ### R27.56 The comparer is not null
 
@@ -8548,6 +8552,7 @@ ensures that the tree and the comparer are unchanged.
 | `IntersectWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers and at most 2^30 elements, for `ConstructRootFromSortedArray`) | `SpecItems == SpecSetInter.Inter(SpecComparer, Old(SpecItems), Old(other.SpecItems))`, the elements of `other` that compare equal to one of this set's; comparers and `other` unchanged (R27.50) |
 | `SymmetricExceptWithSameComparer(SortedSet<T> other)` (requires equal comparers and the two sizes to sum to at most `int.MaxValue`) | `SpecItems == SpecSetOps.SymmetricExcept(c, Old(SpecItems), other.SpecItems)` (R27.53) |
 | `AddAllElements(collection)` (`[Exactly]`; requires equal comparers and the sizes to sum to at most `int.MaxValue`) | `SpecItems == SpecSetOps.AddAll(c, Old(SpecItems), collection.SpecItems)`: each element `Add`ed in turn (R27.55) |
+| `SymmetricExceptWith(other)` (`[Exactly]`; requires equal comparers and the sizes to sum to at most 2^30) | `SpecItems == SpecSetOps.SymmetricExcept(c, Old(SpecItems), other.SpecItems)`. An empty set goes through `UnionWith`, which gives the same set (`SetUnion.sym_except_union_empty`: both are `other`'s elements). The array fallback is proved dead |
 | `UnionWith(other)` (`[Exactly]`; requires equal comparers and the sizes to sum to at most 2^30) | `SpecItems` is `SpecSetOps.Union(c, Old(SpecItems), other.SpecItems)` when the set was empty or `other` is more than half its size, and `SpecSetOps.AddAll(…)` otherwise (R27.55; see 27.3 for why the two differ) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
@@ -8607,11 +8612,36 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 
 **Not annotated:**
 
-* **`TreeSubSet`.** It constructs a second object that shares the region.
+* **`TreeSubSet` and `GetViewBetween`.** Blocked on subclassing a region owner. A view is
+  a `SortedSet<T>` subclass that inherits the fields and overrides the virtual members
+  (`VersionCheck`, `Contains`, `IsWithinRange`, `MinInternal`, `AddIfNotPresent`,
+  `DoRemove`, …). Four things are missing, each a general feature:
+  1. **A subclass with its own invariant.** The view's `root` is a node *inside* the
+     underlying set's region (`FindRange`'s result). Its subtree also holds keys outside
+     the range, its `count` is recomputed lazily, and its `version` starts at -1. So none
+     of the owner invariants (an unshared tree in its own region, `Count == Size`) holds of
+     it. §9's hierarchy encoding gives each subclass its own model, but it covers abstract
+     bases dispatched through a vtable. `SortedSet<T>` is concrete and verified at its exact
+     type (R27.1), which is what lets its virtual calls bind statically.
+  2. **Re-verifying inherited bodies at the subclass.** `base.Contains`,
+     `InOrderTreeWalk`, `FindNode` and the enumerator run on a view receiver, with
+     `VersionCheck` bound to the view's override. They would have to be translated a second
+     time, at the view's invariant.
+  3. **A borrowing class that owns mutable fields.** The view borrows the underlying set
+     (§28) and also writes its own `root`, `count` and `version` in `VersionCheck`. §28's
+     borrowing classes have no such writable state.
+  4. **Writing through a view.** `AddIfNotPresent`, `DoRemove` and `Clear` on a view
+     modify the underlying set. A shared borrow cannot, and an exclusive one would forbid
+     the underlying set's own use while the view is alive, which C# allows.
+
+  The read-only uses in `IsSubsetOf` and `IsSupersetOf` (a view over the other set's
+  `[Min, Max]` whose `Contains` is then called) need only 1–3.
 * **The set operations other than `SetEquals`, `IntersectWith`, `Overlaps`, `ExceptWith`,
-  `UnionWith` and `SymmetricExceptWith`'s helper.** `IsSubsetOf`, `IsSupersetOf` and their
-  proper forms call `GetViewBetween`, which builds a `TreeSubSet`. The verified operations
-  are verified only on their `SortedSet` branches (R27.50–R27.55).
+  `UnionWith` and `SymmetricExceptWith`.** `IsSubsetOf`, `IsSupersetOf` and their
+  proper forms call `GetViewBetween` on their `SortedSet` branch, so they are blocked with
+  `TreeSubSet`. Their other branches go through `CheckUniqueAndUnfoundElements`, the
+  `BitHelper` path of 27.3's finding. The verified operations are verified only on their
+  `SortedSet` branches (R27.50–R27.55).
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
@@ -8636,9 +8666,12 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 * **The `IEnumerable<T>` constructor.** It sorts and deduplicates through `Array.Sort`
   and enumeration before it calls `ConstructRootFromSortedArray`, which is verified
   (R27.32).
-* **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>` (a
-  `SortedSet` subclass) with a key-only comparer. It needs subclassing a region owner and
-  an abstraction from pairs to keys, and was not reached.
+* **`SortedDictionary<TKey, TValue>`.** It wraps a `TreeSet<KeyValuePair<…>>`, a sealed
+  `SortedSet` subclass that overrides `AddIfNotPresent` to throw on a duplicate key.
+  `SortedSet<T>.Add` then dispatches to the override, so the inherited members must be
+  re-verified at the subclass (item 2 above). It also needs a model of
+  `KeyValuePairComparer`, an `IComparer` that compares keys only, and an abstraction from
+  the pair set to a map. Not reached.
 * **Serialization.** This is out of scope.
 
 ### 27.3 Specification findings

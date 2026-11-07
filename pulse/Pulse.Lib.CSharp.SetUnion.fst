@@ -214,3 +214,25 @@ let union_rest (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) (i j: int)
 let rest_done (#a: Type0) (p s: Seq.seq a)
   : Lemma (Seq.append p (Seq.slice s (Seq.length s) (Seq.length s)) == p)
   = Seq.lemma_eq_elim (Seq.append p (Seq.slice s (Seq.length s) (Seq.length s))) p
+
+/// Flipping, in order, the elements of a strictly sorted `t` into the empty set inserts
+/// each at the end, giving `t`: `SymmetricExceptWith` on an empty set is `UnionWith`.
+let rec sym_except_empty (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires Seq.length s == 0 /\ S.strictly_sorted c t)
+          (ensures Pulse.Lib.CSharp.SetOps.sym_except c s t == t)
+          (decreases Seq.length t)
+  = if Seq.length t = 0 then Seq.lemma_eq_elim s t
+    else begin
+      let n = Seq.length t - 1 in
+      let t' = Seq.slice t 0 n in
+      let x = Seq.index t n in
+      sym_except_empty c s t';
+      Pulse.Lib.CSharp.SearchTree.lower_bound_all_below c t' x;
+      Pulse.Lib.CSharp.TopDown.seq_ins_index t' n x 0;
+      Seq.lemma_eq_elim (TH.inserted c t' x) t
+    end
+
+let sym_except_union_empty (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires Seq.length s == 0 /\ S.strictly_sorted c t)
+          (ensures Pulse.Lib.CSharp.SetOps.sym_except c s t == union c s t)
+  = sym_except_empty c s t; union_left_empty c s t

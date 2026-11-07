@@ -1649,12 +1649,19 @@ namespace System.Collections.Generic
             }
         }
 
-        public void SymmetricExceptWith(IEnumerable<T> other)
+        // An empty set takes `UnionWith`'s path, which gives the same set (`SymmetricExceptUnionEmpty`);
+        // `other` is a different object (R27.50).
+        [Requires("@this.SpecComparer == other.SpecComparer")]
+        [Requires("@this.SpecItems.Length + other.SpecItems.Length <= 1073741824")]
+        [Ensures("@this.SpecItems == SpecSetOps.SymmetricExcept(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), Pal.Old(other.SpecItems))")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer) && other.SpecItems == Pal.Old(other.SpecItems) && other.SpecComparer == Pal.Old(other.SpecComparer)")]
+        public void SymmetricExceptWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
 
             if (Count == 0)
             {
+                SpecSetOps.SymmetricExceptUnionEmpty(this.SpecComparer, this.SpecItems, ((SortedSet<T>)other).SpecItems);
                 UnionWith(other);
                 return;
             }
@@ -1673,6 +1680,8 @@ namespace System.Collections.Generic
             }
             else
             {
+                // The contract requires `other` to be a SortedSet<T> with this set's comparer.
+                Pal.Unreachable();
                 int length;
                 T[] elements = EnumerableHelpers.ToArray(other, out length);
                 Array.Sort(elements, 0, length, Comparer);
