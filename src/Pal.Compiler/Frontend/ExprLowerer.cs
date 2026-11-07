@@ -1346,6 +1346,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+        // R27.51. An interface's property read off an object of a class translated at its
+        // exact type is the class's implementation of it.
+        if (symbol is IPropertySymbol { IsStatic: false, ContainingType.TypeKind: TypeKind.Interface } ip &&
+            ExactClassOf(node.Expression) is { } exactClass &&
+            exactClass.FindImplementationForInterfaceMember(ip) is IPropertySymbol { ExplicitInterfaceImplementations.IsEmpty: true } impl)
+        {
+            symbol = impl;
+            receiverType = exactClass;
+        }
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
         // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
@@ -1734,6 +1743,24 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul && InWrappingMethod(node),
         };
+    }
+
+    /// <summary>
+    /// R27.51. The class an <c>[Exactly]</c> parameter is an object of, for the parameter
+    /// or a pattern variable bound to it.
+    /// </summary>
+    private INamedTypeSymbol? ExactClassOf(ExpressionSyntax e)
+    {
+        e = Unparenthesized(e);
+        var p = model.GetSymbolInfo(e).Symbol switch
+        {
+            IParameterSymbol q => q,
+            ILocalSymbol l when _patternBindings.TryGetValue(l, out var v) && v is IrVar iv &&
+                                model.GetEnclosingSymbol(e.SpanStart) is IMethodSymbol m =>
+                m.Parameters.FirstOrDefault(q => q.Name == iv.Name),
+            _ => null,
+        };
+        return p is null ? null : FrontendPass.ExactParameter(p, model.Compilation, known);
     }
 
     /// <summary>R27.46. The expression is an <c>[Exactly]</c> parameter, or a local aliasing one.</summary>
@@ -2542,6 +2569,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         };
     }
 
+    /// <summary>
+    /// R27.51. A call of the parameterless, read-only instance method <paramref name="method"/>
+    /// of an owner class on <paramref name="receiver"/>, as <c>receiver.M()</c> lowers.
+    /// </summary>
+    public IrCall OwnerCall(IMethodSymbol method, IrExpr receiver, IrLoc loc) =>
+        new(loc, Naming.Of(method), [receiver])
+        {
+            Kind = Declarations.KindOf(method, known)!.Value,
+            ResultType = known.MapType(method.ReturnType),
+            HasReceiver = true,
+            KeepsArguments = true,
+            ParamTypes = [.. Declarations.ParamTypes(method, known, true)],
+            TypeArguments = known.TypeArguments(method),
+            MutatesReceiver = !Declarations.IsReadOnly(method, model.Compilation, known),
+        };
+
     /// <summary>R27.16. The receiver of a region class's member: a non-null reference.</summary>
     private IrVar RegionThis(IrLoc loc, INamedTypeSymbol self) =>
         new(loc, Names.This)
@@ -2561,6 +2604,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     /// <summary>R20.5. The hidden counter of the <c>foreach</c> over <paramref name="variable"/>.</summary>
     public static string ForEachIndex(string variable) => variable + "__index";
+
+    /// <summary>R27.51. The hidden enumerator of the <c>foreach</c> over an owner with variable <paramref name="variable"/>.</summary>
+    public static string ForEachEnumerator(string variable) => variable + "__enumerator";
 
     /// <summary>
     /// R20.6. <c>src.OrderBy(x =&gt; x.P).ToList()</c>, where <c>P</c> is a

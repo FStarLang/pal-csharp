@@ -223,6 +223,13 @@ public static class Pal
     /// </summary>
     public static int Index<T>(T element) => throw Ghost();
 
+    /// <summary>
+    /// R27.51. In a contract inside a <c>foreach</c> over an owner, the enumerator the loop
+    /// holds, of type <typeparamref name="E"/>, whose iteration variable is
+    /// <paramref name="element"/>. Only its <c>[Spec]</c> properties may be read.
+    /// </summary>
+    public static E Enumerator<E>(object? element) => throw Ghost();
+
     /// <summary>Whether two ghost sequences are permutations of one another.</summary>
     public static bool IsPermutation<T>(Seq<T> left, Seq<T> right) => throw Ghost();
 

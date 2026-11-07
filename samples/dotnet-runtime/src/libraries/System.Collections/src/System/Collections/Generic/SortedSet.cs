@@ -743,6 +743,7 @@ namespace System.Collections.Generic
         [Ensures("Result == (Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0)")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Frac("p")]
         public virtual bool Contains(T item) => FindNode(item) != null;
 
         [Throws(typeof(ArgumentException), "Pal.Contents(array).Length < @this.SpecItems.Length")]
@@ -988,6 +989,7 @@ namespace System.Collections.Generic
         [Ensures("Result == null || Pal.WellFormed(Result) && Pal.Same(SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(Result), item), SpecSearchTree.Find(@this.SpecComparer, @this.SpecNodes, item, item))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Frac("p")]
         internal virtual Node? FindNode(T item)
         {
             Node? current = root;
@@ -1763,7 +1765,14 @@ namespace System.Collections.Generic
             return result.UniqueCount == Count && result.UnfoundCount == 0;
         }
 
-        public bool Overlaps(IEnumerable<T> other)
+        // The range test is sound only when `other` is sorted by this set's comparer: with a
+        // comparer whose `Equals` says two different orders are equal, `Overlaps` may answer
+        // `false` for sets that share an element (doc/translation.md R27.47).
+        [Requires("@this.SpecComparer == other.SpecComparer")]
+        [Ensures("Result == SpecSetOps.Overlaps(@this.SpecComparer, @this.SpecItems, other.SpecItems)")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Rlimit(8)]
+        public bool Overlaps([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
 
@@ -1776,17 +1785,30 @@ namespace System.Collections.Generic
             SortedSet<T>? asSorted = other as SortedSet<T>;
             if (asSorted != null && HasEqualComparer(asSorted) && (comparer.Compare(Min, asSorted.Max) > 0 || comparer.Compare(Max, asSorted.Min) < 0))
             {
+                SpecSetOps.OverlapsDisjoint(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 return false;
             }
 
+            SpecSetOps.OverlapsWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
             foreach (T item in other)
             {
+                Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
+                              Pal.Enumerator<Enumerator>(item).SpecPending ==
+                                  Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length, asSorted.SpecItems.Length) &&
+                              (Pal.Returned()
+                                  ? Pal.ReturnValue<bool>() && SpecSetOps.Overlaps(this.SpecComparer, this.SpecItems, asSorted.SpecItems)
+                                  : SpecSetOps.Overlaps(this.SpecComparer, this.SpecItems, asSorted.SpecItems) ==
+                                    SpecSetOps.Overlaps(this.SpecComparer, this.SpecItems, Pal.Enumerator<Enumerator>(item).SpecPending)));
+                Pal.Decreases(Pal.Enumerator<Enumerator>(item).SpecPending.Length);
+                SpecSetOps.OverlapsStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
+                    asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length - 1);
                 if (Contains(item))
                 {
                     return true;
                 }
             }
 
+            SpecSetOps.OverlapsStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems, asSorted.SpecItems.Length);
             return false;
         }
 

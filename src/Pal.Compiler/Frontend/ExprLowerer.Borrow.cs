@@ -97,8 +97,27 @@ public sealed partial class ExprLowerer
     /// <summary>R27.41. The borrowing structs held so far, in declaration order.</summary>
     public IEnumerable<BorrowContext> Held => _held.Values;
 
+    // R27.51. The enumerator structs `foreach` statements over owners hold, by iteration variable.
+    private readonly Dictionary<ISymbol, BorrowContext> _foreachHeld = new(SymbolEqualityComparer.Default);
+
+    /// <summary>R27.51. Records that the `foreach` declaring <paramref name="variable"/> holds the enumerator <paramref name="held"/>.</summary>
+    public void HoldForEach(ILocalSymbol variable, BorrowContext held) => _foreachHeld[variable] = held;
+
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
-        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l && _held.TryGetValue(l, out var c) ? c : null;
+        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l && _held.TryGetValue(l, out var c) ? c
+        : ForEachEnumerator(Unparenthesized(e));
+
+    /// <summary>R27.51. <c>Pal.Enumerator&lt;E&gt;(x)</c>, in a contract: the enumerator of the `foreach` over <c>x</c>.</summary>
+    private BorrowContext? ForEachEnumerator(ExpressionSyntax e) =>
+        SpecPosition && e is InvocationExpressionSyntax { ArgumentList.Arguments: [{ Expression: IdentifierNameSyntax x }] } call &&
+        model.GetSymbolInfo(call).Symbol is IMethodSymbol { Name: nameof(PalLang.Pal.Enumerator) } m && known.IsPalIntrinsic(m) &&
+        model.GetSymbolInfo(x).Symbol is ILocalSymbol v && _foreachHeld.TryGetValue(v, out var c) &&
+        SymbolEqualityComparer.Default.Equals(m.TypeArguments[0].OriginalDefinition, c.Struct.OriginalDefinition)
+            ? c : null;
+
+    /// <summary>R27.51. A call of the member <paramref name="callee"/> of the held enumerator <paramref name="held"/>.</summary>
+    public IrExpr HeldCallOf(BorrowContext held, IMethodSymbol callee, IrLoc loc) =>
+        WithHeld(held, () => HeldCall(held, callee, [], loc));
 
     private T WithHeld<T>(BorrowContext held, Func<T> f)
     {

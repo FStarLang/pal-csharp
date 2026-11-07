@@ -447,6 +447,23 @@ public sealed class WalkSet<T>
     [Ensures("Result == @this.SpecItems.Length")]
     public int Count => count;
 
+    // R27.51. `foreach` over another set: its enumerator, held, named `Pal.Enumerator<E>(x)`.
+    [Ensures("Result == other.SpecItems.Length")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(4)]
+    internal int CountOther(WalkSet<T> other)
+    {
+        int n = 0;
+        foreach (T item in other)
+        {
+            Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
+                          n + Pal.Enumerator<Enumerator>(item).SpecPending.Length == other.SpecItems.Length);
+            Pal.Decreases(other.SpecItems.Length - n);
+            n++;
+        }
+        return n;
+    }
+
     // R27.50. Two owners held whole are distinct objects, so `other == this` is false;
     // the loop calls a method on the receiver, whose model the loop keeps because the
     // method has not written it yet; the write comes after.

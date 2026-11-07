@@ -8330,6 +8330,46 @@ proved with the library `Pulse.Lib.CSharp.SetInter` (`SpecSetInter` in C#).
 
 `HasEqualComparer` is marked `[Frac("p")]`, which its write set already allows.
 
+### R27.51 `foreach` over an owner; `Overlaps`
+
+`Overlaps` enumerates another set with `foreach` and asks `this` about each element.
+R27.51 translates that loop.
+
+* **Lowering.** `foreach (T x in o)` where `o` is `this`, a parameter of the method's own
+  class, or an `[Exactly]` parameter (R27.46), and `o`'s class has a translated
+  `GetEnumerator` returning a borrowing struct `E` (R27.37), lowers to
+  `E x__enumerator = o.GetEnumerator(); while (x__enumerator.MoveNext()) { T x = x__enumerator.Current; body }`.
+  The enumerator is held as R27.41 holds a local, for the loop and nothing after it.
+  The `foreach` must be a statement of a method's block, outside any loop, lambda,
+  `try` or `switch`; anywhere else it is PALCS0714. A `foreach` over an array or a
+  `List<T>` is unchanged.
+* **Naming the enumerator.** `Pal.Enumerator<E>(x)`, in the loop's `Pal.Invariant` and
+  `Pal.Decreases`, is the enumerator of the `foreach` that binds `x`. Only its `[Spec]`
+  members may be read (`SpecReady`, `SpecPending`, …). The `MoveNext` contract then
+  carries the invariant from one element to the next.
+* **Interface properties of an `[Exactly]` object.** `c.Count`, where `c` is an
+  `[Exactly]` parameter or a pattern variable bound to one (`other is ICollection<T> c`),
+  is the exact class's implementation of the interface property.
+* **A held local in a spliced block.** A loop whose rest of the block is copied into its
+  exits (R22.12) splices that block flat, so a held local declared in it is closed in tail
+  position as R27.41 requires.
+
+`Overlaps` (with `other` `[Exactly]` a `SortedSet<T>` of the same comparer) is proved with
+`Pulse.Lib.CSharp.SetOps` (`SpecSetOps` in C#). `overlaps c s t` holds when some element of
+`t` is a member of `s` (`key_index c s x >= 0`). The library proves these lemmas:
+
+| lemma | statement |
+|---|---|
+| `overlaps_step` | one step of the walk over the suffixes of `t` |
+| `overlaps_whole` | the whole of `t` is its suffix from 0 |
+| `overlaps_empty` | nothing overlaps an empty `s` (a pattern) |
+| `overlaps_disjoint` | two strictly sorted sequences whose ranges are disjoint share no member; this justifies the `Min`/`Max` shortcut |
+
+The loop calls `Contains` on the receiver, which R27.50 keeps at its model only when the
+callee is read-only. `Contains` and `FindNode` call the comparer, an interface method that
+the write-set scan counts as a write. So they are marked `[Frac("p")]`, which their write
+sets allow.
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
@@ -8382,6 +8422,7 @@ ensures that the tree and the comparer are unchanged.
 | `BreadthFirstTreeWalk([Callback] action)` | `SpecWalk.BfWalked(SpecItems, Trace(action), Result)` (R27.40): every call was on a member, all but the last returned true, and a true result means every member was called on |
 | `RemoveWhere(match)` | `SpecItems == Pal.RemoveAll(Old(SpecItems), match)`, `Result == Old(SpecItems).Length - SpecItems.Length`, comparer unchanged (R27.40) |
 | `SetEquals(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetCompare.SameKeys(SpecComparer, SpecItems, other.SpecItems)`, which on the two strictly sorted sets is set equality (R27.49). The fallback branch is proved dead (R27.48) |
+| `Overlaps(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers) | `Result == SpecSetOps.Overlaps(SpecComparer, SpecItems, other.SpecItems)`: some element of `other` is a member; both sets unchanged (R27.51) |
 | `IntersectWith(other)` (`other` `[Exactly]` a `SortedSet<T>`; requires equal comparers and at most 2^30 elements, for `ConstructRootFromSortedArray`) | `SpecItems == SpecSetInter.Inter(SpecComparer, Old(SpecItems), Old(other.SpecItems))`, the elements of `other` that compare equal to one of this set's; comparers and `other` unchanged (R27.50) |
 | `ConstructRootFromSortedArray` (static) | `Tree(Result) == Build(arr, startIndex, endIndex, Old(Tree(redNode)))`, unshared, re-linking `redNode`; with no `redNode`, red-black with keys `arr[startIndex..endIndex]` (R27.32) |
 
@@ -8442,9 +8483,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
 **Not annotated:**
 
 * **`TreeSubSet`.** It constructs a second object that shares the region.
-* **The set operations other than `SetEquals` and `IntersectWith`.** `UnionWith` and the
-  rest build on enumeration and on `TreeSubSet`. `IntersectWith` is verified only on its
-  `SortedSet` branch (R27.50).
+* **The set operations other than `SetEquals`, `IntersectWith` and `Overlaps`.**
+  `UnionWith` and the rest build on enumeration and on `TreeSubSet`. `IntersectWith` and
+  `Overlaps` are verified only on their `SortedSet` branches (R27.50, R27.51).
 * **`ICollection.CopyTo(Array, int)`.** It takes a non-generic `Array` and casts it to
   `T[]` or `object[]`, which pal-csharp does not model.
 * **The copy constructor, beyond a `SortedSet` with the same comparer.** Both
@@ -8545,6 +8586,9 @@ The writers also ensure the heap-level prop `SpecTopDown` names for them (`Recol
   which the code's reliance on `Equals` is known to be right. A caller whose comparers
   differ but claim to be `Equals` is outside the contract, and gets a set whose tree may
   not be sorted under its own comparer.
+  `Overlaps` relies on `Equals` too: it answers `false` without enumerating when the two
+  ranges are disjoint under `this.Comparer`, which with a lying `Equals` can be wrong.
+  Its contract therefore requires the same comparer as well (R27.51).
 
 ## 28. Enumerators: structs that borrow their collection
 

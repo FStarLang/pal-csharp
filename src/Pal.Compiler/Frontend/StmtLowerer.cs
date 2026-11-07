@@ -326,7 +326,8 @@ public sealed class StmtLowerer(
             : new IrReturn(loc, _loopReturnType is { } rt
                 ? new IrVar(loc, ReturnedValue) { Type = known.MapType(rt) }
                 : _iterator is not null ? TraceVar(loc) : null);
-        return new IrBlock(loc, [lowered, new IrIf(loc, flag, owed, null)]) { Splice = true };
+        return new IrBlock(loc, [.. lowered is IrBlock { Splice: true } spliced ? spliced.Statements : [lowered],
+            new IrIf(loc, flag, owed, null)]) { Splice = true };
     }
 
     private static bool ReturnsFrom(IrStmt s) => s switch
@@ -1199,6 +1200,8 @@ public sealed class StmtLowerer(
     {
         var collectionType = model.GetTypeInfo(node.Expression).Type;
         var symbol = model.GetSymbolInfo(node.Expression).Symbol;
+        if (known.MapType(collectionType) is not IrArrayType && ForEachOwner(node, loc) is { } overOwner)
+            return overOwner;
         if (known.MapType(collectionType) is not IrArrayType { Element: var element } arrayType ||
             node.Expression is not IdentifierNameSyntax collection ||
             symbol is not (ILocalSymbol or IParameterSymbol))
@@ -1247,6 +1250,90 @@ public sealed class StmtLowerer(
     }
 
     /// <summary>
+    /// R27.51. <c>foreach (T x in o) body</c>, where <c>o</c> is <c>this</c> or a parameter
+    /// of an owner class whose <c>GetEnumerator()</c> returns a borrowing struct <c>E</c>:
+    /// <c>{ E e = o.GetEnumerator(); while (e.MoveNext()) { T x = e.Current; body } }</c>,
+    /// with <c>e</c> held as R27.41/R27.49 hold such a local, and named in contracts by
+    /// <c>Pal.Enumerator&lt;E&gt;(x)</c>. <c>null</c> when <c>o</c> is no such object.
+    /// </summary>
+    // R27.51. The enumerator structs of the `foreach` statements over owners being lowered.
+    private readonly List<BorrowContext> _heldForEach = [];
+
+    private IrStmt? ForEachOwner(ForEachStatementSyntax node, IrLoc loc)
+    {
+        var self = model.GetEnclosingSymbol(node.SpanStart) as IMethodSymbol;
+        var expr = ExprLowerer.Unparenthesized(node.Expression);
+        INamedTypeSymbol? cls = expr is ThisExpressionSyntax ? self?.ContainingType
+            : model.GetSymbolInfo(expr).Symbol switch
+            {
+                IParameterSymbol p => FrontendPass.ExactParameter(p, model.Compilation, known) ?? p.Type as INamedTypeSymbol,
+                ILocalSymbol l => l.Type as INamedTypeSymbol,
+                _ => null,
+            };
+        if (cls is not { TypeKind: TypeKind.Class } || !known.HasModel(cls)) return null;
+        var getter = cls.GetMembers("GetEnumerator").OfType<IMethodSymbol>().FirstOrDefault(m =>
+            m is { IsStatic: false, Parameters.IsEmpty: true, DeclaredAccessibility: Accessibility.Public } &&
+            m.ReturnType is INamedTypeSymbol { TypeKind: TypeKind.Struct } r && Borrowing.IsBorrowing(r, known));
+        if (getter?.ReturnType is not INamedTypeSymbol st) return null;
+        var moveNext = st.GetMembers("MoveNext").OfType<IMethodSymbol>()
+            .FirstOrDefault(m => m is { IsStatic: false, Parameters.IsEmpty: true });
+        var current = st.GetMembers("Current").OfType<IPropertySymbol>()
+            .FirstOrDefault(q => q is { IsStatic: false, GetMethod: not null });
+        var owner = Borrowing.OwnerField(st, known)!;
+        var variable = model.GetDeclaredSymbol(node) as ILocalSymbol;
+        var receiver = _code.Lower(expr);
+        if (moveNext is null || current?.GetMethod is null || variable is null ||
+            known.MapType(st) is not { } structType || known.MapType(owner.Type) is not IrClassType ownerType ||
+            known.MapType(variable.Type) is not { } elementType ||
+            self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
+            !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
+            receiver is not IrVar { Name: var ownerName } ||
+            (ownerName != Pal.Compiler.Emit.Names.This && !self.Parameters.Any(q => q.Name == ownerName)) ||
+            node.Parent is not BlockSyntax ||
+            node.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
+                .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or
+                          CommonForEachStatementSyntax or AnonymousFunctionExpressionSyntax or
+                          LocalFunctionStatementSyntax or TryStatementSyntax or SwitchSectionSyntax))
+        {
+            diagnostics.Error("PALCS0714", Locations.From(node.Expression),
+                $"`foreach` over `{node.Expression}`. A `foreach` over an object is translated in an " +
+                "instance method of its class, over `this` or a parameter of the class, directly in a " +
+                "block outside any loop, lambda or `try`, when the class's `GetEnumerator()` returns a " +
+                "borrowing struct with `MoveNext()` and `Current` (doc/translation.md R27.51).");
+            return new IrBlock(loc, []);
+        }
+
+        var vloc = Locations.From(node.Identifier);
+        var name = ExprLowerer.ForEachEnumerator(variable.Name);
+        var owned = Borrowing.OwnedFields(st, known);
+        var held = new BorrowContext(st, owner, structType, ownerType, false, null)
+        {
+            Owned = owned,
+            SelfName = name,
+            OwnerName = ownerName,
+            OwnedNames = owned.ToImmutableDictionary(f => f.Name, f => $"__pal_own_{name}{f.Name}"),
+        };
+        var ownedLocals = ImmutableArray.CreateBuilder<(string, string, IrClassType)>();
+        foreach (var f in owned)
+            if (known.MapType(f.Type) is IrClassType ot) ownedLocals.Add((f.Name, held.OwnedLocal(f), ot));
+        var decl = new IrLocalDecl(vloc, name, structType, _code.OwnerCall(getter, receiver, vloc))
+        {
+            Owned = ownedLocals.ToImmutable(),
+            HeldOwner = ownerName == Pal.Compiler.Emit.Names.This ? null : ownerName,
+        };
+        _code.HoldForEach(variable, held);
+        _spec.HoldForEach(variable, held);
+        _heldForEach.Add(held);
+        var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
+        var first = new IrLocalDecl(vloc, variable.Name, elementType,
+            _code.ToDeclared(_code.HeldCallOf(held, current.GetMethod, vloc), elementType)) { Immutable = true };
+        var loop = new IrWhile(loc, _code.HeldCallOf(held, moveNext, vloc), invariants, decreases,
+            new IrBlock(body.Loc, [first, .. ((IrBlock)body).Statements]));
+        _heldForEach.Remove(held);
+        return new IrBlock(loc, [decl, loop]) { Splice = true };
+    }
+
+    /// <summary>
     /// Pulls the leading <c>Pal.Invariant</c> / <c>Pal.Decreases</c> calls off a loop
     /// body (surface rule B1). They must lead: a loop specification describes the loop,
     /// so anything before it in the body would already have run under no specification.
@@ -1259,7 +1346,7 @@ public sealed class StmtLowerer(
             invariants.AddRange(BorrowFacts.Invariants(borrow, known, Locations.From(bodySyntax)));
         // R27.41. So does a loop of a method that holds one, for each it holds.
         if (loop)
-            foreach (var held in _spec.Held)
+            foreach (var held in _spec.Held.Concat(_heldForEach))
                 invariants.AddRange(BorrowFacts.Invariants(held, known, Locations.From(bodySyntax), snapshots: false));
         IrExpr? decreases = null;
 
