@@ -3,6 +3,7 @@
 // an ordinary object holding pointers; what it owes is a pure function of the owner's heap
 // (`SpecWalk`).
 using System.Collections.Generic;
+using System.Diagnostics;
 using PalLang;
 #pragma warning disable CS0649
 
@@ -489,6 +490,33 @@ public sealed class WalkSet<T>
                 break;
             }
             ResetVersion();
+            n++;
+        }
+        return n;
+    }
+
+    [Ensures("Result && @this.SpecNodes == Pal.Old(@this.SpecNodes) && @this.SpecVersion == 0")]
+    internal bool ZeroVersion() { version = 0; return true; }
+
+    [Ensures("Result && @this.SpecNodes == Pal.Old(@this.SpecNodes) && @this.SpecVersion == 1")]
+    internal bool OneVersion() { version = 1; return true; }
+
+    // R27.53. A non-nullable parameter of an owner class is not null; a local initialized
+    // by a conditional whose arms each call a method that writes the receiver.
+    [Ensures("Result == other.SpecItems.Length")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Rlimit(8)]
+    internal int FlipPerItem(WalkSet<T> other)
+    {
+        Debug.Assert(other != null);
+        int n = 0;
+        foreach (T item in other)
+        {
+            Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady && this.SpecNodes == Pal.Old(this.SpecNodes) &&
+                          n + Pal.Enumerator<Enumerator>(item).SpecPending.Length == other.SpecItems.Length);
+            Pal.Decreases(Pal.Enumerator<Enumerator>(item).SpecPending.Length);
+            bool flipped = n % 2 == 0 ? ZeroVersion() : OneVersion();
+            Debug.Assert(flipped);
             n++;
         }
         return n;

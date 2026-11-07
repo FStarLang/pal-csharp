@@ -1722,6 +1722,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R27.46. An `[Exactly]` parameter (or a local naming it) is not null.
             if ((right is IrNull && ExactOperand(node.Left)) || (left is IrNull && ExactOperand(node.Right)))
                 return new IrLiteral(loc, op is BinOp.Ne) { Type = IrPrim.Bool };
+            // R27.53. A reference at a non-nullable type of a class translated with no null
+            // value (neither recursive, R10.8, nor a region's, R27.3) is an object of it.
+            if ((right is IrNull && NeverNull(node.Left, left)) || (left is IrNull && NeverNull(node.Right, right)))
+                return new IrLiteral(loc, op is BinOp.Ne) { Type = IrPrim.Bool };
             // R27.50. A reference R27.46 decided to be `null`, compared with `null`.
             if (left is IrNull && right is IrNull &&
                 (left.Type is IrClassType { Nullable: true } || right.Type is IrClassType { Nullable: true }))
@@ -1762,6 +1766,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         };
         return p is null ? null : FrontendPass.ExactParameter(p, model.Compilation, known);
     }
+
+    /// <summary>
+    /// R27.53. The expression's translation has no null: a non-nullable reference to a
+    /// translated class whose representation has no null pointer.
+    /// </summary>
+    private bool NeverNull(ExpressionSyntax e, IrExpr lowered) =>
+        lowered.Type is IrClassType { Nullable: false } &&
+        model.GetTypeInfo(e).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, NullableAnnotation: not NullableAnnotation.Annotated } t &&
+        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t);
 
     /// <summary>R27.46. The expression is an <c>[Exactly]</c> parameter, or a local aliasing one.</summary>
     private bool ExactOperand(ExpressionSyntax e)

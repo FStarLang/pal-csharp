@@ -3612,6 +3612,18 @@ public sealed class CodeEmitter(
                 UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan);
                 return;
             }
+            // R27.53. A local initialized by a conditional one of whose arms calls a method
+            // that moves its receiver: Pulse joins the two arms' calls at a fresh model and
+            // keeps the facts of one arm only, so the declaration becomes an `if` whose arms
+            // each bind the local and run the rest.
+            if (statements[k] is IrLocalDecl { Init: IrConditional ce } d &&
+                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else)))
+            {
+                UnitTail(new IrIf(d.Loc, ce.Cond,
+                    new IrBlock(ce.Then.Loc, [d with { Init = ce.Then }, .. rest]),
+                    new IrBlock(ce.Else.Loc, [d with { Init = ce.Else }, .. rest])), plan);
+                return;
+            }
             // R27.27. An escaping `if` whose join would lose a moved region (R22.12): the rest
             // goes into the arm that falls through; the escaping arm keeps none of it.
             if (statements[k] is IrIf ei && _escape is not null && MayEscape(ei) && MovesRegion(ei))
@@ -3639,6 +3651,10 @@ public sealed class CodeEmitter(
         }
         Line("()");
     }
+
+    /// <summary>R27.53. Whether an expression calls a method that may move its receiver.</summary>
+    private static bool MovesReceiver(IrExpr e) =>
+        Passes.Check.Subexpressions(e).OfType<IrCall>().Any(c => c.MutatesReceiver);
 
     /// <summary>R24.24. Whether some arm of an <c>if</c> assigns a field of the receiver.</summary>
     private bool WritesRecordInArm(IrIf i) =>

@@ -8409,6 +8409,37 @@ receiver unchanged. R27.52 covers a loop that changes it.
 | `except_disjoint` | two strictly sorted sequences with disjoint ranges: nothing is removed (the shortcut when the ranges do not overlap) |
 | `except_empty` | removing from an empty `s` leaves `s` (a pattern) |
 
+### R27.53 Non-null owners; a conditional over calls that change the receiver; `SymmetricExceptWith`
+
+* **A non-nullable owner is not null.** A reference at a non-nullable C# type of a
+  translated class is an object of that class. Its translation has no null value. (A
+  recursive class, R10.8, and a region's class, R27.3, are the exceptions: their
+  pointers can be null.) So `x == null` on such a reference is `false`, and `x != null`
+  is `true`. The typical use is `Debug.Assert(other != null)` on a `SortedSet<T>`
+  parameter. Before this rule, the test was R10.7's window test, which a `Debug.Assert`
+  cannot hold.
+* **A conditional whose arms change the receiver.** Consider a loop body (in tail
+  position, R5.8d) that declares `T x = c ? a : b;` where `a` or `b` calls a method that
+  may change its receiver (R4.11). Emitted as `let x = if c { a } else { b }`, Pulse
+  joins the two arms at a fresh model. It keeps the facts of only one arm, and only under
+  that arm's condition (`SymmetricExceptWith`'s `Contains(item) ? Remove(item) :
+  Add(item)` lost `Remove`'s postcondition this way). So the declaration becomes
+  `if (c) { T x = a; rest } else { T x = b; rest }`. The rest of the body is copied into
+  both arms, and each arm is checked against the loop invariant.
+
+`SymmetricExceptWith` enumerates `other` (an `[Exactly]` `SortedSet<T>` of the same
+comparer). For each element it calls `Remove` if the element is a member of `this`, and
+`Add` otherwise. Its specification is `SpecSetOps.SymmetricExcept(c, old SpecItems,
+other.SpecItems)`. Here `sym_except c s t` flips the membership of each element of `t`
+in turn. A member is removed by `TopDownRemove.removed`, which is `Remove`'s
+specification. A non-member is inserted by `TopDownHeap.inserted`, which is `Add`'s
+specification. The library proves:
+
+| lemma | statement |
+|---|---|
+| `sym_except_step`, `sym_except_whole` | one more element of `t`; the whole of `t` is its prefix of full length |
+| `sym_except_length` | after `i` elements, the length is at most `s`'s length plus `i`. This is what keeps `Add`'s `count` from overflowing, under the requirement that the two lengths sum to at most `int.MaxValue` |
+
 ### 27.1 Trusted assumptions
 
 * `RefEq.ref_eq` (R27.8).
