@@ -158,6 +158,21 @@ fn read (#a: Type0) (x: B.box a) (#p: perm) (#h: erased (heap a))
   v
 }
 
+/// R31.11. Reading the owner a node points back to (`list!.head` in a ring node's member):
+/// the member is given the owner's box `o`, at some permission, and a pointer `x` read
+/// from the node that the precondition says is `o`. The read goes through `x`.
+fn read_owner (#b: Type0) (o: erased (B.box b)) (x: B.box b) (#p: perm) (#r: erased b)
+  preserves B.pts_to (reveal o) #p r
+  requires pure (x == reveal o)
+  returns  v: b
+  ensures  pure (v == reveal r)
+{
+  rewrite (B.pts_to (reveal o) #p r) as (B.pts_to x #p r);
+  let v = B.(!x);
+  rewrite (B.pts_to x #p r) as (B.pts_to (reveal o) #p r);
+  v
+}
+
 /// R27.5. Writing a field: the whole record is replaced in place.
 fn write (#a: Type0) (x: B.box a) (v: a) (#h: erased (heap a))
   requires region h ** pure (mem h x)

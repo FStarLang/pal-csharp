@@ -28,8 +28,15 @@ public sealed class CodeEmitter(
     IReadOnlyDictionary<string, ImmutableArray<RegionUse>>? regionHeld = null,
     ISet<string>? openMethods = null,
     ISet<string>? raising = null,
-    ISet<string>? readOnlyMethods = null)
+    ISet<string>? readOnlyMethods = null,
+    IReadOnlyDictionary<string, IrMethod>? methods = null)
 {
+    /// <summary>R31.14. Every method, by name, for reading a callee's postcondition at a call.</summary>
+    public IReadOnlyDictionary<string, IrMethod>? Methods { get; init; }
+
+    /// <summary>R31.11. The ring node members that read their owner, by method name.</summary>
+    public IReadOnlyDictionary<string, OwnerBorrow>? OwnerBorrows { get; init; }
+
     /// <summary>
     /// R27.50. Whether a statement emitted so far may have changed the receiver's model: a
     /// field write, a write to its region, or a call on it to a method that is not
@@ -212,6 +219,7 @@ public sealed class CodeEmitter(
         // fields this body may name at all (PALCS0523 refuses the rest), so the bracket
         // goes exactly where the field accesses are.
         _params = plan.Slots;
+        _constructsArrays = false;
         _objects = method.DeclaringClass is not null &&
                    plan.Slots.TryGetValue(Names.This, out var self) &&
                    self.Kind == SlotKind.Object && !self.Open
@@ -312,6 +320,13 @@ public sealed class CodeEmitter(
 
     private static bool IsVoid(IrMethod method) => method.ReturnType is IrPrim { Kind: PrimKind.Void };
 
+    private static bool EndsInBareReturn(IrStmt s) => s switch
+    {
+        IrReturn { Value: null } => true,
+        IrBlock { Statements: [.., var last] } => EndsInBareReturn(last),
+        _ => false,
+    };
+
     /// <summary>
     /// Emits the statement whose value is the enclosing block's value. Only three shapes
     /// can occupy that position; anything else is emitted for its effect and the block
@@ -379,18 +394,33 @@ public sealed class CodeEmitter(
                 Tail(bare with { Else = new IrBlock(bare.Loc, []) }, method, plan);
                 return;
 
+            // R33.16. Likewise in a void method when the arm returns (R26.2's
+            // `if (__pal_returned) return;` closing a nested block): the missing `else`
+            // falls off the end, which is a `return;` too.
+            case IrIf { Else: null } guard when IsVoid(method) && EndsInBareReturn(guard.Then):
+                Tail(guard with { Else = new IrBlock(guard.Loc, []) }, method, plan);
+                return;
+
             case IrIf { Else: not null } i:
             {
+                // R32.4. Each arm ends the method, so a field one arm closes (R27.59) is
+                // still open in the other.
+                var fieldsOpen = _fieldOpen.ToList();
+                void RestoreFieldsOpen()
+                {
+                    _fieldOpen.Clear();
+                    foreach (var (k, v) in fieldsOpen) _fieldOpen[k] = v;
+                }
                 if (NullTest(i.Cond) is { } window)
                 {
                     var dirtyAtWindow = _receiverDirty;
-                    NullWindow(window, i, branch => { _receiverDirty = dirtyAtWindow; Tail(branch!, method, plan); }, tail: true);
+                    NullWindow(window, i, branch => { _receiverDirty = dirtyAtWindow; RestoreFieldsOpen(); Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
                 {
                     var dirtyAtPlain = _receiverDirty;
-                    PlainNullWindow(ptest, i, branch => { _receiverDirty = dirtyAtPlain; Tail(branch!, method, plan); }, tail: true);
+                    PlainNullWindow(ptest, i, branch => { _receiverDirty = dirtyAtPlain; RestoreFieldsOpen(); Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 var cond = Expr(i.Cond);
@@ -400,6 +430,7 @@ public sealed class CodeEmitter(
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
                 var moved = _movedArrays.ToList();
+                var arrays = _slots.Where(p => p.Value.Kind == SlotKind.Array).ToList();
                 // R27.50. Likewise the receiver is as dirty in the other arm as before both.
                 var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
@@ -408,6 +439,8 @@ public sealed class CodeEmitter(
                 _objectLocals.AddRange(owned);
                 _movedArrays.Clear();
                 _movedArrays.UnionWith(moved);
+                RestoreFieldsOpen();
+                foreach (var (n, sl) in arrays) _slots[n] = sl;
                 _indent--;
                 Line("} else {");
                 _indent++;
@@ -562,8 +595,9 @@ public sealed class CodeEmitter(
                 field.Type is IrPrim or IrTypeParamType or IrNamedType)
                 value = Default(field.Type);
             // R27.6. A pointer into a region starts null, in a region that starts empty.
+            // Typed (R31.2): in a ring's owner nothing else names the type arguments.
             if (value is null && IsRegionType(field.Type))
-                value = "B.null";
+                value = $"(B.null #{PulseEmitter.RegionRaw((IrClassType)field.Type!)})";
             if (value is null)
             {
                 diagnostics.Unsupported(method.Loc,
@@ -737,7 +771,7 @@ public sealed class CodeEmitter(
                 case IrPrim or IrTypeParamType or IrNamedType:
                     value = Default(field.Type);
                     break;
-                // R30.19. A nullable field of a bound library type (`IEqualityComparer<T>?`)
+                // R30.19 / R33.25. A nullable field of a bound library type (`IEqualityComparer<T>?`)
                 // the constructor leaves alone is C#'s `null`, which is `None`.
                 case IrOptionType fieldOption:
                     value = $"(None #{Types.Atom(fieldOption.Inner)})";
@@ -768,6 +802,7 @@ public sealed class CodeEmitter(
         };
         _slots[Names.This] = slot;
         _objects = [slot];
+        _constructsArrays = decl.Fields.Any(f => f.Type is IrArrayType);
         var self = new IrVar(method.Loc, Names.This) { Type = alloc };
         EmitSequence([.. statements, new IrReturn(method.Loc, self)], method, _plan!);
     }
@@ -779,7 +814,37 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
-        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i);
+        // R32.12. A wrapping struct's guard tests what a call of the wrapped struct returned.
+        (ThrowGuard(i) && Check.Subexpressions(i.Cond).Any(e => e is IrCall)
+            && _method?.Parameters.Any(p => p.Name == Frontend.BorrowContext.Self) == true) ||
+        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i) ||
+        // R32.14. A view's member called with the record by reference rebinds the record.
+        Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf) ||
+        WritesOpenRecord(i);
+
+    /// <summary>
+    /// R32.6. An arm that passes a lambda to a <c>[Callback]</c> parameter (R27.39): what the
+    /// call ensures of the trace, and so of the lambda's captures, is stated over an
+    /// existential trace, and Pulse's join keeps it of one arm only.
+    /// </summary>
+    private static bool PassesLambda(IrStmt s) =>
+        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .Any(e => e is IrLambdaRef);
+
+    /// <summary>
+    /// R33.16. An arm that replaces the record of an `[Open]` receiver owning arrays: their
+    /// `pts_to`s are reached through the record, and Pulse's join generalises the record
+    /// afresh, leaving them reached through one it cannot relate to it.
+    /// </summary>
+    private bool WritesOpenRecord(IrIf i) =>
+        (_constructsArrays || _slots.Values.Any(s => s is { Open: true } && s.OpenFields.Any(f => f.Type is IrArrayType))) &&
+        ReceiverWrites(i).Record;
+
+    /// <summary>
+    /// R33.25. The constructor being emitted builds an object that owns arrays: like an
+    /// `[Open]` receiver's, its record is what reaches them.
+    /// </summary>
+    private bool _constructsArrays;
 
     /// <summary>
     /// R30.23. A constructor's arm that assigns a field of the object it builds: the join
@@ -839,6 +904,10 @@ public sealed class CodeEmitter(
         classes is not null &&
         Check.Statements(s).Any(t =>
             t is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && IsRegionType(k) ||
+            // R31.10. A write of a ring's entry pointer (the owner's `head`): the ring
+            // lemma after the join needs which node it now is.
+            t is IrAssign { Target: IrField { Type: IrClassType r } } &&
+                classes.TryGetValue(r.Name, out var rd) && rd.IsCyclic ||
             Check.Expressions(t).SelectMany(Check.Subexpressions)
                 .Any(e => e is IrAlloc ||
                           e is IrCall c && regionHeld is not null &&
@@ -883,7 +952,9 @@ public sealed class CodeEmitter(
         };
         bool Splits(IrExpr arm) =>
             _objects.Length > 0 && CallsOpenReceiver(new IrExprStmt(arm.Loc, arm)) ||
-            value is IrConditional && MovesRegion(new IrExprStmt(arm.Loc, arm));
+            value is IrConditional && MovesRegion(new IrExprStmt(arm.Loc, arm)) ||
+            // R32.14. Or calls a view's member that takes the view's record by reference.
+            value is IrConditional && PassesRefSelf(arm);
         if (arms is not { } a || !Splits(a.Then) && !Splits(a.Else))
             return s;
         IrStmt With(IrExpr v) => s switch
@@ -1066,6 +1137,12 @@ public sealed class CodeEmitter(
     /// rather than from anything the user wrote. Every other proposition the loop needs is
     /// the user's to state, which is R5.8's rule unchanged.
     /// </summary>
+    private static bool CallsOnReceiver(IrStmt body) =>
+        Passes.Check.Statements(body)
+            .SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions)
+            .Any(e => e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] });
+
     private void Representation(
         Slot receiver,
         IrStmt body,
@@ -1095,6 +1172,22 @@ public sealed class CodeEmitter(
         if (writesRecord) existentials.Add(record);
         else fixedNames.Add((record, recordResource));
         var heapsOfRecord = new List<string>();
+        // R33.20. A record the loop writes, across a call of an `[Open]` method on it, keeps
+        // the fields neither the loop nor that callee assigns. A loop without such a call
+        // states what it keeps itself (R5.8), and an unneeded frame only burdens its proofs.
+        if (writesRecord && classes is not null && classes.TryGetValue(klass.Name, out var framed) &&
+            CallsOnReceiver(body) &&
+            MethodPlan.OpenAssigned(body, methods, []) is { } loopAssigned &&
+            framed.Fields.Where(f => !loopAssigned.Contains(f.Name)).ToList() is { Count: > 0 } kept)
+        {
+            var before = FreshValue("rep");
+            Line($"with {before}. assert (B.pts_to {receiver.Binder} {receiver.PermArg}{before});");
+            foreach (var f in kept)
+            {
+                var proj = Names.ClassProjection(klass.Name, f.Name);
+                pure.Add($"{record}.{proj} == {before}.{proj}");
+            }
+        }
 
         // F3. A `decreases` measure may name a field only when the loop leaves it alone,
         // because then the record has a name from before the loop. A loop that writes a
@@ -1132,7 +1225,8 @@ public sealed class CodeEmitter(
         if (reopened && unchanged && receiver.ViewBase is null &&
             decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
-            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {record} " +
+            var selfArg = PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "";
+            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {selfArg}{record} " +
                      $"{string.Concat(heapsOfRecord.Select(h => h + " "))}{receiver.PreModel}");
             // R27.50. The receiver is at its model throughout, so a measure reads it there.
             if (receiver.PreModel is { } pm)
@@ -1146,7 +1240,7 @@ public sealed class CodeEmitter(
                  decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
             var m = FreshValue(klass.Name);
-            var args = $"{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
+            var args = $"{(PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "")}{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
             existentials.Add($"({m}: {PulseEmitter.SubModelType(klass)})");
             resources.Add($"pure ({m} == {Names.ClassModule(klass.Name)}.{Names.ClassAbsModel(klass.Name)} {args})");
             pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbsRep(klass.Name)} {args}");
@@ -1180,6 +1274,15 @@ public sealed class CodeEmitter(
                 if (settled) fixedNames.Add((sub, subResource));
                 else existentials.Add(sub);
                 BindBoth($"{Names.This}.{f.Name}", new Term(sub, TermKind.Math, f.Type), settled);
+                continue;
+            }
+            // R33.27. An array a live span borrowed is held by the span, which the loop
+            // carries as a local; the borrow's receipt is framed around it.
+            if (f.Type is IrArrayType && receiver.Name == Names.This &&
+                _slots.Values.Any(s => s is { Kind: SlotKind.Span } && s.BorrowedField == f.Name))
+            {
+                scope.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                    new Term(projection, TermKind.Other, f.Type));
                 continue;
             }
             if (f.Type is IrArrayType)
@@ -1239,7 +1342,7 @@ public sealed class CodeEmitter(
             .OfType<IrCall>()
             .Any(c => c.HasReceiver && c.Args is [IrVar { Name: var n }, ..] && n == receiver.Name &&
                       receiver.ViewBase is null && openMethods?.Contains(c.Callee) != true ||
-                      // R30.27. Not a `[DoesNotReturn]` call: nothing follows it to reopen for.
+                      // R30.27 (also in R33.14/15). Not a `[DoesNotReturn]` call: nothing follows it to reopen for.
                       raising?.Contains(c.Callee) == true && !c.DoesNotReturn && receiver.Fraction is not null &&
                       receiver.ViewBase is null && receiver.PostModel == receiver.PreModel);
 
@@ -1285,9 +1388,13 @@ public sealed class CodeEmitter(
             {
                 if (node is not IrCall call) continue;
                 // R27.23. An `[Open]` callee is handed the receiver's record and may write it.
+                // R33.16. And the arrays it owns.
                 if (call.HasReceiver && openMethods?.Contains(call.Callee) == true &&
                     call.Args is [IrVar { Name: Names.This }, ..])
+                {
                     record = true;
+                    arrays.Add(AnyArray);
+                }
                 for (var i = 0; i < call.Args.Length; i++)
                 {
                     if (call.Args[i] is IrVar av && IsArrayCell(av.Name)) arrays.Add(AnyArray);
@@ -1688,6 +1795,10 @@ public sealed class CodeEmitter(
             .SelectMany(Check.Expressions)
             .SelectMany(Check.Subexpressions)
             .Any(e => e is IrField { Receiver: IrVar { Name: var n } } && n == Names.This ||
+                      // R33.15. An `[Open]` callee takes the receiver as the opened
+                      // invariant holds it.
+                      e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } oc &&
+                      openMethods?.Contains(oc.Callee) == true ||
                       // R27.13. A node of the receiver's region is read in the receiver's
                       // region, which only the opened invariant holds.
                       e is IrField { Receiver.Type: IrClassType k } && IsRegionType(k) &&
@@ -1732,6 +1843,12 @@ public sealed class CodeEmitter(
         var model = obj.PreModel;
         if (regions.Count == 0)
         {
+            // R33.28. A local has no model named on entry: the bracket names the one it holds.
+            if (string.IsNullOrEmpty(model))
+            {
+                model = FreshValue(obj.Name);
+                Line($"with {model}. assert ({Inv(oc)} {obj.Binder} {obj.PermArg}{model});");
+            }
             Line($"unfold {Inv(oc)} {obj.Binder} {obj.PermArg}{model};");
             inside();
             Line($"fold {Inv(oc)} {obj.Binder} {obj.PermArg}{model};");
@@ -1749,6 +1866,46 @@ public sealed class CodeEmitter(
         var post = after?.Invoke(hs) ?? hs;
         Line($"fold {InvHeap(oc)} {obj.Binder} {obj.PermArg}{model} {string.Join(" ", post)};");
         Line($"{module}.{Names.ClassOfHeap(oc.Name)} {obj.Binder};");
+    }
+
+    /// <summary>
+    /// R33.28. A statement that writes a field of another object of the receiver's class --
+    /// a field, an element of an array field, or the destination of an array copy -- held
+    /// whole by a local or parameter without regions.
+    /// </summary>
+    private (Slot Slot, IrClass Class)? PeerWritten(IrStmt stmt)
+    {
+        var target = PeerTarget(stmt);
+        if (target is not { Peer: true, Receiver: IrVar pv } || pv.Name == Names.This ||
+            _peerOpen.Contains(pv.Name) || _objects.Any(o => o.Name == pv.Name) ||
+            !_slots.TryGetValue(pv.Name, out var slot) ||
+            slot is not { Kind: SlotKind.Object, Open: false, Type: IrClassType oc } ||
+            classes is null || !classes.TryGetValue(oc.Name, out var decl) || RegionsOf(decl).Any())
+            return null;
+        return (slot, decl);
+    }
+
+    private static IrField? PeerTarget(IrStmt stmt) => stmt switch
+    {
+        IrAssign { Target: IrField { Peer: true } f } => f,
+        IrAssign { Target: IrElement { Array: IrField { Peer: true } f } } => f,
+        IrArrayOp { Written: IrField { Peer: true } f } => f,
+        _ => null,
+    };
+
+    /// <summary>
+    /// R33.28. Opens the object around a statement that writes one of its fields, at the
+    /// model its invariant holds, and closes it at the model of what the statement left.
+    /// </summary>
+    private void PeerWrite(Slot obj, IrClass decl, Action inside)
+    {
+        var oc = (IrClassType)obj.Type;
+        var model = FreshValue(obj.Name);
+        Line($"with {model}. assert ({Inv(oc)} {obj.Binder} {obj.PermArg}{model});");
+        Line($"unfold {Inv(oc)} {obj.Binder} {obj.PermArg}{model};");
+        _peerOpen.Add(obj.Name);
+        try { inside(); } finally { _peerOpen.Remove(obj.Name); }
+        Line($"fold {Inv(oc)} {obj.Binder} {obj.PermArg}{ModelWitness(decl, obj)};");
     }
 
     private readonly Stack<List<(IrClassType Region, string Heap)>> _peerHeaps = new();
@@ -1995,6 +2152,27 @@ public sealed class CodeEmitter(
     {
         DropLocals(returned, 0, ownedBy, plan.ResultOwned);
 
+        // R33.27. A span the body borrowed from the opened receiver's arrays and left
+        // borrowed when its scope ended is given back before the receiver is closed, the
+        // latest borrow first.
+        if (_objects.Length > 0)
+            foreach (var span in _slots.Values.Where(s => s is { Kind: SlotKind.Span, Origin: not null }).Reverse().ToList())
+            {
+                // A window left as it was borrowed gives the array back unchanged.
+                if (span.Origin is SpanOrigin.ArrayRange)
+                {
+                    var (a, i, j, v) = (FreshValue("a"), FreshValue("i"), FreshValue("j"), FreshValue("v"));
+                    Line($"with {a} {i} {j} {v}. assert (Span.is_range_of {a} {span.Binder} {span.Fraction ?? "1.0R"} {i} {j} {v});");
+                    Line($"Pulse.Lib.CSharp.Seq.splice_same {v} {i} {j};");
+                }
+                Line($"Span.{span.Origin switch
+                {
+                    SpanOrigin.Array => "restore_array",
+                    SpanOrigin.ArrayRange => "restore_array_range",
+                    _ => "restore_sub",
+                }} {span.Binder};");
+            }
+
         // R10.7. The innermost window closes first: it was opened last, and what it
         // re-establishes is a conjunct of what the one outside it re-establishes.
         for (var i = _windows.Count - 1; i >= 0; i--) Line(_windows[i]);
@@ -2028,14 +2206,46 @@ public sealed class CodeEmitter(
     }
 
     /// <summary>R27.59. The owned fields left open at a heap by a call that returned a region pointer.</summary>
-    private readonly Dictionary<string, (IrClassType Class, string Args)> _fieldOpen = [];
+    // R32.10. `Regions` names the field's region classes in the order of its heap
+    // arguments; `Written` is set when the method has since written one of them.
+    private readonly Dictionary<string, (IrClassType Class, string Args, string? Perm, IReadOnlyList<string> Regions,
+        IReadOnlyList<string> Heaps, IReadOnlyList<IrClassType> Written)> _fieldOpen = [];
+
+    /// <summary>R32.10. A write to (or an allocation in) a region of class <paramref name="k"/> may be a write to an open field's region.</summary>
+    private void FieldRegionWritten(IrClassType k)
+    {
+        foreach (var (f, open) in _fieldOpen.ToList())
+            if (open.Regions.Contains(k.Name) && !open.Written.Any(w => w.Name == k.Name))
+                _fieldOpen[f] = open with { Written = [.. open.Written, k] };
+    }
 
     /// <summary>R27.59. Closes an owned field <see cref="_fieldOpen"/> holds open, back to its invariant.</summary>
     private void CloseFieldRegion(string field, bool forget = true)
     {
         if (!_fieldOpen.TryGetValue(field, out var open)) return;
-        Line($"fold {InvHeap(open.Class)} {open.Args};");
-        Line($"{Names.ClassModule(open.Class.Name)}.{Names.ClassOfHeap(open.Class.Name)} {open.Args.Split(' ')[0]};");
+        var fexpr = open.Args.Split(' ')[0];
+        if (open.Written.Count == 0)
+            Line($"fold {InvHeap(open.Class)} {open.Args};");
+        else
+        {
+            // R32.10. The method wrote the field's region since the call that opened it:
+            // the invariant is folded again at the heap the region holds now, and at the
+            // model that heap and the field's record determine. Folding it at that model
+            // is the proof obligation that the write kept the invariant's refinements.
+            var perm = open.Perm ?? "1.0R";
+            var heaps = open.Heaps.ToList();
+            foreach (var k in open.Written)
+            {
+                var hn = FreshValue(Frontend.Region.HeapBinder(k.Name));
+                Line($"with {hn}. assert ({PulseEmitter.RegionAt(k, perm, hn)});");
+                heaps[open.Regions.ToList().IndexOf(k.Name)] = hn;
+            }
+            var rn = FreshValue(open.Class.Name);
+            Line($"with {rn}. assert (B.pts_to {fexpr} #{perm} {rn});");
+            var model = $"({Names.ClassModule(open.Class.Name)}.{Names.ClassAbsModel(open.Class.Name)} {rn} {string.Join(" ", heaps)})";
+            Line($"fold {InvHeap(open.Class)} {fexpr} {(open.Perm is null ? "" : $"#{open.Perm} ")}{model} {string.Join(" ", heaps)};");
+        }
+        Line($"{Names.ClassModule(open.Class.Name)}.{Names.ClassOfHeap(open.Class.Name)} {fexpr};");
         if (forget) _fieldOpen.Remove(field);
     }
 
@@ -2180,7 +2390,12 @@ public sealed class CodeEmitter(
         // it happened to contain last.
         var outer = _loc;
         _loc = stmt.Loc;
-        try { StatementCore(stmt, plan); } finally { _loc = outer; }
+        try
+        {
+            if (PeerWritten(stmt) is { } peer) PeerWrite(peer.Slot, peer.Class, () => StatementCore(stmt, plan));
+            else StatementCore(stmt, plan);
+        }
+        finally { _loc = outer; }
         if (!_receiverDirty && DirtiesReceiver(stmt)) _receiverDirty = true;
     }
 
@@ -2216,6 +2431,10 @@ public sealed class CodeEmitter(
                 _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Span, binder)
                 {
                     Origin = create.Origin,
+                    BorrowedField = create.Source is IrField { Receiver: IrVar { Name: Names.This }, Field: var bf } ? bf : null,
+                    // R33.27. A window of the receiver's array is held at the receiver's permission.
+                    Fraction = create.Source is IrField { Receiver: IrVar { Name: Names.This } }
+                        ? _objects.FirstOrDefault(o => o.Name == Names.This)?.Fraction : null,
                 };
                 return;
             }
@@ -2357,8 +2576,9 @@ public sealed class CodeEmitter(
                 ArrayLocal(d);
                 return;
 
-            case IrLocalDecl { Owned.IsDefaultOrEmpty: false } d:
-                HeldStruct(d);
+            // R32.14. So is a view of another object of the class, which owns nothing.
+            case IrLocalDecl { Owned.IsDefaultOrEmpty: false } or IrLocalDecl { HeldOwner: not null }:
+                HeldStruct((IrLocalDecl)stmt);
                 return;
 
             case IrLocalDecl d:
@@ -2395,6 +2615,10 @@ public sealed class CodeEmitter(
                 // the rest of the block unreachable, whatever it expects to hold.
                 DoesNotReturnCall(dnr, plan);
                 Line("unreachable ();");
+                return;
+
+            case IrExprStmt { Expr: IrCall rc } when RaisesThroughOpenRegion(rc) is { } held:
+                RaisingRegionCall(rc, held, plan);
                 return;
 
             case IrArrayOp c:
@@ -2584,7 +2808,9 @@ public sealed class CodeEmitter(
              d.Type is IrSeqType ||
              // R27.37. The struct a borrowing constructor builds is passed by reference to
              // its writer members, which take a reference to the (refined) struct type.
-             d.Name == Frontend.BorrowContext.SelfCell
+             d.Name == Frontend.BorrowContext.SelfCell ||
+             // R32.12. So is the copy of a wrapped struct a writer member is passed.
+             d.Name.StartsWith("__pal_inner", StringComparison.Ordinal)
             ? $"let mut {cell} : {Types.Render(d.Type)} = {init};"
             : $"let mut {cell} = {init};");
     }
@@ -2729,6 +2955,7 @@ public sealed class CodeEmitter(
                     Line($"let {wcur} = {Names.ClassModule(wc.Name)}.{Frontend.Region.ReadOf(wc.Name)} {wrecv};");
                     Line($"{Frontend.Region.Module}.write {wrecv} " +
                          $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
+                    FieldRegionWritten(wc);
                     return;
                 }
                 Line($"let {wcur} = B.op_Bang {wobj.NonNull};");
@@ -2752,6 +2979,7 @@ public sealed class CodeEmitter(
                 Line($"let {ccur} = {Names.ClassModule(cc.Name)}.{Frontend.Region.ReadOf(cc.Name)} {cptr};");
                 Line($"{Frontend.Region.Module}.write {cptr} " +
                      $"({{ {ccur} with {Names.ClassProjection(cc.Name, cfield.Field)} = {cvalue} }});");
+                FieldRegionWritten(cc);
                 return;
             }
 
@@ -2770,6 +2998,7 @@ public sealed class CodeEmitter(
                 Line($"let {xcur} = {Names.ClassModule(xc.Name)}.{Frontend.Region.ReadOf(xc.Name)} {xptr};");
                 Line($"{Frontend.Region.Module}.write {xptr} " +
                      $"({{ {xcur} with {Names.ClassProjection(xc.Name, xfield.Field)} = {xvalue} }});");
+                FieldRegionWritten(xc);
                 return;
             }
 
@@ -2806,6 +3035,9 @@ public sealed class CodeEmitter(
                     {
                         _objectLocals.RemoveAll(l => l.Name == moved.Name && l.Kind == SlotKind.Array);
                         _movedArrays.Add(moved.Name);
+                        // R33.16. Nor does a ghost statement's naming bracket still find it.
+                        if (_slots.TryGetValue(moved.Name, out var ms) && ms.Kind == SlotKind.Array)
+                            _slots[moved.Name] = ms with { Kind = SlotKind.Value, Index = null };
                     }
                     // R24.7. A nullable field owns what it holds through `NA.pts_to`: a
                     // non-null array moves in by `intro`, and `null` owns nothing.
@@ -2953,8 +3185,13 @@ public sealed class CodeEmitter(
         // identity coercion is F*'s. What remains is not about the reference but about its
         // invariant, which is stated through R10.3a's abbreviation and must be unfolded.
         // R12.2. A plain reference carries no invariant, so for it there is nothing at all.
-        if (classes is not null && classes.TryGetValue(k.Name, out var kd) && kd.IsPlain)
-            return text;
+        if (classes is not null && classes.TryGetValue(k.Name, out var kd))
+        {
+            if (kd.IsPlain) return text;
+            // R31.2. Nor has any class that is not recursive (a ring's owner): R10.3a's
+            // abbreviation is only a recursive class's.
+            if (kd.Recursion is null) return text;
+        }
         Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
         return text;
     }
@@ -3225,6 +3462,11 @@ public sealed class CodeEmitter(
             if (slot.Kind == SlotKind.Cell && slot.Type is IrArrayType &&
                 !unassigned.Contains(slot.Name) && !Rebinds(w, slot.Name))
                 unassigned = unassigned.Add(slot.Name);
+        // R33.28. An object whose fields the loop writes changes its model.
+        foreach (var slot in live)
+            if (slot.Kind == SlotKind.Object && unassigned.Contains(slot.Name) &&
+                Check.Statements(w.Body).Any(st => PeerTarget(st) is { Receiver: IrVar pv } && pv.Name == slot.Name))
+                unassigned = unassigned.Remove(slot.Name);
 
         // Name the values the loop will *not* change, so the invariant can say they are
         // unchanged rather than merely existentially quantified (R5.8b). Values the loop
@@ -3308,9 +3550,28 @@ public sealed class CodeEmitter(
         foreach (var slot in live.Where(s => s is { Open: true, Type: IrClassType }))
         {
             var oc = (IrClassType)slot.Type;
+            var (_, written) = ReceiverWrites(w.Body);
             foreach (var f in slot.OpenFields)
-                scope.Bind($"{Names.This}.{f.Name}", new Term(
-                    $"{fixedNames[slot.Name]}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+            {
+                var at = $"{fixedNames[slot.Name]}.{Names.ClassProjection(oc.Name, f.Name)}";
+                // R33.15. An array field is carried by its own `pts_to`, at contents the
+                // loop holds fixed unless it writes the array.
+                if (f.Type is IrArrayType)
+                {
+                    var c = FreshValue(Names.Contents(f.Name));
+                    var res = $"{PulseEmitter.ArrayPts(f)} {at} {c}";
+                    resources.Add(res);
+                    // A fixed contents names the record it is reached from, so it can be
+                    // fixed only while the record is.
+                    if (written.Contains(f.Name) || written.Contains(AnyArray) || !unassigned.Contains(slot.Name))
+                        existentials.Add(c);
+                    else repFixed.Add((c, res));
+                    scope.Bind($"{Names.This}.{f.Name}", new Term(c, TermKind.Seq, f.Type));
+                    scope.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"), new Term(at, TermKind.Other, f.Type));
+                    continue;
+                }
+                scope.Bind($"{Names.This}.{f.Name}", new Term(at, MethodPlan.KindOf(f.Type), f.Type));
+            }
         }
 
         // R5.8b, and R5.12 with it: a binder the loop cannot change is *named* before the
@@ -3322,6 +3583,23 @@ public sealed class CodeEmitter(
             .Concat(live.Where(s => unassigned.Contains(s.Name))
                         .Select(s => (Name: fixedNames[s.Name], Resource: s.Resource(fixedNames[s.Name]))))
             .ToList();
+        // R33.20. An `[Open]` receiver the loop changes keeps, across it, the fields that
+        // neither the loop nor an `[Open]` callee of it assigns.
+        foreach (var slot in live.Where(s => s is { Open: true, Type: IrClassType } && !unassigned.Contains(s.Name)))
+        {
+            if (MethodPlan.OpenAssigned(w.Body, methods, []) is not { } loopAssigned) continue;
+            var kept = slot.OpenFields.Where(f => !loopAssigned.Contains(f.Name)).ToList();
+            if (kept.Count == 0) continue;
+            var before = FreshValue(slot.Name);
+            Line($"with {before}. assert ({slot.Resource(before)});");
+            var oc = (IrClassType)slot.Type;
+            foreach (var f in kept)
+            {
+                var proj = Names.ClassProjection(oc.Name, f.Name);
+                pure.Add($"{fixedNames[slot.Name]}.{proj} == {before}.{proj}");
+            }
+        }
+
         if (fixedAll.Count > 0)
         {
             Line($"with {string.Join(" ", fixedAll.Select(f => f.Name).Concat(stillHeaps))}. " +
@@ -3539,6 +3817,124 @@ public sealed class CodeEmitter(
     }
 
     private bool _receiverClosedForThrow;
+    private bool _catching;
+
+    /// <summary>
+    /// R31.14. A static call that may raise, made while the receiver is open and holds its
+    /// regions: the callee takes a region the receiver's invariant owns, so the receiver
+    /// cannot be closed around the call (R27.38), and an exception it raises would leave
+    /// the invariant unfolded. The call is caught in a local function, which returns the
+    /// exception; the receiver is then closed as at a <c>throw</c> and the exception raised
+    /// again. Only a receiver whose representation is its box and its regions, with
+    /// nothing else live, is so handled; it may be held at a fraction.
+    /// </summary>
+    private Slot? RaisesThroughOpenRegion(IrCall call)
+    {
+        if (raising?.Contains(call.Callee) != true || call.HasReceiver || call.DoesNotReturn) return null;
+        if (_tryMarks.Count > 0 || _windows.Count > 0 || _objectLocals.Count > 0 || _heldPeers.Count > 0 ||
+            _receiverClosedForThrow || _objects is not [{ Name: Names.This, ViewBase: null } self])
+            return null;
+        if (self.Type is not IrClassType k || classes is null || !classes.TryGetValue(k.Name, out var decl))
+            return null;
+        if (!RegionsOf(decl).Any() ||
+            decl.Fields.Any(f => f.Type is IrArrayType || f.Type is IrClassType && !IsRegionType(f.Type)))
+            return null;
+        if (_slots.Values.Any(s => s.Owns && s.Name != Names.This)) return null;
+        // The callee's postcondition is restated at the arguments, which must be names.
+        if ((Methods ?? methods)?.TryGetValue(call.Callee, out var callee) != true || callee!.Parameters.Length != call.Args.Length ||
+            call.Args.Any(a => a is not IrVar v || !_slots.TryGetValue(v.Name, out var vs) || vs.Kind is not SlotKind.Value))
+            return null;
+        return self;
+    }
+
+    private void RaisingRegionCall(IrCall call, Slot self, MethodPlan plan)
+    {
+        var decl = classes![((IrClassType)self.Type).Name];
+        var rep = FreshValue("rep");
+        var heaps = RegionsOf(decl).Select(k => (k, FreshValue(Frontend.Region.HeapBinder(k.Name)))).ToList();
+        var held = string.Join(" ** ",
+            new[] { $"B.pts_to {self.Binder} {self.PermArg}{rep}" }
+                .Concat(heaps.Select(h => PulseEmitter.RegionAt(h.k, self.Fraction ?? "1.0R", h.Item2))));
+        Line($"with {rep} {string.Join(" ", heaps.Select(h => h.Item2))}. assert ({held});");
+        // What the callee ensures is what the code after the call knows: a `try` is not
+        // framed, so its contract restates it, read at the arguments and at the heaps held.
+        var callee = (Methods ?? methods)![call.Callee];
+        var scope = new SpecScope();
+        for (var i = 0; i < callee.Parameters.Length; i++)
+        {
+            var prm = callee.Parameters[i];
+            scope.Bind(prm.Name, new Term(_slots[((IrVar)call.Args[i]).Name].Binder, MethodPlan.KindOf(prm.Type), prm.Type));
+        }
+        foreach (var (k, h) in heaps)
+            scope.Bind(Frontend.Region.HeapName(k.Name), new Term(h, TermKind.Other));
+        scope = new SpecScope(scope) { Pre = scope };
+        var post = callee.Ensures.Select(e => spec.AsProp(spec.Emit(e, scope))).ToList();
+        var ex = $"ex_{_try++}";
+        // And what it raises is what its `[Throws]` clauses say it may (R19.2).
+        var cases = callee.Throws.Select(t =>
+        {
+            scope.Bind(Frontend.FrontendPass.ThrownParameter, new Term(ex, TermKind.Other, t.Type));
+            var parts = new List<string>();
+            if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {ex}");
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, scope)));
+            return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
+        }).ToList();
+        var raised = cases.Count == 0 ? held : $"{held} ** pure ({string.Join(" \\/ ", cases)})";
+        // A `try` whose handler closed the receiver cannot be used here: Pulse appends a
+        // forwarding branch to every handler, which must hand what the `try` raises to the
+        // method's own `raises` as it stands, unclosed. So the call is caught inside a local
+        // function, where no exception destination is in scope and that branch is
+        // unreachable, and the outcome comes back as an `option exn` to raise from.
+        var helper = $"catch_{_try++}";
+        var res = FreshValue("caught");
+        var normal = post.Count == 0 ? "True" : string.Join(" /\\ ", post);
+        var thrown = cases.Count == 0 ? "True" : string.Join(" \\/ ", cases);
+        var settled = $"{held} ** pure (None? {res} ==> ({normal})) ** " +
+            $"pure (Some? {res} ==> (let {ex} = Some?.v {res} in {thrown}))";
+        Line($"fn {helper} ()");
+        _indent++;
+        Line($"requires {held}");
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        _indent--;
+        Line("{");
+        _indent++;
+        Line("try");
+        _indent++;
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        Line($"raises (fun ({ex}: exn) -> {raised})");
+        _indent--;
+        Line("{");
+        _indent++;
+        // The receiver is not closed around this call as R27.38 closes one held read-only:
+        // the callee takes its regions.
+        _catching = true;
+        try { Line(Expr(call) + ";"); }
+        finally { _catching = false; }
+        Line("None #exn");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{ex} -> {{ Some {ex} }}");
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+        var outcome = Fresh();
+        Line($"let {outcome} = {helper} ();");
+        Line($"if (Some? {outcome}) {{");
+        _indent++;
+        ReleaseForThrow(plan);
+        Line($"raise (Some?.v {outcome});");
+        Line("()");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        Line("()");
+        _indent--;
+        Line("};");
+    }
 
     /// <summary>R22.11. Discards an open object's box and the arrays its fields own.</summary>
     private void DropRepresentation(Slot obj)
@@ -3744,8 +4140,10 @@ public sealed class CodeEmitter(
             // that moves its receiver: Pulse joins the two arms' calls at a fresh model and
             // keeps the facts of one arm only, so the declaration becomes an `if` whose arms
             // each bind the local and run the rest.
+            // R32.14. So does one an arm of which calls a view's member that takes the
+            // view's record by reference: Pulse rebinds the record at a fresh value there too.
             if (statements[k] is IrLocalDecl { Init: IrConditional ce } d &&
-                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else)))
+                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else) || PassesRefSelf(ce.Then) || PassesRefSelf(ce.Else)))
             {
                 UnitTail(new IrIf(d.Loc, ce.Cond,
                     new IrBlock(ce.Then.Loc, [d with { Init = ce.Then }, .. rest]),
@@ -3779,6 +4177,11 @@ public sealed class CodeEmitter(
         }
         Line("()");
     }
+
+    /// <summary>R32.14. Whether an expression passes a view member's by-reference record on to a call.</summary>
+    private bool PassesRefSelf(IrExpr e) =>
+        _method is { } m && m.Parameters.Any(p => p.Name == Frontend.BorrowContext.Self && p.Mode == ParamMode.Ref) &&
+        Passes.Check.Subexpressions(e).OfType<IrCall>().Any(c => c.Args.Any(a => a is IrVar { Name: Frontend.BorrowContext.Self } or IrRefArg { Operand: IrVar { Name: Frontend.BorrowContext.Self } }));
 
     /// <summary>R27.53. Whether an expression calls a method that may move its receiver.</summary>
     private static bool MovesReceiver(IrExpr e) =>
@@ -3997,8 +4400,18 @@ public sealed class CodeEmitter(
             if (slot is { Open: true, Type: IrClassType oc })
             {
                 foreach (var f in slot.OpenFields)
-                    scope.Bind($"{Names.This}.{f.Name}", new Term(
-                        $"{value}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+                {
+                    var at = $"{value}.{Names.ClassProjection(oc.Name, f.Name)}";
+                    if (f.Type is IrArrayType)
+                    {
+                        var c = FreshValue(Names.Contents(f.Name));
+                        named.Add((c, $"{PulseEmitter.ArrayPts(f)} {at} {c}"));
+                        scope.Bind($"{Names.This}.{f.Name}", new Term(c, TermKind.Seq, f.Type));
+                        scope.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"), new Term(at, TermKind.Other, f.Type));
+                        continue;
+                    }
+                    scope.Bind($"{Names.This}.{f.Name}", new Term(at, MethodPlan.KindOf(f.Type), f.Type));
+                }
                 foreach (var k in slot.OpenHeaps)
                 {
                     var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));
@@ -4298,6 +4711,10 @@ public sealed class CodeEmitter(
                 {
                     OptionOpKind.HasValue => $"(Some? {operand})",
                     OptionOpKind.Value => $"(Some?.v {operand})",
+                    // R33.11. A value of another type the same F* type stands for (two
+                    // bindings of one type) is given the option's type explicitly.
+                    _ when oo.Type is IrOptionType on && oo.Operand.Type is { } ot && !ot.Equals(on.Inner) =>
+                        $"(Some #{Types.Atom(on.Inner)} {operand})",
                     _ => $"(Some {operand})",
                 };
             }
@@ -4351,6 +4768,16 @@ public sealed class CodeEmitter(
                 // R27.6. Typed, so that a cell initialised with it has a type to allocate.
                 return pnd.IsRegion ? $"(B.null #{PulseEmitter.RegionRaw(pk)})" : "B.null";
 
+            // R31.9. A non-recursive class has no `intro_nil` (§10 derives it only for a
+            // recursive one): its null, stored in a node's back pointer, is the typed null box.
+            case IrNull nn when nn.Type is IrClassType nk
+                && classes is not null && classes.TryGetValue(nk.Name, out var nnd) && nnd.Recursion is null:
+            {
+                var t = Fresh();
+                Line($"let {t} : {Types.Render(nk with { Nullable = true })} = B.null;");
+                return t;
+            }
+
             // R15.8. `B.null` at a generic class says nothing about what it is empty *of*,
             // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
             // resolve against. Naming the empty structure first, at its type, is the
@@ -4389,6 +4816,21 @@ public sealed class CodeEmitter(
                 return ne.Args.IsEmpty
                     ? $"({Names.Qualified(Names.ExnNew(ne.Class))} ())"
                     : $"({Names.Qualified(Names.ExnNew(ne.Class))} {string.Join(" ", ne.Args.Select(a => $"({Expr(a)})"))})";
+
+            // R31.11. `list!.head` in a ring node's member: the node is read for its back
+            // pointer, and the owner is read through it, as the box the member was given.
+            case IrField { Receiver: IrField { Receiver: IrVar { Name: Names.This }, Field: var obf } } obr when
+                _method is not null && OwnerBorrows is not null &&
+                OwnerBorrows.TryGetValue(_method.Name, out var obm) && obm.Field == obf:
+            {
+                var nodeRead = Fresh();
+                var thisBinder = _slots.TryGetValue(Names.This, out var obs) ? obs.Binder : Names.Local(Names.This);
+                Line($"let {nodeRead} = {Names.ClassModule(obm.Node.Name)}.{Frontend.Region.ReadOf(obm.Node.Name)} {thisBinder};");
+                var ownerRead = Fresh();
+                Line($"let {ownerRead} = {Frontend.Region.Module}.read_owner {OwnerBorrow.Binder} " +
+                     $"{nodeRead}.{Names.ClassProjection(obm.Node.Name, obf)};");
+                return $"{ownerRead}.{Names.ClassProjection(obm.Owner.Name, obr.Field)}";
+            }
 
             case IrField { Receiver: IrVar pv } pf when
                 _slots.TryGetValue(pv.Name, out var pobj)
@@ -4481,6 +4923,20 @@ public sealed class CodeEmitter(
                 return Unary(u);
             // R12.3. A null test on a `[Plain]` reference in value position is the
             // representation's own question and nothing more: is the pointer null?
+            // R31.13. A region node's back pointer to its owner (`node.list != null`) is a
+            // box stored in the node's record: the test asks only whether it is null.
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } ob when
+                (ob.Left is IrNull ? ob.Right : ob.Right is IrNull ? ob.Left : null) is
+                    IrField { Type: IrClassType { Nullable: true }, Receiver.Type: var backOf } back &&
+                IsRegionType(backOf) && !IsRegionType(back.Type):
+            {
+                // Bound on its own, so the solver sees `is_null`'s refinement (`b <==> x == null`).
+                var t = Expr(back);
+                var name = Fresh();
+                Line($"let {name} = B.is_null {t};");
+                return ob.Op is BinOp.Eq ? name : $"(not {name})";
+            }
+
             case IrBinary { Op: BinOp.Eq or BinOp.Ne } pb when PlainNullTest(pb) is { } pt:
             {
                 var t = Expr(pt.Tested);
@@ -4527,7 +4983,13 @@ public sealed class CodeEmitter(
                     [lr.Callback.View, lr.Callback.Result]));
                 Line($"fold ({protocol} (Seq.empty #{e}));");
                 _lambdaProtocols.Add(protocol);
-                return $"{protocol} ({Names.LambdaCallback(lr.Method)} {applied})".Replace(" )", ")");
+                // R32.11. A bounded parameter takes the lambda's bound, or none, before it.
+                var callback = $"({Names.LambdaCallback(lr.Method)} {applied})".Replace(" )", ")");
+                if (!lr.Callback.Bounded) return $"{protocol} {callback}";
+                var bound = lr.Bounded
+                    ? $"({Names.LambdaBound(lr.Method)} {applied})".Replace(" )", ")")
+                    : "Pulse.Lib.CSharp.Callback.max_bound";
+                return $"{protocol} {bound} {callback}";
             }
 
             case IrConvert cv:
@@ -4596,6 +5058,21 @@ public sealed class CodeEmitter(
             .Select((text, i) => Inject(
                 i < call.ParamTypes.Length ? call.ParamTypes[i] : null, call.Args[i], text))
             .ToImmutableArray();
+
+        // R31.11. A ring node's member that reads its owner is called from a method of the
+        // owner's class, on a node of the receiver's region: the receiver's box is passed as
+        // the owner, and the callee's precondition says the node points back to it.
+        if (OwnerBorrows is not null && OwnerBorrows.TryGetValue(call.Callee, out var cob) && call.HasReceiver && args.Length > 0)
+        {
+            if (_method?.DeclaringClass == cob.Owner.Name && _slots.TryGetValue(Names.This, out var ownerSlot) &&
+                _objects.Any(o => o.Name == Names.This))
+                args = args.Insert(1, $"(hide {ownerSlot.Binder})");
+            else
+                diagnostics.Error("PALCS0781", call.Loc,
+                    $"`{call.Callee}` reads the `{cob.Owner.Name}` its node points back to through `{cob.Field}`, " +
+                    $"so it is called only from an instance method of `{cob.Owner.Name}` on a node of the receiver's " +
+                    "ring, with the receiver open (doc/translation.md R31.11).");
+        }
 
         var indexed = false;
         for (var i = 0; i < raw.Length; i++)
@@ -4687,11 +5164,26 @@ public sealed class CodeEmitter(
         // holds, to the caller's `raises`, which owns the objects closed. An object only
         // read (a borrowing struct's owner) is closed around the call, and reopened at the
         // same model after it: the call cannot have changed it.
-        var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow
+        var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow && !_catching
             ? _objects.Where(o => o != self && o.Fraction is not null && o.ViewBase is null &&
-                                  o.PostModel == o.PreModel && !raw.Contains(o.Binder)).ToList()
+                                  o.PostModel == o.PreModel && !raw.Contains(o.Binder) &&
+                                  // R32.9. Not the holder whose owned field is the receiver
+                                  // (R27.58): the field's invariant is unfolded from it.
+                                  !(fieldRecv && o.Name == Names.This)).ToList()
             : [];
         foreach (var o in bracketed) CloseObject(_method!, o);
+        // R33.22. A receiver held whole and opened (R4.10), around a callee on something
+        // else that may raise: the exception leaves with it closed, so it is closed before
+        // the call -- its invariant must hold there -- and reopened after it. Not around a
+        // call on an object the receiver owns (`_set.Add(…)`), whose permission the open
+        // receiver holds: that call's own raising path closes the receiver (R27.38).
+        var closedAround = raising?.Contains(call.Callee) == true && !call.DoesNotReturn && _windows.Count == 0 &&
+                           !_receiverClosedForThrow && self is null &&
+                           !call.Args.Any(a => a is IrField { Type: IrClassType })
+            ? _objects.Where(o => o.Name == Names.This && o.Fraction is null && o.ViewBase is null &&
+                                  !o.Open && o.Heaps.IsEmpty && !raw.Contains(o.Binder) && !bracketed.Contains(o)).ToList()
+            : [];
+        foreach (var o in closedAround) CloseObject(_method!, o);
         if (convert is not null)
             Line($"{convert}{(wantsHeap ? Names.ClassToHeap(recvClass!) : Names.ClassOfHeap(recvClass!))} {raw[0]};");
         Line($"let {binder} = {callee} {applied};");
@@ -4703,6 +5195,7 @@ public sealed class CodeEmitter(
         }
         _lambdaProtocols.Clear();
         foreach (var o in bracketed) Line(Unfold(o) + ";");
+        foreach (var o in closedAround) Reopen(o, null);
         // R27.59. A region pointer handed back by a call on an owned field points into the
         // field's region, at the heap the call left it at: the field is kept open there, so
         // that the pointer can be read, until the receiver is closed.
@@ -4716,7 +5209,8 @@ public sealed class CodeEmitter(
             var fargs = $"{raw[0]} {holder.PermArg}{fm} {string.Join(" ", fhs)}";
             Line($"with {fm} {string.Join(" ", fhs)}. assert ({InvHeap(fk)} {fargs});");
             Line($"unfold {InvHeap(fk)} {fargs};");
-            _fieldOpen[((IrField)call.Args[0]).Field] = (fk, fargs);
+            _fieldOpen[((IrField)call.Args[0]).Field] = (fk, fargs, holder.Fraction,
+                [.. RegionsOf(fdecl).Select(k => k.Name)], fhs, []);
         }
         else if (convert is not null && (closedRecv is not null || fieldRecv))
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");
@@ -4850,7 +5344,13 @@ public sealed class CodeEmitter(
             (b.Left.Type is IrOptionType || b.Right.Type is IrOptionType))
             return $"({(b.Op is BinOp.Eq ? "None?" : "Some?")} {Atom(b.Left is IrNull ? r : l)})";
         if (b.Op is BinOp.Eq or BinOp.Ne && b.Left.Type is IrOptionType or IrUserSpecType)
+        {
+            // R33.25. `c != EqualityComparer<T>.Default` for a nullable `c`: the other side
+            // is a value that is there.
+            if (b.Left.Type is IrOptionType && b.Right.Type is IrUserSpecType) r = $"(Some {Atom(r)})";
+            else if (b.Left.Type is IrUserSpecType && b.Right.Type is IrOptionType) l = $"(Some {Atom(l)})";
             return b.Op is BinOp.Eq ? $"({l} = {r})" : $"(not ({l} = {r}))";
+        }
 
         // R27.8. Two references to objects of a `[Region]` class are compared as pointers.
         if (b.Op is BinOp.Eq or BinOp.Ne && IsRegionType(b.Left.Type) && IsRegionType(b.Right.Type))
@@ -4858,11 +5358,12 @@ public sealed class CodeEmitter(
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
                 : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
 
-        // R27.50. So is `x == this` of an owner class: each is a box. Other comparisons of
-        // two objects stay refused (R18.1).
+        // R27.50. So is `x == this` of an owner class: each is a box. R31.8: `x` may be
+        // nullable (a node's `list`), a null box being unequal to `this`. Other comparisons
+        // of two objects stay refused (R18.1).
         if (b.Op is BinOp.Eq or BinOp.Ne &&
             (b.Left is IrVar { Name: Names.This } || b.Right is IrVar { Name: Names.This }) &&
-            b.Left.Type is IrClassType { Nullable: false } lc && b.Right.Type is IrClassType { Nullable: false } rc &&
+            b.Left.Type is IrClassType lc && b.Right.Type is IrClassType rc &&
             lc.Name == rc.Name && classes is not null && classes.ContainsKey(lc.Name))
             return b.Op is BinOp.Eq
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"

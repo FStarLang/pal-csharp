@@ -45,6 +45,7 @@ public static class Names
     /// <summary>R27.39. A lifted lambda's protocol predicate, and its callback.</summary>
     public static string LambdaProtocol(string name) => "protocol_" + name;
     public static string LambdaCallback(string name) => "callback_" + name;
+    public static string LambdaBound(string name) => "bound_" + name;
     public static string SpecModule(string name) => "Let_" + name;
 
     // R3.4. A struct's field names are prefixed and always used module-qualified, so a

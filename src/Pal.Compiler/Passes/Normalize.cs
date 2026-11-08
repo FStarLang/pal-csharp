@@ -49,7 +49,59 @@ public static class Normalize
     /// is copied into both arms, so that R5.5b finds the guard and the rest in one block.
     /// </summary>
     private static IrStmt LoopReturns(IrStmt body) =>
-        LoopReturn(body) ? new IrBlock(body.Loc, Sink(Stmts(body))) : body;
+        LoopReturn(body) || NestedReturn(body) || NestedReturn(Stmts(body)) ? new IrBlock(body.Loc, Sink(Stmts(body))) : body;
+
+    /// <summary>
+    /// R32.14. Whether <paramref name="s"/> holds an <c>if</c> with an arm that may return
+    /// but may also complete (<c>if (a) { if (b) return e; }</c>). It is no guard clause
+    /// (R5.5b), so what follows it is copied into each arm, after the arm, as for R24.14.
+    /// </summary>
+    private static bool NestedReturn(IrStmt? s) => s switch
+    {
+        IrIf i => InnerReturn(i.Then) || InnerReturn(i.Else),
+        IrBlock b => b.Statements.Any(NestedReturn),
+        _ => false,
+    };
+
+    private static bool InnerReturn(IrStmt? s) => s is not null && HasReturn(s) && !EndsInReturn(s);
+
+    private static bool HasReturn(IrStmt? s) => s switch
+    {
+        IrReturn => true,
+        IrBlock b => b.Statements.Any(HasReturn),
+        IrIf i => HasReturn(i.Then) || HasReturn(i.Else),
+        _ => false,
+    };
+
+    /// <summary>
+    /// R33.23. The same copying serves a <c>return</c> nested in an <c>if</c> that is not a
+    /// guard chain (an <c>if</c>/<c>else</c> whose arms each hold a guard, say) when
+    /// something follows the <c>if</c>: the tail is copied into each arm that does not
+    /// already return, after which each inner guard is an R5.5b guard with its tail.
+    /// </summary>
+    private static bool NestedReturn(ImmutableArray<IrStmt> stmts)
+    {
+        for (var i = 0; i < stmts.Length; i++)
+        {
+            var last = i == stmts.Length - 1;
+            switch (stmts[i])
+            {
+                case IrIf f when !last && ReturnInside(f) && !GuardChain(f):
+                    return true;
+                case IrBlock { Splice: false } b when NestedReturn(b.Statements):
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ReturnInside(IrStmt? s) => s switch
+    {
+        IrReturn => true,
+        IrBlock b => b.Statements.Any(ReturnInside),
+        IrIf i => ReturnInside(i.Then) || ReturnInside(i.Else),
+        _ => false,
+    };
 
     private static ImmutableArray<IrStmt> Stmts(IrStmt? s) =>
         s is null ? [] : s is IrBlock b ? b.Statements : [s];
@@ -83,10 +135,10 @@ public static class Normalize
             var rest = stmts.RemoveRange(0, i + 1);
             switch (s)
             {
-                case IrBlock { Splice: false } b when LoopReturn(b):
+                case IrBlock { Splice: false } b when LoopReturn(b) || rest.Length > 0 && NestedReturn(b) || NestedReturn(b.Statements):
                     result.AddRange(Sink([.. b.Statements, .. rest]));
                     return [.. result];
-                case IrIf f when LoopReturn(f):
+                case IrIf f when LoopReturn(f) || rest.Length > 0 && (NestedReturn(f) || ReturnInside(f) && !GuardChain(f)):
                     result.Add(f with
                     {
                         // A branch that already returns at its end is not followed by `rest`.
@@ -136,7 +188,7 @@ public static class Normalize
             // `if` takes what follows into both of its exits: after the branch, where the
             // nested guard absorbs it in turn, and as its `else`.
             if (statements[i] is IrIf { Else: null } nested && !EndsInReturn(nested.Then) &&
-                NestedReturn(nested.Then) && EndsInReturn(statements[^1]))
+                HasReturn(nested.Then) && EndsInReturn(statements[^1]))
             {
                 var tail = statements.Skip(i + 1).ToImmutableArray();
                 var then = nested.Then is IrBlock tb
@@ -161,15 +213,6 @@ public static class Normalize
         return statements;
     }
 
-    /// <summary>A <c>return</c> reached through blocks and <c>if</c>s alone, not loops.</summary>
-    private static bool NestedReturn(IrStmt stmt) => stmt switch
-    {
-        IrReturn => true,
-        IrBlock b => b.Statements.Any(NestedReturn),
-        IrIf i => NestedReturn(i.Then) || (i.Else is not null && NestedReturn(i.Else)),
-        _ => false,
-    };
-
     /// <summary>
     /// A chain <c>if (c1) T1 else if (c2) T2 …</c> that ends without an <c>else</c> and
     /// whose every branch returns. Such a chain has one exit that is not a return — the
@@ -187,8 +230,19 @@ public static class Normalize
     {
         IrReturn => true,
         IrBlock { Statements.IsEmpty: false } b => EndsInReturn(b.Statements[^1]),
-        IrIf { Else: not null } i => EndsInReturn(i.Then) && EndsInReturn(i.Else),
+        // R33.21. An arm that never completes -- a throw, a `[DoesNotReturn]` call -- is
+        // no exit either, so an `if`/`else` that returns from its other arms returns.
+        IrIf { Else: not null } i => EndsInExit(i.Then) && EndsInExit(i.Else) &&
+                                     (EndsInReturn(i.Then) || EndsInReturn(i.Else)),
         _ => false,
+    };
+
+    private static bool EndsInExit(IrStmt stmt) => stmt switch
+    {
+        IrThrow or IrExprStmt { Expr: IrCall { DoesNotReturn: true } } => true,
+        IrBlock { Statements.IsEmpty: false } b => EndsInExit(b.Statements[^1]),
+        IrIf { Else: not null } i => EndsInExit(i.Then) && EndsInExit(i.Else),
+        _ => EndsInReturn(stmt),
     };
 
     /// <param name="outer">Locals in scope from enclosing blocks; only these can be live.</param>
@@ -654,6 +708,8 @@ public static class Normalize
                 return;
             case IrElement el: MutatedIn(el.Array, into); MutatedIn(el.Index, into); return;
             case IrField f: MutatedIn(f.Receiver, into); return;
+            // R29.1. `kvp.Key`/`.Value` of a call's result: the call may change its arguments.
+            case IrSpecOp o: foreach (var a in o.Args) MutatedIn(a, into); return;
             default: return;
         }
     }

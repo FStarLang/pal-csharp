@@ -28,6 +28,26 @@ public sealed record BorrowContext(
     public ImmutableArray<IFieldSymbol> Owned { get; init; } = [];
 
     /// <summary>
+    /// R32.12. For a wrapping struct, the wrapped fields down to the borrowing struct at its
+    /// core, whose borrowing field <see cref="Owner"/> and owned fields <see cref="Owned"/> are.
+    /// Empty for a borrowing struct.
+    /// </summary>
+    public ImmutableArray<IFieldSymbol> CorePath { get; init; } = [];
+
+    /// <summary>
+    /// R32.12. The wrapped fields the struct is read through from <see cref="SelfName"/>: empty
+    /// for the struct a member is of; the path to it, for a struct a wrapping struct wraps.
+    /// </summary>
+    public ImmutableArray<IFieldSymbol> SelfPath { get; init; } = [];
+
+    /// <summary>R32.12. Whether the struct wraps another rather than borrowing itself.</summary>
+    public bool Wrapping => !CorePath.IsEmpty;
+
+    /// <summary>R32.12. <paramref name="value"/>'s borrowing struct at its core: the value itself, or its wrapped field's, recursively.</summary>
+    public IrExpr Core(IrExpr value, WellKnown known) =>
+        CorePath.Aggregate(value, (v, f) => new IrField(v.Loc, v, f.Name) { Type = known.MapType(f.Type) });
+
+    /// <summary>
     /// R27.41. The IR name the struct is read under: <c>self</c> in its own members, the
     /// local in an owner's method that holds one.
     /// </summary>
@@ -51,9 +71,17 @@ public sealed record BorrowContext(
     public bool IsOwner(IFieldSymbol f) =>
         SymbolEqualityComparer.Default.Equals(f.OriginalDefinition, Owner.OriginalDefinition);
 
+    /// <summary>R32.13. For a view, the class it derives from, whose instance fields are its state too.</summary>
+    public INamedTypeSymbol? ViewBase { get; init; }
+
+    /// <summary>R32.13. The struct is a method's result, read in its postcondition.</summary>
+    public bool SelfIsResult { get; init; }
+
     public bool IsState(IFieldSymbol f) =>
         !f.IsStatic && !f.IsConst &&
-        SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, Struct.OriginalDefinition);
+        (SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, Struct.OriginalDefinition) ||
+         ViewBase is not null && !IsOwner(f) &&
+         SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, ViewBase.OriginalDefinition));
 }
 
 public sealed partial class ExprLowerer
@@ -85,7 +113,60 @@ public sealed partial class ExprLowerer
     private IrExpr SelfExpr(IrLoc loc) =>
         Borrow!.Constructor
             ? new IrResult(loc) { Type = Borrow.StructType }
-            : new IrVar(loc, Borrow.SelfName) { Type = Borrow.StructType };
+            : SelfOf(Borrow, loc);
+
+    /// <summary>R32.12. The struct <paramref name="held"/> is of, read through its wrapped fields.</summary>
+    private IrExpr SelfOf(BorrowContext held, IrLoc loc) =>
+        held.SelfIsResult ? new IrResult(loc) { Type = held.StructType } :
+        held.SelfPath.Aggregate((IrExpr)new IrVar(loc, held.SelfName) { Type = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType) },
+            (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+
+    /// <summary>
+    /// R32.12. The context of the struct a wrapping struct wraps, read through the wrapped
+    /// field: the same borrowed object, owned objects and struct local, one field further in.
+    /// </summary>
+    private BorrowContext InnerContext(BorrowContext outer)
+    {
+        var field = outer.CorePath[0];
+        var type = (INamedTypeSymbol)field.Type;
+        var (path, core) = Borrowing.Innermost(type, known);
+        return new BorrowContext(type, Borrowing.OwnerField(core, known)!, known.MapType(type)!, outer.OwnerType, false, null)
+        {
+            Owned = outer.Owned,
+            CorePath = path,
+            SelfName = outer.SelfName,
+            SelfPath = outer.SelfPath.Add(field),
+            OwnerName = outer.OwnerName,
+            OwnedNames = outer.OwnedNames,
+        };
+    }
+
+    /// <summary>R32.12. Whether <paramref name="e"/> is the wrapped field of the struct a wrapping member is of.</summary>
+    private BorrowContext? WrappedField(ExpressionSyntax e)
+    {
+        if (Borrow is not { Wrapping: true } bw) return null;
+        var target = e switch
+        {
+            IdentifierNameSyntax => e,
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } => e,
+            MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv } m when
+                model.GetSymbolInfo(recv).Symbol is IParameterSymbol { Name: Names.This } tp && IsShim(tp.ContainingSymbol) => m,
+            _ => null,
+        };
+        return target is not null && model.GetSymbolInfo(target).Symbol is IFieldSymbol f &&
+               SymbolEqualityComparer.Default.Equals(f.OriginalDefinition, bw.CorePath[0].OriginalDefinition)
+            ? InnerContext(bw)
+            : null;
+    }
+
+    private IrExpr WrappingRefused(ExpressionSyntax node, INamedTypeSymbol type, IrLoc loc)
+    {
+        diagnostics.Error("PALCS0801", loc,
+            $"`{node}` creates the wrapping struct `{type.Name}`. A wrapping struct's members are " +
+            "verified as members of the object its core borrows; creating one is not supported " +
+            "(doc/translation.md R32.12).");
+        return new IrLiteral(loc, null);
+    }
 
     // R27.41. The borrowing structs this method holds in locals, by local.
     private readonly Dictionary<ISymbol, BorrowContext> _held = new(SymbolEqualityComparer.Default);
@@ -115,9 +196,22 @@ public sealed partial class ExprLowerer
     public void Unalias(ILocalSymbol x) => _aliases.Remove(x);
 
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
-        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
+        WrappedField(Unparenthesized(e)) ??
+        (model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
         (_aliases.TryGetValue(l0, out var l) ? l : l0) is var l1 && _held.TryGetValue(l1, out var c) ? c
-        : ForEachEnumerator(Unparenthesized(e));
+        : ForEachEnumerator(Unparenthesized(e))) ??
+        ViewCast(Unparenthesized(e));
+
+    /// <summary>
+    /// R32.14. <c>((V)x)</c> in a contract, where the local <c>x</c> of a view's base class
+    /// holds a view of exactly <c>V</c>: the view itself, so that its <c>[Spec]</c> members
+    /// may be named. The cast cannot fail, since the local holds exactly a <c>V</c>.
+    /// </summary>
+    private BorrowContext? ViewCast(ExpressionSyntax e) =>
+        SpecPosition && e is CastExpressionSyntax ce && model.GetTypeInfo(ce.Type).Type is INamedTypeSymbol ct &&
+        Borrowing.IsView(ct, known) && HeldContext(ce.Expression) is { ViewBase: not null } hc &&
+        SymbolEqualityComparer.Default.Equals(hc.Struct.OriginalDefinition, ct.OriginalDefinition)
+            ? hc : null;
 
     /// <summary>R27.51. <c>Pal.Enumerator&lt;E&gt;(x)</c>, in a contract: the enumerator of the `foreach` over <c>x</c>.</summary>
     private BorrowContext? ForEachEnumerator(ExpressionSyntax e) =>
@@ -150,10 +244,10 @@ public sealed partial class ExprLowerer
         if (node.Expression is not MemberAccessExpressionSyntax { Expression: var receiver } ||
             HeldContext(receiver) is not { } held)
             return null;
-        if (SpecPosition || !Borrowing.IsMember(method, known) || method.IsStatic)
+        if (SpecPosition || !(Borrowing.IsMember(method, known) || held.ViewBase is not null) || method.IsStatic)
             return HeldRefused(node, loc);
         var args = node.ArgumentList.Arguments.Select(a => Lower(a.Expression)).ToList();
-        return WithHeld(held, () => HeldCall(held, method, args, loc));
+        return WithHeld(held, () => HeldCall(held, method, args, loc, node));
     }
 
     /// <summary>
@@ -162,12 +256,19 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr? HeldMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
     {
+        // R32.13. `Result.P` in a postcondition of a method returning a view: the view's
+        // `[Spec]` property, with the method's own object the view's borrowed one.
+        if (SpecPosition && symbol is IPropertySymbol { IsStatic: false } rp && Declarations.Has(rp, known.SpecAttribute) &&
+            Borrowing.IsView(rp.ContainingType, known) &&
+            model.GetSymbolInfo(Unparenthesized(node.Expression)).Symbol is IParameterSymbol { Name: SpecBinder.ResultParameter } &&
+            ResultView(rp.ContainingType) is { } rv)
+            return InlineSpec(rv, rp, loc);
         if (symbol is IMethodSymbol || HeldContext(node.Expression) is not { } held) return null;
         if (symbol is IPropertySymbol sp && SpecPosition && Declarations.Has(sp, known.SpecAttribute))
             return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
         if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
-            Borrowing.IsMember(getter, known))
-            return WithHeld(held, () => HeldCall(held, getter, [], loc));
+            (Borrowing.IsMember(getter, known) || held.ViewBase is not null))
+            return WithHeld(held, () => HeldCall(held, getter, [], loc, node));
         return HeldRefused(node, loc);
     }
 
@@ -179,17 +280,61 @@ public sealed partial class ExprLowerer
         return new IrLiteral(loc, null);
     }
 
-    private IrExpr HeldCall(BorrowContext held, IMethodSymbol callee, IReadOnlyList<IrExpr> args, IrLoc loc)
+    /// <summary>R32.13. The context a view returned by the method is read in, in its postcondition.</summary>
+    private BorrowContext? ResultView(INamedTypeSymbol view) =>
+        known.MapType(view) is { } vt && Borrowing.OwnerField(view, known) is { } owner &&
+        known.MapType(owner.Type) is IrClassType ot
+            ? new BorrowContext(view, owner, vt, ot, false, null)
+                { SelfIsResult = true, ViewBase = Borrowing.ViewBase(view, known) }
+            : null;
+
+    private IrExpr HeldCall(BorrowContext held, IMethodSymbol callee, IReadOnlyList<IrExpr> args, IrLoc loc,
+        SyntaxNode? site = null)
     {
+        // R32.13. A member of a held view, or of its base: the view's own, its override, or
+        // the base member's replica at it, with the local by reference.
+        if (held.ViewBase is not null && ViewTarget(held.Struct, callee, viaBase: false) is { } vname)
+            return ViewCall(held, vname, callee, new IrRefArg(loc, SelfOf(held, loc)), args, loc);
         var decl = callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
         if (decl?.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
-        var local = new IrVar(loc, held.SelfName) { Type = held.StructType };
-        IrExpr self = decl is not null &&
-                      Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct)
-            ? new IrRefArg(loc, local)
-            : local;
-        return BorrowingCall(callee, self, args, loc);
+        var writes = decl is not null &&
+                     Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct);
+        var local = SelfOf(held, loc);
+        if (!writes) return BorrowingCall(callee, local, args, loc);
+        if (held.SelfPath.IsEmpty) return BorrowingCall(callee, new IrRefArg(loc, local), args, loc);
+
+        // R32.12. A writer member of the wrapped struct: the struct is copied to a local, the
+        // member writes the local by reference, and the local is written back to the field.
+        // A raise skips the write-back, and is then the member's own: its struct after a
+        // raise is unconstrained (R28.4), so nothing can tell. A `try` could, and is refused.
+        if (site?.Ancestors().Any(a => a is TryStatementSyntax) == true)
+        {
+            diagnostics.Error("PALCS0802", loc,
+                $"`{site}` writes the wrapped struct inside a `try`. A wrapping struct's write through " +
+                "its wrapped field is written back when the call returns, so a handler could see the " +
+                "field before the call (doc/translation.md R32.12).");
+            return new IrLiteral(loc, null);
+        }
+        var cell = Fresh("inner");
+        var cellVar = new IrVar(loc, cell) { Type = held.StructType };
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        prelude.Add(new IrLocalDecl(loc, cell, held.StructType, local));
+        var call = BorrowingCall(callee, new IrRefArg(loc, cellVar), args, loc);
+        IrExpr value;
+        if (call.ResultType is null or IrPrim { Kind: PrimKind.Void })
+        {
+            prelude.Add(new IrExprStmt(loc, call));
+            value = new IrLiteral(loc, null) { Type = call.ResultType };
+        }
+        else
+        {
+            var result = Fresh("innerResult");
+            prelude.Add(new IrLocalDecl(loc, result, call.ResultType, call) { Immutable = true });
+            value = new IrVar(loc, result) { Type = call.ResultType };
+        }
+        prelude.Add(new IrAssign(loc, local, cellVar));
+        return new IrStmtExpr(loc, prelude.ToImmutable(), value) { Type = value.Type };
     }
 
     /// <summary>
@@ -211,7 +356,12 @@ public sealed partial class ExprLowerer
             ObjectFields = ObjectFields,
         };
         nested._inlineDepth = _inlineDepth + 1;
-        return nested.Lower(body);
+        var inlined = nested.Lower(body);
+        // The getter's own return type is the conversion C# applies to its body.
+        return known.MapType(property.Type) is IrPrim { Kind: PrimKind.SpecInt or PrimKind.SpecNat } spec &&
+               inlined.Type is IrPrim { IsMachineInt: true }
+            ? new IrConvert(loc, spec, inlined) { Type = spec }
+            : inlined;
     }
 
     private static bool IsShim(ISymbol? s) =>
@@ -241,7 +391,12 @@ public sealed partial class ExprLowerer
             // R27.37. An owned object is a parameter of every member but the constructor.
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
+            // R33.26. The struct's auto-property is its backing field.
+            case IPropertySymbol ap when !SpecPosition && !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
+                return new IrField(loc, SelfExpr(loc), ap.Name) { Type = known.MapType(ap.Type) };
             case IFieldSymbol f when bw.IsState(f):
+                if (bw.Constructor && !SpecPosition && _ctorGiven.TryGetValue(f.Name, out var givenValue))
+                    return givenValue;
                 if (bw.Constructor && !SpecPosition)
                 {
                     diagnostics.Error("PALCS0732", loc,
@@ -264,8 +419,27 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr? BorrowedMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
     {
+        // R32.13. The base's `[Spec]` members describe an object of the base by its model; a
+        // view has none of its own.
+        if (Borrow is { ViewBase: { } vbase } && SpecPosition && symbol is IPropertySymbol { IsStatic: false } bsp &&
+            SymbolEqualityComparer.Default.Equals(bsp.ContainingType.OriginalDefinition, vbase.OriginalDefinition) &&
+            model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } vthis && IsShim(vthis.ContainingSymbol))
+        {
+            diagnostics.Error("PALCS0803", loc,
+                $"`{node}` reads a member of `{vbase.Name}` on a view of it. A contract at a view reads the " +
+                "view's own `[Spec]` members and fields, and the base's through the object it borrows " +
+                "(doc/translation.md R32.13).");
+            return new IrLiteral(loc, null);
+        }
         if (Borrow is { } sb && symbol is IPropertySymbol && node.Expression is ThisExpressionSyntax)
             return BorrowedIdentifier(symbol, SyntaxFactory_Identifier(node), loc);
+        // R32.12. `@this.SpecP` in a contract: the struct's own `[Spec]` property, expanded.
+        if (Borrow is { } spb && SpecPosition && symbol is IPropertySymbol { IsStatic: false } own &&
+            Declarations.Has(own, known.SpecAttribute) &&
+            SymbolEqualityComparer.Default.Equals(own.ContainingType.OriginalDefinition, spb.Struct.OriginalDefinition) &&
+            model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } shimThis &&
+            IsShim(shimThis.ContainingSymbol))
+            return InlineSpec(spb, own, loc);
         if (Borrow is not { } bw || symbol is not IFieldSymbol { IsStatic: false } f) return null;
         if (bw.IsOwner(f) && node.Expression is ThisExpressionSyntax) return BorrowedObject(loc);
         if (bw.IsOwned(f) && !bw.Constructor &&
@@ -331,6 +505,7 @@ public sealed partial class ExprLowerer
     {
         if (Borrow is not { Constructor: false } bw || SpecPosition) return null;
         if (callee is { IsStatic: true } or { MethodKind: MethodKind.Constructor }) return null;
+        if (bw.ViewBase is not null) return ViewSelfCall(callee, args, loc, viaBase: false);
         if (!SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition))
             return null;
         if (!Borrowing.IsMember(callee, known) || Declarations.KindOf(callee, known) is null) return null;
@@ -346,6 +521,65 @@ public sealed partial class ExprLowerer
             : SelfExpr(loc);
         return BorrowingCall(callee, self, args.Select(Lower), loc);
     }
+
+    /// <summary>
+    /// R32.13. The translation a call of <paramref name="callee"/> on a view reaches: the
+    /// view's own member; for a member of its base, the view's override, unless the call is
+    /// through <c>base</c>; otherwise the base member's replica at the view, which is asked
+    /// for. <c>null</c> when <paramref name="callee"/> is of neither class.
+    /// </summary>
+    internal string? ViewTarget(INamedTypeSymbol view, IMethodSymbol callee, bool viaBase)
+    {
+        if (Borrowing.ViewBase(view, known) is not { } vb) return null;
+        var holder = callee.ContainingType.OriginalDefinition;
+        if (SymbolEqualityComparer.Default.Equals(holder, view.OriginalDefinition)) return Naming.Of(callee.OriginalDefinition);
+        if (!SymbolEqualityComparer.Default.Equals(holder, vb.OriginalDefinition)) return null;
+        if (!viaBase && Subclasses.OverrideOf(view, callee) is { } ov) return Naming.Of(ov.OriginalDefinition);
+        var source = Naming.Of(callee.OriginalDefinition);
+        var name = $"{view.Name}_at_{source}";
+        if (known.ReplicaSeen.Add(name))
+            known.ReplicaDemand.Enqueue(new WellKnown.ReplicaRequest(source, view.OriginalDefinition, name));
+        return name;
+    }
+
+    /// <summary>
+    /// R32.13. A call, inside a member of a view (or a base member's replica at it), of a
+    /// member of the view or its base on the view itself (implicitly, through <c>this</c>, or
+    /// through <c>base</c>): <see cref="ViewTarget"/> applied to the borrowed object and the
+    /// view's record, by reference.
+    /// </summary>
+    private IrExpr? ViewSelfCall(IMethodSymbol callee, IReadOnlyList<ExpressionSyntax> args, IrLoc loc, bool viaBase)
+    {
+        if (Borrow is not { Constructor: false, ViewBase: not null } bw || SpecPosition) return null;
+        if (callee is { IsStatic: true } or { MethodKind: MethodKind.Constructor }) return null;
+        if (ViewTarget(bw.Struct, callee, viaBase) is not { } name) return null;
+        var self = new IrRefArg(loc, new IrVar(loc, bw.SelfName) { Type = bw.StructType });
+        return ViewCall(bw, name, callee, self, args.Select(Lower), loc);
+    }
+
+    private IrCall ViewCall(BorrowContext bw, string name, IMethodSymbol callee, IrExpr self, IEnumerable<IrExpr> args, IrLoc loc)
+    {
+        var targs = WellKnown.AllTypeArguments(bw.Struct).Select(known.MapType).ToList();
+        var given = args.ToList();
+        // R27.38. An omitted optional argument is the parameter's constant default.
+        for (var k = given.Count; k < callee.Parameters.Length; k++)
+            if (callee.Parameters[k] is { HasExplicitDefaultValue: true, ExplicitDefaultValue: bool or int } dp &&
+                known.MapType(dp.Type) is { } dt)
+                given.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
+        return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. given])
+        {
+            Kind = CalleeKind.Method,
+            ResultType = ViewResultType(callee),
+            HasReceiver = true,
+            ParamTypes = [null, null, .. callee.Parameters.Select(p => known.MapType(p.Type))],
+            TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
+            MutatesReceiver = false,
+        };
+    }
+
+    /// <summary>R32.13. A member's result type, or the view its <c>[return: Exactly]</c> names.</summary>
+    internal IrType? ViewResultType(IMethodSymbol callee) =>
+        FrontendPass.ExactReturn(callee, known) is { } exact ? known.MapType(exact) : known.MapType(callee.ReturnType);
 
     /// <summary>
     /// R28.2/R27.37. A call of a borrowing member's translation: the borrowed object, the
@@ -438,8 +672,14 @@ public sealed partial class ExprLowerer
     {
         var bw = Borrow!;
         var given = new List<IrFieldInit>();
-        var extended = !bw.Owned.IsEmpty;
+        var extended = !bw.Owned.IsEmpty || bw.ViewBase is not null;
         var prefix = new List<IrStmt>();
+        // R32.13. A view's constructor runs its base's first: each argument is a local, and
+        // each field the base's constructor assigns is given its value over those locals.
+        if (bw.ViewBase is not null && ctor.Initializer is { } baseInit &&
+            baseInit.ThisOrBaseKeyword.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.BaseKeyword) &&
+            !BaseConstructorFields(baseInit, bw, given, prefix, loc))
+            return new IrReturn(loc, new IrLiteral(loc, null));
         var tail = new List<(IMethodSymbol Callee, InvocationExpressionSyntax Call)>();
         // An expression-bodied constructor (`=> _queue = queue`) is its one expression; it is
         // read in place, because a statement synthesised around it is in no syntax tree.
@@ -457,18 +697,32 @@ public sealed partial class ExprLowerer
                 given.All(g => g.Field != f.Name))
             {
                 var value = Lower(right);
-                if (extended && (bw.IsOwned(f) || ContainsCall(value)) && known.MapType(f.Type) is { } ft)
+                if (extended && (bw.IsOwned(f) || ContainsCall(value) || bw.ViewBase is not null && value is not (IrVar or IrLiteral)) &&
+                    known.MapType(f.Type) is { } ft)
                 {
                     var local = bw.IsOwned(f) ? Borrowing.OwnedName(f) : "__pal_init" + f.Name;
                     prefix.Add(new IrLocalDecl(Locations.From(node), local, ft, value));
                     value = new IrVar(loc, local) { Type = ft };
                 }
                 given.Add(new IrFieldInit(f.Name, value));
+                // R32.13. A later initialiser of a view's constructor may read the field.
+                if (bw.ViewBase is not null) _ctorGiven[f.Name] = value;
                 continue;
             }
             if (expr is InvocationExpressionSyntax inv &&
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
+                continue;
+            // R32.1. `ArgumentNullException.ThrowIfNull(x)` at a non-nullable class type does
+            // nothing, as in any body (R23.2): such a reference is not null.
+            if (expr is InvocationExpressionSyntax guard &&
+                model.GetSymbolInfo(guard).Symbol is IMethodSymbol { IsStatic: true, Name: "ThrowIfNull" } gm &&
+                gm.ContainingType?.ToDisplayString() == "System.ArgumentNullException" &&
+                guard.ArgumentList.Arguments is [var ga, ..] &&
+                guard.ArgumentList.Arguments.Skip(1).All(x => model.GetConstantValue(x.Expression).HasValue) &&
+                model.GetTypeInfo(ga.Expression) is { Type: { TypeKind: TypeKind.Class } } gt &&
+                gt.Nullability.FlowState == NullableFlowState.NotNull &&
+                gt.Type!.NullableAnnotation != NullableAnnotation.Annotated)
                 continue;
             if (extended && expr is InvocationExpressionSyntax call &&
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol callee)
@@ -505,6 +759,63 @@ public sealed partial class ExprLowerer
             structValue = selfVar;
         }
         return new IrBlock(loc, [.. prefix, new IrReturn(loc, structValue)]);
+    }
+
+    // R32.13. The fields a view's constructor has given so far, and their values.
+    private readonly Dictionary<string, IrExpr> _ctorGiven = new();
+
+    private bool BaseConstructorFields(ConstructorInitializerSyntax init, BorrowContext bw,
+        List<IrFieldInit> given, List<IrStmt> prefix, IrLoc loc)
+    {
+        if (model.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
+            target.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl ||
+            !model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) || decl.Initializer is not null)
+        {
+            diagnostics.Error("PALCS0804", loc,
+                $"`{init}`. A view's constructor may call a constructor of its base that is declared in the " +
+                "program and calls no other (doc/translation.md R32.13).");
+            return false;
+        }
+        var tmodel = model.Compilation.GetSemanticModel(decl.SyntaxTree);
+        var nested = new ExprLowerer(tmodel, known, diagnostics, specPosition: false) { Borrow = bw };
+        foreach (var a in init.ArgumentList.Arguments)
+        {
+            if (model.GetOperation(a) is not Microsoft.CodeAnalysis.Operations.IArgumentOperation { Parameter: { } p } ||
+                known.MapType(p.Type) is not { } pt)
+                return false;
+            var local = "__pal_base_" + p.Name;
+            prefix.Add(new IrLocalDecl(Locations.From(a), local, pt, Lower(a.Expression)));
+            nested.Alias(tmodel.GetDeclaredSymbol(decl.ParameterList.Parameters[p.Ordinal]) ?? p, new IrVar(loc, local) { Type = pt });
+        }
+        IEnumerable<StatementSyntax> body = decl.ExpressionBody is { } eb
+            ? [Microsoft.CodeAnalysis.CSharp.SyntaxFactory.ExpressionStatement(eb.Expression)]
+            : decl.Body?.Statements ?? default;
+        foreach (var st in body)
+        {
+            if (st is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { Left: var left, Right: var right } a } &&
+                a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
+                (left is IdentifierNameSyntax || left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
+                tmodel.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) && given.All(g => g.Field != f.Name) &&
+                known.MapType(f.Type) is { } ft)
+            {
+                var value = nested.Lower(right);
+                if (value is not (IrVar or IrLiteral))
+                {
+                    var local = "__pal_init" + f.Name;
+                    prefix.Add(new IrLocalDecl(Locations.From(st), local, ft, value));
+                    value = new IrVar(loc, local) { Type = ft };
+                }
+                given.Add(new IrFieldInit(f.Name, value));
+                _ctorGiven[f.Name] = value;
+                continue;
+            }
+            diagnostics.Error("PALCS0804", Locations.From(st),
+                $"`{st.ToString().Trim()}` in the constructor of `{target.ContainingType.Name}`, which a view's " +
+                "constructor calls. Such a constructor assigns each field at most once, and does nothing else " +
+                "(doc/translation.md R32.13).");
+            return false;
+        }
+        return true;
     }
 
     private static bool ContainsCall(IrExpr e) => e switch
@@ -548,12 +859,12 @@ public static class BorrowFacts
     {
         var self = new IrVar(loc, borrow.SelfName) { Type = borrow.StructType };
         yield return new IrBinary(loc, BinOp.Eq,
-            new IrField(loc, self, borrow.Owner.Name) { Type = borrow.OwnerType },
+            new IrField(loc, borrow.Core(self, known), borrow.Owner.Name) { Type = borrow.OwnerType },
             new IrRefOf(loc, borrow.OwnerName) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
         // R27.37. Each owned field holds its parameter.
         foreach (var f in borrow.Owned)
             if (known.MapType(f.Type) is IrClassType ot)
-                yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, self, f.Name) { Type = ot },
+                yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, borrow.Core(self, known), f.Name) { Type = ot },
                     new IrRefOf(loc, borrow.OwnedLocal(f)) { Type = ot }) { Type = IrPrim.Bool };
         if (!snapshots) yield break;
         foreach (var (f, type) in ReadOnlyFields(borrow, known))

@@ -111,6 +111,9 @@ namespace System.Collections.Generic
         /// <summary>
         ///  Initializes a new instance of the <see cref="PriorityQueue{TElement, TPriority}"/> class.
         /// </summary>
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == 0")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == Comparer<TPriority>.Default")]
         public PriorityQueue()
         {
             _nodes = Array.Empty<(TElement, TPriority)>();
@@ -125,6 +128,10 @@ namespace System.Collections.Generic
         /// <exception cref="ArgumentOutOfRangeException">
         ///  The specified <paramref name="initialCapacity"/> was negative.
         /// </exception>
+        [Throws(typeof(ArgumentOutOfRangeException), "initialCapacity < 0")]
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == initialCapacity")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == Comparer<TPriority>.Default")]
         public PriorityQueue(int initialCapacity)
             : this(initialCapacity, comparer: null)
         {
@@ -138,6 +145,9 @@ namespace System.Collections.Generic
         ///  Custom comparer dictating the ordering of elements.
         ///  Uses <see cref="Comparer{T}.Default" /> if the argument is <see langword="null"/>.
         /// </param>
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == 0")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == (comparer ?? Comparer<TPriority>.Default)")]
         public PriorityQueue(IComparer<TPriority>? comparer)
         {
             _nodes = Array.Empty<(TElement, TPriority)>();
@@ -156,6 +166,10 @@ namespace System.Collections.Generic
         /// <exception cref="ArgumentOutOfRangeException">
         ///  The specified <paramref name="initialCapacity"/> was negative.
         /// </exception>
+        [Throws(typeof(ArgumentOutOfRangeException), "initialCapacity < 0")]
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == initialCapacity")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == (comparer ?? Comparer<TPriority>.Default)")]
         public PriorityQueue(int initialCapacity, IComparer<TPriority>? comparer)
         {
             ArgumentOutOfRangeException.ThrowIfNegative(initialCapacity);
@@ -226,6 +240,7 @@ namespace System.Collections.Generic
         /// <summary>
         ///  Gets the priority comparer used by the <see cref="PriorityQueue{TElement, TPriority}"/>.
         /// </summary>
+        [Ensures("Result == (@this.Order ?? Comparer<TPriority>.Default)")]
         public IComparer<TPriority> Comparer => _comparer ?? Comparer<TPriority>.Default;
 
         /// <summary>
@@ -623,6 +638,14 @@ namespace System.Collections.Generic
         ///
         /// If no <paramref name="equalityComparer"/> is specified, <see cref="EqualityComparer{TElement}.Default"/> will be used instead.
         /// </remarks>
+        [Requires("Pal.IsHeap(@this.Items, @this.Order)")]
+        // (nodeIndex << 2) + 1 wraps for nodeIndex >= 2^29; see the spec findings.
+        [Requires("@this.SpecCount <= 536870912")]
+        [Ensures("@this.Order == Pal.Old(@this.Order)")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Result == !PriorityQueue<TElement, TPriority>.NoMatch(equalityComparer, element, Pal.Old(@this.Items), Pal.Old(@this.SpecCount))")]
+        [Ensures("Pal.Implies(!Result, @this.SpecCount == Pal.Old(@this.SpecCount) && @this.Items == Pal.Old(@this.Items))")]
+        [Ensures("Pal.Implies(Result, @this.SpecCount == Pal.Old(@this.SpecCount) - 1 && PriorityQueue<TElement, TPriority>.ElemEq(equalityComparer, element, removedElement) && Pal.Permutation(Pal.Old(@this.Items), Pal.Snoc(@this.Items, (removedElement, priority))))")]
         public bool Remove(
             TElement element,
             [MaybeNullWhen(false)] out TElement removedElement,
@@ -646,6 +669,7 @@ namespace System.Collections.Generic
                 // We're removing an element from the middle of the heap.
                 // Pop the last element in the collection and sift from the removed index.
                 (TElement Element, TPriority Priority) lastNode = nodes[newSize];
+                HeapRemoveInit(Pal.Contents(_nodes), newSize, index, _comparer);
 
                 if (_comparer == null)
                 {
@@ -671,6 +695,7 @@ namespace System.Collections.Generic
                 }
             }
 
+            HeapRemoveDone(Pal.Old(this.Store), newSize, index, Pal.Slice(Pal.Contents(_nodes), 0, _size));
             nodes[newSize] = default;
             _version++;
             return true;
@@ -896,6 +921,26 @@ namespace System.Collections.Generic
         [PulseBody("Pulse.Lib.CSharp.Heap.remove_root _ _ $(s) $(n) $(r)")]
         [Conditional("PAL")]
         private static void HeapRemoveRoot(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, Seq<(TElement Element, TPriority Priority)> r) { }
+
+        // Remove's proof steps (pal-csharp doc/translation.md §33). The last node, put in the
+        // removed node's hole, meets MoveUp*'s or MoveDown*'s precondition; and the old heap
+        // is the new one with the removed node put back.
+        [Lemma]
+        [Requires("0 <= i && i < n && n < s.Length && Pal.IsHeap(Pal.Slice(s, 0, n + 1), c)")]
+        [Ensures("Pal.Implies(Pal.Compare(c ?? Comparer<TPriority>.Default, s[n].Priority, s[i].Priority) < 0, Pal.HeapUp(s, n, i, s[n], c, Pal.SetAt(Pal.Slice(s, 0, n), i, s[n])))")]
+        [Ensures("Pal.Implies(Pal.Compare(c ?? Comparer<TPriority>.Default, s[n].Priority, s[i].Priority) >= 0, Pal.HeapDown(s, n, i, s[n], c, Pal.SetAt(Pal.Slice(s, 0, n), i, s[n])))")]
+        [PulseBody("PriorityQueueRemove.remove_init _ _ $(s) (I32.v $(n)) (I32.v $(i)) $(c)")]
+        [Conditional("PAL")]
+        private static void HeapRemoveInit(Seq<(TElement Element, TPriority Priority)> s, int n, int i, IComparer<TPriority>? c) { }
+
+        [Lemma]
+        [Requires("0 <= i && i <= n && n < s.Length")]
+        [Requires("Pal.Implies(i < n, Pal.Permutation(Pal.SetAt(Pal.Slice(s, 0, n), i, s[n]), r))")]
+        [Requires("Pal.Implies(i == n, r == Pal.Slice(s, 0, n))")]
+        [Ensures("Pal.Permutation(Pal.Slice(s, 0, n + 1), Pal.Snoc(r, s[i]))")]
+        [PulseBody("PriorityQueueRemove.remove_done _ _ $(s) (I32.v $(n)) (I32.v $(i)) $(r)")]
+        [Conditional("PAL")]
+        private static void HeapRemoveDone(Seq<(TElement Element, TPriority Priority)> s, int n, int i, Seq<(TElement Element, TPriority Priority)> r) { }
 
         /// <summary>
         /// Gets the index of an element's parent.
@@ -1178,6 +1223,9 @@ namespace System.Collections.Generic
         /// <summary>
         /// Scans the heap for the first index containing an element equal to the specified parameter.
         /// </summary>
+        [Ensures("-1 <= Result && Result < @this.SpecCount")]
+        [Ensures("Pal.Implies(Result >= 0, Result < @this.Items.Length && PriorityQueue<TElement, TPriority>.ElemEq(equalityComparer, element, @this.Items[Result].Element))")]
+        [Ensures("PriorityQueue<TElement, TPriority>.NoMatch(equalityComparer, element, @this.Items, Result >= 0 ? Result : @this.SpecCount)")]
         private int FindIndex(TElement element, IEqualityComparer<TElement>? equalityComparer)
         {
             equalityComparer ??= EqualityComparer<TElement>.Default;
@@ -1190,6 +1238,10 @@ namespace System.Collections.Generic
             {
                 for (int i = 0; i < nodes.Length; i++)
                 {
+                    Pal.Invariant(0 <= i && i <= nodes.Length);
+                    Pal.Invariant(NoMatch(equalityComparer, element, Pal.Contents(nodes), i));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), i < nodes.Length && Pal.ReturnValue<int>() == i &&
+                        ElemEq(equalityComparer, element, Pal.Contents(nodes)[i].Element)));
                     if (EqualityComparer<TElement>.Default.Equals(element, nodes[i].Element))
                     {
                         return i;
@@ -1200,6 +1252,10 @@ namespace System.Collections.Generic
             {
                 for (int i = 0; i < nodes.Length; i++)
                 {
+                    Pal.Invariant(0 <= i && i <= nodes.Length);
+                    Pal.Invariant(NoMatch(equalityComparer, element, Pal.Contents(nodes), i));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), i < nodes.Length && Pal.ReturnValue<int>() == i &&
+                        ElemEq(equalityComparer, element, Pal.Contents(nodes)[i].Element)));
                     if (equalityComparer.Equals(element, nodes[i].Element))
                     {
                         return i;
@@ -1210,9 +1266,20 @@ namespace System.Collections.Generic
             return -1;
         }
 
+        /// <summary><paramref name="c"/>, or the default comparer when it is null, deems <paramref name="x"/> equal to <paramref name="y"/>.</summary>
+        [Spec]
+        [PulseBody("PriorityQueueRemove.elem_eq $(c) $(x) $(y)")]
+        public static bool ElemEq(IEqualityComparer<TElement>? c, TElement x, TElement y) => throw new InvalidOperationException();
+
+        /// <summary>No node of <paramref name="s"/> below <paramref name="i"/> holds an element equal to <paramref name="x"/>.</summary>
+        [Spec]
+        [PulseBody("PriorityQueueRemove.no_match $(c) $(x) $(s) $(i)")]
+        public static bool NoMatch(IEqualityComparer<TElement>? c, TElement x, Seq<(TElement Element, TPriority Priority)> s, SpecInt i) => throw new InvalidOperationException();
+
         /// <summary>
         /// Initializes the custom comparer to be used internally by the heap.
         /// </summary>
+        [Ensures("(Result ?? Comparer<TPriority>.Default) == (comparer ?? Comparer<TPriority>.Default)")]
         private static IComparer<TPriority>? InitializeComparer(IComparer<TPriority>? comparer)
         {
             if (typeof(TPriority).IsValueType)

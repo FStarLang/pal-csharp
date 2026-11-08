@@ -1315,6 +1315,46 @@ loop invariant `Inv` and measure `Measure`, the ghost steps (`Start`, `AtCur`, `
 `Split`, `AfterBalance`, …) and `Inserted(c, s, k)`, the set `s` with `k` added at its lower
 bound (R27.26).
 
+#### Rings: `[Region(Cyclic = true)]` and `SpecRing`
+
+A circular doubly-linked list keeps its nodes in a cyclic region:
+
+```csharp
+[Invariant("SpecRing.Ring<LinkedListNode<T>, LinkedList<T>>(Pal.Heap<LinkedListNode<T>>(), head, count, @this)")]
+public class LinkedList<T>
+{
+    internal LinkedListNode<T>? head;
+    internal int count;
+    ...
+}
+
+[Region(Cyclic = true)]
+public sealed class LinkedListNode<T>
+{
+    internal LinkedList<T>? list;
+    internal LinkedListNode<T>? next;
+    internal LinkedListNode<T>? prev;
+    internal T item;
+
+    [Model]
+    private (T, LinkedList<T>?) View => (item, list);
+}
+```
+
+* The two self-typed fields are the ring's `next` and `prev` links. The view is a pair:
+  the item, and the owner every node points back to.
+* The owner's invariant may name `@this`.
+* `Pal.Tree` and the other tree intrinsics are refused (PALCS0780).
+* `PalLang.SpecRing` states the shape:
+  * `Ring`, `Shape`, `Nodes`, `Items`, `Item` and `Owner`;
+  * `Pos`, `InsertAt` and `RemoveAt` over sequences;
+  * searches (`IndexOf`, `LastIndexOf`, `IndexFrom`, `LastFrom`);
+  * lemmas called as ghost statements (`Neighbours`, `Ends`, `Member`, `Removed`,
+    `Adopted`, `FindStep`, …).
+
+A method that walks the ring calls `Neighbours` on the current node, to learn its links'
+positions, and `Ends`, to learn that the walk comes back to `head`. See doc/translation.md §31.
+
 ## 10. Generics
 
 ### 10.1 Methods

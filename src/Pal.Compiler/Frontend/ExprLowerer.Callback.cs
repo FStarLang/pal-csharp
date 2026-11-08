@@ -38,7 +38,11 @@ public sealed partial class ExprLowerer
             node.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute)) is IPropertySymbol view &&
             known.MapType(view.Type) is { } viewType &&
             known.MapType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
-            return new IrCallback(region with { Nullable = false }, viewType, result);
+            return new IrCallback(region with { Nullable = false }, viewType, result)
+            {
+                Bounded = Declarations.Find(p, known.CallbackAttribute) is { } data &&
+                          Declarations.NamedFlag(data, nameof(PalLang.CallbackAttribute.Bounded)),
+            };
         diagnostics.Error("PALCS0708", loc,
             $"The `[Callback]` parameter `{p.Name}` must be a delegate taking one reference to a " +
             "`[Region]` class and returning a value (doc/translation.md R27.39).");
@@ -97,6 +101,21 @@ public sealed partial class ExprLowerer
     }
 
     /// <summary>
+    /// R32.11. <c>Pal.CallBound(action)</c>: the bound on the calls through the
+    /// <c>[Callback]</c> parameter <c>action</c>, a ghost the caller passes.
+    /// </summary>
+    private IrExpr LowerCallBound(SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
+    {
+        if (args is not [{ Expression: IdentifierNameSyntax id }] || !TraceTarget(id))
+            return Refused("PALCS0800", loc,
+                "`Pal.CallBound` takes a `[Callback]` parameter of the enclosing method (doc/translation.md R32.11).");
+        return new IrVar(loc, CallBoundName(id.Identifier.ValueText)) { Type = IrPrim.SpecIntType };
+    }
+
+    /// <summary>R32.11. The variable naming the call bound of the callback parameter <paramref name="action"/>.</summary>
+    public static string CallBoundName(string action) => "__pal_bound_" + action;
+
+    /// <summary>
     /// R27.39. A lambda passed to a <c>[Callback]</c> parameter is lifted to a method of its
     /// own: it takes the trace, then the variables it captures (by reference those it writes),
     /// then the node; it requires its protocol on the trace and that the node is in the
@@ -104,7 +123,8 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr LowerCallbackArgument(ArgumentSyntax arg, IrCallback cb, IrLoc loc)
     {
-        if (arg.Expression is not LambdaExpressionSyntax lambda ||
+        // R32.5. An anonymous method (`delegate (Node n) { … }`) is lifted as a lambda is.
+        if (arg.Expression is not AnonymousFunctionExpressionSyntax lambda ||
             model.GetSymbolInfo(lambda).Symbol is not IMethodSymbol { Parameters: [var nodeParam] } lambdaSymbol)
             return Refused("PALCS0709", loc,
                 "The argument to a `[Callback]` parameter is a lambda of one parameter " +
@@ -114,7 +134,8 @@ public sealed partial class ExprLowerer
             statements[0] is not ExpressionStatementSyntax { Expression: InvocationExpressionSyntax protocolCall } ||
             model.GetSymbolInfo(protocolCall).Symbol is not IMethodSymbol { Name: nameof(PalLang.Pal.Protocol) } protocol ||
             !SymbolEqualityComparer.Default.Equals(protocol.ContainingType, known.Pal) ||
-            protocolCall.ArgumentList.Arguments is not [{ Expression: LambdaExpressionSyntax inv }] ||
+            protocolCall.ArgumentList.Arguments.Count is not (1 or 2) ||
+            protocolCall.ArgumentList.Arguments[0].Expression is not LambdaExpressionSyntax inv ||
             inv.ExpressionBody is null ||
             model.GetSymbolInfo(inv).Symbol is not IMethodSymbol { Parameters: [var traceParam] })
             return Refused("PALCS0709", loc,
@@ -139,6 +160,24 @@ public sealed partial class ExprLowerer
                 "A lambda passed to a `[Callback]` parameter that captures `this` " +
                 "(doc/translation.md R27.39): the callee holds the object's region already.");
         var written = flow.WrittenInside.ToImmutableHashSet<ISymbol>(SymbolEqualityComparer.Default);
+
+        // R32.11. A bound on the calls is fixed when the lambda is passed: it names only
+        // captures the lambda does not write, and goes only to a bounded parameter.
+        var boundSyntax = protocolCall.ArgumentList.Arguments.Count == 2
+            ? protocolCall.ArgumentList.Arguments[1].Expression : null;
+        if (boundSyntax is not null)
+        {
+            if (!cb.Bounded)
+                return Refused("PALCS0800", loc,
+                    "A lambda states a bound on its calls in `Pal.Protocol`, but the parameter it is passed to " +
+                    "is not `[Callback(Bounded = true)]` (doc/translation.md R32.11).");
+            if (boundSyntax.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>()
+                    .Select(n => model.GetSymbolInfo(n).Symbol)
+                    .FirstOrDefault(sym => sym is not null && written.Contains(sym)) is { } w)
+                return Refused("PALCS0800", loc,
+                    $"The bound on a lambda's calls names `{w.Name}`, which the lambda writes " +
+                    "(doc/translation.md R32.11).");
+        }
 
         var parameters = ImmutableArray.CreateBuilder<IrParam>();
         var traceType = known.MapType(traceParam.Type);
@@ -184,8 +223,15 @@ public sealed partial class ExprLowerer
         postLowerer.Alias(traceParam, extended);
         var post = postLowerer.Lower(inv.ExpressionBody!);
         var inRegion = new IrSpecOp(loc, $"{Region.Module}.mem", [heap, nodeVar]) { Type = IrPrim.Bool, MachineArgs = true };
-        var bounded = new IrSpecOp(loc, "Pulse.Lib.CSharp.Callback.callable",
+        IrExpr bounded = new IrSpecOp(loc, "Pulse.Lib.CSharp.Callback.callable",
             [new IrVar(loc, trace) { Type = traceType }]) { Type = IrPrim.Bool, MachineArgs = true };
+        IrExpr? bound = boundSyntax is null ? null : spec.Lower(boundSyntax);
+        if (bound is not null)
+            bounded = new IrBinary(loc, BinOp.And, bounded,
+                new IrBinary(loc, BinOp.Lt,
+                    new IrSpecOp(loc, "Seq.length", [new IrVar(loc, trace) { Type = traceType }])
+                        { Type = IrPrim.SpecIntType, MachineArgs = true },
+                    bound) { Type = IrPrim.Bool }) { Type = IrPrim.Bool };
 
         var name = $"{LiftPrefix}_Lambda{Lifted.Count}";
         var body = new StmtLowerer(model, known, diagnostics);
@@ -195,7 +241,7 @@ public sealed partial class ExprLowerer
         var method = new IrMethod(loc, name, parameters.ToImmutable(), cb.Result,
             [pre, bounded, inRegion], [post], null, new IrBlock(loc, lowered))
         {
-            Lambda = new IrLambdaInfo(trace, node, cb),
+            Lambda = new IrLambdaInfo(trace, node, cb) { Bound = bound },
             TypeParameters = LiftTypeParameters,
         };
         Lifted.Add(method);
@@ -203,6 +249,7 @@ public sealed partial class ExprLowerer
         return new IrLambdaRef(loc, name, captures.ToImmutable())
         {
             Callback = cb,
+            Bounded = bound is not null,
             TypeArguments = [.. LiftTypeParameters.Select(t => (IrType)new IrTypeParamType(t))],
         };
     }

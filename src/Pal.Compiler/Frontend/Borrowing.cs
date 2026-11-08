@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -20,9 +21,12 @@ public static class Borrowing
         if (type is not INamedTypeSymbol s) return null;
         // R29.3. A sealed class with no model of its own, deriving from nothing, borrows
         // as a struct does: its state is the record of its fields.
+        // R32.13. So does a view: a sealed class nested in the class with a model it
+        // derives from, declaring no model of its own.
         if (!(s.TypeKind == TypeKind.Struct ||
               s is { TypeKind: TypeKind.Class, IsSealed: true, IsStatic: false, BaseType.SpecialType: SpecialType.System_Object } &&
-              !known.HasModel(s.OriginalDefinition) && !Declarations.Has(s.OriginalDefinition, known.PlainAttribute)))
+              !known.HasModel(s.OriginalDefinition) && !Declarations.Has(s.OriginalDefinition, known.PlainAttribute) ||
+              ViewBase(s, known) is not null))
             return null;
         IFieldSymbol? found = null;
         foreach (var f in s.GetMembers().OfType<IFieldSymbol>())
@@ -35,6 +39,48 @@ public static class Borrowing
         }
         return found;
     }
+
+    /// <summary>
+    /// R32.13. The class a *view* derives from: <paramref name="type"/> is a sealed class
+    /// nested in a class with a model that is also its direct base, and declares no model
+    /// of its own (it may not be <c>[Plain]</c>). The view's state is the record of its own
+    /// fields and the base's instance fields; it borrows the object its readonly field of
+    /// the base type holds (R28.1), and is verified at its exact type.
+    /// </summary>
+    public static INamedTypeSymbol? ViewBase(ITypeSymbol? type, WellKnown known) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class, IsSealed: true, IsStatic: false, BaseType: { } b } s &&
+        b.SpecialType != SpecialType.System_Object && Encloses(b, s) &&
+        !s.OriginalDefinition.GetMembers().Any(m => Declarations.Has(m, known.ModelAttribute)) &&
+        !Declarations.Has(s.OriginalDefinition, known.PlainAttribute) &&
+        b.OriginalDefinition.GetMembers().Any(m => Declarations.Has(m, known.ModelAttribute)) &&
+        (Declarations.IsAnnotated(s.OriginalDefinition, known) ||
+         s.OriginalDefinition.GetMembers().Any(m => Declarations.IsAnnotated(m, known) ||
+             m is IMethodSymbol { AssociatedSymbol: { } a } && Declarations.IsAnnotated(a, known)))
+            ? b : null;
+
+    /// <summary>R32.13. Whether <paramref name="type"/> is a view (<see cref="ViewBase"/>).</summary>
+    public static bool IsView(ITypeSymbol? type, WellKnown known) => ViewBase(type, known) is not null;
+
+    /// <summary>
+    /// R28.1, R32.13. Whether <paramref name="f"/> is a field of the state of the borrowing
+    /// type <paramref name="self"/>: one it declares, or, for a view, one its base declares.
+    /// </summary>
+    public static bool IsStateField(IFieldSymbol f, INamedTypeSymbol self, WellKnown? known)
+    {
+        if (f.IsStatic || f.IsConst) return false;
+        var holder = f.ContainingType.OriginalDefinition;
+        if (SymbolEqualityComparer.Default.Equals(holder, self.OriginalDefinition)) return true;
+        return known is not null && ViewBase(self, known) is { } b &&
+               SymbolEqualityComparer.Default.Equals(holder, b.OriginalDefinition);
+    }
+
+    /// <summary>R32.13. The base's instance fields in a view's record: the ones the base's own representation maps.</summary>
+    public static IEnumerable<IFieldSymbol> InheritedState(INamedTypeSymbol self, WellKnown known) =>
+        ViewBase(self, known) is { } b
+            ? b.GetMembers().OfType<IFieldSymbol>().Where(f =>
+                !f.IsStatic && !f.IsConst && f.AssociatedSymbol is null && known.MapType(f.Type) is not null &&
+                !IsBorrowingClass(f.Type, known))
+            : [];
 
     /// <summary>
     /// R29.3b. Whether <paramref name="a"/> fills a view cache: <c>f ??= new V(this)</c>,
@@ -104,6 +150,53 @@ public static class Borrowing
     public static bool IsBorrowing(ITypeSymbol? type, WellKnown known) => OwnerField(type, known) is not null;
 
     /// <summary>
+    /// R32.12. The wrapped field of a *wrapping* struct: a struct that borrows nothing itself
+    /// (R28.1), whose one instance field of struct type is a borrowing or wrapping struct,
+    /// and whose other instance fields are values that hold no reference.
+    /// </summary>
+    public static IFieldSymbol? InnerField(ITypeSymbol? type, WellKnown known) => InnerField(type, known, 0);
+
+    private static IFieldSymbol? InnerField(ITypeSymbol? type, WellKnown known, int depth)
+    {
+        if (depth > 8 || type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } s || OwnerField(s, known) is not null)
+            return null;
+        IFieldSymbol? found = null;
+        foreach (var f in s.GetMembers().OfType<IFieldSymbol>())
+        {
+            if (f.IsStatic || f.IsConst) continue;
+            if (f.Type is INamedTypeSymbol { TypeKind: TypeKind.Struct } ft &&
+                (IsBorrowing(ft, known) || InnerField(ft, known, depth + 1) is not null))
+            {
+                if (found is not null) return null;
+                found = f;
+                continue;
+            }
+            if (f.Type.IsReferenceType || f.Type.TypeKind == TypeKind.TypeParameter ||
+                f.Type is { TypeKind: TypeKind.Struct, SpecialType: SpecialType.None }) return null;
+        }
+        return found;
+    }
+
+    /// <summary>R32.12. Whether <paramref name="type"/> is a wrapping struct.</summary>
+    public static bool IsWrapping(ITypeSymbol? type, WellKnown known) => InnerField(type, known) is not null;
+
+    /// <summary>
+    /// R32.12. The wrapped fields from a wrapping struct down to the borrowing struct at its
+    /// core, and that struct: each field is of the struct the next is a field of.
+    /// </summary>
+    public static (ImmutableArray<IFieldSymbol> Path, INamedTypeSymbol Core) Innermost(ITypeSymbol type, WellKnown known)
+    {
+        var path = ImmutableArray.CreateBuilder<IFieldSymbol>();
+        var t = (INamedTypeSymbol)type;
+        while (InnerField(t, known) is { } f)
+        {
+            path.Add(f);
+            t = (INamedTypeSymbol)f.Type;
+        }
+        return (path.ToImmutable(), t);
+    }
+
+    /// <summary>
     /// R28.2. Whether <paramref name="method"/> is a member of a borrowing struct that is
     /// translated: an instance method, accessor, constructor, or explicit interface
     /// implementation.
@@ -112,7 +205,7 @@ public static class Borrowing
         method is { IsStatic: false,
                     MethodKind: MethodKind.Ordinary or MethodKind.Constructor or MethodKind.PropertyGet or MethodKind.PropertySet
                                 or MethodKind.ExplicitInterfaceImplementation }
-        && IsBorrowing(method.ContainingType, known);
+        && (IsBorrowing(method.ContainingType, known) || IsWrapping(method.ContainingType, known));
 
     private static bool Encloses(INamedTypeSymbol outer, INamedTypeSymbol inner)
     {
@@ -147,6 +240,22 @@ public static class Borrowing
                 model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) &&
                 WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), self, seen))
                 return true;
+            // R32.12. A call of a writer member of the struct a wrapping struct wraps writes it.
+            if (node is InvocationExpressionSyntax
+                {
+                    Expression: MemberAccessExpressionSyntax
+                    {
+                        Expression: var wrapped and (IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }),
+                    },
+                } inner &&
+                model.GetSymbolInfo(wrapped).Symbol is IFieldSymbol { IsStatic: false, Type: INamedTypeSymbol { TypeKind: TypeKind.Struct } wt } wf &&
+                SymbolEqualityComparer.Default.Equals(wf.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
+                model.GetSymbolInfo(inner).Symbol is IMethodSymbol { IsStatic: false } innerCallee &&
+                SymbolEqualityComparer.Default.Equals(innerCallee.ContainingType.OriginalDefinition, wt.OriginalDefinition) &&
+                innerCallee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } innerDecl &&
+                model.Compilation.ContainsSyntaxTree(innerDecl.SyntaxTree) &&
+                WritesState(innerDecl, model.Compilation.GetSemanticModel(innerDecl.SyntaxTree), wt, seen))
+                return true;
             var target = node switch
             {
                 AssignmentExpressionSyntax a => a.Left,
@@ -157,12 +266,125 @@ public static class Borrowing
             if (target is null) continue;
             while (target is ParenthesizedExpressionSyntax pe) target = pe.Expression;
             if (target is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } or IdentifierNameSyntax &&
-                model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f &&
-                SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, self.OriginalDefinition))
+                (model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f &&
+                 SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, self.OriginalDefinition) ||
+                 IsAutoProperty(model.GetSymbolInfo(target).Symbol, self)))
                 return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// R32.14. The names of the view's state fields (its own and its base's) a member of the
+    /// view may write: by assignment, step or <c>ref</c> argument in its body, or in the
+    /// body of a member of the view or its base it calls or reads on itself (bound at the
+    /// view: an override of the view's, else the base's), transitively. Lambdas' bodies are
+    /// part of the body they are written in.
+    /// </summary>
+    public static HashSet<string> ViewWrites(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known)
+    {
+        var written = new HashSet<string>();
+        ViewWrites(body, model, view, known, written, new HashSet<SyntaxNode>());
+        return written;
+    }
+
+    private static void ViewWrites(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known,
+        HashSet<string> written, HashSet<SyntaxNode> seen)
+    {
+        if (!seen.Add(body) || ViewBase(view, known) is not { } vb) return;
+        bool Ours(ISymbol m) =>
+            SymbolEqualityComparer.Default.Equals(m.ContainingType.OriginalDefinition, view.OriginalDefinition) ||
+            SymbolEqualityComparer.Default.Equals(m.ContainingType.OriginalDefinition, vb.OriginalDefinition);
+        void Into(IMethodSymbol? callee, bool viaBase)
+        {
+            if (callee is null) return;
+            var target = viaBase ? callee : Subclasses.OverrideOf(view, callee) ?? callee;
+            foreach (var r in target.DeclaringSyntaxReferences)
+                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree))
+                    ViewWrites(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, written, seen);
+        }
+        foreach (var node in body.DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                PostfixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg => arg.Expression,
+                _ => null,
+            };
+            if (target is not null)
+            {
+                while (target is ParenthesizedExpressionSyntax pe) target = pe.Expression;
+                if (target is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax or BaseExpressionSyntax } &&
+                    model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f && Ours(f))
+                    written.Add(f.Name);
+            }
+            // A member of the view reached on itself: an invocation, or a property read or written.
+            if (node is not (IdentifierNameSyntax or MemberAccessExpressionSyntax) ||
+                node.Parent is MemberAccessExpressionSyntax pm && pm.Name == node) continue;
+            var receiver = node is MemberAccessExpressionSyntax ma ? ma.Expression : null;
+            if (receiver is not (null or ThisExpressionSyntax or BaseExpressionSyntax)) continue;
+            var viaBase = receiver is BaseExpressionSyntax;
+            switch (model.GetSymbolInfo(node).Symbol)
+            {
+                case IMethodSymbol { IsStatic: false } m when Ours(m):
+                    Into(m, viaBase);
+                    break;
+                case IPropertySymbol { IsStatic: false } prop when Ours(prop):
+                    Into(prop.GetMethod, viaBase);
+                    Into(prop.SetMethod, viaBase);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// R32.13. Whether a member of the view <paramref name="view"/> writes the object it
+    /// borrows: it calls a method of it that is not read-only, or calls (on itself, or on
+    /// <c>base</c>) a member of the view or its base that does, transitively.
+    /// </summary>
+    public static bool WritesOwner(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known) =>
+        WritesOwner(body, model, view, known, new HashSet<SyntaxNode>());
+
+    private static bool WritesOwner(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known,
+        HashSet<SyntaxNode> seen)
+    {
+        if (!seen.Add(body) || ViewBase(view, known) is not { } vb || OwnerField(view, known) is not { } owner) return false;
+        foreach (var node in body.DescendantNodes())
+        {
+            if (node is not InvocationExpressionSyntax call ||
+                model.GetSymbolInfo(call).Symbol is not IMethodSymbol { IsStatic: false } callee) continue;
+            var receiver = call.Expression is MemberAccessExpressionSyntax ma ? ma.Expression : null;
+            if (receiver is not null && model.GetSymbolInfo(receiver).Symbol is IFieldSymbol rf &&
+                SymbolEqualityComparer.Default.Equals(rf.OriginalDefinition, owner.OriginalDefinition))
+            {
+                if (!Declarations.IsReadOnly(callee, model.Compilation, known)) return true;
+                continue;
+            }
+            if (receiver is not (null or ThisExpressionSyntax or BaseExpressionSyntax)) continue;
+            var holder = callee.ContainingType.OriginalDefinition;
+            if (!SymbolEqualityComparer.Default.Equals(holder, view.OriginalDefinition) &&
+                !SymbolEqualityComparer.Default.Equals(holder, vb.OriginalDefinition)) continue;
+            var target = receiver is BaseExpressionSyntax ? callee
+                : Subclasses.OverrideOf(view, callee) ?? callee;
+            foreach (var r in target.DeclaringSyntaxReferences)
+                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree) &&
+                    WritesOwner(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, seen))
+                    return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// R33.26. An instance auto-property of the struct (<c>Current { get; private set; }</c>):
+    /// its backing field is one of the struct's fields (R3.4), under the property's name.
+    /// </summary>
+    public static bool IsAutoProperty(ISymbol? symbol, INamedTypeSymbol self) =>
+        symbol is IPropertySymbol { IsStatic: false, IsIndexer: false } p &&
+        SymbolEqualityComparer.Default.Equals(p.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
+        self.OriginalDefinition.GetMembers().OfType<IFieldSymbol>()
+            .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p.OriginalDefinition));
 
     /// <summary>
     /// R28.4. The constructor parameter the borrowed object arrives in: the one the
@@ -174,7 +396,9 @@ public static class Borrowing
             return null;
         // R27.38. A constructor that only chains (`: this(set, false) { }`) passes the
         // borrowed object on: its parameter is the one given for the chained-to constructor's.
-        if (decl.Initializer is { } init)
+        // R32.13. A view's constructor calls its base's (`: base(u.Comparer)`) and then assigns
+        // its fields, the borrowing one among them.
+        if (decl.Initializer is { } init && !init.ThisOrBaseKeyword.IsKind(SyntaxKind.BaseKeyword))
         {
             if (compilation is null || !init.ThisOrBaseKeyword.IsKind(SyntaxKind.ThisKeyword) ||
                 decl.Body is { Statements.Count: > 0 } || decl.ExpressionBody is not null)

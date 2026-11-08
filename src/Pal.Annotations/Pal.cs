@@ -234,7 +234,7 @@ public static class Pal
     public static bool IsPermutation<T>(Seq<T> left, Seq<T> right) => throw Ghost();
 
     /// <summary>The ghost sequence <paramref name="s"/> with index <paramref name="index"/> replaced.</summary>
-    public static Seq<T> SetAt<T>(Seq<T> s, int index, T value) => throw Ghost();
+    public static Seq<T> SetAt<T>(Seq<T> s, SpecInt index, T value) => throw Ghost();
 
     /// <summary>The ghost subsequence <c>[from, to)</c>.</summary>
     public static Seq<T> Slice<T>(Seq<T> s, SpecInt from, SpecInt to) => throw Ghost();
@@ -485,6 +485,22 @@ public static class Pal
     /// the lambda is passed, each call extends it, and it holds after the call returns.
     /// </summary>
     public static void Protocol<TV, TR>(Func<Seq<(TV, TR)>, bool> invariant) => throw Ghost();
+
+    /// <summary>
+    /// R32.11. <c>Pal.Protocol</c> with a bound on the calls: the lambda may assume it is
+    /// called fewer than <paramref name="maxCalls"/> times. <paramref name="maxCalls"/> names
+    /// only captured variables the lambda does not write. It is passed to a
+    /// <c>[Callback(Bounded = true)]</c> parameter, whose callee requires what it needs of
+    /// <c>Pal.CallBound(action)</c>.
+    /// </summary>
+    public static void Protocol<TV, TR>(Func<Seq<(TV, TR)>, bool> invariant, SpecInt maxCalls) => throw Ghost();
+
+    /// <summary>
+    /// R32.11. The bound on the calls through the <c>[Callback(Bounded = true)]</c> parameter
+    /// <paramref name="action"/>, which the caller chose: the callee calls it fewer times.
+    /// For a parameter that is not bounded it is <c>int.MaxValue</c>.
+    /// </summary>
+    public static SpecInt CallBound(Delegate action) => throw Ghost();
 
     public static SlProp PtsTo<T>(T location, T value) => throw Ghost();
 

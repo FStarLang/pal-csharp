@@ -172,6 +172,23 @@ public sealed class WellKnown
     public bool IsRegionClass(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeKind: TypeKind.Class } n && Declarations.Has(n.OriginalDefinition, RegionAttribute);
 
+    /// <summary>R31.1. A <c>[Region(Cyclic = true)]</c> class.</summary>
+    public bool IsCyclicRegionClass(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class } n &&
+        Declarations.Find(n.OriginalDefinition, RegionAttribute) is { } data && Declarations.NamedFlag(data, "Cyclic");
+
+    /// <summary>
+    /// R31.2. The owner of a cyclic region: a class with a field of a cyclic region class
+    /// that has a field of it in turn. A node's pointer to it is an identity, not ownership,
+    /// so it is plain data wherever a region pointer is.
+    /// </summary>
+    public bool IsRingOwner(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class } c &&
+        c.OriginalDefinition.GetMembers().OfType<IFieldSymbol>().Any(f =>
+            IsCyclicRegionClass(f.Type) &&
+            ((INamedTypeSymbol)f.Type).OriginalDefinition.GetMembers().OfType<IFieldSymbol>().Any(g =>
+                SymbolEqualityComparer.Default.Equals(g.Type.OriginalDefinition, c.OriginalDefinition)));
+
     /// <summary>
     /// R27.3. The type arguments a class type carries: those of every enclosing type, then
     /// its own. A class nested in a generic class is generic in the outer parameters too.
@@ -462,6 +479,10 @@ public sealed class WellKnown
     private IrType RegionArgument(ITypeSymbol argument, IrType mapped) =>
         mapped is IrClassType { Nullable: false } k && IsRegionClass(argument) ? k with { Nullable = true } : mapped;
 
+    /// <summary>R31.2. A pair's component: a region pointer or a ring owner is the nullable pointer.</summary>
+    private IrType PairComponent(ITypeSymbol argument, IrType mapped) =>
+        mapped is IrClassType { Nullable: false } k && IsRingOwner(argument) ? k with { Nullable = true } : RegionArgument(argument, mapped);
+
     /// <summary>
     /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
     /// resolved them — inferred and explicit calls are indistinguishable here, which is
@@ -597,11 +618,11 @@ public sealed class WellKnown
             // like a type argument, it is the nullable pointer, so the pair has C#'s default.
             case INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } tuple
                 when MapType(tuple.TupleElements[0].Type) is { } t1 &&
-                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type)) &&
+                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type) || IsRingOwner(tuple.TupleElements[0].Type)) &&
                      MapType(tuple.TupleElements[1].Type) is { } t2 &&
-                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type)):
+                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type) || IsRingOwner(tuple.TupleElements[1].Type)):
                 return new IrUserSpecType("ValueTuple", TupleType,
-                    [RegionArgument(tuple.TupleElements[0].Type, t1), RegionArgument(tuple.TupleElements[1].Type, t2)]);
+                    [PairComponent(tuple.TupleElements[0].Type, t1), PairComponent(tuple.TupleElements[1].Type, t2)]);
             // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
             case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
                      MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&

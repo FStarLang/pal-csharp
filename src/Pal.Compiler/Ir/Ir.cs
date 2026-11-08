@@ -282,6 +282,16 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// <summary>R27.17. The operation is a constant of a <c>[SpecType]</c> enum (R21.8).</summary>
     public bool EnumCase { get; init; }
 
+    /// <summary>R27.22. The operation is a <c>[RegionOp]</c>, over a region's heap.</summary>
+    public bool Region { get; init; }
+
+    /// <summary>
+    /// R33.4. The operation is a bound static member of a machine-integer type
+    /// (<c>IntPtr.Size</c>): its value is a machine integer, which a contract reads through
+    /// <c>.v</c>.
+    /// </summary>
+    public bool MachineValue { get; init; }
+
     /// <summary>
     /// R20.10. The operation models a BCL member over program values, so its arguments
     /// are at their machine types in a contract too -- `set.Contains(i)` asks about the
@@ -480,19 +490,30 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 {
     public ImmutableArray<IrType> TypeArguments { get; init; } = [];
     public IrCallback Callback { get; init; } = null!;
+
+    /// <summary>R32.11. Whether the lambda's protocol states a bound on its calls.</summary>
+    public bool Bounded { get; init; }
 }
 
 /// <summary>
 /// R27.39. What a <c>[Callback]</c> delegate is called with and returns: a pointer into
 /// <c>Region</c>, recorded in the trace by its <c>[Model]</c> view <c>View</c>.
 /// </summary>
-public sealed record IrCallback(IrClassType Region, IrType View, IrType Result);
+public sealed record IrCallback(IrClassType Region, IrType View, IrType Result)
+{
+    /// <summary>R32.11. <c>[Callback(Bounded = true)]</c>: the caller passes a bound on the calls.</summary>
+    public bool Bounded { get; init; }
+}
 
 /// <summary>
 /// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
 /// first clause of its contract each way is the protocol.
 /// </summary>
-public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback);
+public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback)
+{
+    /// <summary>R32.11. The bound on the calls the protocol states, over the read-only captures.</summary>
+    public IrExpr? Bound { get; init; }
+}
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);
@@ -1067,6 +1088,12 @@ public sealed record IrClass(
     /// first two nullable fields of the class's own type are the children.
     /// </summary>
     public bool IsRegion { get; init; }
+
+    /// <summary>
+    /// R31.1. <c>[Region(Cyclic = true)]</c>: the two self-typed fields are ring links, not
+    /// children, so no tree shape is derived for the region.
+    /// </summary>
+    public bool IsCyclic { get; init; }
 
     /// <summary>
     /// R9.1. The translated class this one derives from, if any. Non-null and

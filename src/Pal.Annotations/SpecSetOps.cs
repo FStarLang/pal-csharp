@@ -29,6 +29,26 @@ public static class SpecSetOps
     [SpecOp("Pulse.Lib.CSharp.SetOps.overlaps_disjoint")]
     public static void OverlapsDisjoint<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
+    /// <summary>R32.14. Every element of <paramref name="t"/> is a member of <paramref name="s"/> under <paramref name="c"/> (<c>IsSupersetOf</c>/<c>IsSubsetOf</c>).</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetOps.all_in")]
+    public static bool AllIn<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: one step of a walk over the suffix <c>t[i..]</c>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetOps.all_in_step")]
+    public static void AllInStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: the whole of <paramref name="t"/> is its suffix from 0.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetOps.all_in_whole")]
+    public static void AllInWhole<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: a strictly sorted subset of a strictly sorted <paramref name="s"/> is no longer than it.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetOps.all_in_length")]
+    public static void AllInLength<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+    /// <summary>A lemma: <c>t[i]</c> of a strictly sorted <paramref name="t"/> lies between its first and last.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SetOps.sorted_bounds")]
+    public static void SortedBounds<T>(IComparer<T> c, Seq<T> t, SpecInt i) => throw Ghost();
+
     /// <summary><paramref name="s"/> after removing each element of <paramref name="t"/>, first to last (<c>ExceptWith</c>).</summary>
     [SpecOp("Pulse.Lib.CSharp.SetOps.except")]
     public static Seq<T> Except<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();

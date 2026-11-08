@@ -97,11 +97,17 @@ namespace System.Collections.Generic
             _set = new TreeSet<KeyValuePair<TKey, TValue>>(new KeyValuePairComparer(comparer));
         }
 
+        [Requires("@this.SpecPairs.Length < int.MaxValue")]
+        [Requires("Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, keyValuePair.Key) < 0")]
+        [Ensures("@this.SpecPairs == SpecTopDown.Inserted(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), keyValuePair)")]
+        [Ensures("@this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
         void ICollection<KeyValuePair<TKey, TValue>>.Add(KeyValuePair<TKey, TValue> keyValuePair)
         {
             _set.Add(keyValuePair);
         }
 
+        [Ensures("Result == (Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, keyValuePair.Key) >= 0 && (Pal.IsNull(keyValuePair.Value) ? Pal.IsNull(@this.SpecPairs[Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, keyValuePair.Key)].Value) : Pal.DefaultEquals(@this.SpecPairs[Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, keyValuePair.Key)].Value, keyValuePair.Value)))")]
+        [Ensures("@this.SpecPairs == Pal.Old(@this.SpecPairs)")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Contains(KeyValuePair<TKey, TValue> keyValuePair)
         {
             TreeSet<KeyValuePair<TKey, TValue>>.Node? node = _set.FindNode(keyValuePair);
@@ -120,6 +126,9 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("Result == (Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key) >= 0 && Pal.DefaultEquals(Pal.Old(@this.SpecPairs)[Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)].Value, keyValuePair.Value))")]
+        [Ensures("@this.SpecPairs == (Result ? SpecTopDownRemove.Removed(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), keyValuePair) : Pal.Old(@this.SpecPairs))")]
+        [Ensures("@this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Remove(KeyValuePair<TKey, TValue> keyValuePair)
         {
             TreeSet<KeyValuePair<TKey, TValue>>.Node? node = _set.FindNode(keyValuePair);
@@ -136,6 +145,7 @@ namespace System.Collections.Generic
             return false;
         }
 
+        [Ensures("!Result")]
         bool ICollection<KeyValuePair<TKey, TValue>>.IsReadOnly
         {
             get
@@ -163,6 +173,10 @@ namespace System.Collections.Generic
 
                 return node.Item.Value;
             }
+            [Requires("!Pal.IsNull(key)")]
+            [Requires("@this.SpecPairs.Length < int.MaxValue")]
+            [Ensures("Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), key) < 0 ? @this.SpecPairs == SpecTopDown.Inserted(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), new KeyValuePair<TKey, TValue>(key, value)) : @this.SpecPairs == Pal.SetAt(Pal.Old(@this.SpecPairs), Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), key), new KeyValuePair<TKey, TValue>(Pal.Old(@this.SpecKeys)[Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), key)], value))")]
+            [Ensures("@this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
             set
             {
                 ArgumentNullException.ThrowIfNull(key);
@@ -189,6 +203,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("Result == @this.SpecKeyComparer")]
         public IComparer<TKey> Comparer
         {
             get
@@ -197,6 +212,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("ReferenceEquals(Result._dictionary, @this)")]
         public KeyCollection Keys => _keys ??= new KeyCollection(this);
 
         ICollection<TKey> IDictionary<TKey, TValue>.Keys
@@ -215,6 +231,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("ReferenceEquals(Result._dictionary, @this)")]
         public ValueCollection Values => _values ??= new ValueCollection(this);
 
         ICollection<TValue> IDictionary<TKey, TValue>.Values
@@ -261,6 +278,10 @@ namespace System.Collections.Generic
             return _set.Contains(new KeyValuePair<TKey, TValue>(key, default(TValue)!));
         }
 
+        // pal: R32.8. Each callback returns false exactly on a match, and records it in `found`.
+        [Ensures("Result == SpecValueSearch.HasValue(@this.SpecPairs, value)")]
+        [Ensures("@this.SpecPairs == Pal.Old(@this.SpecPairs)")]
+        [Frac("p")]
         public bool ContainsValue(TValue value)
         {
             bool found = false;
@@ -268,6 +289,7 @@ namespace System.Collections.Generic
             {
                 _set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
                 {
+                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => Pal.IsNull(value) && SpecValueSearch.Searched(tr, value, found));
                     if (node.Item.Value == null)
                     {
                         found = true;
@@ -281,6 +303,7 @@ namespace System.Collections.Generic
                 EqualityComparer<TValue> valueComparer = EqualityComparer<TValue>.Default;
                 _set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
                 {
+                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => !Pal.IsNull(value) && valueComparer == EqualityComparer<TValue>.Default && SpecValueSearch.Searched(tr, value, found));
                     if (valueComparer.Equals(node.Item.Value, value))
                     {
                         found = true;
@@ -342,11 +365,13 @@ namespace System.Collections.Generic
             ((ICollection)_set).CopyTo(array, index);
         }
 
+        [Ensures("!Result")]
         bool IDictionary.IsFixedSize
         {
             get { return false; }
         }
 
+        [Ensures("!Result")]
         bool IDictionary.IsReadOnly
         {
             get { return false; }
@@ -458,6 +483,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("!Result")]
         bool ICollection.IsSynchronized
         {
             get { return false; }
@@ -478,22 +504,43 @@ namespace System.Collections.Generic
             internal const int KeyValuePair = 1;
             internal const int DictEntry = 2;
 
+            // R32.12. A wrapping struct: its members are the set's, read through `_treeEnum`.
+            [Spec] internal bool SpecWalking => _treeEnum.SpecWalking;
+            [Spec] internal bool SpecWalkable => _treeEnum.SpecWalkable;
+            [Spec] internal bool SpecFresh => _treeEnum.SpecFresh;
+            [Spec] internal bool SpecCurrentOk => _treeEnum.SpecCurrentOk;
+            [Spec] internal bool SpecEnded => _treeEnum.SpecEnded;
+            [Spec] internal bool SpecCurrentWf => _treeEnum.SpecCurrentWf;
+            [Spec] internal Seq<KeyValuePair<TKey, TValue>> SpecPending => _treeEnum.SpecPending;
+            [Spec] internal Seq<KeyValuePair<TKey, TValue>> SpecInitial => _treeEnum.SpecInitial;
+            [Spec] internal SpecTree<(KeyValuePair<TKey, TValue>, bool)> SpecCurrentTree => _treeEnum.SpecCurrentTree;
+
             internal Enumerator(SortedDictionary<TKey, TValue> dictionary, int getEnumeratorRetType)
             {
                 _treeEnum = dictionary._set.GetEnumerator();
                 _getEnumeratorRetType = getEnumeratorRetType;
             }
 
+            [Rlimit(40)]
+            [Requires("@this._treeEnum.SpecWalking")]
+            [Throws(typeof(InvalidOperationException), "!@this._treeEnum.SpecFresh")]
+            [Ensures("@this._treeEnum.SpecWalking && @this._treeEnum.SpecCurrentOk")]
+            [Ensures("Result == (Pal.Old(@this._treeEnum.SpecPending).Length > 0)")]
+            [Ensures("Pal.Implies(Result, @this._treeEnum.SpecCurrentWf && Pal.Same(SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, Pal.Old(@this._treeEnum.SpecPending)[0]), Pal.Old(@this._treeEnum.SpecPending)[0]))")]
+            [Ensures("@this._treeEnum.SpecPending == Pal.Slice(Pal.Old(@this._treeEnum.SpecPending), Result ? 1 : 0, Pal.Old(@this._treeEnum.SpecPending).Length)")]
             public bool MoveNext()
             {
                 return _treeEnum.MoveNext();
             }
 
+            [Ensures("true")]
             public void Dispose()
             {
                 _treeEnum.Dispose();
             }
 
+            [Requires("@this._treeEnum.SpecCurrentOk")]
+            [Ensures("Pal.Implies(!@this._treeEnum.SpecEnded, Pal.Same(Result, SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, Result)))")]
             public KeyValuePair<TKey, TValue> Current
             {
                 get
@@ -502,6 +549,7 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Ensures("Result == @this._treeEnum.SpecEnded")]
             internal bool NotStartedOrEnded
             {
                 get
@@ -510,12 +558,18 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Rlimit(40)]
+            [Throws(typeof(InvalidOperationException), "!@this._treeEnum.SpecFresh")]
+            [Ensures("@this._treeEnum.SpecWalkable && @this._treeEnum.SpecPending == @this._treeEnum.SpecInitial")]
             internal void Reset()
             {
                 _treeEnum.Reset();
             }
 
 
+            [Rlimit(40)]
+            [Throws(typeof(InvalidOperationException), "!@this._treeEnum.SpecFresh")]
+            [Ensures("@this._treeEnum.SpecWalkable && @this._treeEnum.SpecPending == @this._treeEnum.SpecInitial")]
             void IEnumerator.Reset()
             {
                 _treeEnum.Reset();
@@ -539,6 +593,9 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Requires("@this._treeEnum.SpecCurrentOk")]
+            [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded")]
             object IDictionaryEnumerator.Key
             {
                 get
@@ -552,6 +609,9 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Requires("@this._treeEnum.SpecCurrentOk")]
+            [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded")]
             object? IDictionaryEnumerator.Value
             {
                 get
@@ -585,6 +645,7 @@ namespace System.Collections.Generic
         {
             private readonly SortedDictionary<TKey, TValue> _dictionary;
 
+            [Ensures("ReferenceEquals(@this._dictionary, dictionary)")]
             public KeyCollection(SortedDictionary<TKey, TValue> dictionary)
             {
                 ArgumentNullException.ThrowIfNull(dictionary);
@@ -600,6 +661,11 @@ namespace System.Collections.Generic
 
             IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<TKey>)this).GetEnumerator();
 
+            // pal: R32.11. The walk calls back fewer than `Count` times, so `index++` stays in bounds.
+            [Throws(typeof(ArgumentOutOfRangeException), "index < 0")]
+            [Throws(typeof(ArgumentException), "Pal.Contents(array).Length - index < @this._dictionary.SpecPairs.Length")]
+            [Ensures("0 <= index && Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), index, index + @this._dictionary.SpecPairs.Length, @this._dictionary.SpecKeys)")]
+            [Ensures("@this._dictionary.SpecPairs == Pal.Old(@this._dictionary.SpecPairs)")]
             public void CopyTo(TKey[] array, int index)
             {
                 ArgumentNullException.ThrowIfNull(array);
@@ -611,7 +677,15 @@ namespace System.Collections.Generic
                     throw new ArgumentException(SR.Arg_ArrayPlusOffTooSmall);
                 }
 
-                _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node) { array[index++] = node.Item.Key; return true; });
+                Ghost<SpecInt> i0 = (SpecInt)index;
+                Ghost<SpecInt> n0 = (SpecInt)_dictionary.SpecPairs.Length;
+                Ghost<Seq<TKey>> a0 = Pal.Contents(array);
+                _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
+                {
+                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => i0.Value + n0.Value <= a0.Value.Length && a0.Value.Length <= int.MaxValue && SpecKeyMap.CopiedKeys(tr, a0.Value, Pal.Contents(array), i0.Value, index), n0.Value);
+                    array[index++] = node.Item.Key;
+                    return true;
+                });
             }
 
             void ICollection.CopyTo(Array array, int index)
@@ -653,36 +727,47 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Ensures("Result == @this._dictionary.SpecPairs.Length")]
             public int Count
             {
                 get { return _dictionary.Count; }
             }
 
+            [Ensures("Result")]
             bool ICollection<TKey>.IsReadOnly
             {
                 get { return true; }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void ICollection<TKey>.Add(TKey item)
             {
                 throw new NotSupportedException(SR.NotSupported_KeyCollectionSet);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void ICollection<TKey>.Clear()
             {
                 throw new NotSupportedException(SR.NotSupported_KeyCollectionSet);
             }
 
+            [Ensures("Result == (Pal.KeyIndex(@this._dictionary.SpecKeyComparer, @this._dictionary.SpecKeys, item) >= 0)")]
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(item)")]
             public bool Contains(TKey item)
             {
                 return _dictionary.ContainsKey(item);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             bool ICollection<TKey>.Remove(TKey item)
             {
                 throw new NotSupportedException(SR.NotSupported_KeyCollectionSet);
             }
 
+            [Ensures("!Result")]
             bool ICollection.IsSynchronized
             {
                 get { return false; }
@@ -702,16 +787,25 @@ namespace System.Collections.Generic
                     _dictEnum = dictionary.GetEnumerator();
                 }
 
+                [Ensures("true")]
                 public void Dispose()
                 {
                     _dictEnum.Dispose();
                 }
 
+                [Rlimit(40)]
+                [Requires("@this._dictEnum.SpecWalking")]
+                [Throws(typeof(InvalidOperationException), "!@this._dictEnum.SpecFresh")]
+                [Ensures("@this._dictEnum.SpecWalking && @this._dictEnum.SpecCurrentOk")]
+                [Ensures("Result == (Pal.Old(@this._dictEnum.SpecPending).Length > 0)")]
+                [Ensures("@this._dictEnum.SpecPending == Pal.Slice(Pal.Old(@this._dictEnum.SpecPending), Result ? 1 : 0, Pal.Old(@this._dictEnum.SpecPending).Length)")]
                 public bool MoveNext()
                 {
                     return _dictEnum.MoveNext();
                 }
 
+                [Requires("@this._dictEnum.SpecCurrentOk")]
+                [Ensures("Pal.Implies(!@this._dictEnum.SpecEnded, Pal.Same(Result, SpecSearchTree.RootKey(@this._dictEnum.SpecCurrentTree, default(KeyValuePair<TKey, TValue>)).Key))")]
                 public TKey Current
                 {
                     get
@@ -720,6 +814,9 @@ namespace System.Collections.Generic
                     }
                 }
 
+                [Requires("@this._dictEnum.SpecCurrentOk")]
+                [Throws(typeof(InvalidOperationException), "@this._dictEnum.SpecEnded")]
+                [Ensures("!@this._dictEnum.SpecEnded && Pal.Exists((TKey v) => Pal.Boxes(Result, v) && Pal.Same(v, SpecSearchTree.RootKey(@this._dictEnum.SpecCurrentTree, default(KeyValuePair<TKey, TValue>)).Key))")]
                 object? IEnumerator.Current
                 {
                     get
@@ -733,6 +830,9 @@ namespace System.Collections.Generic
                     }
                 }
 
+                [Rlimit(40)]
+                [Throws(typeof(InvalidOperationException), "!@this._dictEnum.SpecFresh")]
+                [Ensures("@this._dictEnum.SpecWalkable && @this._dictEnum.SpecPending == @this._dictEnum.SpecInitial")]
                 void IEnumerator.Reset()
                 {
                     _dictEnum.Reset();
@@ -746,6 +846,7 @@ namespace System.Collections.Generic
         {
             private readonly SortedDictionary<TKey, TValue> _dictionary;
 
+            [Ensures("ReferenceEquals(@this._dictionary, dictionary)")]
             public ValueCollection(SortedDictionary<TKey, TValue> dictionary)
             {
                 ArgumentNullException.ThrowIfNull(dictionary);
@@ -761,6 +862,11 @@ namespace System.Collections.Generic
 
             IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<TValue>)this).GetEnumerator();
 
+            // pal: R32.11. As `KeyCollection.CopyTo`, for the values.
+            [Throws(typeof(ArgumentOutOfRangeException), "index < 0")]
+            [Throws(typeof(ArgumentException), "Pal.Contents(array).Length - index < @this._dictionary.SpecPairs.Length")]
+            [Ensures("0 <= index && Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), index, index + @this._dictionary.SpecPairs.Length, SpecKeyMap.Values(@this._dictionary.SpecPairs))")]
+            [Ensures("@this._dictionary.SpecPairs == Pal.Old(@this._dictionary.SpecPairs)")]
             public void CopyTo(TValue[] array, int index)
             {
                 ArgumentNullException.ThrowIfNull(array);
@@ -772,7 +878,15 @@ namespace System.Collections.Generic
                     throw new ArgumentException(SR.Arg_ArrayPlusOffTooSmall);
                 }
 
-                _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node) { array[index++] = node.Item.Value; return true; });
+                Ghost<SpecInt> i0 = (SpecInt)index;
+                Ghost<SpecInt> n0 = (SpecInt)_dictionary.SpecPairs.Length;
+                Ghost<Seq<TValue>> a0 = Pal.Contents(array);
+                _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
+                {
+                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => i0.Value + n0.Value <= a0.Value.Length && a0.Value.Length <= int.MaxValue && SpecKeyMap.CopiedValues(tr, a0.Value, Pal.Contents(array), i0.Value, index), n0.Value);
+                    array[index++] = node.Item.Value;
+                    return true;
+                });
             }
 
             void ICollection.CopyTo(Array array, int index)
@@ -814,36 +928,46 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Ensures("Result == @this._dictionary.SpecPairs.Length")]
             public int Count
             {
                 get { return _dictionary.Count; }
             }
 
+            [Ensures("Result")]
             bool ICollection<TValue>.IsReadOnly
             {
                 get { return true; }
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void ICollection<TValue>.Add(TValue item)
             {
                 throw new NotSupportedException(SR.NotSupported_ValueCollectionSet);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void ICollection<TValue>.Clear()
             {
                 throw new NotSupportedException(SR.NotSupported_ValueCollectionSet);
             }
 
+            [Ensures("Result == SpecValueSearch.HasValue(@this._dictionary.SpecPairs, item)")]
             bool ICollection<TValue>.Contains(TValue item)
             {
                 return _dictionary.ContainsValue(item);
             }
 
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             bool ICollection<TValue>.Remove(TValue item)
             {
                 throw new NotSupportedException(SR.NotSupported_ValueCollectionSet);
             }
 
+            [Ensures("!Result")]
             bool ICollection.IsSynchronized
             {
                 get { return false; }
@@ -863,16 +987,25 @@ namespace System.Collections.Generic
                     _dictEnum = dictionary.GetEnumerator();
                 }
 
+                [Ensures("true")]
                 public void Dispose()
                 {
                     _dictEnum.Dispose();
                 }
 
+                [Rlimit(40)]
+                [Requires("@this._dictEnum.SpecWalking")]
+                [Throws(typeof(InvalidOperationException), "!@this._dictEnum.SpecFresh")]
+                [Ensures("@this._dictEnum.SpecWalking && @this._dictEnum.SpecCurrentOk")]
+                [Ensures("Result == (Pal.Old(@this._dictEnum.SpecPending).Length > 0)")]
+                [Ensures("@this._dictEnum.SpecPending == Pal.Slice(Pal.Old(@this._dictEnum.SpecPending), Result ? 1 : 0, Pal.Old(@this._dictEnum.SpecPending).Length)")]
                 public bool MoveNext()
                 {
                     return _dictEnum.MoveNext();
                 }
 
+                [Requires("@this._dictEnum.SpecCurrentOk")]
+                [Ensures("Pal.Implies(!@this._dictEnum.SpecEnded, Pal.Same(Result, SpecSearchTree.RootKey(@this._dictEnum.SpecCurrentTree, default(KeyValuePair<TKey, TValue>)).Value))")]
                 public TValue Current
                 {
                     get
@@ -881,6 +1014,9 @@ namespace System.Collections.Generic
                     }
                 }
 
+                [Requires("@this._dictEnum.SpecCurrentOk")]
+                [Throws(typeof(InvalidOperationException), "@this._dictEnum.SpecEnded")]
+                [Ensures("!@this._dictEnum.SpecEnded && Pal.Exists((TValue v) => Pal.Boxes(Result, v) && Pal.Same(v, SpecSearchTree.RootKey(@this._dictEnum.SpecCurrentTree, default(KeyValuePair<TKey, TValue>)).Value))")]
                 object? IEnumerator.Current
                 {
                     get
@@ -894,6 +1030,9 @@ namespace System.Collections.Generic
                     }
                 }
 
+                [Rlimit(40)]
+                [Throws(typeof(InvalidOperationException), "!@this._dictEnum.SpecFresh")]
+                [Ensures("@this._dictEnum.SpecWalkable && @this._dictEnum.SpecPending == @this._dictEnum.SpecInitial")]
                 void IEnumerator.Reset()
                 {
                     _dictEnum.Reset();
@@ -966,6 +1105,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item) < 0")]
         [Ensures("@this.SpecItems == SpecTopDown.Inserted(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), item)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecVersion == SpecWrap.Int32(Pal.Old(@this.SpecVersion) + 1)")]
         [Throws(typeof(ArgumentException), "Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0")]
         internal override bool AddIfNotPresent(T item)
         {

@@ -23,6 +23,13 @@ namespace PalLang;
 public sealed class RequiresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -34,6 +41,13 @@ public sealed class RequiresAttribute(string predicate) : Attribute
 public sealed class EnsuresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -95,7 +109,12 @@ public sealed class ConsumesAttribute : Attribute;
 /// passes an expression whose static type is that class; inside the method, the parameter
 /// is an object of it, and its contracts may name the class's members on it.
 /// </summary>
-[AttributeUsage(AttributeTargets.Parameter)]
+/// <remarks>
+/// R32.13. On a method's return value, it names a view (a sealed nested subclass the
+/// containing class borrows into): the method returns an object of exactly that class, and
+/// its result is the view's record.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.ReturnValue)]
 public sealed class ExactlyAttribute(Type type) : Attribute
 {
     public Type Type { get; } = type;
@@ -139,7 +158,19 @@ public sealed class PlainAttribute : Attribute;
 /// which <c>Pal.Tree</c> maps over the tree a pointer reaches.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class)]
-public sealed class RegionAttribute : Attribute;
+public sealed class RegionAttribute : Attribute
+{
+    /// <summary>
+    /// R31.1. The nodes form rings rather than trees: the two self-typed fields are the
+    /// <em>next</em> and <em>previous</em> links of a circular doubly-linked list
+    /// (<c>LinkedListNode&lt;T&gt;</c>). The owner's invariant does not require its pointers
+    /// to be unshared trees, a read requires only that the node is in the region, and the
+    /// tree intrinsics (<c>Pal.Tree</c>, <c>Pal.WellFormed</c>, <c>Pal.Unshared</c>,
+    /// <c>Pal.Reshaped</c>) are refused (PALCS0780). The shape is the user's to state, through
+    /// <c>SpecRing</c>.
+    /// </summary>
+    public bool Cyclic { get; set; }
+}
 
 /// <summary>
 /// R22.14. Arithmetic that writes this integer field -- or, on a method or constructor, all the integer
@@ -483,5 +514,14 @@ public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
 /// <c>Pal.Trace</c>. An argument at this position is a lambda whose first statement is
 /// <c>Pal.Protocol</c>, the invariant it keeps over the trace.
 /// </summary>
+/// <remarks>
+/// R32.11. With <c>Bounded = true</c> the callee takes a bound from the caller,
+/// <c>Pal.CallBound(action)</c>, and calls the delegate fewer times than it. Its contract
+/// requires what it needs of the bound; the lambda passed states the bound in
+/// <c>Pal.Protocol(tr => …, maxCalls)</c> and may assume it.
+/// </remarks>
 [AttributeUsage(AttributeTargets.Parameter)]
-public sealed class CallbackAttribute : Attribute;
+public sealed class CallbackAttribute : Attribute
+{
+    public bool Bounded { get; set; }
+}
