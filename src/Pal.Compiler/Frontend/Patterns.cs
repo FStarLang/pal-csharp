@@ -357,6 +357,10 @@ public sealed partial class ExprLowerer
                 ? cond
                 : False(loc);
 
+        // R30.6. A library class whose test is bound: the predicate, of the non-null value.
+        if (known.TypeTestBinding(target) is { } test)
+            return Conj(loc, cond, new IrSpecOp(loc, test, [narrowed]) { Type = Bool });
+
         diagnostics.Error("PALCS0627", loc,
             $"A test that a `{subject.Type}` is a `{target}`. A type pattern translates when " +
             "the type is a case of the subject's closed record hierarchy, or the subject's " +

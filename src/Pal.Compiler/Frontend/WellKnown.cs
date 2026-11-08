@@ -207,6 +207,14 @@ public sealed class WellKnown
     public string? Binding(ISymbol? symbol) =>
         symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
         bindings.TryGetValue(id, out var term) ? term : null;
+
+    /// <summary>
+    /// R30.6. The F* predicate a type test against a library class is bound to: the binding
+    /// of <c>"is:"</c> followed by the class's documentation-comment ID.
+    /// </summary>
+    public string? TypeTestBinding(ITypeSymbol? type) =>
+        type?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
+        bindings.TryGetValue("is:" + id, out var term) ? term : null;
     public INamedTypeSymbol SpecOpAttribute { get; }
 
     /// <summary>R27.22. <c>[RegionOp]</c>: a specification operation over a region's nodes.</summary>

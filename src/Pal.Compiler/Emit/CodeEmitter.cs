@@ -122,6 +122,9 @@ public sealed class CodeEmitter(
     /// </summary>
     private readonly List<Slot> _objectLocals = [];
 
+    /// <summary>R30.11. The array locals whose ownership has moved into a field.</summary>
+    private readonly HashSet<string> _movedArrays = [];
+
     /// <summary>
     /// How many enclosing blocks would have to discard what they declared as they close
     /// (F19). Zero means the nearest enclosing block ends at the method's exit, where the
@@ -274,7 +277,7 @@ public sealed class CodeEmitter(
             // an arm that replaces an open object's array field leaves the join holding the
             // box and the new array under unrelated existentials. The rest of the block is
             // moved into both arms instead, so that no join is needed.
-            if (statements[i] is IrIf split && JoinLoses(split))
+            if (statements[i] is IrIf split && (JoinLoses(split) || ArmDeclaresCell(split)))
             {
                 var rest = statements.RemoveRange(0, i + 1);
                 // An arm that never completes keeps none of the rest: behind its
@@ -395,12 +398,15 @@ public sealed class CodeEmitter(
                 // Each arm ends the method, so what one arm moves out of a local (R22.12)
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
+                var moved = _movedArrays.ToList();
                 // R27.50. Likewise the receiver is as dirty in the other arm as before both.
                 var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
                 _receiverDirty = dirty;
                 _objectLocals.Clear();
                 _objectLocals.AddRange(owned);
+                _movedArrays.Clear();
+                _movedArrays.UnionWith(moved);
                 _indent--;
                 Line("} else {");
                 _indent++;
@@ -768,6 +774,31 @@ public sealed class CodeEmitter(
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
         MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i);
+
+    /// <summary>
+    /// R30.10. An arm that declares a mutable scalar local outside any loop body (a
+    /// <c>for</c> counter): Pulse allocates a cell only where the post-condition is known,
+    /// so the rest of the block is moved into both arms, as for R22.12.
+    /// </summary>
+    private static bool ArmDeclaresCell(IrIf i)
+    {
+        static bool Declares(IrStmt? s) => s switch
+        {
+            IrLocalDecl { Immutable: false, Type: not (IrArrayType or IrSpanType or IrGhostType or IrClassType) } => true,
+            IrBlock b => b.Statements.Any(Declares),
+            _ => false,
+        };
+        return Declares(i.Then) || Declares(i.Else);
+    }
+
+    /// <summary>
+    /// R30.12. An arm that writes an array element, followed in a loop body by a lemma call
+    /// or an assertion: Pulse's join of the arms keeps no pure fact about the array's new
+    /// contents, which the lemma needs, so the rest of the body moves into both arms.
+    /// </summary>
+    private static bool WritesElementBeforeLemma(IrIf i, ImmutableArray<IrStmt> rest) =>
+        Check.Statements(i).Any(t => t is IrAssign a && Normalize.ElementTarget(a.Target) is IrElement) &&
+        rest.Any(s => s is IrGhostStmt { Kind: GhostKind.LemmaCall or GhostKind.Assert });
 
     /// <summary>
     /// R27.54. An arm with a loop that breaks: the break flag is a mutable local, which Pulse
@@ -2757,7 +2788,10 @@ public sealed class CodeEmitter(
                     Line($"with {old}. assert ({pts} {projection} {old});");
                     Line($"drop_ ({pts} {projection} {old});");
                     if (a.Value is IrVar moved)
+                    {
                         _objectLocals.RemoveAll(l => l.Name == moved.Name && l.Kind == SlotKind.Array);
+                        _movedArrays.Add(moved.Name);
+                    }
                     // R24.7. A nullable field owns what it holds through `NA.pts_to`: a
                     // non-null array moves in by `intro`, and `null` owns nothing.
                     // (`null` arrives owned, by `NA.alloc_null`.)
@@ -3680,7 +3714,7 @@ public sealed class CodeEmitter(
             // R27.40. And so, in a loop that may escape, does one that calls a method on a local
             // object without escaping (R26.5's split, which only a non-escaping loop gets).
             if (statements[k] is IrIf i &&
-                (WritesRecordInArm(i) || _escape is null && MovesRegion(i) ||
+                (WritesRecordInArm(i) || _escape is null && (MovesRegion(i) || ArmDeclaresCell(i) || WritesElementBeforeLemma(i, rest)) ||
                  _escape is not null && !MayEscape(i) && CallsLocalObject(i)) &&
                 NullTest(i.Cond) is null)
             {
@@ -3910,6 +3944,8 @@ public sealed class CodeEmitter(
         // instance method mention a field.
         var owned = _slots.Values
             .Where(s => s.Owns && !_objects.Any(o => o.Name == s.Name))
+            // R30.11. Nor does an array local whose array a field now owns.
+            .Where(s => !(s.Kind is SlotKind.Array && _movedArrays.Contains(s.Name)))
             .ToImmutableArray();
         var scope = new SpecScope(plan.PreScope) { Pre = plan.PreScope };
 

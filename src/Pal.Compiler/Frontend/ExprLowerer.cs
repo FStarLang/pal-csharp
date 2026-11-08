@@ -74,7 +74,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// R24.9. A call of a <c>ref</c>-returning method of this program whose body is a
     /// sequence of single-variable local declarations followed by <c>return ref e;</c> is
     /// <c>e</c>, with each local and each parameter replaced by what it was bound to. Each
-    /// argument must be a name or a constant, so substituting it is evaluating it.
+    /// argument must be a name or a constant, or a field of one (R30.8), so substituting it
+    /// is evaluating it.
     /// </summary>
     private IrExpr? InlineRef(InvocationExpressionSyntax node, IMethodSymbol method,
         IReadOnlyList<ArgumentSyntax> args, IrLoc loc)
@@ -87,8 +88,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 { IsConst: false, Declaration.Variables: [{ Initializer: { Value: not RefExpressionSyntax } }] }) ||
             (!method.IsStatic && node.Expression is not (IdentifierNameSyntax or
                 MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax })) ||
-            !args.All(a => a.RefKindKeyword.IsKind(SyntaxKind.None) &&
-                a.Expression is IdentifierNameSyntax or LiteralExpressionSyntax))
+            !args.All(a => a.RefKindKeyword.IsKind(SyntaxKind.None) && FieldPath(a.Expression)))
         {
             diagnostics.Unsupported(loc, $"A call to the `ref`-returning `{method.Name}`",
                 "Only a method of locals and `return ref e;`, called on `this` with names or " +
@@ -114,6 +114,32 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         foreach (var b in bound) _patternBindings.Remove(b);
         return inlined;
     }
+
+    /// <summary>
+    /// R30.9. The image of <c>(C)e</c>'s target when both <c>C</c> and <c>e</c>'s type are
+    /// reference types bound by R21.5 and C# converts one to the other by reference.
+    /// </summary>
+    private IrType? BoundReferenceCast(CastExpressionSyntax c)
+    {
+        if (model.GetTypeInfo(c.Type).Type is not { IsReferenceType: true } to ||
+            model.GetTypeInfo(c.Expression).Type is not { IsReferenceType: true } from ||
+            known.Binding(to) is null || known.Binding(from) is null ||
+            model.GetConversion(c) is not { IsReference: true } and not { IsIdentity: true })
+            return null;
+        return known.MapType(to.WithNullableAnnotation(NullableAnnotation.NotAnnotated)) is { } t and not IrOptionType ? t : null;
+    }
+
+    /// <summary>
+    /// R24.9, R30.8. A name, a constant, or a field of one (<c>entry.HashCode</c>): reading
+    /// it has no effect, so substituting it where the parameter was is evaluating it.
+    /// </summary>
+    private bool FieldPath(ExpressionSyntax e) => e switch
+    {
+        IdentifierNameSyntax or LiteralExpressionSyntax or ThisExpressionSyntax => true,
+        MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } m =>
+            model.GetSymbolInfo(m).Symbol is IFieldSymbol && FieldPath(m.Expression),
+        _ => false,
+    };
 
     /// <summary>
     /// R27.46. An argument at an <c>[Exactly(typeof(C))]</c> parameter is an expression whose
@@ -361,6 +387,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 model.GetTypeInfo(ce).ConvertedType is IArrayTypeSymbol { Rank: 1 } emptyArray &&
                 known.MapType(emptyArray) is IrArrayType emptyType =>
                 new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType },
+            // R30.13. `out _`: a fresh local, declared ahead of the statement.
+            ExpressionSyntax dx when OutDiscard(dx) is { } dn =>
+                new IrVar(loc, dn) { Type = known.MapType(model.GetTypeInfo(dx).Type!) },
             IdentifierNameSyntax id => LowerIdentifier(id, loc),
             // R27.43. `out var x`: the local, declared ahead of the statement.
             DeclarationExpressionSyntax { Designation: SingleVariableDesignationSyntax dv }
@@ -402,6 +431,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             CastExpressionSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) &&
                                         known.MapType(model.GetTypeInfo(c.Type).Type) is IrUserSpecType { FStar: Sorted.ComparerType } castCmp =>
                 new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", []) { TypeArgs = castCmp.Args, Type = castCmp },
+            // R30.9. A reference conversion between two library types bound by R21.5
+            // (`(IEqualityComparer<T>)c`) is the bound value itself, not null.
+            CastExpressionSyntax c when BoundReferenceCast(c) is { } bt =>
+                Lower(c.Expression) is var castee && castee.Type is IrOptionType
+                    ? new IrOptionOp(loc, OptionOpKind.Value, castee) { Type = bt }
+                    : castee with { Type = bt },
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -1961,9 +1996,18 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public IrExpr ToDeclared(IrExpr value, IrType? declared) =>
         declared is IrOptionType option && value is not IrNull &&
-        value.Type is { } type and not IrOptionType && type.Equals(option.Inner)
+        value.Type is { } type and not IrOptionType && SameType(type, option.Inner)
             ? new IrOptionOp(value.Loc, OptionOpKind.Some, value) { Type = option }
             : value;
+
+    /// <summary>
+    /// Type equality that compares a bound type's arguments element by element (a record's
+    /// <c>ImmutableArray</c> member compares by reference).
+    /// </summary>
+    internal static bool SameType(IrType a, IrType b) =>
+        a.Equals(b) ||
+        a is IrUserSpecType ua && b is IrUserSpecType ub && ua.Name == ub.Name && ua.FStar == ub.FStar &&
+        ua.Args.Length == ub.Args.Length && ua.Args.Zip(ub.Args, (x, y) => SameType(x, y)).All(same => same);
 
     /// <summary>
     /// R10.5, R24.23. <c>e!</c> is transparent, but for an <c>option</c>: there C# types
@@ -2177,6 +2221,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         CallbackOf(method.Parameters[i], known, diagnostics) is { } cb
             ? LowerCallbackArgument(arg, cb, Locations.From(arg))
             : LowerArgument(arg);
+
+    /// <summary>
+    /// R30.13. The local standing for the discard <c>out _</c> (or <c>out var _</c>,
+    /// <c>out T _</c>), which the statement holding it declares; null for any other expression.
+    /// </summary>
+    public string? OutDiscard(ExpressionSyntax e) =>
+        e.Parent is ArgumentSyntax { RefKindKeyword.RawKind: (int)SyntaxKind.OutKeyword } &&
+        (e is DeclarationExpressionSyntax { Designation: DiscardDesignationSyntax } ||
+         e is IdentifierNameSyntax && model.GetSymbolInfo(e).Symbol is IDiscardSymbol)
+            ? $"__pal_discard{e.SpanStart}"
+            : null;
 
     public IrExpr LowerArgument(ArgumentSyntax arg)
     {

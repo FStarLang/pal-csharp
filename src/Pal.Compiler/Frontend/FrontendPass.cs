@@ -590,10 +590,16 @@ public static partial class FrontendPass
                         _ => null,
                     });
 
+                    // R30.5. Nor does a static method of a static class bound by R21.5: a
+                    // helper such as `HashHelpers.GetPrime` reads nothing but its arguments,
+                    // like a method of a class outside the sources (`BitOperations.Log2`).
+                    var staticHelper = member is IMethodSymbol { IsStatic: true } && type.IsStatic &&
+                        known.SpecTypeName(type) is null;
+
                     // R27.58. A nested class bound by R21.5 is a type, not an operation.
                     if (member is not ITypeSymbol &&
                         known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
-                        !isPredicate && !producesObject &&
+                        !isPredicate && !producesObject && !staticHelper &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
                             $"`[SpecOp]` on `{type.Name}.{member.Name}`, but `{type.Name}` is not a " +

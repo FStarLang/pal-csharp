@@ -49,7 +49,7 @@ public static class NestedUse
         if (b)
         {
             NestedCell c = new NestedCell();
-            int ignored = c.Get();
+            c.Get();
         }
         return answer;
     }
