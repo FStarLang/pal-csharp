@@ -2000,14 +2000,46 @@ public sealed class CodeEmitter(
     }
 
     /// <summary>R27.59. The owned fields left open at a heap by a call that returned a region pointer.</summary>
-    private readonly Dictionary<string, (IrClassType Class, string Args)> _fieldOpen = [];
+    // R32.10. `Regions` names the field's region classes in the order of its heap
+    // arguments; `Written` is set when the method has since written one of them.
+    private readonly Dictionary<string, (IrClassType Class, string Args, string? Perm, IReadOnlyList<string> Regions,
+        IReadOnlyList<string> Heaps, IReadOnlyList<IrClassType> Written)> _fieldOpen = [];
+
+    /// <summary>R32.10. A write to (or an allocation in) a region of class <paramref name="k"/> may be a write to an open field's region.</summary>
+    private void FieldRegionWritten(IrClassType k)
+    {
+        foreach (var (f, open) in _fieldOpen.ToList())
+            if (open.Regions.Contains(k.Name) && !open.Written.Any(w => w.Name == k.Name))
+                _fieldOpen[f] = open with { Written = [.. open.Written, k] };
+    }
 
     /// <summary>R27.59. Closes an owned field <see cref="_fieldOpen"/> holds open, back to its invariant.</summary>
     private void CloseFieldRegion(string field, bool forget = true)
     {
         if (!_fieldOpen.TryGetValue(field, out var open)) return;
-        Line($"fold {InvHeap(open.Class)} {open.Args};");
-        Line($"{Names.ClassModule(open.Class.Name)}.{Names.ClassOfHeap(open.Class.Name)} {open.Args.Split(' ')[0]};");
+        var fexpr = open.Args.Split(' ')[0];
+        if (open.Written.Count == 0)
+            Line($"fold {InvHeap(open.Class)} {open.Args};");
+        else
+        {
+            // R32.10. The method wrote the field's region since the call that opened it:
+            // the invariant is folded again at the heap the region holds now, and at the
+            // model that heap and the field's record determine. Folding it at that model
+            // is the proof obligation that the write kept the invariant's refinements.
+            var perm = open.Perm ?? "1.0R";
+            var heaps = open.Heaps.ToList();
+            foreach (var k in open.Written)
+            {
+                var hn = FreshValue(Frontend.Region.HeapBinder(k.Name));
+                Line($"with {hn}. assert ({PulseEmitter.RegionAt(k, perm, hn)});");
+                heaps[open.Regions.ToList().IndexOf(k.Name)] = hn;
+            }
+            var rn = FreshValue(open.Class.Name);
+            Line($"with {rn}. assert (B.pts_to {fexpr} #{perm} {rn});");
+            var model = $"({Names.ClassModule(open.Class.Name)}.{Names.ClassAbsModel(open.Class.Name)} {rn} {string.Join(" ", heaps)})";
+            Line($"fold {InvHeap(open.Class)} {fexpr} {(open.Perm is null ? "" : $"#{open.Perm} ")}{model} {string.Join(" ", heaps)};");
+        }
+        Line($"{Names.ClassModule(open.Class.Name)}.{Names.ClassOfHeap(open.Class.Name)} {fexpr};");
         if (forget) _fieldOpen.Remove(field);
     }
 
@@ -2701,6 +2733,7 @@ public sealed class CodeEmitter(
                     Line($"let {wcur} = {Names.ClassModule(wc.Name)}.{Frontend.Region.ReadOf(wc.Name)} {wrecv};");
                     Line($"{Frontend.Region.Module}.write {wrecv} " +
                          $"({{ {wcur} with {Names.ClassProjection(wc.Name, wfield.Field)} = {wvalue} }});");
+                    FieldRegionWritten(wc);
                     return;
                 }
                 Line($"let {wcur} = B.op_Bang {wobj.NonNull};");
@@ -2724,6 +2757,7 @@ public sealed class CodeEmitter(
                 Line($"let {ccur} = {Names.ClassModule(cc.Name)}.{Frontend.Region.ReadOf(cc.Name)} {cptr};");
                 Line($"{Frontend.Region.Module}.write {cptr} " +
                      $"({{ {ccur} with {Names.ClassProjection(cc.Name, cfield.Field)} = {cvalue} }});");
+                FieldRegionWritten(cc);
                 return;
             }
 
@@ -2742,6 +2776,7 @@ public sealed class CodeEmitter(
                 Line($"let {xcur} = {Names.ClassModule(xc.Name)}.{Frontend.Region.ReadOf(xc.Name)} {xptr};");
                 Line($"{Frontend.Region.Module}.write {xptr} " +
                      $"({{ {xcur} with {Names.ClassProjection(xc.Name, xfield.Field)} = {xvalue} }});");
+                FieldRegionWritten(xc);
                 return;
             }
 
@@ -4492,7 +4527,13 @@ public sealed class CodeEmitter(
                     [lr.Callback.View, lr.Callback.Result]));
                 Line($"fold ({protocol} (Seq.empty #{e}));");
                 _lambdaProtocols.Add(protocol);
-                return $"{protocol} ({Names.LambdaCallback(lr.Method)} {applied})".Replace(" )", ")");
+                // R32.11. A bounded parameter takes the lambda's bound, or none, before it.
+                var callback = $"({Names.LambdaCallback(lr.Method)} {applied})".Replace(" )", ")");
+                if (!lr.Callback.Bounded) return $"{protocol} {callback}";
+                var bound = lr.Bounded
+                    ? $"({Names.LambdaBound(lr.Method)} {applied})".Replace(" )", ")")
+                    : "Pulse.Lib.CSharp.Callback.max_bound";
+                return $"{protocol} {bound} {callback}";
             }
 
             case IrConvert cv:
@@ -4684,7 +4725,8 @@ public sealed class CodeEmitter(
             var fargs = $"{raw[0]} {holder.PermArg}{fm} {string.Join(" ", fhs)}";
             Line($"with {fm} {string.Join(" ", fhs)}. assert ({InvHeap(fk)} {fargs});");
             Line($"unfold {InvHeap(fk)} {fargs};");
-            _fieldOpen[((IrField)call.Args[0]).Field] = (fk, fargs);
+            _fieldOpen[((IrField)call.Args[0]).Field] = (fk, fargs, holder.Fraction,
+                [.. RegionsOf(fdecl).Select(k => k.Name)], fhs, []);
         }
         else if (convert is not null && (closedRecv is not null || fieldRecv))
             Line($"{convert}{(wantsHeap ? Names.ClassOfHeap(recvClass!) : Names.ClassToHeap(recvClass!))} {raw[0]};");

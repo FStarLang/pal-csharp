@@ -9421,6 +9421,64 @@ the receiver's, so closing the receiver would need the field closed first.
 `SortedDictionary.CopyTo` (whose `_set.CopyTo` may raise, but whose `Requires` rule it out)
 needs it.
 
+### R32.10 Writing through a node an owned field's search found
+
+A spec-only struct may hold a pointer to a `[Region]` class: it is a value that owns
+nothing (PALCS0511 is not reported for it). A region owner's model can then name its root
+(`SortedSetModel.Root`, `[Spec] internal SpecRoot`), and a search's contract can say that
+the node it returns is one of the tree's nodes:
+`SpecRegionWrite.InTree<Node, T>(Pal.Heap<Node>(), @this.SpecRoot, Result)`
+(`Pulse.Lib.CSharp.RegionReplace.in_tree`: the box is among those the root reaches).
+
+A holder (R27.58) keeps the field open at the heap the call returned (R27.59). When the
+method then writes a field of a region object, the field is marked as written. When the
+field is closed, its invariant is folded at the heap the region holds then, and at the model
+that heap and the field's record determine (`abs_model`). That fold is the proof obligation
+that the write kept the owner's invariant and its `[Refine]`s. It is discharged by
+`RegionReplace` lemmas that fire on their own:
+
+* `write_unshared` and `write_in_tree`. A write to a node of the tree that keeps the node's
+  links leaves the tree unshared. The in-order keys change only at the node's position (`pos`),
+  where the old key was. If the write keeps the node's colour, the shape, size and
+  red-black colouring are unchanged.
+* `upd_equiv`. Replacing a key with one that compares like it keeps a strictly sorted
+  sequence strictly sorted.
+* `key_index_index`. In a strictly sorted sequence, an element's key index is its position.
+
+The `SortedDictionary` indexer setter replaces the value of the pair a search found
+(`node.Item = new KeyValuePair(node.Item.Key, value)`). Its contract says the pairs are
+updated at the key's index when the key is present, and that the pair is inserted otherwise.
+`Pal.SetAt` takes a `SpecInt` index.
+
+### R32.11 A callee-stated bound on a callback's calls
+
+A walk calls its callback once per node, and a callback that writes `array[index++]` with
+no check of its own needs to know that. The R27.39 callback type bounds the trace only by
+its call budget (`max_calls`), so it cannot. A `[Callback]` parameter can take a bound:
+
+* The callee declares `[Callback(Bounded = true)]` and states what it calls back fewer
+  times than, in a precondition over `Pal.CallBound(action)`. For example, the walk has
+  `[Requires("@this.SpecItems.Length <= Pal.CallBound(action)")]`. `Pal.CallBound`
+  names a `[Callback]` parameter of the enclosing method, else PALCS0800.
+* The bound is a ghost argument the caller chooses (`n_action: erased int`, before the
+  action). The callback's type `region_cb view p n` requires `|tr| < max_calls` and
+  `|tr| < n` of the trace each call extends.
+* A lambda states its bound as the second argument of `Pal.Protocol(tr => …, bound)`. The
+  lifted method (`bound_L`, of the lambda's type parameters and captures) is passed for
+  `n`. The lambda may then assume `|tr| < bound` on entry. The bound may name only
+  captures the lambda does not write, so it is fixed when the lambda is passed. A bound
+  given to an unbounded parameter, or one that names a written capture, is PALCS0800.
+* A lambda with no bound passed to a bounded parameter, and every lambda passed to an
+  unbounded one, gets `max_bound` (`max_calls`), the old budget.
+
+Lambdas in the members of a borrowing class (R29, e.g. `KeyCollection.CopyTo`) are now
+lifted like those of other classes. Before, their lifted methods were dropped.
+
+`Pulse.Lib.CSharp.PairWalk` states what a walk of pairs copied (`copied_keys`,
+`copied_values`, of `KeyMap.keys`/`KeyMap.values`) and proves it from the trace. With the
+walk's bound set to the pair count, the views' `CopyTo` write `array[index++]` in range,
+and their contents become the old contents spliced with the keys or values from `index` on.
+
 ### Verified (§32)
 
 `SortedDictionary<TKey,TValue>` members verified in this section:
@@ -9440,6 +9498,8 @@ needs it.
 | `ContainsValue(v)` | `SpecValueSearch.HasValue(pairs, v)`; pairs unchanged |
 | `ValueCollection` `ICollection<T>.Contains(v)` | `HasValue` of the dictionary's pairs |
 | `Comparer` | the key comparer (`SpecKeyComparer`) |
+| `KeyCollection.CopyTo(a, i)`, `ValueCollection.CopyTo(a, i)` | `a` spliced at `[i, i + Count)` with the keys (values) in order; throws `ArgumentOutOfRangeException` on `i < 0`, `ArgumentException` when `a.Length - i < Count` |
+| indexer setter `this[key] = value` | key present: pairs `SetAt` the key's index to `(key at that index, value)`; absent: `Inserted`; requires a non-null key and fewer than `int.MaxValue` pairs |
 
 `ContainsKey`, `TryGetValue` and `SortedSet.TryGetValue` were re-verified under R32.2.
 `InOrderTreeWalk`, `RemoveWhere`, the three `SortedSet.CopyTo` overloads and
@@ -9453,12 +9513,9 @@ needs it.
 
 ### Not verified (§32)
 
-* `KeyCollection.CopyTo`/`ValueCollection.CopyTo` (and their `ICollection` forms). Their
-  callbacks write `array[index++]` with no bound check. The callback type of R27.39 bounds
-  the trace only by its call budget, not by the walked tree's size, so the write cannot be
-  proved in bounds. A callee-stated bound on the trace would be needed.
-* The indexer setter, which replaces a found pair's value in place: a region write
-  through an owned field, needing a same-key replacement lemma for the in-order sequence.
+* The `ICollection.CopyTo(Array, int)` forms (of the dictionary and both views). They test
+  `array.Rank` and `GetLowerBound`, type-test `array` (`is TKey[]`, `as object[]`) and
+  rely on array covariance raising `ArrayTypeMismatchException`. None of these is modelled.
 * The dictionary's and the views' enumerators, the `IDictionary` constructors, and the
   non-generic `IDictionary`/`ICollection` members.
 * `TreeSubSet` and `GetViewBetween`, and so the `IsSubsetOf` family's view branches.
@@ -9473,4 +9530,12 @@ needs it.
   the contracts state each as written.
 * `ICollection<KVP>.Add`, like `Add`, requires the key to be absent: a holder cannot pass on
   the exception its owned set raises (§27.3).
+* A view's "never checked" versions can collide with the set's. `TreeSubSet`'s
+  constructor sets `version` and `_countVersion` to `-1` as sentinels. But the set's
+  `version` is `[Wrapping]` and so can itself be `-1`. If it is `-1` when the view is
+  created, `Count` (`VersionCheck(updateCount: true)`) skips the recount and returns 0
+  however many elements are in range. If it is `-2`, one modification makes it `-1`, the
+  versions agree, and the view keeps the `root` it found before the modification, which may
+  be a removed node. Both need about 2^32 modifications first. The contracts therefore
+  cannot let a view's count or root rest on version equality alone.
 

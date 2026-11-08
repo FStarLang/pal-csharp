@@ -23,6 +23,20 @@ let keys_index (#k #v: Type) (s: Seq.seq (k & v)) (i: nat)
           [SMTPat (Seq.index (keys s) i)]
   = ()
 
+/// R32.11. The values of `s`, in key order.
+let values (#k #v: Type) (s: Seq.seq (k & v)) : Seq.seq v =
+  Seq.init (Seq.length s) (fun i -> snd (Seq.index s i))
+
+let values_length (#k #v: Type) (s: Seq.seq (k & v))
+  : Lemma (Seq.length (values s) == Seq.length s) [SMTPat (values s)]
+  = ()
+
+let values_index (#k #v: Type) (s: Seq.seq (k & v)) (i: nat)
+  : Lemma (requires i < Seq.length s)
+          (ensures Seq.index (values s) i == snd (Seq.index s i))
+          [SMTPat (Seq.index (values s) i)]
+  = ()
+
 let keys_tail (#k #v: Type) (s: Seq.seq (k & v))
   : Lemma (requires Seq.length s > 0)
           (ensures keys (Seq.tail s) == Seq.tail (keys s))

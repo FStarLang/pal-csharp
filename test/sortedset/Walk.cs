@@ -303,11 +303,13 @@ public sealed class WalkSet<T>
 
     // R27.39. A walk that calls back: what the callback was called on, and what it returned,
     // is the trace the caller's protocol is kept over.
+    // R32.11. It calls back once per item, so fewer times than a bound of at least the count.
+    [Requires("@this.SpecItems.Length <= Pal.CallBound(action)")]
     [Ensures("SpecWalk.Walked(@this.SpecItems, Pal.Trace<(T, bool), bool>(action), Result)")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
     [Rlimit(4)]
     [Frac("p")]
-    internal bool InOrderTreeWalk([Callback] WalkPredicate<T> action)
+    internal bool InOrderTreeWalk([Callback(Bounded = true)] WalkPredicate<T> action)
     {
         if (root == null)
         {
@@ -393,6 +395,25 @@ public sealed class WalkSet<T>
             {
                 return false;
             }
+            array[index++] = node.Item;
+            return true;
+        });
+    }
+
+    // R32.11. A lambda that writes `array[index++]` with no check: the walk's bound keeps it in range.
+    [Requires("0 <= index && index + @this.SpecItems.Length <= array.Length")]
+    [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), index, index + @this.SpecItems.Length, @this.SpecItems)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    internal void CopyAll(T[] array, int index)
+    {
+        int length = array.Length;
+        Ghost<SpecInt> i0 = (SpecInt)index;
+        Ghost<SpecInt> n0 = (SpecInt)this.SpecItems.Length;
+        Ghost<Seq<T>> a0 = Pal.Contents(array);
+        InOrderTreeWalk(node =>
+        {
+            Pal.Protocol<(T, bool), bool>(tr => i0.Value + n0.Value <= a0.Value.Length && a0.Value.Length <= int.MaxValue &&
+                                                SpecWalk.Copied(tr, a0.Value, Pal.Contents(array), i0.Value, i0.Value + n0.Value, index), n0.Value);
             array[index++] = node.Item;
             return true;
         });

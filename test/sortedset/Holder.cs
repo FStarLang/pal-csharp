@@ -35,6 +35,22 @@ public sealed class TreeHolder<U>
         return true;
     }
 
+    // R32.10. A write through a node a call on the owned field found: the field's
+    // invariant is folded again at the heap the write left, which keeps the tree's shape.
+    [Ensures("Result == SpecSearchTree.Contains(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecNodes), item)")]
+    [Ensures("@this.SpecNodes.Size == Pal.Old(@this.SpecNodes).Size")]
+    [Ensures("Pal.Implies(!Result, @this.SpecNodes == Pal.Old(@this.SpecNodes))")]
+    public bool Replace(U item, U replacement)
+    {
+        SearchTree<U>.Node? node = _tree.FindNode(item);
+        if (node == null)
+        {
+            return false;
+        }
+        node.Item = replacement;
+        return true;
+    }
+
     // R32.2. `Contains` is `[Frac]` and calls the comparer through its interface: it is
     // read-only, so this method (and the borrowing class's below) is too.
     [Ensures("Result == SpecSearchTree.Contains(@this.SpecComparer, @this.SpecNodes, item)")]

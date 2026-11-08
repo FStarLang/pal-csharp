@@ -480,19 +480,30 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 {
     public ImmutableArray<IrType> TypeArguments { get; init; } = [];
     public IrCallback Callback { get; init; } = null!;
+
+    /// <summary>R32.11. Whether the lambda's protocol states a bound on its calls.</summary>
+    public bool Bounded { get; init; }
 }
 
 /// <summary>
 /// R27.39. What a <c>[Callback]</c> delegate is called with and returns: a pointer into
 /// <c>Region</c>, recorded in the trace by its <c>[Model]</c> view <c>View</c>.
 /// </summary>
-public sealed record IrCallback(IrClassType Region, IrType View, IrType Result);
+public sealed record IrCallback(IrClassType Region, IrType View, IrType Result)
+{
+    /// <summary>R32.11. <c>[Callback(Bounded = true)]</c>: the caller passes a bound on the calls.</summary>
+    public bool Bounded { get; init; }
+}
 
 /// <summary>
 /// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
 /// first clause of its contract each way is the protocol.
 /// </summary>
-public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback);
+public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback)
+{
+    /// <summary>R32.11. The bound on the calls the protocol states, over the read-only captures.</summary>
+    public IrExpr? Bound { get; init; }
+}
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);

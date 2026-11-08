@@ -526,6 +526,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(construct, decl.Loc),
                     new Provenance(Names.LambdaProtocol(lm.Name), decl.Loc),
                     new Provenance(Names.LambdaCallback(lm.Name), decl.Loc),
+                    // R32.11. A bounded lambda adds its bound, from the `Pal.CallBound` it states.
+                    .. lm.Lambda.Bound is null ? ImmutableArray<Provenance>.Empty :
+                        [new Provenance(Names.LambdaBound(lm.Name), decl.Loc)],
                 ],
                 _ => [new Provenance(construct, decl.Loc)],
             };
@@ -1928,6 +1931,20 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             : $"  {string.Join(" ** ", parts)}");
         sb.AppendLine();
 
+        // R32.11. The bound the callback may assume, as `region_cb` states it: the lambda's
+        // own (`bound_L`, over captures it does not write), or none.
+        var bound = "Pulse.Lib.CSharp.Callback.max_bound";
+        if (lambda.Bound is { } lb)
+        {
+            bound = $"({Names.LambdaBound(method.Name)} {applied})".Replace(" )", ")");
+            sb.Append($"let {Names.LambdaBound(method.Name)}");
+            foreach (var b in tys.Where(b => !b.StartsWith("{|"))) sb.Append(' ').Append(b);
+            foreach (var b in captures) sb.Append(' ').Append(b);
+            sb.AppendLine(" : erased int =");
+            sb.AppendLine($"  hide ({_spec.Emit(lb, plan.PreScope).Text})");
+            sb.AppendLine();
+        }
+
         sb.Append($"fn {Names.LambdaCallback(method.Name)}");
         foreach (var b in tys) sb.Append(' ').Append(b);
         foreach (var b in captures) sb.Append(' ').Append(b);
@@ -1935,7 +1952,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"  (x: B.box {raw} {{ not (B.is_null x) /\\ {Frontend.Region.Module}.mem h x }})");
         var after = $"(Seq.snoc (reveal tr) ({view} x ({Frontend.Region.Module}.get h x), r))";
         sb.AppendLine($"  requires {P("(reveal tr)")} ** {Frontend.Region.Module}.region #{raw} #q h ** " +
-                      "pure (Seq.length (reveal tr) < Pulse.Lib.CSharp.Callback.max_calls)");
+                      "pure (Seq.length (reveal tr) < Pulse.Lib.CSharp.Callback.max_calls /\\ " +
+                      $"Seq.length (reveal tr) < reveal {bound})");
         sb.AppendLine($"  returns r: {Types.Render(cb.Result)}");
         sb.AppendLine($"  ensures {P(after)} ** {Frontend.Region.Module}.region #{raw} #q h");
         sb.AppendLine("{");

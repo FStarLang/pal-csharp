@@ -19,10 +19,16 @@ unfold let max_calls : int = 2147483647
 
 unfold let callable (#e: Type0) (tr: Seq.seq e) : bool = Seq.length tr < max_calls
 
-let region_cb (#a #v #r: Type0) (view: B.box a -> a -> v) (p: Seq.seq (v & r) -> slprop) =
+/// R32.11. The callee may also promise a bound `n` of its own on the calls (a walk calls back
+/// at most once per node, so fewer times than the tree has nodes), which the callback may
+/// assume. A callee that promises none passes `max_bound`.
+unfold let max_bound : erased int = hide max_calls
+
+let region_cb (#a #v #r: Type0) (view: B.box a -> a -> v) (p: Seq.seq (v & r) -> slprop)
+    (n: erased int) =
   (#tr: erased (Seq.seq (v & r))) -> (#q: perm) -> (#h: erased (heap a)) ->
   (x: B.box a { not (B.is_null x) /\ mem h x }) ->
-  stt r (p tr ** region #a #q h ** pure (Seq.length tr < max_calls))
+  stt r (p tr ** region #a #q h ** pure (Seq.length tr < max_calls /\ Seq.length tr < reveal n))
         (fun res -> p (Seq.snoc tr (view x (get h x), res)) ** region #a #q h)
 
 /// The view of `x` in `h`, as the trace records it.

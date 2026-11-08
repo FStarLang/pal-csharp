@@ -11,16 +11,27 @@ public struct TreeModel<T>
     public IComparer<T> Comparer;
 }
 
+// R32.10. The owner's model also names its root pointer, so that a contract can say a
+// node a search returns is one of the tree's nodes.
+[Spec]
+public struct SearchTreeModel<T>
+{
+    public SpecTree<(T, bool)> Nodes;
+    public IComparer<T> Comparer;
+    internal SearchTree<T>.Node? Root;
+}
+
 public sealed class SearchTree<T>
 {
     private readonly IComparer<T> comparer;
     private Node? root;
 
     [Model]
-    private TreeModel<T> Model => new TreeModel<T> { Nodes = Pal.Tree<(T, bool)>(root), Comparer = comparer };
+    private SearchTreeModel<T> Model => new SearchTreeModel<T> { Nodes = Pal.Tree<(T, bool)>(root), Comparer = comparer, Root = root };
 
     [Spec] public SpecTree<(T, bool)> SpecNodes => Model.Nodes;
     [Spec] public IComparer<T> SpecComparer => Model.Comparer;
+    [Spec] internal Node? SpecRoot => Model.Root;
 
     [Ensures("@this.SpecNodes.IsLeaf")]
     [Ensures("@this.SpecComparer == Comparer<T>.Default")]
@@ -43,7 +54,7 @@ public sealed class SearchTree<T>
                           SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item)));
             Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.ReturnValue<bool>() &&
                           SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item)));
-            int order = comparer.Compare(item, current.Item);
+            int order = comparer.Compare(item, current!.Item);
             if (order == 0)
             {
                 return true;
@@ -75,6 +86,7 @@ public sealed class SearchTree<T>
     // R27.13. The contract names the node the search returns at the owner's heap.
     [Ensures("(Result != null) == SpecSearchTree.Contains(@this.SpecComparer, @this.SpecNodes, item)")]
     [Ensures("Result == null || Pal.WellFormed(Result) && Pal.Same(SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(Result), item), SpecSearchTree.Find(@this.SpecComparer, @this.SpecNodes, item, item))")]
+    [Ensures("Result == null || SpecRegionWrite.InTree<SearchTree<T>.Node, T>(Pal.Heap<SearchTree<T>.Node>(), @this.SpecRoot, Result)")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
     [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
     internal Node? FindNode(T item)
@@ -86,14 +98,16 @@ public sealed class SearchTree<T>
             Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) &&
                           SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(current), item) ==
                           SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item) &&
+                          (current == null || SpecRegionWrite.InTree<Node, T>(Pal.Heap<Node>(), root, current)) &&
                           Pal.Same(SpecSearchTree.Find(comparer, Pal.Tree<(T, bool)>(current), item, item),
                                    SpecSearchTree.Find(comparer, Pal.Tree<(T, bool)>(root), item, item))));
             Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.ReturnValue<Node?>() != null &&
                           SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item) &&
                           Pal.WellFormed(Pal.ReturnValue<Node?>()) &&
+                          SpecRegionWrite.InTree<Node, T>(Pal.Heap<Node>(), root, Pal.ReturnValue<Node?>()) &&
                           Pal.Same(SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(Pal.ReturnValue<Node?>()), item),
                                    SpecSearchTree.Find(comparer, Pal.Tree<(T, bool)>(root), item, item))));
-            int order = comparer.Compare(item, current.Item);
+            int order = comparer.Compare(item, current!.Item);
             if (order == 0)
             {
                 return current;

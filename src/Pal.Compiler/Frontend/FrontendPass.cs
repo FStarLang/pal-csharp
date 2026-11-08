@@ -691,6 +691,9 @@ public static partial class FrontendPass
                     borrowed |= mapped is IrClassType && Borrowing.IsBorrowing(symbol, known) &&
                         (known.IsRegionClass(type) ||
                          member is IFieldSymbol of && Borrowing.OwnedFields(symbol, known).Contains(of, SymbolEqualityComparer.Default));
+                    // R32.10. A spec-only struct may hold a pointer into a region: a value
+                    // that owns nothing, which names nodes of the region's heap.
+                    borrowed |= specOnly && mapped is IrClassType && known.IsRegionClass(type);
                     if (mapped is null || !(borrowed || (specOnly ? IsSpecField(mapped) : IsValueField(mapped))))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
@@ -2567,7 +2570,7 @@ public static partial class FrontendPass
             Declarations.Has(bsp, known.SpecAttribute))
             return null;
         if (Borrowing.IsMember(symbol, known))
-            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc);
+            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc, lifted);
 
         var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, model, known, diagnostics);

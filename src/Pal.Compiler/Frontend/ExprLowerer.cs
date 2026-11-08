@@ -2903,6 +2903,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             }
             case nameof(PalLang.Pal.Trace):
                 return LowerTrace(method, args, loc);
+            case nameof(PalLang.Pal.CallBound):
+                return LowerCallBound(args, loc);
             case nameof(PalLang.Pal.Forall) or nameof(PalLang.Pal.Exists):
                 return LowerQuantifier(method.Name == nameof(PalLang.Pal.Forall), args, loc);
             // R26.2. The cells a `return` inside a loop leaves its outcome in.

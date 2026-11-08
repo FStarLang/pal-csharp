@@ -483,5 +483,14 @@ public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
 /// <c>Pal.Trace</c>. An argument at this position is a lambda whose first statement is
 /// <c>Pal.Protocol</c>, the invariant it keeps over the trace.
 /// </summary>
+/// <remarks>
+/// R32.11. With <c>Bounded = true</c> the callee takes a bound from the caller,
+/// <c>Pal.CallBound(action)</c>, and calls the delegate fewer times than it. Its contract
+/// requires what it needs of the bound; the lambda passed states the bound in
+/// <c>Pal.Protocol(tr => …, maxCalls)</c> and may assume it.
+/// </remarks>
 [AttributeUsage(AttributeTargets.Parameter)]
-public sealed class CallbackAttribute : Attribute;
+public sealed class CallbackAttribute : Attribute
+{
+    public bool Bounded { get; set; }
+}

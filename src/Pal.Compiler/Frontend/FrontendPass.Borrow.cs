@@ -18,7 +18,8 @@ public static partial class FrontendPass
     /// </summary>
     private static IrDecl? LowerBorrowingMember(
         Candidate candidate, SemanticModel model, WellKnown known,
-        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics, IrLoc loc)
+        ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics, IrLoc loc,
+        List<IrMethod>? lifted = null)
     {
         // The candidate's symbol is of the compilation before the spec shims were added;
         // the borrowing context is compared against symbols of this one.
@@ -124,6 +125,10 @@ public static partial class FrontendPass
         }
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
+        // R32.11. A lambda a borrowing member passes to a `[Callback]` is lifted as any other's.
+        lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
+        lowerer.Expressions.LiftTypeParameters =
+            [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
         ImmutableArray<IrExpr> bodyRequires = [], bodyEnsures = [];
         if (isCtor)
@@ -155,6 +160,7 @@ public static partial class FrontendPass
 
         ImmutableArray<string> typeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
+        lifted?.AddRange(lowerer.Expressions.Lifted);
         return new IrMethod(
             loc, Naming.Of(symbol), [.. leading, .. parameters], returnType,
             [.. requires, .. specs.Requires, .. bodyRequires],

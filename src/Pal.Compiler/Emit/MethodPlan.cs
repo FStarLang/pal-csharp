@@ -182,9 +182,17 @@ public sealed class MethodPlan
                 var trace = Frontend.ExprLowerer.TraceName(p.Name);
                 var postTrace = "post_" + Names.Local(trace);
                 binders.Add($"({protocol}: Seq.seq {e} -> slprop)");
+                // R32.11. A bounded parameter takes the caller's bound on the calls before it.
+                var boundName = Frontend.ExprLowerer.CallBoundName(p.Name);
+                var bound = cb.Bounded ? "n_" + name : "Pulse.Lib.CSharp.Callback.max_bound";
+                if (cb.Bounded) binders.Add($"({bound}: erased int)");
                 binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
                             $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
-                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol})");
+                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
+                var boundTerm = new Term($"(reveal {bound})", TermKind.Math, IrPrim.SpecIntType);
+                pre.Bind(boundName, boundTerm);
+                post.Bind(boundName, boundTerm);
+                slots[boundName] = new Slot(boundName, IrPrim.SpecIntType, SlotKind.Value, bound);
                 preResources.Add($"{protocol} (Seq.empty #{e})");
                 postResources.Add($"{protocol} {postTrace}");
                 postExistentials.Add(postTrace);
