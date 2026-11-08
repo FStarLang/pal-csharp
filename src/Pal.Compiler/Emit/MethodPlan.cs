@@ -31,6 +31,38 @@ public sealed class MethodPlan
     /// or in a null test. A constructor that only reads from an object it is given (a copy constructor)
     /// hands it back.
     /// </summary>
+    /// <summary>
+    /// R33.15. The receiver's fields an `[Open]` body assigns, or <c>null</c> if it hands the
+    /// receiver or a field by reference to a callee, which might assign any of them.
+    /// </summary>
+    /// An `[Open]` callee on the receiver assigns what its own body assigns.
+    internal static HashSet<string>? OpenAssigned(IrStmt body, IReadOnlyDictionary<string, IrMethod>? methods,
+        HashSet<string> visiting)
+    {
+        var assigned = new HashSet<string>();
+        foreach (var stmt in Passes.Check.Statements(body))
+        {
+            if (stmt is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This }, Field: var f } })
+                assigned.Add(f);
+            foreach (var e in Passes.Check.Expressions(stmt).SelectMany(Passes.Check.Subexpressions))
+            {
+                if (e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } call)
+                {
+                    if (methods is null || !methods.TryGetValue(call.Callee, out var callee) ||
+                        !callee.Open || callee.Body is null)
+                        return null;
+                    if (!visiting.Add(call.Callee)) continue;
+                    var inner = OpenAssigned(callee.Body, methods, visiting);
+                    if (inner is null) return null;
+                    assigned.UnionWith(inner);
+                }
+                else if (e is IrRefArg { Operand: IrField { Receiver: IrVar { Name: Names.This } } })
+                    return null;
+            }
+        }
+        return assigned;
+    }
+
     private static bool Stored(IrMethod method, string name, IReadOnlyDictionary<string, IrMethod>? methods,
         ImmutableHashSet<string> visiting)
     {
@@ -344,9 +376,34 @@ public sealed class MethodPlan
                             pre.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {hPre})", TermKind.Other));
                             post.Bind(Frontend.Region.HeapName(k.Name), new Term(hPost, TermKind.Other));
                         }
+                        // R33.15. A field the body never assigns, with no other `[Open]`
+                        // call that might, is where it was: an array field's reference above
+                        // all, which the caller's invariant needs back.
+                        var openAssigned = method.Body is null ? null : OpenAssigned(method.Body, methods, [method.Name]);
                         foreach (var f in openFields)
                         {
                             var proj = Names.ClassProjection(klass.Name, f.Name);
+                            if (openAssigned is not null && !openAssigned.Contains(f.Name))
+                                postResources.Add($"pure (post_{p.Name}.{proj} == (reveal pre_{p.Name}).{proj})");
+                            // R33.15. An array field is held as the invariant holds it, by its
+                            // own `pts_to` at the contents, which the field then denotes
+                            // (R3.10a); `Pal.Contents`'s reference is the record's field.
+                            if (f.Type is IrArrayType at)
+                            {
+                                var cPre = $"pre_{p.Name}_{Names.Contents(f.Name)}";
+                                var cPost = $"post_{p.Name}_{Names.Contents(f.Name)}";
+                                ghostBinders.Add($"(#{cPre}: erased (Seq.seq {Types.Atom(at.Element)}))");
+                                preResources.Add($"{PulseEmitter.ArrayPts(f)} (reveal pre_{p.Name}).{proj} {cPre}");
+                                postResources.Add($"{PulseEmitter.ArrayPts(f)} post_{p.Name}.{proj} {cPost}");
+                                postExistentials.Add(cPost);
+                                pre.Bind($"{Names.This}.{f.Name}", new Term($"(reveal {cPre})", TermKind.Seq, f.Type));
+                                post.Bind($"{Names.This}.{f.Name}", new Term(cPost, TermKind.Seq, f.Type));
+                                pre.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                                    new Term($"(reveal pre_{p.Name}).{proj}", TermKind.Other, f.Type));
+                                post.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                                    new Term($"post_{p.Name}.{proj}", TermKind.Other, f.Type));
+                                continue;
+                            }
                             pre.Bind($"{Names.This}.{f.Name}",
                                 new Term($"(reveal pre_{p.Name}).{proj}", KindOf(f.Type), f.Type));
                             post.Bind($"{Names.This}.{f.Name}",

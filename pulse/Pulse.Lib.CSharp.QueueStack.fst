@@ -58,18 +58,19 @@ fn resize (#t: Type0) {| d: has_default t |} (a: A.array t) (n: I32.t { I32.v n 
 // R23.6. `Debug.Assert(a != b)` between two arrays the method holds.
 // ---------------------------------------------------------------------------
 
-/// Two arrays held whole at once are distinct if either has a cell. Two empty arrays
-/// may be one object (`Array.Empty<T>()`), so nothing is concluded about them.
+/// Two arrays held at once, one of them whole, are distinct if either has a cell. Two
+/// empty arrays may be one object (`Array.Empty<T>()`), so nothing is concluded about
+/// them. The other may be held at a fraction, as a read-only method holds its receiver's.
 ghost
-fn distinct (#t: Type0) (a b: A.array t) (#s1 #s2: Ghost.erased (Seq.seq t))
-  preserves A.pts_to a s1 ** A.pts_to b s2
-  requires pure (Seq.length s1 > 0 \/ Seq.length s2 > 0)
+fn distinct (#t: Type0) (a b: A.array t) (#p1 #p2: perm) (#s1 #s2: Ghost.erased (Seq.seq t))
+  preserves A.pts_to a #p1 s1 ** A.pts_to b #p2 s2
+  requires pure ((p1 == 1.0R \/ p2 == 1.0R) /\ (Seq.length s1 > 0 \/ Seq.length s2 > 0))
   ensures  pure (~(a == b))
 {
   let same = FStar.IndefiniteDescription.strong_excluded_middle (a == b);
   if same
   {
-    rewrite (A.pts_to b s2) as (A.pts_to a s2);
+    rewrite (A.pts_to b #p2 s2) as (A.pts_to a #p2 s2);
     A.gather a;
     A.pts_to_perm_bound a;
     unreachable ()

@@ -218,6 +218,21 @@ public static class Declarations
                 model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
                 return true;
 
+            // R33.10. An element written through a local array may be one of a field's
+            // (R24.19's `T[] nodes = _nodes;`), unless every value the local takes is fresh.
+            if (target is ElementAccessExpressionSyntax &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { Type: IArrayTypeSymbol } arrayLocal &&
+                !AlwaysFresh(arrayLocal, syntax, model))
+                return true;
+
+            // R33.14. A write through a `ref` local writes what it aliases, which may be an
+            // element of a field's array (R24.8, `ref int bucket = ref GetBucket(h)`).
+            // Rebinding it (`entry = ref entries[i]`) writes nothing.
+            if (target is not null &&
+                node is not AssignmentExpressionSyntax { Right: RefExpressionSyntax } &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { RefKind: RefKind.Ref })
+                return true;
+
             // R27.16. An auto-property of a class is a field (R27.3), however it is written.
             if (target is not null &&
                 model.GetSymbolInfo(RootOf(target)).Symbol is IPropertySymbol
@@ -246,8 +261,12 @@ public static class Declarations
                       Borrowing.WritesOwner(heldBody, model.Compilation.GetSemanticModel(heldBody.SyntaxTree),
                           held.ContainingType.OriginalDefinition, known)))
                     continue;
+                // R33.14. A `[SpecBinding]`-bound library method (a comparer's `Equals`) is an
+                // F* term, which cannot reach this object's state except through an array
+                // argument, checked below.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
+                    known?.Binding(callee) is null &&
                     !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 
@@ -262,13 +281,55 @@ public static class Declarations
                         ContainingType: { Name: "Array", ContainingNamespace.Name: "System" },
                     })
                     continue;
+                // R33.14. A specification intrinsic (`Pal.Contents(_a)`), and a `[Spec]` or
+                // `[Lemma]` member, is ghost: it reads the array it is handed.
+                if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol ghost &&
+                    (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
+                     Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
+                    continue;
                 foreach (var argument in call.ArgumentList.Arguments)
+                {
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
                         return true;
+                    // R33.24. A `ref` argument the callee may write through: a `ref` local
+                    // (R33.16's `ref entry` into a field's array) or a field itself.
+                    if (argument.RefKindKeyword.RawKind is (int)SyntaxKind.RefKeyword or (int)SyntaxKind.OutKeyword &&
+                        model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is ILocalSymbol { RefKind: RefKind.Ref } or IFieldSymbol { IsStatic: false })
+                        return true;
+                }
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// R33.10. Whether every value <paramref name="local"/> takes in <paramref name="body"/>
+    /// is a newly created array, so that writing its elements writes no object's field.
+    /// </summary>
+    private static bool AlwaysFresh(ILocalSymbol local, SyntaxNode body, SemanticModel model)
+    {
+        static bool Fresh(ExpressionSyntax? e) =>
+            e is ArrayCreationExpressionSyntax or ImplicitArrayCreationExpressionSyntax or CollectionExpressionSyntax;
+        if (local.DeclaringSyntaxReferences is not [var decl] || decl.GetSyntax() is not VariableDeclaratorSyntax ||
+            local.IsRef)
+            return false;
+        foreach (var node in body.DescendantNodes())
+        {
+            if (node is VariableDeclaratorSyntax v &&
+                SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(v), local) &&
+                !Fresh(v.Initializer?.Value))
+                return false;
+            if (node is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, local) &&
+                !(a.IsKind(SyntaxKind.SimpleAssignmentExpression) && Fresh(a.Right)))
+                return false;
+            if (node is ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(arg.Expression).Symbol, local))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
