@@ -1291,6 +1291,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 {
                     if (st is IrAssign { Target: IrField { Receiver.Type: IrClassType wk } } && IsRegion(wk))
                     { Add(wk); w.Add(wk.Name); }
+                    // R31.9. A write to a field of the receiver, named without `this.`, has an
+                    // untyped receiver: it writes the region of the member's own class.
+                    else if (st is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This, Type: null } } } &&
+                             m.Parameters.FirstOrDefault(p => p.Name == Names.This)?.Type is IrClassType tk && IsRegion(tk))
+                    { Add(tk); w.Add(tk.Name); }
                     if (st is IrLocalDecl ld) Add(ld.Type);
                     foreach (var e in Passes.Check.Expressions(st).SelectMany(Passes.Check.Subexpressions))
                     {
@@ -1303,7 +1308,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             }
             // R27.59. A region that an object the method's class owns through a field owns is
             // reached through that field, which the body keeps open while it reads the region.
-            if (m.DeclaringClass is { } hc && _classes.TryGetValue(hc, out var hdecl) && !hdecl.IsPlain)
+            // R31.9: not for a member of a region class, whose back pointer to its owner
+            // (a ring node's `list`) is not how it reaches the region it lives in.
+            if (m.DeclaringClass is { } hc && _classes.TryGetValue(hc, out var hdecl) && !hdecl.IsPlain && !hdecl.IsRegion)
                 foreach (var f in hdecl.Fields)
                     if (f.Type is IrClassType { } fc && _classes.TryGetValue(fc.Name, out var fdecl) && !fdecl.IsPlain)
                         foreach (var rf in fdecl.Fields.Where(IsRegionField))

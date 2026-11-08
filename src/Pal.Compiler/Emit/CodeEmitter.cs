@@ -795,6 +795,10 @@ public sealed class CodeEmitter(
         classes is not null &&
         Check.Statements(s).Any(t =>
             t is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && IsRegionType(k) ||
+            // R31.10. A write of a ring's entry pointer (the owner's `head`): the ring
+            // lemma after the join needs which node it now is.
+            t is IrAssign { Target: IrField { Type: IrClassType r } } &&
+                classes.TryGetValue(r.Name, out var rd) && rd.IsCyclic ||
             Check.Expressions(t).SelectMany(Check.Subexpressions)
                 .Any(e => e is IrAlloc ||
                           e is IrCall c && regionHeld is not null &&
@@ -4305,6 +4309,16 @@ public sealed class CodeEmitter(
                 // R27.6. Typed, so that a cell initialised with it has a type to allocate.
                 return pnd.IsRegion ? $"(B.null #{PulseEmitter.RegionRaw(pk)})" : "B.null";
 
+            // R31.9. A non-recursive class has no `intro_nil` (§10 derives it only for a
+            // recursive one): its null, stored in a node's back pointer, is the typed null box.
+            case IrNull nn when nn.Type is IrClassType nk
+                && classes is not null && classes.TryGetValue(nk.Name, out var nnd) && nnd.Recursion is null:
+            {
+                var t = Fresh();
+                Line($"let {t} : {Types.Render(nk with { Nullable = true })} = B.null;");
+                return t;
+            }
+
             // R15.8. `B.null` at a generic class says nothing about what it is empty *of*,
             // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
             // resolve against. Naming the empty structure first, at its type, is the
@@ -4812,11 +4826,12 @@ public sealed class CodeEmitter(
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
                 : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
 
-        // R27.50. So is `x == this` of an owner class: each is a box. Other comparisons of
-        // two objects stay refused (R18.1).
+        // R27.50. So is `x == this` of an owner class: each is a box. R31.8: `x` may be
+        // nullable (a node's `list`), a null box being unequal to `this`. Other comparisons
+        // of two objects stay refused (R18.1).
         if (b.Op is BinOp.Eq or BinOp.Ne &&
             (b.Left is IrVar { Name: Names.This } || b.Right is IrVar { Name: Names.This }) &&
-            b.Left.Type is IrClassType { Nullable: false } lc && b.Right.Type is IrClassType { Nullable: false } rc &&
+            b.Left.Type is IrClassType lc && b.Right.Type is IrClassType rc &&
             lc.Name == rc.Name && classes is not null && classes.ContainsKey(lc.Name))
             return b.Op is BinOp.Eq
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"

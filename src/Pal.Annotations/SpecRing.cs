@@ -14,7 +14,7 @@ public static class SpecRing
     private static Exception Ghost() => new InvalidOperationException(
         "SpecRing is a specification-only construct and has no runtime meaning.");
 
-    /// <summary>The ring of <paramref name="n"/> nodes from <paramref name="hd"/> (null exactly when empty), whose nodes are exactly those <paramref name="h"/> says <paramref name="owner"/> owns.</summary>
+    /// <summary>The ring of <paramref name="n"/> nodes from <paramref name="hd"/> (null exactly when empty), whose nodes are exactly those <paramref name="h"/> says <paramref name="owner"/>, a non-null object, owns.</summary>
     [RegionOp("Pulse.Lib.CSharp.RegionRing.ring")]
     public static bool Ring<K, O>(SpecHeap<K> h, K? hd, SpecInt n, O? owner) where K : class where O : class => throw Ghost();
 
@@ -62,7 +62,7 @@ public static class SpecRing
     [SpecOp("Pulse.Lib.CSharp.RegionRing.remove_at")]
     public static Seq<T> RemoveAt<T>(Seq<T> s, SpecInt i) => throw Ghost();
 
-    /// <summary>A lemma: a node of the ring is held, and so are its neighbours, which are in the ring.</summary>
+    /// <summary>A lemma: a node of the ring is held, and so are its neighbours, which are in the ring, non-null, right after and right before it (cyclically); it is first exactly when it is <paramref name="hd"/>, inserting before its next node puts the new node right after it, and the item at its position is its own.</summary>
     [RegionOp("Pulse.Lib.CSharp.RegionRing.neighbours")]
     public static void Neighbours<K>(SpecHeap<K> h, K? hd, SpecInt n, K x) where K : class => throw Ghost();
 
@@ -101,7 +101,58 @@ public static class SpecRing
     [RegionOp("Pulse.Lib.CSharp.RegionRing.ins_head")]
     public static void InsHead<K>(SpecHeap<K> h, K? hd, SpecInt n) where K : class => throw Ghost();
 
-    /// <summary>A lemma: the ring has <paramref name="n"/> nodes; when there are any, the first is <paramref name="hd"/>, held, and the last is the one before it.</summary>
+    /// <summary>A lemma: the ring has <paramref name="n"/> nodes; when there are any, the first is <paramref name="hd"/>, held, at position 0, and the last is the one before it, at position <c>n - 1</c>.</summary>
     [RegionOp("Pulse.Lib.CSharp.RegionRing.ends")]
     public static void Ends<K>(SpecHeap<K> h, K? hd, SpecInt n) where K : class => throw Ghost();
+
+    /// <summary>A lemma: a node of <paramref name="o"/>'s ring is held and owned by <paramref name="o"/>; the ring is not empty, and the node is its own next exactly when it is the only one, which is then <paramref name="hd"/>.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.member")]
+    public static void Member<K, O>(SpecHeap<K> h, K? hd, SpecInt n, K x, O o) where K : class where O : class => throw Ghost();
+
+    /// <summary>A lemma: a node <paramref name="h"/> holds is owned by the owner of a ring exactly when it is in the ring.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.owns")]
+    public static void Owns<K, O>(SpecHeap<K> h, K? hd, SpecInt n, K x, O o) where K : class where O : class => throw Ghost();
+
+    /// <summary>
+    /// A lemma: <paramref name="x"/>, removed from <paramref name="o"/>'s ring -- its neighbours
+    /// linked to each other (unless it was alone), every other link and view kept, and
+    /// <paramref name="x"/> left without an owner (<paramref name="h1"/>) -- leaves the ring
+    /// entered at <paramref name="hd1"/> (null when it was alone, its next node when it was the
+    /// first) as <paramref name="o"/>'s ring without <paramref name="x"/>, and its items without
+    /// <paramref name="x"/>'s.
+    /// </summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.removed")]
+    public static void Removed<K, O>(SpecHeap<K> h0, SpecHeap<K> h1, K? hd, SpecInt n, K x, K? hd1, O o) where K : class where O : class => throw Ghost();
+
+    /// <summary>
+    /// The first position of <paramref name="s"/> whose element matches <paramref name="value"/>, or -1:
+    /// when <paramref name="value"/> is null, a null element; otherwise one
+    /// <c>EqualityComparer&lt;T&gt;.Default</c> calls equal to it (<see cref="Pal.DefaultEquals{T}"/>).
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.index_of")]
+    public static SpecInt IndexOf<T>(Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>The first position at or after <paramref name="i"/> whose element matches <paramref name="value"/> (as in <see cref="IndexOf{T}"/>), or -1.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.index_from")]
+    public static SpecInt IndexFrom<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
+
+    /// <summary>The last position of <paramref name="s"/> whose element matches <paramref name="value"/> (as in <see cref="IndexOf{T}"/>), or -1.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.last_index_of")]
+    public static SpecInt LastIndexOf<T>(Seq<T> s, T value) => throw Ghost();
+
+    /// <summary>The last position at or before <paramref name="i"/> whose element matches <paramref name="value"/>, or -1.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.last_from")]
+    public static SpecInt LastFrom<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: a forward search from <paramref name="i"/> (at least 0) is -1 past the end, <paramref name="i"/> when the element there matches, and the search from <c>i + 1</c> otherwise.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.find_step")]
+    public static void FindStep<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: a backward search from <paramref name="i"/> (before the end) is -1 before 0, <paramref name="i"/> when the element there matches, and the search from <c>i - 1</c> otherwise.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RegionRing.last_step")]
+    public static void LastStep<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
+
+    /// <summary>A lemma: the node at position <paramref name="k"/> of the ring, when there is one, is held, non-null, and at <paramref name="k"/>.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.at")]
+    public static void At<K>(SpecHeap<K> h, K? hd, SpecInt n, SpecInt k) where K : class => throw Ghost();
 }

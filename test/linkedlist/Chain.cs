@@ -1,7 +1,9 @@
 // R31. A ring of nodes owned by the object they point back to: a cyclic region (R31.1),
 // the owner's record in the region's module (R31.2), an invariant that names `@this`
 // (R31.3), `SpecRing` (R31.4), the receiver as a region operation's owner (R31.5),
-// `x?.F` as a value (R31.6) and the model's refinement (R31.7).
+// `x?.F` as a value (R31.6) and the model's refinement (R31.7); unlinking compares the
+// owner with `this` (R31.8), clears the node with a typed null (R31.9) and splits the
+// write of the entry pointer (R31.10).
 using PalLang;
 
 [Spec]
@@ -105,6 +107,36 @@ public sealed class Chain<T>
         SpecRing.Adopted<Link<T>, Chain<T>>(h0.Value, ha.Value, Pal.Heap<Link<T>>(), f0.Value, n0.Value, first, fresh, 0, this);
         return fresh;
     }
+
+    [Requires("Pal.InRegion(at) && SpecRing.Pos<Link<T>>(@this.SpecLinks, at) >= 0")]
+    [Ensures("@this.SpecSize == Pal.Old(@this.SpecSize) - 1")]
+    [Ensures("@this.SpecLinks == SpecRing.RemoveAt(Pal.Old(@this.SpecLinks), SpecRing.Pos<Link<T>>(Pal.Old(@this.SpecLinks), at))")]
+    [Ensures("@this.SpecValues == SpecRing.RemoveAt(Pal.Old(@this.SpecValues), SpecRing.Pos<Link<T>>(Pal.Old(@this.SpecLinks), at))")]
+    public void Unlink(Link<T> at)
+    {
+        Ghost<SpecHeap<Link<T>>> h0 = Pal.Heap<Link<T>>();
+        Ghost<Link<T>?> f0 = first;
+        Ghost<SpecInt> n0 = (SpecInt)size;
+        SpecRing.Member<Link<T>, Chain<T>>(h0.Value, first, size, at, this);
+        SpecRing.Neighbours<Link<T>>(h0.Value, first, size, at);
+        System.Diagnostics.Debug.Assert(at.owner == this);
+        if (at.next == at)
+        {
+            first = null;
+        }
+        else
+        {
+            at.next!.prev = at.prev;
+            at.prev!.next = at.next;
+            if (first == at)
+            {
+                first = at.next;
+            }
+        }
+        at.Detach();
+        SpecRing.Removed<Link<T>, Chain<T>>(h0.Value, Pal.Heap<Link<T>>(), f0.Value, n0.Value, at, first, this);
+        size--;
+    }
 }
 
 [Region(Cyclic = true)]
@@ -121,5 +153,14 @@ public sealed class Link<T>
     {
         this.owner = owner;
         this.value = value;
+    }
+
+    [Requires("Pal.InRegion(@this)")]
+    [Ensures("SpecRing.Detached<Link<T>>(Pal.Old(Pal.Heap<Link<T>>()), Pal.Heap<Link<T>>(), @this)")]
+    internal void Detach()
+    {
+        owner = null;
+        next = null;
+        prev = null;
     }
 }
