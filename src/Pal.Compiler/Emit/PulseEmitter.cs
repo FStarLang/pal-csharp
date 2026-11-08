@@ -1784,6 +1784,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             method.Throws.Where(t => t.When is not null).Select(t => t.When!));
         var classOpens = method.Parameters
             .Select(p => p.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var owner) ? owner : null)
+            // R30.20. A constructor folds its class's invariant, so it opens what that names.
+            .Append(method.IsConstructor && method.DeclaringClass is { } built &&
+                    _classes.TryGetValue(built, out var builtClass) ? builtClass : null)
             .OfType<IrClass>()
             .SelectMany(ClassSpecOpens);
         foreach (var open in methodOpens.Union(classOpens).Distinct())

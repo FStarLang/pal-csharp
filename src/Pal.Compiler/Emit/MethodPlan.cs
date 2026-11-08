@@ -226,6 +226,9 @@ public sealed class MethodPlan
                     }
 
                     pre.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    // R30.25. `array != null` asks about the parameter's reference (R24.7).
+                    pre.Bind(SpecEmitter.ArrayRefKey(p.Name), new Term(name, TermKind.Other, p.Type));
+                    post.Bind(SpecEmitter.ArrayRefKey(p.Name), new Term(name, TermKind.Other, p.Type));
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name)
                     {
                         Fraction = p.Fraction,

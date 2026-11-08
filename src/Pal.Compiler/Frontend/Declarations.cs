@@ -226,8 +226,11 @@ public static class Declarations
                     call.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax heldLocal } &&
                     model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol)
                     continue;
+                // R30.26. A member bound by `[SpecBinding]` (R21.5) is a pure F* function:
+                // calling it writes nothing, whatever its receiver.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
+                    known?.Binding(callee) is null &&
                     !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 

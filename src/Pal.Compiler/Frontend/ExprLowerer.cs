@@ -74,8 +74,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// R24.9. A call of a <c>ref</c>-returning method of this program whose body is a
     /// sequence of single-variable local declarations followed by <c>return ref e;</c> is
     /// <c>e</c>, with each local and each parameter replaced by what it was bound to. Each
-    /// argument must be a name or a constant, or a field of one (R30.8), so substituting it
-    /// is evaluating it.
+    /// argument must be a name or a constant, or a field of one (R30.8), or an array element
+    /// at such an index (R30.15), so substituting it is evaluating it.
     /// </summary>
     private IrExpr? InlineRef(InvocationExpressionSyntax node, IMethodSymbol method,
         IReadOnlyList<ArgumentSyntax> args, IrLoc loc)
@@ -132,12 +132,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// <summary>
     /// R24.9, R30.8. A name, a constant, or a field of one (<c>entry.HashCode</c>): reading
     /// it has no effect, so substituting it where the parameter was is evaluating it.
+    /// R30.15. So is an element of an array named by one, at an index that is one
+    /// (<c>entries[i].hashCode</c>): the read is proved in bounds, so it cannot throw either.
     /// </summary>
     private bool FieldPath(ExpressionSyntax e) => e switch
     {
         IdentifierNameSyntax or LiteralExpressionSyntax or ThisExpressionSyntax => true,
         MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } m =>
             model.GetSymbolInfo(m).Symbol is IFieldSymbol && FieldPath(m.Expression),
+        ElementAccessExpressionSyntax { ArgumentList.Arguments: [{ RefKindKeyword.RawKind: (int)SyntaxKind.None } index] } el =>
+            model.GetTypeInfo(el.Expression).Type is IArrayTypeSymbol && FieldPath(el.Expression) && FieldPath(index.Expression),
         _ => false,
     };
 
@@ -412,6 +416,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ConditionalExpressionSyntax c =>
                 new IrConditional(loc, Lower(c.Condition), Lower(c.WhenTrue), Lower(c.WhenFalse)),
             ConditionalAccessExpressionSyntax ca => LowerConditionalAccess(ca, loc),
+            // R30.14. `a?.Length` at an array: the bound array's length.
+            MemberBindingExpressionSyntax mb when _bound is { } abound && mb.Name.Identifier.ValueText == "Length" &&
+                                                  model.GetTypeInfo(BoundSyntax!).Type is IArrayTypeSymbol =>
+                new IrLength(loc, abound),
             MemberBindingExpressionSyntax mb when _bound is { } bound &&
                                                   known.SpecTypeName(model.GetTypeInfo(BoundSyntax!).Type) is not null =>
                 SpecMember(model.GetSymbolInfo(mb).Symbol, [bound], mb, loc),
@@ -431,6 +439,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             CastExpressionSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) &&
                                         known.MapType(model.GetTypeInfo(c.Type).Type) is IrUserSpecType { FStar: Sorted.ComparerType } castCmp =>
                 new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", []) { TypeArgs = castCmp.Args, Type = castCmp },
+            // R30.19. `(IEqualityComparer<T>?)null`, a null cast to a nullable type, is that
+            // type's `None`, as the uncast literal at it is.
+            CastExpressionSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) &&
+                                        known.MapType(model.GetTypeInfo(c.Type).Type) is IrOptionType castOption =>
+                new IrNull(loc) { Type = castOption },
             // R30.9. A reference conversion between two library types bound by R21.5
             // (`(IEqualityComparer<T>)c`) is the bound value itself, not null.
             CastExpressionSyntax c when BoundReferenceCast(c) is { } bt =>
@@ -1809,6 +1822,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 right = right with { Type = lt };
             else if (left is IrNull && left.Type is not IrOptionType && right.Type is IrOptionType rt)
                 left = left with { Type = rt };
+            // R30.21. A nullable reference compared with a non-null one of its type
+            // (`comparer != EqualityComparer<T>.Default`): the non-null one is `Some`. Two
+            // types bound to one F* type (`IEqualityComparer<T>`, `EqualityComparer<T>`) agree.
+            else if (left is not IrNull && right is not IrNull &&
+                     left.Type is IrOptionType lo && right.Type is { } rty && rty is not IrOptionType && BoundAlike(lo.Inner, rty))
+                right = new IrOptionOp(loc, OptionOpKind.Some, right) { Type = lo };
+            else if (left is not IrNull && right is not IrNull &&
+                     right.Type is IrOptionType ro && left.Type is { } lty && lty is not IrOptionType && BoundAlike(ro.Inner, lty))
+                left = new IrOptionOp(loc, OptionOpKind.Some, left) { Type = ro };
         }
         return new IrBinary(loc, op.Value, left, right)
         {
@@ -1872,6 +1894,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private IrExpr LowerCoalesce(BinaryExpressionSyntax node, IrLoc loc)
     {
+        // R30.14. `a?.M ?? d` at a nullable array `a` with no effect is `a != null ? a.M : d`:
+        // the array's null is a property of the reference (R24.7), not an option.
+        if (Unparenthesized(node.Left) is ConditionalAccessExpressionSyntax { Expression: var arraySyntax } access &&
+            model.GetTypeInfo(arraySyntax).Type is IArrayTypeSymbol)
+        {
+            var array = Lower(arraySyntax);
+            if (!HasEffect(array))
+            {
+                var member = WithBound(array, arraySyntax, () => Lower(access.WhenNotNull));
+                var otherwise = Lower(node.Right);
+                var notNull = new IrBinary(loc, BinOp.Ne, array, new IrNull(loc) { Type = array.Type }) { Type = IrPrim.Bool };
+                return new IrConditional(loc, notNull, member, otherwise) { Type = member.Type };
+            }
+        }
         var tested = Lower(node.Left);
         var fallback = Lower(node.Right);
         // R25.4. A comparer that may be null, with a fallback: `if is_null c then d else c`.
@@ -2004,6 +2040,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// Type equality that compares a bound type's arguments element by element (a record's
     /// <c>ImmutableArray</c> member compares by reference).
     /// </summary>
+    private static bool BoundAlike(IrType a, IrType b) =>
+        SameType(a, b) ||
+        a is IrUserSpecType ua && b is IrUserSpecType ub && ua.FStar == ub.FStar &&
+        ua.Args.Length == ub.Args.Length && ua.Args.Zip(ub.Args, (x, y) => SameType(x, y)).All(same => same);
+
     internal static bool SameType(IrType a, IrType b) =>
         a.Equals(b) ||
         a is IrUserSpecType ua && b is IrUserSpecType ub && ua.Name == ub.Name && ua.FStar == ub.FStar &&

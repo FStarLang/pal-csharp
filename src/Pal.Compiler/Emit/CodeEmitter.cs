@@ -277,7 +277,8 @@ public sealed class CodeEmitter(
             // an arm that replaces an open object's array field leaves the join holding the
             // box and the new array under unrelated existentials. The rest of the block is
             // moved into both arms instead, so that no join is needed.
-            if (statements[i] is IrIf split && (JoinLoses(split) || ArmDeclaresCell(split)))
+            if (statements[i] is IrIf split && (JoinLoses(split) || ArmDeclaresCell(split) ||
+                                                  method.IsConstructor && AssignsOwnField(split)))
             {
                 var rest = statements.RemoveRange(0, i + 1);
                 // An arm that never completes keeps none of the rest: behind its
@@ -736,6 +737,11 @@ public sealed class CodeEmitter(
                 case IrPrim or IrTypeParamType or IrNamedType:
                     value = Default(field.Type);
                     break;
+                // R30.19. A nullable field of a bound library type (`IEqualityComparer<T>?`)
+                // the constructor leaves alone is C#'s `null`, which is `None`.
+                case IrOptionType fieldOption:
+                    value = $"(None #{Types.Atom(fieldOption.Inner)})";
+                    break;
                 // R25.1. A comparer's stand-in is the default comparer, under the same
                 // condition as an array's: it is never observed.
                 case IrUserSpecType { Args: [var cmpElement] } cmp
@@ -774,6 +780,14 @@ public sealed class CodeEmitter(
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
         MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i);
+
+    /// <summary>
+    /// R30.23. A constructor's arm that assigns a field of the object it builds: the join
+    /// generalises the record, and what the arm stored (`_comparer = comparer ?? Default`)
+    /// is lost to the postcondition, so the rest of the body moves into both arms.
+    /// </summary>
+    private static bool AssignsOwnField(IrIf i) =>
+        Check.Statements(i).Any(t => t is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This } } });
 
     /// <summary>
     /// R30.10. An arm that declares a mutable scalar local outside any loop body (a
@@ -1225,7 +1239,8 @@ public sealed class CodeEmitter(
             .OfType<IrCall>()
             .Any(c => c.HasReceiver && c.Args is [IrVar { Name: var n }, ..] && n == receiver.Name &&
                       receiver.ViewBase is null && openMethods?.Contains(c.Callee) != true ||
-                      raising?.Contains(c.Callee) == true && receiver.Fraction is not null &&
+                      // R30.27. Not a `[DoesNotReturn]` call: nothing follows it to reopen for.
+                      raising?.Contains(c.Callee) == true && !c.DoesNotReturn && receiver.Fraction is not null &&
                       receiver.ViewBase is null && receiver.PostModel == receiver.PreModel);
 
     /// <summary>
@@ -3496,7 +3511,9 @@ public sealed class CodeEmitter(
         }
         if (!NeedsEpilogue) return false;
         if (_method is { IsConstructor: true } &&
-            _objects.FirstOrDefault(o => o.Binder == Names.Result) is { } built)
+            // R30.24. The object a chained constructor got back (R27.45) is the one being
+            // built too, under the chained call's binder.
+            _objects.FirstOrDefault(o => o.Binder == Names.Result || o.Name == Names.This) is { } built)
         {
             var saved = _objects;
             _objects = [.. _objects.Where(o => o != built)];

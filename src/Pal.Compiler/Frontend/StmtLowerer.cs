@@ -839,9 +839,20 @@ public sealed class StmtLowerer(
         var root = target is ElementAccessExpressionSyntax { Expression: var arr }
             ? model.GetSymbolInfo(arr).Symbol : null;
         // Writing an element is seen through the alias; rebinding the array's name is not.
-        if (root is ILocalSymbol al && scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-                .Any(a => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
-            return null;
+        // R30.16. Only while the alias is live: from its declaration to its last use, when
+        // the block has no jumps. A local that is R24.19's or R30.2's name for a field is
+        // the field there, so the field must not change in that stretch either.
+        if (root is ILocalSymbol al)
+        {
+            var live = LiveStretch(scope, node, symbol);
+            if (scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a => live(a) &&
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
+                return null;
+            if (al.DeclaringSyntaxReferences is [var ad] && ad.GetSyntax() is VariableDeclaratorSyntax { Initializer.Value: var av } &&
+                model.GetSymbolInfo(av).Symbol is IFieldSymbol { IsStatic: false } af0 &&
+                ChangesFields(scope, symbol, new HashSet<ISymbol>(SymbolEqualityComparer.Default) { af0 }, live))
+                return null;
+        }
         if (root is IParameterSymbol) return null;
         // A field may be replaced by an assignment or by a call of another method of the
         // class; the alias would then name the new array's element, not the old one. The
@@ -849,7 +860,6 @@ public sealed class StmtLowerer(
         // `ref`-returning method mentions; assigning any other field is harmless.
         if (target is InvocationExpressionSyntax || root is IFieldSymbol)
         {
-            var self = symbol.ContainingSymbol.ContainingType;
             var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             if (root is IFieldSymbol rf) read.Add(rf);
             if (target is InvocationExpressionSyntax call &&
@@ -857,17 +867,7 @@ public sealed class StmtLowerer(
                 callee.SyntaxTree == model.SyntaxTree)
                 foreach (var id in callee.GetSyntax().DescendantNodes().OfType<IdentifierNameSyntax>())
                     if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f) read.Add(f);
-            foreach (var n in scope.DescendantNodes())
-            {
-                if (n is AssignmentExpressionSyntax a && model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol { IsStatic: false } af &&
-                    read.Contains(af))
-                    return null;
-                if (n is InvocationExpressionSyntax inv &&
-                    model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
-                    SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
-                    !Declarations.Has(m, known.LemmaAttribute))
-                    return null;
-            }
+            if (ChangesFields(scope, symbol, read, _ => true)) return null;
         }
         if (_code.Lower(v.Initializer.Value) is not IrElement element) return null;
         var index = Fresh("ref");
@@ -880,6 +880,49 @@ public sealed class StmtLowerer(
         _spec.Alias(symbol, !v.Initializer.Value.DescendantNodes().Any(Borrowing.IsStep) &&
             _spec.Lower(v.Initializer.Value) is IrElement se ? se with { Index = alias.Index } : alias);
         return alias;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="scope"/> may, at a node <paramref name="at"/> accepts, assign
+    /// one of the fields in <paramref name="read"/>, or call a method of the class that may.
+    /// </summary>
+    private bool ChangesFields(SyntaxNode scope, ILocalSymbol symbol, HashSet<ISymbol> read, Func<SyntaxNode, bool> at)
+    {
+        var self = symbol.ContainingSymbol.ContainingType;
+        foreach (var n in scope.DescendantNodes().Where(at))
+        {
+            if (n is AssignmentExpressionSyntax a && model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol { IsStatic: false } af &&
+                read.Contains(af))
+                return true;
+            if (n is InvocationExpressionSyntax inv &&
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
+                !Declarations.Has(m, known.LemmaAttribute))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// R30.16. The nodes of <paramref name="scope"/> that may run while the <c>ref</c> local
+    /// <paramref name="symbol"/>, declared by <paramref name="decl"/>, is live: those between
+    /// the declaration and its last use, or the end of the last loop in the block around a
+    /// use. A use cannot precede the declaration, and a loop around the block declares it
+    /// afresh; only a jump could reach an earlier node while it is bound, so with one in
+    /// the block, every node.
+    /// </summary>
+    private Func<SyntaxNode, bool> LiveStretch(SyntaxNode scope, SyntaxNode decl, ILocalSymbol symbol)
+    {
+        if (scope.DescendantNodes().Any(n => n is GotoStatementSyntax or LabeledStatementSyntax or SwitchStatementSyntax))
+            return _ => true;
+        var from = decl.Span.End;
+        var until = scope.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol))
+            .Select(id => id.AncestorsAndSelf().TakeWhile(a => a != scope)
+                .Where(a => a == id || a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax)
+                .Max(a => a.Span.End))
+            .DefaultIfEmpty(from).Max();
+        return n => n.SpanStart >= from && n.SpanStart < until;
     }
 
     /// <summary>R30.1, R30.2. The locals PALCS0750 has already refused.</summary>

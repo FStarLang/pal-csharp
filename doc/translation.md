@@ -9317,3 +9317,282 @@ KeyValuePair)` is translated as written; no translation at the dynamic type was 
 `Pulse.Lib.CSharp.Obj` is implemented (`obj = unit`), so its interface carries no
 assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
 only new trust: each says the read or call is pure and does not throw.
+
+## 30. `Dictionary<TKey,TValue>` and the rest of `HashSet<T>`
+
+§24 verified `HashSet<T>`'s lookups and removal. §30 adds the members that grow, fill and
+rebuild the table (`AddIfNotPresent`, `Resize`, `EnsureCapacity`, `TrimExcess`,
+`Initialize`), and the same for `Dictionary<TKey,TValue>` (`TryInsert` and its wrappers,
+`Remove`, `Resize`, `Clear`, …). The runtime harnesses are `pal/HashSet` and the new
+`pal/Dictionary` (with its glue `pal/Dictionary/DictionaryChain.fst`). `test/rebind_alias`
+and `test/collections_hashing/Ctor.cs` pin the rules, and `test/diagnostics/cases/Rebind*.cs`
+pin PALCS0750.
+
+### R30.1 A `ref` local rebound by statements
+
+A `ref` local bound to an element of a field's array (R24.8) may be rebound, as a
+statement (`r = ref e;`), to an element of the same field's array; or be declared
+`ref Unsafe.NullRef<T>()` and bound later. Each binding evaluates the element's index into
+the local's index variable; every use of the name is the element of the field's array at
+that index. That is sound only where the local is *current*: bound since the field last
+changed. The field changes by an assignment to it, or by a call of another non-lemma
+instance method of the class (which may replace the array, as `Resize` does). A conservative
+walk in C#'s evaluation order (`AliasFlow`) checks that every use is current; anything it
+does not follow (`goto`, a lambda that names the local) fails. A use that may be stale, or
+unbound, is **PALCS0750**.
+
+### R30.2 An array local rebound from its field
+
+An array local that is R24.19's name for a field (`Entry[]? entries = _entries;`) may be
+rebound by the statement `entries = _entries;`, typically after a call that replaced the
+array. The same walk as R30.1 checks that every read of the local is current; where it is,
+the local is the field. Otherwise **PALCS0750**.
+
+### R30.3 Growing and rebuilding a chained table (library)
+
+`Pulse.Lib.CSharp.HashInsert` proves, over `HashChain`'s separate-chaining table seen through
+a projection of its entries (`view o f`: the key for `HashSet<T>`, the key-value pair for
+`Dictionary`), that inserting an entry (from the free list or at the end), rebuilding the
+chains into new arrays (`Resize`), recomputing the hash codes (`forceNewHashCodes`) and
+compacting into new arrays (`CopyEntries`) keep the table well formed and its contents. It
+is fully proved.
+
+### R30.4 The code's bucket index
+
+`HashChain.bkt_code` (and `bkt_code_long`, for `GetBucket`'s `uint % int`, which C# computes
+in `long`) state that the index the code computes is `HashChain.bkt` of the hash code.
+Both are proved and fire by pattern.
+
+### R30.5 Static helpers of bound static classes read only their arguments
+
+A static method of a static class bound by R21.5 (`HashHelpers.GetPrime`) reads no state,
+like a method outside the sources. Its binding is `Pulse.Lib.CSharp.HashSize`:
+`get_prime`, `get_prime_at_least` and `is_prime`, which are **trusted** (`HashHelpers`
+trial-divides upward without a bound). They state only that the result is at least the
+request and at least 3, prime, and at most `MaxPrimeArrayLength` (`0x7FFFFFC3`) when the
+request is.
+
+### R30.6 A type test against a bound library class
+
+`c is C`, `C` a library class bound by R21.5, translates to the predicate bound to
+`"is:" + C`'s documentation-comment ID, applied to the non-null value.
+`NonRandomizedStringEqualityComparer` is bound to `Pulse.Lib.CSharp.StringComparers`, whose
+`val`s are **trusted**: `is_non_randomized`, `randomized` (`GetRandomizedEqualityComparer`),
+that the randomized comparer has the same equality, and that a non-randomized comparer's
+equality is reflexive.
+
+### R30.7 `T x = f = e;`
+
+A declaration initialised by a simple assignment to a field of `this` or a local is the
+assignment followed by the declaration, initialised by reading back what was stored (not
+null where C# says so). `int[] buckets = _buckets = new int[size];` is such a declaration.
+
+### R30.8 A field of a name as an argument to an inlined `ref` helper
+
+R24.9 inlines a `ref`-returning helper whose arguments are names or constants. A field of
+one (`entry.hashCode`) is accepted too: reading it has no effect.
+
+### R30.9 A reference cast between bound library types
+
+`(C)e`, with `C` and `e`'s type both reference types bound by R21.5 and C# converting one
+to the other by reference (`(IEqualityComparer<string>)comparer`), is `e` at `C`'s image.
+
+### R30.10 An arm that declares a mutable scalar
+
+An `if` arm that declares a mutable scalar local outside any loop body (a `for` counter):
+Pulse allocates a cell only where the post-condition is known, so the rest of the block is
+moved into both arms, as for R22.12. This lifts F19 for such blocks.
+
+### R30.11 An array local moved into a field
+
+After `_f = a;`, the array local `a` no longer owns its array: the field does. A ghost
+statement later in the method does not mention `a`'s resource.
+
+### R30.12 An element write followed by a lemma
+
+An `if` arm that writes an array element, followed in a loop body by a lemma call or an
+assertion: Pulse's join of the arms keeps no pure fact about the array's new contents, so
+the rest of the body moves into both arms.
+
+### R30.13 `out _`
+
+Each `out _` (or `out var _`) in a statement is a fresh local, declared just before it at its
+type's `default`. The callee writes it and nothing reads it.
+
+### R30.14 `a?.Length ?? d`
+
+On a nullable array `a` whose evaluation has no effect, `a?.Length ?? d` means
+`a != null ? a.Length : d`. A null array is a property of the reference (R24.7), not an
+option. `a?.Length` alone is the length of the bound array.
+
+### R30.15 An element as an argument to an inlined `ref` helper
+
+R30.8 also accepts an element of an array named by a name, at an index that is a name or a
+constant, or a field of such an element (`entries[i].hashCode`). The read is proved in
+bounds where it occurs, so it cannot throw, and substituting it is evaluating it.
+
+### R30.16 A `ref` local's array local is checked only while the alias is live
+
+R24.8 refuses a `ref` local into an array *local* when the program rebinds that local. Now
+only rebindings in the alias's live stretch count: from its declaration to its last use,
+extended to the end of any loop (within the block) around a use. A loop around the block
+declares the alias afresh. With a `goto`, label or `switch` in the block, every node
+counts. When the array local is R24.19's or R30.2's name for a field, the field must not
+change in that stretch either (by assignment or by a call of a non-lemma instance method of
+the class). `TryInsert` needs this rule: its `entries = _entries;` (after `Resize`) precedes
+`ref Entry entry = ref entries![index];`.
+
+### R30.17 A by-value argument does not make a variable assignable
+
+A variable passed to a call is taken to be possibly assigned by it (it may be passed by
+reference, or be an object the callee mutates), so it gets a mutable cell, and loop
+invariants hold it only existentially. A variable of a primitive type or of a type
+parameter, passed by value, is copied: the callee cannot change it. Such arguments no
+longer count. Before this rule, `ThrowHelper.ThrowAddingDuplicateWithKeyArgumentException(key)`
+inside `TryInsert`'s loops lost `key`'s value at the loop head.
+
+### R30.18 `NonRandomizedStringEqualityComparer.GetStringComparer`
+
+`GetStringComparer(o)` is `StringComparerOf.string_comparer (Obj.box o)`, a trusted
+`option Eq.handle`. Its one lemma (`string_comparer_equals`) says that, at `T == string`,
+a comparer it returns is non-randomized and equates exactly what the comparer it was given
+does. `HashSet<T>(comparer)` swaps its comparer for that one; `HashSetChain.string_swap`
+proves the swap keeps the set's equality (`SameEquality`).
+
+### R30.19 A `null` cast to a nullable reference type
+
+`(IEqualityComparer<T>?)null`, where the type is an `option`, is that `option`'s `None`,
+not a `B.null`. A constructor's field of `option` type with no initialiser starts at
+`None`, typed with its element type.
+
+### R30.20 A constructor opens its class's spec modules
+
+A constructor's module opens the modules the class's other members' specifications open
+(`ClassSpecOpens`). Before this, a constructor whose contract named a class-level `[Spec]`
+function (`HashSet<T>.ItemsOf`) did not typecheck.
+
+### R30.21 A nullable reference compared with a non-null one
+
+`comparer != EqualityComparer<T>.Default`, with `comparer` an `option` and the other side
+not, wraps the other side in `Some`. Two C# types bound to the same F* type
+(`IEqualityComparer<T>` and `EqualityComparer<T>`) count as the same type here.
+
+### R30.22 A `return` nested in an `if` with no `else`
+
+`if (a) { …; if (b) { …; return x; } } rest; return y;` is R5.5b's guard chain one level
+deeper: the statements after the outer `if` are appended to its branch (where the inner
+`if` absorbs them as its `else`) and become the outer `if`'s `else`. The tail is
+duplicated. `HashSet<T>.TryGetValue` is the case.
+
+### R30.23 A constructor's arm that assigns a field
+
+In a constructor, an `if` an arm of which assigns a field of the object being built is not
+joined (R22.12): the rest of the body moves into both arms. Pulse's join generalises the
+whole record, so what the arm stored (`_comparer = comparer ?? EqualityComparer<T>.Default`)
+was lost to the postcondition.
+
+### R30.24 A chained constructor that throws
+
+A chained constructor (R27.45) holds the object the chained call returned under that
+call's binder rather than `result`. At a `throw` or a `[DoesNotReturn]` call, that object
+is discarded exactly as R22.11 discards the one R22.9 allocates; before, its invariant was
+left over. `HashSet<T>(int capacity, comparer)`'s argument check is the case.
+
+### R30.25 An array parameter compared with `null` in a contract
+
+An array parameter's reference is bound under R24.7's `ArrayRefKey` in the contract's
+scopes, so `[Requires("array != null")]` is `not (A.is_null var_array)`. Before, the
+comparison was read as one of the contents and was ill-typed. `CopyTo`'s null check is the
+case.
+
+### R30.26 A call to a bound member writes nothing
+
+R4.11's write-set scan counted an instance call to a method with no body in the
+compilation as a write of the receiver. A member bound by `[SpecBinding]` (R21.5) is a pure
+F* function, so a call to it is no longer counted: `EqualityComparer<TValue>.Default.Equals`
+leaves `Dictionary.ContainsValue` read-only, which `ValueCollection`'s
+`ICollection<TValue>.Contains` (holding the dictionary at a fraction, R27.41) needs.
+
+### R30.27 A `[DoesNotReturn]` call does not reopen a read-only receiver
+
+R27.38 has a loop of a read-only method reopen the receiver at a fresh record when its
+body may call a raising method: the call closes the receiver around itself. A
+`[DoesNotReturn]` call does too (R22.11), but nothing follows it, so there is nothing to
+reopen for; the record stays named, and a measure may still mention a field
+(`(uint)entries.Length - collisionCount`, where `entries` aliases `_entries`). Before, the
+measure's field read was refused as unsupported. R30.26 made `HashSet<T>.FindItemIndex`
+read-only, which is how it was found.
+
+### Trusted assumptions
+
+* `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
+* `Pulse.Lib.CSharp.StringComparers`: all four `val`s (R30.6).
+* `Pulse.Lib.CSharp.StringComparerOf`: `string_comparer` and `string_comparer_equals`
+  (R30.18).
+* The harness's `ThrowHelper` stand-ins (`pal/common/ThrowHelper.cs`): each is
+  `[DoesNotReturn]`, throws its exception and ensures `false`.
+  `ThrowNotSupportedException(ExceptionResource)` gained that contract here (the key and
+  value collections' `Add`, `Clear` and `Remove`).
+* `pal/Dictionary/Stubs.cs` binds `GenericEmptyEnumerator<T>.Instance` to R29.4's
+  `Obj.empty_enumerator`, as `pal/common/Bindings.cs` binds `SZGenericArrayEnumerator`'s
+  (`Dictionary`'s boxed `GetEnumerator`s of an empty dictionary).
+* §24's `Pulse.Lib.CSharp.Equality` bindings of `IEqualityComparer<T>` and
+  `EqualityComparer<T>.Default`, unchanged.
+
+Everything else (`HashInsert`, `HashChain`'s new lemmas, `pal/Dictionary/DictionaryChain.fst`)
+is proved.
+
+### The Dictionary model
+
+`Dictionary<TKey,TValue>`'s model is the sequences of live keys and values, in entry order
+(`SpecKeys`, `SpecValues`), the live count, the comparer and the number of slots. Its
+invariant (`Wf`) is that of §24's table plus: `_entries` is null exactly when `_buckets` is,
+and then the dictionary is empty; and every live key is non-null (`NonNullKeys`).
+The specifications are functional: `Added`, `Overwritten`, `Removed`/`RemovedAny` relate
+the sequences before and after.
+
+### Findings
+
+* **Capacity bound.** Inserting into a table of `MaxPrimeArrayLength` (`0x7FFFFFC3`)
+  slots throws `OutOfMemoryException` from `Resize`; the inserting members require fewer
+  slots than that.
+* **Non-null keys.** `Resize(forceNewHashCodes: true)` stores
+  `comparer.GetHashCode(entry.key)` without the null case `Equality.hash` has; it is correct
+  only because no key is null. That is now part of the invariant.
+* **`_entries` null implies empty.** Needed by `Count`, `Clear` and `Remove` when
+  `_buckets` is null.
+* **`_version` wraps.** It is `[Wrapping]`.
+* **`Resize`'s forced rehash** requires `!typeof(TKey).IsValueType` (as its
+  `Debug.Assert` says); the length bound is `Array.MaxLength`.
+* **`HashSet<T>.FindItemIndex`'s `location >= 0`** on a hit is not provable from the
+  invariant alone without a frame; the frame was added.
+* **`Initialize`** returns a positive size.
+* **SMT instability.** `TryInsert` and `AddIfNotPresent` needed assertions at the ends of
+  arms and `[Rlimit]`; `TryInsert` takes about an hour to check, `Remove(key)` about 35
+  minutes. R30.17 changed the SMT context enough that both needed a
+  `Pal.Assert(0 <= index && index < entries.Length)` at the end of each insertion arm.
+* **Long division.** `(uint)hashCode % buckets.Length` is computed in `long`; that the
+  quotient fits is nonlinear, so `TryInsert` calls a `DivFits` lemma (proved in
+  `DictionaryChain.div_fits` with `FStar.Math.Lemmas`) before the bucket lookup after `Resize`.
+* **`Remove(key, out value)`** cannot state *which* value it returned: C#'s definite
+  assignment rejects naming the `out` parameter in a loop invariant before it is assigned.
+  Its contract says what `Remove(key)`'s does.
+* **Unverifiable lookups.** `FindValue` uses `goto` and returns a `ref`, so it and its
+  callers (`ContainsKey`, `TryGetValue`, the indexer's getter, `ICollection.Contains` /
+  `Remove`) are not verified.
+  `KeyCollection.Contains` calls `ContainsKey` and is not verified either.
+* **Constructor order.** `Dictionary(int capacity, comparer)` calls `Initialize` before it
+  sets `_comparer`, so the invariant (which names the comparer) does not hold at that call;
+  it and the constructors that chain to it are not verified.
+* **Broken invariant across calls.** `TrimExcess` / `CopyEntries` call instance methods
+  while the table is half rebuilt; `RemoveWhere`
+  holds an alias of `_entries` across calls to `Remove`, which may replace it. Neither is
+  expressible.
+* **Collections' constructors.** `KeyCollection(dictionary)` and `ValueCollection` check the
+  argument for `null` before storing it; a borrowing struct's constructor may only assign
+  its fields (PALCS0730), so they are not verified. Their other members are.
+* **Out of reach.** `ICollection.CopyTo(Array, int)` (type tests and `try`/`catch` over
+  `Array`), `SyncRoot`, the non-generic `IEnumerable.GetEnumerator`s (interface dispatch),
+  serialization, and `HashSet`'s set operations (`IEnumerable<T>` arguments, `foreach`).
+* **Write sets.** The write-set scan over-approximated calls to bound members (R30.26),
+  which made `ContainsValue` look like it wrote the dictionary.

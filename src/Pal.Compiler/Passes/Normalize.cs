@@ -132,6 +132,23 @@ public static class Normalize
     {
         for (var i = 0; i < statements.Length - 1; i++)
         {
+            // R30.22. An `if` with no `else` whose branch returns only from inside a nested
+            // `if` takes what follows into both of its exits: after the branch, where the
+            // nested guard absorbs it in turn, and as its `else`.
+            if (statements[i] is IrIf { Else: null } nested && !EndsInReturn(nested.Then) &&
+                NestedReturn(nested.Then) && EndsInReturn(statements[^1]))
+            {
+                var tail = statements.Skip(i + 1).ToImmutableArray();
+                var then = nested.Then is IrBlock tb
+                    ? tb with { Statements = tb.Statements.AddRange(tail) }
+                    : new IrBlock(nested.Then.Loc, [nested.Then, .. tail]);
+                return
+                [
+                    .. statements.Take(i),
+                    nested with { Then = then, Else = new IrBlock(tail[0].Loc, Returns(tail)) },
+                ];
+            }
+
             if (statements[i] is not IrIf branch || !GuardChain(branch)) continue;
 
             var rest = Returns([.. statements.Skip(i + 1)]);
@@ -143,6 +160,15 @@ public static class Normalize
         }
         return statements;
     }
+
+    /// <summary>A <c>return</c> reached through blocks and <c>if</c>s alone, not loops.</summary>
+    private static bool NestedReturn(IrStmt stmt) => stmt switch
+    {
+        IrReturn => true,
+        IrBlock b => b.Statements.Any(NestedReturn),
+        IrIf i => NestedReturn(i.Then) || (i.Else is not null && NestedReturn(i.Else)),
+        _ => false,
+    };
 
     /// <summary>
     /// A chain <c>if (c1) T1 else if (c2) T2 …</c> that ends without an <c>else</c> and
@@ -717,6 +743,9 @@ public static class Normalize
                 {
                     switch (arg)
                     {
+                        // R30.17. A value of a primitive type or a type parameter is copied
+                        // in: the callee cannot write the caller's variable through it.
+                        case IrVar { Type: IrPrim or IrTypeParamType }: break;
                         case IrVar v: into.Add(v.Name); break;
                         case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
                     }

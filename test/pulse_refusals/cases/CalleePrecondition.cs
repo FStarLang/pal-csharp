@@ -1,4 +1,4 @@
-// EXPECT-PULSE: Failed to prove pure property: ‘I32.v arg_n > 0
+// EXPECT-PULSE: Failed to prove pure property: ‘I32.v var_n > 0
 // R4.1. A call must establish the callee's precondition at the call site. `Half` demands a
 // positive argument; `Caller` passes one it has not bounded, so the obligation lands on
 // the call rather than inside `Half`, which is itself perfectly provable.
