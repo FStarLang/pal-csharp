@@ -1194,7 +1194,7 @@ public sealed class CodeEmitter(
             .OfType<IrCall>()
             .Any(c => c.HasReceiver && c.Args is [IrVar { Name: var n }, ..] && n == receiver.Name &&
                       receiver.ViewBase is null && openMethods?.Contains(c.Callee) != true ||
-                      raising?.Contains(c.Callee) == true && receiver.Fraction is not null &&
+                      raising?.Contains(c.Callee) == true && !c.DoesNotReturn && receiver.Fraction is not null &&
                       receiver.ViewBase is null && receiver.PostModel == receiver.PreModel);
 
     /// <summary>
@@ -1642,6 +1642,10 @@ public sealed class CodeEmitter(
             .SelectMany(Check.Expressions)
             .SelectMany(Check.Subexpressions)
             .Any(e => e is IrField { Receiver: IrVar { Name: var n } } && n == Names.This ||
+                      // R33.15. An `[Open]` callee takes the receiver as the opened
+                      // invariant holds it.
+                      e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } oc &&
+                      openMethods?.Contains(oc.Callee) == true ||
                       // R27.13. A node of the receiver's region is read in the receiver's
                       // region, which only the opened invariant holds.
                       e is IrField { Receiver.Type: IrClassType k } && IsRegionType(k) &&
@@ -3259,9 +3263,25 @@ public sealed class CodeEmitter(
         foreach (var slot in live.Where(s => s is { Open: true, Type: IrClassType }))
         {
             var oc = (IrClassType)slot.Type;
+            var (_, written) = ReceiverWrites(w.Body);
             foreach (var f in slot.OpenFields)
-                scope.Bind($"{Names.This}.{f.Name}", new Term(
-                    $"{fixedNames[slot.Name]}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+            {
+                var at = $"{fixedNames[slot.Name]}.{Names.ClassProjection(oc.Name, f.Name)}";
+                // R33.15. An array field is carried by its own `pts_to`, at contents the
+                // loop holds fixed unless it writes the array.
+                if (f.Type is IrArrayType)
+                {
+                    var c = FreshValue(Names.Contents(f.Name));
+                    var res = $"{PulseEmitter.ArrayPts(f)} {at} {c}";
+                    resources.Add(res);
+                    if (written.Contains(f.Name) || written.Contains(AnyArray)) existentials.Add(c);
+                    else repFixed.Add((c, res));
+                    scope.Bind($"{Names.This}.{f.Name}", new Term(c, TermKind.Seq, f.Type));
+                    scope.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"), new Term(at, TermKind.Other, f.Type));
+                    continue;
+                }
+                scope.Bind($"{Names.This}.{f.Name}", new Term(at, MethodPlan.KindOf(f.Type), f.Type));
+            }
         }
 
         // R5.8b, and R5.12 with it: a binder the loop cannot change is *named* before the
@@ -3944,8 +3964,18 @@ public sealed class CodeEmitter(
             if (slot is { Open: true, Type: IrClassType oc })
             {
                 foreach (var f in slot.OpenFields)
-                    scope.Bind($"{Names.This}.{f.Name}", new Term(
-                        $"{value}.{Names.ClassProjection(oc.Name, f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
+                {
+                    var at = $"{value}.{Names.ClassProjection(oc.Name, f.Name)}";
+                    if (f.Type is IrArrayType)
+                    {
+                        var c = FreshValue(Names.Contents(f.Name));
+                        named.Add((c, $"{PulseEmitter.ArrayPts(f)} {at} {c}"));
+                        scope.Bind($"{Names.This}.{f.Name}", new Term(c, TermKind.Seq, f.Type));
+                        scope.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"), new Term(at, TermKind.Other, f.Type));
+                        continue;
+                    }
+                    scope.Bind($"{Names.This}.{f.Name}", new Term(at, MethodPlan.KindOf(f.Type), f.Type));
+                }
                 foreach (var k in slot.OpenHeaps)
                 {
                     var heap = FreshValue(Frontend.Region.HeapBinder(k.Name));

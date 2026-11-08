@@ -9393,11 +9393,7 @@ never passed by `ref`). `PriorityQueue`'s `MoveDown*` had been classified as mut
 because they call a comparer; had they not, the emitted code would not have verified, so
 the gap was incompleteness, not unsoundness.
 
-Treating comparer calls (`Equals`, `GetHashCode`, `Compare`) as pure, so that more methods
-would be read-only, was tried and withdrawn: the read-only translation does not yet cover
-`HashSet.FindItemIndex`'s `Entry[]` local, `Stack.CopyTo` or `SortedSet.Overlaps`, which
-then fail. `OrderedDictionary`'s `IndexOf` and `TryGetValue` instead promise in their
-contracts that the model is unchanged, which is what the indexer's getter needs.
+R33.14 completes this in the other direction.
 
 **R33.11. `x ??= d;` on a local or parameter** is `x = x ?? d;`, `x` read once (it is a
 variable). For a comparer, whose null the model cannot see (R25.4), it is
@@ -9421,6 +9417,48 @@ it silently dropped. `C(T v) => _f = v;` is the constructor `{ _f = v; }`; befor
 arrow was not read at all and the constructor was translated as assigning nothing (refused
 by the verifier, not unsound, but every expression-bodied constructor was unprovable).
 
+**R33.14. What does not write.** R4.11's scan now separates reads from writes in three
+places:
+
+* a call of a `[SpecBinding]`-bound instance method (a comparer's `Equals`, `GetHashCode`,
+  `Compare`) is an F* term and cannot write; its array arguments are still checked;
+* a call of `Pal`'s intrinsics or of a `[Spec]` or `[Lemma]` member is ghost, and reads the
+  array it is handed (`Search(Pal.Contents(_buckets), …)`);
+* an assignment through a `ref` local (`entry.Next = …` after `ref Entry entry = ref
+  entries[i]`) is a write, as R24.8 translates it; rebinding the local (`entry = ref …`) is
+  not.
+
+So `HashSet.FindItemIndex`, `Stack.CopyTo` and `OrderedDictionary`'s `IndexOf`,
+`ContainsKey`, `ContainsValue` and `TryGetValue` are read-only, and the views (R28.2), which
+hold the dictionary read-only, can call them. Two things the read-only translation then
+needed:
+
+* R27.38 reopens a read-only receiver around a raising call in a loop, which leaves the
+  record existential and the measure unable to name a field's length. A `[DoesNotReturn]`
+  callee (`ThrowHelper.ThrowInvalidOperationException_…` inside `FindItemIndex`'s loop) no
+  longer counts: nothing after it runs.
+* R23.6's `Debug.Assert(array != _array)` between a whole array and a field held at a
+  fraction: `QueueStack.distinct` takes either at any permission when the other is whole
+  (gathering them would exceed 1).
+
+**R33.15. `[Open]` on a class that owns arrays.** R27.23's `[Open]` was defined for region
+owners: the callee takes the receiver's record and its heaps. A class whose invariant hides
+arrays (`OrderedDictionary`'s `_buckets` and `_entries`) needs the same thing for helpers that
+run while the invariant is broken (`UpdateBucketIndex`, `PushEntryIntoBucket`). Such a callee
+now takes
+
+* the record, `B.pts_to this pre_this`, as before;
+* for each array field `f`, `A.pts_to (reveal pre_this).f pre_this_contents_f`, and in the
+  contract `this.f` denotes those contents (R3.10a) and `Pal.Contents(this.f)`'s reference is
+  the record's field; the post holds each at an existential;
+* for each field the body does not assign, with no call on the receiver that might,
+  `post_this.f == pre_this.f`, which is what lets the caller fold again.
+
+The caller side is R4.10's bracket: a call of an `[Open]` method on the receiver counts as
+touching a field, so an ordinary method opens its invariant around it and refolds after. A
+loop inside an `[Open]` method carries each array field by its own `pts_to` (R5.12), fixed if
+the loop writes no element of it.
+
 ### Findings (§33)
 
 * **Soundness (fixed, R33.6).** `x is null` on an array was translated as `false`, and
@@ -9433,6 +9471,10 @@ by the verifier, not unsound, but every expression-bodied constructor was unprov
   contract of `IEqualityComparer<T>` does not require.
 * The public `IndexOf(TKey)` passes one local, `_`, by `ref` to both of the private
   `IndexOf`'s out-parameters; harmless only because that callee never reads them (R33.7).
+* There is no key distinctness for `OrderedDictionary` (or `Dictionary`, `HashSet`) without
+  a symmetric, transitive comparer: `TryInsert` refuses a key `k` when `Equals(e.Key, k)` for
+  some stored `e`, so two stored keys may still be "equal" under the other argument order.
+  The model therefore states no distinctness; `IndexOf` promises *a* matching index.
 * (R33.13) An annotated expression-bodied indexer was silently not translated, and an
   expression-bodied constructor's body was dropped.
 

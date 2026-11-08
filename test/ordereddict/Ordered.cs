@@ -14,6 +14,12 @@ using static System.Collections.ThrowHelper;
 [assembly: SpecBinding("T:System.Collections.Generic.EqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
 [assembly: SpecBinding("P:System.Collections.Generic.EqualityComparer`1.Default", "Pulse.Lib.CSharp.Equality.default_comparer")]
 
+public static class SlotSpecs
+{
+    [Spec]
+    public static bool Nonempty(Seq<OrderedTable.Slot> xs) => xs.Length > 0;
+}
+
 [Spec]
 public struct OrderedTableModel
 {
@@ -208,6 +214,58 @@ public class OrderedTable
         return n.Value;
     }
 
+    // R33.14. Reading through a comparer and handing `Pal.Contents(_slots)` to a `[Spec]` is
+    // read-only, so `Twice` knows the slots are still there; a loop that raises inside is
+    // read-only too and measures by its field's length; and `Debug.Assert(a != _slots)`
+    // holds of a whole array and a read-only field.
+    [Requires("0 < @this.SpecSlots.Length")]
+    [Ensures("Pal.Implies(Result, @this.SpecSlots[0].Key == x)")]
+    private bool Same(System.Collections.Generic.IEqualityComparer<int> c, int x, int y)
+    {
+        Pal.Assert(SlotSpecs.Nonempty(Pal.Contents(_slots)));
+        return c.Equals(x, y) && _slots[0].Key == x;
+    }
+
+    [Requires("0 < @this.SpecSlots.Length")]
+    [Ensures("Result == @this.SpecSlots[0].Key")]
+    public int Twice(System.Collections.Generic.IEqualityComparer<int> c, int x)
+    {
+        bool _ = Same(c, x, x);
+        return KeyAt(0);
+    }
+
+    [Ensures("Result >= 0")]
+    [Throws(typeof(InvalidOperationException))]
+    private int Walk()
+    {
+        Slot[] slots = _slots;
+        int i = 0;
+        while (i < slots.Length)
+        {
+            Pal.Invariant(0 <= i && i <= slots.Length);
+            Pal.Decreases(slots.Length - i);
+            if (slots[i].Next < -1)
+                System.Collections.ThrowHelper.ThrowCycle();
+            i++;
+        }
+        return i;
+    }
+
+    [Requires("Pal.Contents(a).Length > 0")]
+    private void Apart(Slot[] a)
+    {
+        Debug.Assert(a != _slots);
+    }
+
+    // A write through a `ref` local into the field's array is a write of the field.
+    [Requires("0 < @this.SpecSlots.Length")]
+    [Ensures("@this.SpecSlots.Length == Pal.Old(@this.SpecSlots).Length && @this.SpecSlots[0].Key == k")]
+    public void SetFirstKeyRef(int k)
+    {
+        ref Slot s = ref _slots[0];
+        s.Key = k;
+    }
+
     [Ensures("Result")]
     public static bool SelfEqual<T>(System.Collections.Generic.IEqualityComparer<T>? c, T x)
     {
@@ -244,4 +302,69 @@ public sealed class Row : IRow, IRowReadOnly
 
     [Ensures("Result == @this.SpecValue")]
     bool IRowReadOnly.this[int i] => _value;
+}
+
+// R33.15. An `[Open]` helper of a class that owns arrays.
+[Spec]
+public struct CellsModel
+{
+    public Seq<int> Items;
+    public SpecInt Count;
+}
+
+[Invariant("_a != null")]
+[Invariant("0 <= _n && _n <= _a.Length")]
+public class Cells
+{
+    private int[] _a;
+    private int _n;
+
+    [Model]
+    private CellsModel Model => new CellsModel { Items = Pal.Contents(_a), Count = _n };
+
+    [Spec] internal Seq<int> SpecItems => Model.Items;
+
+    public Cells()
+    {
+        _a = new int[4];
+        _n = 0;
+    }
+
+    [Open]
+    [Requires("0 <= i && i < Pal.Contents(@this._a).Length")]
+    [Ensures("Pal.Contents(@this._a) == Pal.SetAt(Pal.Old(Pal.Contents(@this._a)), i, v)")]
+    [Ensures("@this._n == Pal.Old(@this._n)")]
+    private void Put(int i, int v)
+    {
+        _a[i] = v;
+    }
+
+    [Requires("0 < @this.SpecItems.Length")]
+    [Ensures("@this.SpecItems.Length == Pal.Old(@this.SpecItems).Length && @this.SpecItems[0] == v")]
+    public void PutFirst(int v)
+    {
+        Put(0, v);
+    }
+
+    [Open]
+    [Requires("0 <= @this._n && @this._n <= Pal.Contents(@this._a).Length")]
+    [Ensures("Pal.Contents(@this._a).Length == Pal.Old(Pal.Contents(@this._a)).Length")]
+    [Ensures("@this._n == Pal.Old(@this._n)")]
+    [Ensures("Pal.Forall((int j) => Pal.Implies(0 <= j && j < @this._n, Pal.Contents(@this._a)[j] == v))")]
+    private void FillOpen(int v)
+    {
+        for (int k = 0; k < _n; k++)
+        {
+            Pal.Invariant(0 <= k && k <= _n);
+            Pal.Invariant(Pal.Contents(_a).Length == Pal.Old(Pal.Contents(this._a)).Length && _n == Pal.Old(this._n));
+            Pal.Invariant(Pal.Forall((int j) => Pal.Implies(0 <= j && j < k, Pal.Contents(_a)[j] == v)));
+            _a[k] = v;
+        }
+    }
+
+    [Ensures("@this.SpecItems.Length == Pal.Old(@this.SpecItems).Length")]
+    public void Fill(int v)
+    {
+        FillOpen(v);
+    }
 }

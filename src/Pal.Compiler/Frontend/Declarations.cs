@@ -210,6 +210,14 @@ public static class Declarations
                 !AlwaysFresh(arrayLocal, syntax, model))
                 return true;
 
+            // R33.14. A write through a `ref` local writes what it aliases, which may be an
+            // element of a field's array (R24.8, `ref int bucket = ref GetBucket(h)`).
+            // Rebinding it (`entry = ref entries[i]`) writes nothing.
+            if (target is not null &&
+                node is not AssignmentExpressionSyntax { Right: RefExpressionSyntax } &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { RefKind: RefKind.Ref })
+                return true;
+
             // R27.16. An auto-property of a class is a field (R27.3), however it is written.
             if (target is not null &&
                 model.GetSymbolInfo(RootOf(target)).Symbol is IPropertySymbol
@@ -233,8 +241,12 @@ public static class Declarations
                     call.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax heldLocal } &&
                     model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol)
                     continue;
+                // R33.14. A `[SpecBinding]`-bound library method (a comparer's `Equals`) is an
+                // F* term, which cannot reach this object's state except through an array
+                // argument, checked below.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
+                    known?.Binding(callee) is null &&
                     !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 
@@ -248,6 +260,12 @@ public static class Declarations
                         Name: "IndexOf" or "LastIndexOf" or "BinarySearch",
                         ContainingType: { Name: "Array", ContainingNamespace.Name: "System" },
                     })
+                    continue;
+                // R33.14. A specification intrinsic (`Pal.Contents(_a)`), and a `[Spec]` or
+                // `[Lemma]` member, is ghost: it reads the array it is handed.
+                if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol ghost &&
+                    (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
+                     Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
                     continue;
                 foreach (var argument in call.ArgumentList.Arguments)
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
