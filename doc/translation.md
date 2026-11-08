@@ -9318,6 +9318,253 @@ KeyValuePair)` is translated as written; no translation at the dynamic type was 
 assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
 only new trust: each says the read or call is pure and does not throw.
 
+## 31. `LinkedList<T>`: rings of region nodes
+
+`LinkedList<T>` keeps its nodes in a circular doubly-linked list: `head` is the first
+node, each node's `next` and `prev` link it to its neighbours (the last node's `next` is
+`head`), and every node points back to its list through `list`. §27's regions own
+`SortedSet<T>`'s nodes as trees; a ring is not a tree, so §31 lets a region's nodes form
+rings and states their shape through a library of pure functions and lemmas.
+
+The harness is `pal/LinkedList` in the runtime checkout. `test/linkedlist/Chain.cs` pins
+the rules on a smaller ring: R31.1 to R31.7 through insertion at the front and the back,
+R31.8 to R31.10 through unlinking a node, R31.11 and R31.12 through `Link.Next` and
+`Clear`, and R31.13 and R31.14 through `Fresh` and `Guard`.
+
+### R31.1 Cyclic regions
+
+`[Region(Cyclic = true)]` marks a region class whose two self-typed fields are the `next`
+and `previous` links of rings. For such a class:
+* the owner's invariant does not require its pointers to be unshared trees;
+* a read of a node's field requires only that the node is in the region
+  (`Pal.InRegion(x)`);
+* the tree intrinsics `Pal.Tree`, `Pal.WellFormed`, `Pal.Unshared` and `Pal.Reshaped` are
+  refused with PALCS0780.
+
+The shape is the user's to state, through `SpecRing` (R31.4).
+
+### R31.2 The cycle group
+
+A ring's owner (a class with a field of a cyclic region class) and its nodes refer to each
+other: `LinkedList<T>.head` is a node and `LinkedListNode<T>.list` is a list. The owner's
+record is therefore declared in the region class's module, next to the node's, and the
+owner's own module includes it from there. The owner is not recursive, so it has no
+`intro_nil` (§10); its type arguments are written out where nothing else names them.
+
+### R31.3 `@this` in an invariant
+
+An owner's `[Invariant]` may name `@this`, the reference itself. The ring's invariant
+says that the nodes the region owns are exactly those that point back to the owner:
+```csharp
+[Invariant("SpecRing.Ring<LinkedListNode<T>, LinkedList<T>>(Pal.Heap<LinkedListNode<T>>(), head, count, @this)")]
+```
+
+### R31.4 `SpecRing` and `Pulse.Lib.CSharp.RegionRing`
+
+`SpecRing`'s members are `[RegionOp]`s or `[SpecOp]`s (R27.22) over
+`Pulse.Lib.CSharp.RegionRing`. The region class's view is a pair of its item and its
+owner. Each `void` member is a lemma, called as a ghost statement.
+
+* Shape:
+  * `Ring(h, hd, n, o)`: the ring of `n` nodes from `hd`, owned by `o`;
+  * `Shape(h, hd, n)`: the same ring, whoever owns it;
+  * `Nodes(h, hd, n)`, `Items(h, s)`, `Item(h, x)`, `Owner(h, x)`;
+  * `Succ(h, hd, x)` and `Pred(h, hd, x)`, a node's neighbours as `Next` and `Previous`
+    return them (null past either end), and `SuccAt`.
+* Sequences: `Pos`, `InsIndex`, `InsertAt`, `RemoveAt`.
+* Heap relations: `ViewsKept`, `Detached`, `Cleared` (every node of a prefix of a
+  sequence is detached, and nothing else changed).
+* Lemmas:
+  * `Allocated`, `InsHead`, `Single`, `Rotated` and `Adopted` for insertion;
+  * `Member`, `Owns`, `Neighbours`, `Ends` and `Removed` for reading and removing;
+  * `At` for the node at a position;
+  * `ClearStart`, `ClearNext`, `ClearStep` and `ClearDone` for `Clear`'s loop;
+  * `Reowned` (writing a node's owner keeps the ring's shape) and `Reattached` (a node
+    inserted and then pointed at the owner leaves the ring owned by it) for the
+    overloads that insert a given node.
+* Searches:
+  * `IndexOf` and `LastIndexOf` are the first and last positions whose item *matches* a
+    value: for a null value, the null items; otherwise the items that `EqualityComparer<T>.Default`
+    says are equal;
+  * `IndexFrom` and `LastFrom` are the same searches from or up to a position;
+  * `FindStep` and `LastStep` are their one-step lemmas, for a loop's invariant.
+
+Nothing in `RegionRing` is trusted beyond `Pulse.Lib.CSharp.RefEq.ref_eq` (R27.8).
+
+### R31.5 The receiver as a region operation's argument
+
+In a method body, `this` is the receiver's model (R4.2). A region operation's argument
+`this` is the reference instead: the owner that the ring's nodes point back to.
+
+### R31.6 `x?.F` as a value
+
+`x?.F` on a region pointer, used as a value, is `x != null ? x.F : null`. This is R27.29's
+statement form, as an expression. An `x` with an effect would be evaluated twice, and is
+refused.
+
+### R31.7 The model's refinement
+
+`LinkedList<T>`'s model refines `Count >= 0 && Nodes.Length == Count && Items.Length ==
+Count`. `RegionRing`'s `items_length` and `empty_ring` lemmas discharge it automatically
+(through SMT patterns).
+
+### R31.8 `x == this` with a nullable `x`
+
+R27.50 compares `x == this` of an owner class by reference. `x` may now be nullable (a
+node's `list`): a null box is unequal to `this`.
+
+### R31.9 Clearing a node
+
+`Invalidate` sets `list = null; next = null; prev = null;`.
+* The `null` of a non-recursive class (the owner) is the typed null box, since such a class
+  has no `intro_nil`.
+* A write to a field of the receiver, named without `this.`, writes the region of the
+  member's own class: it is in the method's write set.
+* A region class's back pointer to its owner is not how a member reaches the region it
+  lives in, so R27.59 does not apply to it.
+
+### R31.10 A write of a ring's entry pointer splits the join
+
+`if (head == node) head = node.next;` is not in tail position. A join would forget which
+node `head` now is, and the `Removed` lemma after it needs that. An arm that writes a field
+whose type is a cyclic region class is therefore treated like one that moves a region
+(R27.16): the continuation is duplicated into both arms.
+
+### R31.11 A node member that reads its owner
+
+`LinkedListNode<T>.Next` is `next == null || next == list!.head ? null : next`: it reads
+`head`, a field of the list its back pointer names. The node's region does not hold the
+list. A member of a cyclic region class whose body reads `f.g`, where `f` is a field of the
+node whose class owns the node's region (`list`, of type `LinkedList<T>`), is therefore
+given the owner as an extra argument:
+
+* an erased binder `owner_this` for the owner's box, and a fraction
+  `B.pts_to owner_this #p rep` of its representation, which the member gives back;
+* the precondition `owner_at view heap this == owner_this`: the node points back to it.
+
+The read `list!.head` becomes `Region.read_owner owner_this t.list`, which reads the box at
+the permission held once the pointer is known to be the owner. In a contract,
+`@this.list!.head` is the field of `rep` (the frontend admits a field of the back pointer's
+class there, and nowhere else outside the class).
+
+The owner's binder is typed `B.box raw` and not the class's alias, so that an `if` whose
+arms instantiate the box type differently still joins on one `pts_to`.
+
+A call is admitted only from an instance method of the owner's class, with the receiver
+open: the receiver's box is passed (`hide this`), and the precondition is then the fact
+that the node's owner is the receiver, which `SpecRing.ClearNext` or `Owns` supplies.
+Elsewhere the call is PALCS0781: no other caller holds the owner's representation.
+
+### R31.12 A reference tested against null in a boolean
+
+`current == null ? count : Pos(s, current)` puts a reference comparison in a conditional's
+guard, which is a `bool`. A box has no decidable equality, so `=` does not typecheck; the
+comparison with `null` is `B.is_null x` (or its negation).
+
+### R31.13 A back pointer tested against null in code
+
+`node.list != null` reads a field of a region node whose type is a class that is not a
+region class (the owner). In code, the comparison is `B.is_null` of the field read,
+bound by its own `let` so that the solver sees `is_null`'s refinement; R31.12 is the same
+test in a contract. In a contract, R27.53 folds `x != null` to `true` for an `x` that is
+never null; a spec method whose result is `O?` (such as `SpecRing.Owner`) may return null,
+and is no longer folded.
+
+### R31.14 A raising call with the receiver open
+
+`AddLast(node)` calls the static `ValidateNewNode(node)`, which reads `node.list` and so
+takes the list's region, which the receiver's invariant owns. The receiver is open around
+the call, and cannot be closed around it as R27.38 closes one: the callee needs the region.
+An exception the callee raises would then leave the invariant unfolded, and the method's
+`raises` needs it closed.
+
+A Pulse `try` whose handler closes the receiver and raises again does not work: Pulse adds
+to every handler a branch that forwards an exception no clause matched, and that branch
+must give what the `try` raises, with the receiver still open, to the method's `raises`
+as it is. A `fn` defined locally has no exception destination in scope, so in one, that
+branch is unreachable. The call is therefore made in a local function:
+```
+fn catch_1 ()
+  requires B.pts_to this rep ** region h
+  returns caught: option exn
+  ensures B.pts_to this rep ** region h **
+          pure (None? caught ==> <callee's ensures>) ** pure (Some? caught ==> <callee's throws>)
+{ try ... { ValidateNewNode node; None } catch { ex -> { Some ex } } };
+let t = catch_1 ();
+if (Some? t) { <close the receiver, as a throw does>; raise (Some?.v t) } else { () };
+```
+The callee's `[Ensures]` and `[Throws]` are read at the arguments and at the heaps held.
+This applies only to a static call whose arguments are names, with the receiver the only
+open object and its representation nothing but its box and its regions. The receiver may
+be held at a fraction.
+
+### What is verified
+
+The model is `Nodes` (the nodes, in order from `head`), `Items` (their values), `Count`
+and `Version`. Every mutator ensures `Version == Bumped(Old(Version))`, where `Bumped` is
+`version++` on a wrapping counter; the read-only members leave it unchanged.
+
+| Member | Contract |
+|---|---|
+| `LinkedList()` | empty |
+| `Count`, `First`, `Last` | `Count`; `Nodes[0]` or `Nodes[Count-1]`, or null when empty |
+| `AddFirst(T)`, `AddLast(T)`, `ICollection<T>.Add` | the new node and item inserted at 0 or at the end; requires `Count < int.MaxValue` |
+| `AddAfter(node, T)`, `AddBefore(node, T)` | inserted after or at `node`'s position; throw `InvalidOperationException` when `node` is not in the list |
+| `AddFirst(node)`, `AddLast(node)`, `AddAfter(node, newNode)`, `AddBefore(node, newNode)` | the given node and its item inserted as for the value overloads, the node then owned by the list; throw `InvalidOperationException` when the node to insert has an owner (`Owner(heap, node) != null`), or when `node` is not in the list |
+| `ValidateNewNode` | throws `InvalidOperationException` exactly when the node has an owner |
+| `Remove(node)` | removed at `node`'s position; throws when `node` is not in the list |
+| `RemoveFirst`, `RemoveLast` | removed at 0 or at the end; throw when empty |
+| `Find`, `FindLast` | the node at `IndexOf`/`LastIndexOf` of the value, or null; the model unchanged |
+| `Contains`, `Remove(T)` | through `IndexOf` |
+| `CopyTo(T[], int)` | `array` is `Splice(old, index, index + Count, Items)`; the two argument exceptions |
+| `InternalInsertNodeBefore`, `InternalInsertNodeToEmptyList`, `InternalRemoveNode`, `ValidateNode` | on `head`, `count` and the ring's shape |
+| `Clear` | `Count` is 0, and `Cleared(Old(heap), heap, Old(Nodes), Old(Count))`: every old node is detached (links and owner null, item kept), and nothing else changed |
+| `GetEnumerator`, `IEnumerable<T>.GetEnumerator`, `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) | §28's borrowing enumerator; `MoveNext` throws `InvalidOperationException` when `Version` changed, and otherwise steps `_index` over `Nodes`; requires `Count < int.MaxValue` |
+| `LinkedListNode.Next`, `Previous` | `Succ`/`Pred` of the node in its owner's ring; with the ring's shape, `Nodes[pos ± 1]` or null at the ends |
+| `LinkedListNode.Value` (get and set), `Invalidate` | the node's item; `Detached` |
+
+### Not annotated, and why
+
+* `LinkedListNode.List`. It returns the owner, and a returned object comes with its
+  invariant, which the node cannot give.
+* `LinkedList(IEnumerable<T>)` (an interface enumeration), `ICollection.CopyTo(Array, int)`
+  (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
+  (a `ref` return) and the public `LinkedListNode(T)` constructor (a node allocated outside
+  any owner's region). The node-taking overloads therefore insert a node already in this
+  list's region and detached from it, such as one `Remove(node)` or `Clear` detached: the
+  model has no node outside every region.
+
+### Findings (§31)
+
+* The public members that take a node require `Pal.InRegion(node)`: the node must be in
+  this list's region, though it need not be in the list. This is a limitation of the model.
+  The code's `ValidateNode` turns a node of another list into `InvalidOperationException`;
+  the contract can say so only for nodes in the region. Likewise `ValidateNewNode`'s
+  exception is specified for a node in the region that still has an owner.
+* `InternalInsertNodeBefore` and `InternalInsertNodeToEmptyList` also ensure
+  `Pal.InRegion(newNode)`: `ViewsKept` says so, but it is opaque, and the overloads
+  then write `newNode.list`.
+* `Find(null)` and `FindLast(null)` test `item == null`, not `EqualityComparer<T>.Default`.
+  The contracts' `IndexOf` follows the code.
+* `CopyTo`'s contract also ensures `0 <= index && index + Count <= array.Length`, which the
+  `Splice` needs to be well-typed.
+* The `Value` setter's contract states the node's new item only: the effect on the owning
+  list's `Items` would need the owner, which the node does not hold.
+* `Find` and `FindLast` call `EqualityComparer<T>.Equals`, which the write-set scan counts
+  as a possible write, so they are not read-only, and a caller would lose the list's model.
+  Their contracts therefore also say that `Count`, `Nodes` and `Items` are unchanged. A
+  rule treating bound members (R21.5) as pure was tried. It made `HashSet<T>.FindItemIndex`
+  read-only, and that member's array reads have no read-only translation, so the rule was
+  dropped.
+* The `Debug.Assert`s (for example `node.list == this` in `InternalRemoveNode`) are proof
+  obligations, and all of them are proved.
+
+### Trusted (§31)
+
+`Pulse.Lib.CSharp.RefEq.ref_eq` (R27.8) and `Null.is_null` (R25.4) were already trusted.
+The harness binds `EqualityComparer<T>`, `Default` and `Equals` to
+`Pulse.Lib.CSharp.Equality` (§24's modeling axioms). There is no new assumption.
+
 ## 32. SortedSet views and the rest of SortedDictionary
 
 This section continues §27.3 (`SortedDictionary<TKey,TValue>` over `TreeSet`). Its

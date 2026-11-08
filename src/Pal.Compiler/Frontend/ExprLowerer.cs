@@ -25,6 +25,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public bool SpecPosition { get; } = specPosition;
 
+    private static ExpressionSyntax Unbanged(ExpressionSyntax e) => e switch
+    {
+        PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn => Unbanged(sn.Operand),
+        ParenthesizedExpressionSyntax pe => Unbanged(pe.Expression),
+        _ => e,
+    };
+
     /// <summary>
     /// §3.4. The members of the class being lowered, which a body inside that class names
     /// without a receiver: the fields a <c>[Model]</c> abstraction reads, and the
@@ -1618,6 +1625,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             node.Expression is IdentifierNameSyntax { Identifier.ValueText: Names.This })
             return new IrField(loc, new IrVar(loc, Names.This), openField.Name);
 
+        // R31.11. In a ring node's member, a field of the owner its back pointer names
+        // (`list!.head`, `@this.list!.head` in a contract): the member is given the owner's
+        // box, and the emitter reads the field through the pointer, or off the
+        // representation the owner is held at.
+        if (symbol is IFieldSymbol { IsStatic: false } ownerField &&
+            Unbanged(node.Expression) is var back &&
+            back is IdentifierNameSyntax or MemberAccessExpressionSyntax
+            {
+                Expression: ThisExpressionSyntax or IdentifierNameSyntax { Identifier.ValueText: Names.This },
+            } &&
+            model.GetSymbolInfo(back).Symbol is IFieldSymbol { IsStatic: false, ContainingType: { } backOwner } &&
+            known.IsRegionClass(backOwner) && receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } ownerClass &&
+            !known.IsRegionClass(ownerClass))
+            return new IrField(loc, Lower(node.Expression), ownerField.Name);
+
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
         // a caller holds the model and nothing else; a field read here would be a fact
         // about the representation, which no caller can see.
@@ -1853,7 +1875,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private bool NeverNull(ExpressionSyntax e, IrExpr lowered) =>
         lowered.Type is IrClassType { Nullable: false } &&
         model.GetTypeInfo(e).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, NullableAnnotation: not NullableAnnotation.Annotated } t &&
-        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t);
+        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t) &&
+        // R31.13. A spec function declared to return `O?` may return null, whatever
+        // nullable context the attribute string was bound in.
+        !(model.GetSymbolInfo(e).Symbol is IMethodSymbol { OriginalDefinition.ReturnType.NullableAnnotation: NullableAnnotation.Annotated });
 
     /// <summary>R27.46. The expression is an <c>[Exactly]</c> parameter, or a local aliasing one.</summary>
     private bool ExactOperand(ExpressionSyntax e)
@@ -2060,6 +2085,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var resultType = known.MapType(model.GetTypeInfo(node).Type);
         var tested = Lower(node.Expression);
+        // R31.6. `x?.F` on a region pointer, as a value, is `x != null ? x.F : null`: R27.29's
+        // statement form, as an expression. The pointer is a value, so testing and reading it
+        // read the same `x`; one with an effect would be evaluated twice, and is refused.
+        if (known.IsRegionClass(model.GetTypeInfo(node.Expression).Type) &&
+            tested.Type is IrClassType pointer && !HasEffect(tested) &&
+            resultType is IrClassType { Nullable: true } or IrOptionType)
+        {
+            var bound = tested with { Type = pointer with { Nullable = false } };
+            var read = WithBound(bound, node.Expression, () => Lower(node.WhenNotNull));
+            if (resultType is IrOptionType && read.Type is not IrOptionType)
+                read = new IrOptionOp(loc, OptionOpKind.Some, read) { Type = resultType };
+            var test = new IrBinary(loc, BinOp.Ne, tested, new IrNull(loc) { Type = pointer with { Nullable = true } })
+            {
+                Type = IrPrim.Bool,
+            };
+            return new IrConditional(loc, test, read, new IrNull(loc) { Type = resultType }) { Type = resultType };
+        }
         if (tested.Type is not IrOptionType inner || resultType is not IrOptionType result)
             return Unsupported(node, loc);
 
@@ -2537,6 +2579,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             {
                 Type = method.ReturnsVoid ? null : known.MapType(method.ReturnType),
                 ParamTypes = SpecParamTypes(method, lowered),
+                Region = true,
             };
         }
 
@@ -2928,6 +2971,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     diagnostics.Error("PALCS0703", loc,
                         $"`Pal.{method.Name}` takes a reference to a `[Region]` class " +
                         "(doc/translation.md R27.7).");
+                    return new IrLiteral(loc, null);
+                }
+                // R31.1. A ring has no tree: its shape is stated through `SpecRing`.
+                if (method.Name is nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed)
+                        or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped) &&
+                    Declarations.Find(rc.OriginalDefinition, known.RegionAttribute) is { } ra &&
+                    Declarations.NamedFlag(ra, "Cyclic"))
+                {
+                    diagnostics.Error("PALCS0780", loc,
+                        $"`Pal.{method.Name}` describes a tree, and `{rc.Name}` is `[Region(Cyclic = true)]`: " +
+                        "its nodes form rings, whose shape `SpecRing` states (doc/translation.md R31.1).");
                     return new IrLiteral(loc, null);
                 }
                 var heap = new IrVar(loc, HeapVarName(rc.Name)) { Type = IrPrim.SpecIntType };

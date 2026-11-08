@@ -30,6 +30,12 @@ public sealed class CodeEmitter(
     ISet<string>? raising = null,
     ISet<string>? readOnlyMethods = null)
 {
+    /// <summary>R31.14. Every method, by name, for reading a callee's postcondition at a call.</summary>
+    public IReadOnlyDictionary<string, IrMethod>? Methods { get; init; }
+
+    /// <summary>R31.11. The ring node members that read their owner, by method name.</summary>
+    public IReadOnlyDictionary<string, OwnerBorrow>? OwnerBorrows { get; init; }
+
     /// <summary>
     /// R27.50. Whether a statement emitted so far may have changed the receiver's model: a
     /// field write, a write to its region, or a call on it to a method that is not
@@ -564,8 +570,9 @@ public sealed class CodeEmitter(
                 field.Type is IrPrim or IrTypeParamType or IrNamedType)
                 value = Default(field.Type);
             // R27.6. A pointer into a region starts null, in a region that starts empty.
+            // Typed (R31.2): in a ring's owner nothing else names the type arguments.
             if (value is null && IsRegionType(field.Type))
-                value = "B.null";
+                value = $"(B.null #{PulseEmitter.RegionRaw((IrClassType)field.Type!)})";
             if (value is null)
             {
                 diagnostics.Unsupported(method.Loc,
@@ -817,6 +824,10 @@ public sealed class CodeEmitter(
         classes is not null &&
         Check.Statements(s).Any(t =>
             t is IrAssign { Target: IrField { Receiver.Type: IrClassType k } } && IsRegionType(k) ||
+            // R31.10. A write of a ring's entry pointer (the owner's `head`): the ring
+            // lemma after the join needs which node it now is.
+            t is IrAssign { Target: IrField { Type: IrClassType r } } &&
+                classes.TryGetValue(r.Name, out var rd) && rd.IsCyclic ||
             Check.Expressions(t).SelectMany(Check.Subexpressions)
                 .Any(e => e is IrAlloc ||
                           e is IrCall c && regionHeld is not null &&
@@ -1112,7 +1123,8 @@ public sealed class CodeEmitter(
         if (reopened && unchanged && receiver.ViewBase is null &&
             decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
-            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {record} " +
+            var selfArg = PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "";
+            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {selfArg}{record} " +
                      $"{string.Concat(heapsOfRecord.Select(h => h + " "))}{receiver.PreModel}");
             // R27.50. The receiver is at its model throughout, so a measure reads it there.
             if (receiver.PreModel is { } pm)
@@ -1126,7 +1138,7 @@ public sealed class CodeEmitter(
                  decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
             var m = FreshValue(klass.Name);
-            var args = $"{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
+            var args = $"{(PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "")}{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
             existentials.Add($"({m}: {PulseEmitter.SubModelType(klass)})");
             resources.Add($"pure ({m} == {Names.ClassModule(klass.Name)}.{Names.ClassAbsModel(klass.Name)} {args})");
             pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbsRep(klass.Name)} {args}");
@@ -2409,6 +2421,10 @@ public sealed class CodeEmitter(
                 Line("unreachable ();");
                 return;
 
+            case IrExprStmt { Expr: IrCall rc } when RaisesThroughOpenRegion(rc) is { } held:
+                RaisingRegionCall(rc, held, plan);
+                return;
+
             case IrArrayOp c:
             {
                 var args = Operands(c.Args);
@@ -2967,8 +2983,13 @@ public sealed class CodeEmitter(
         // identity coercion is F*'s. What remains is not about the reference but about its
         // invariant, which is stated through R10.3a's abbreviation and must be unfolded.
         // R12.2. A plain reference carries no invariant, so for it there is nothing at all.
-        if (classes is not null && classes.TryGetValue(k.Name, out var kd) && kd.IsPlain)
-            return text;
+        if (classes is not null && classes.TryGetValue(k.Name, out var kd))
+        {
+            if (kd.IsPlain) return text;
+            // R31.2. Nor has any class that is not recursive (a ring's owner): R10.3a's
+            // abbreviation is only a recursive class's.
+            if (kd.Recursion is null) return text;
+        }
         Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
         return text;
     }
@@ -3551,6 +3572,124 @@ public sealed class CodeEmitter(
     }
 
     private bool _receiverClosedForThrow;
+    private bool _catching;
+
+    /// <summary>
+    /// R31.14. A static call that may raise, made while the receiver is open and holds its
+    /// regions: the callee takes a region the receiver's invariant owns, so the receiver
+    /// cannot be closed around the call (R27.38), and an exception it raises would leave
+    /// the invariant unfolded. The call is caught in a local function, which returns the
+    /// exception; the receiver is then closed as at a <c>throw</c> and the exception raised
+    /// again. Only a receiver whose representation is its box and its regions, with
+    /// nothing else live, is so handled; it may be held at a fraction.
+    /// </summary>
+    private Slot? RaisesThroughOpenRegion(IrCall call)
+    {
+        if (raising?.Contains(call.Callee) != true || call.HasReceiver || call.DoesNotReturn) return null;
+        if (_tryMarks.Count > 0 || _windows.Count > 0 || _objectLocals.Count > 0 || _heldPeers.Count > 0 ||
+            _receiverClosedForThrow || _objects is not [{ Name: Names.This, ViewBase: null } self])
+            return null;
+        if (self.Type is not IrClassType k || classes is null || !classes.TryGetValue(k.Name, out var decl))
+            return null;
+        if (!RegionsOf(decl).Any() ||
+            decl.Fields.Any(f => f.Type is IrArrayType || f.Type is IrClassType && !IsRegionType(f.Type)))
+            return null;
+        if (_slots.Values.Any(s => s.Owns && s.Name != Names.This)) return null;
+        // The callee's postcondition is restated at the arguments, which must be names.
+        if (Methods?.TryGetValue(call.Callee, out var callee) != true || callee!.Parameters.Length != call.Args.Length ||
+            call.Args.Any(a => a is not IrVar v || !_slots.TryGetValue(v.Name, out var vs) || vs.Kind is not SlotKind.Value))
+            return null;
+        return self;
+    }
+
+    private void RaisingRegionCall(IrCall call, Slot self, MethodPlan plan)
+    {
+        var decl = classes![((IrClassType)self.Type).Name];
+        var rep = FreshValue("rep");
+        var heaps = RegionsOf(decl).Select(k => (k, FreshValue(Frontend.Region.HeapBinder(k.Name)))).ToList();
+        var held = string.Join(" ** ",
+            new[] { $"B.pts_to {self.Binder} {self.PermArg}{rep}" }
+                .Concat(heaps.Select(h => PulseEmitter.RegionAt(h.k, self.Fraction ?? "1.0R", h.Item2))));
+        Line($"with {rep} {string.Join(" ", heaps.Select(h => h.Item2))}. assert ({held});");
+        // What the callee ensures is what the code after the call knows: a `try` is not
+        // framed, so its contract restates it, read at the arguments and at the heaps held.
+        var callee = Methods![call.Callee];
+        var scope = new SpecScope();
+        for (var i = 0; i < callee.Parameters.Length; i++)
+        {
+            var prm = callee.Parameters[i];
+            scope.Bind(prm.Name, new Term(_slots[((IrVar)call.Args[i]).Name].Binder, MethodPlan.KindOf(prm.Type), prm.Type));
+        }
+        foreach (var (k, h) in heaps)
+            scope.Bind(Frontend.Region.HeapName(k.Name), new Term(h, TermKind.Other));
+        scope = new SpecScope(scope) { Pre = scope };
+        var post = callee.Ensures.Select(e => spec.AsProp(spec.Emit(e, scope))).ToList();
+        var ex = $"ex_{_try++}";
+        // And what it raises is what its `[Throws]` clauses say it may (R19.2).
+        var cases = callee.Throws.Select(t =>
+        {
+            scope.Bind(Frontend.FrontendPass.ThrownParameter, new Term(ex, TermKind.Other, t.Type));
+            var parts = new List<string>();
+            if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {ex}");
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, scope)));
+            return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
+        }).ToList();
+        var raised = cases.Count == 0 ? held : $"{held} ** pure ({string.Join(" \\/ ", cases)})";
+        // A `try` whose handler closed the receiver cannot be used here: Pulse appends a
+        // forwarding branch to every handler, which must hand what the `try` raises to the
+        // method's own `raises` as it stands, unclosed. So the call is caught inside a local
+        // function, where no exception destination is in scope and that branch is
+        // unreachable, and the outcome comes back as an `option exn` to raise from.
+        var helper = $"catch_{_try++}";
+        var res = FreshValue("caught");
+        var normal = post.Count == 0 ? "True" : string.Join(" /\\ ", post);
+        var thrown = cases.Count == 0 ? "True" : string.Join(" \\/ ", cases);
+        var settled = $"{held} ** pure (None? {res} ==> ({normal})) ** " +
+            $"pure (Some? {res} ==> (let {ex} = Some?.v {res} in {thrown}))";
+        Line($"fn {helper} ()");
+        _indent++;
+        Line($"requires {held}");
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        _indent--;
+        Line("{");
+        _indent++;
+        Line("try");
+        _indent++;
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        Line($"raises (fun ({ex}: exn) -> {raised})");
+        _indent--;
+        Line("{");
+        _indent++;
+        // The receiver is not closed around this call as R27.38 closes one held read-only:
+        // the callee takes its regions.
+        _catching = true;
+        try { Line(Expr(call) + ";"); }
+        finally { _catching = false; }
+        Line("None #exn");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{ex} -> {{ Some {ex} }}");
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+        var outcome = Fresh();
+        Line($"let {outcome} = {helper} ();");
+        Line($"if (Some? {outcome}) {{");
+        _indent++;
+        ReleaseForThrow(plan);
+        Line($"raise (Some?.v {outcome});");
+        Line("()");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        Line("()");
+        _indent--;
+        Line("};");
+    }
 
     /// <summary>R22.11. Discards an open object's box and the arrays its fields own.</summary>
     private void DropRepresentation(Slot obj)
@@ -4368,6 +4507,16 @@ public sealed class CodeEmitter(
                 // R27.6. Typed, so that a cell initialised with it has a type to allocate.
                 return pnd.IsRegion ? $"(B.null #{PulseEmitter.RegionRaw(pk)})" : "B.null";
 
+            // R31.9. A non-recursive class has no `intro_nil` (§10 derives it only for a
+            // recursive one): its null, stored in a node's back pointer, is the typed null box.
+            case IrNull nn when nn.Type is IrClassType nk
+                && classes is not null && classes.TryGetValue(nk.Name, out var nnd) && nnd.Recursion is null:
+            {
+                var t = Fresh();
+                Line($"let {t} : {Types.Render(nk with { Nullable = true })} = B.null;");
+                return t;
+            }
+
             // R15.8. `B.null` at a generic class says nothing about what it is empty *of*,
             // so the type argument `intro_nil` takes implicitly (R15.2) has nothing to
             // resolve against. Naming the empty structure first, at its type, is the
@@ -4406,6 +4555,21 @@ public sealed class CodeEmitter(
                 return ne.Args.IsEmpty
                     ? $"({Names.Qualified(Names.ExnNew(ne.Class))} ())"
                     : $"({Names.Qualified(Names.ExnNew(ne.Class))} {string.Join(" ", ne.Args.Select(a => $"({Expr(a)})"))})";
+
+            // R31.11. `list!.head` in a ring node's member: the node is read for its back
+            // pointer, and the owner is read through it, as the box the member was given.
+            case IrField { Receiver: IrField { Receiver: IrVar { Name: Names.This }, Field: var obf } } obr when
+                _method is not null && OwnerBorrows is not null &&
+                OwnerBorrows.TryGetValue(_method.Name, out var obm) && obm.Field == obf:
+            {
+                var nodeRead = Fresh();
+                var thisBinder = _slots.TryGetValue(Names.This, out var obs) ? obs.Binder : Names.Local(Names.This);
+                Line($"let {nodeRead} = {Names.ClassModule(obm.Node.Name)}.{Frontend.Region.ReadOf(obm.Node.Name)} {thisBinder};");
+                var ownerRead = Fresh();
+                Line($"let {ownerRead} = {Frontend.Region.Module}.read_owner {OwnerBorrow.Binder} " +
+                     $"{nodeRead}.{Names.ClassProjection(obm.Node.Name, obf)};");
+                return $"{ownerRead}.{Names.ClassProjection(obm.Owner.Name, obr.Field)}";
+            }
 
             case IrField { Receiver: IrVar pv } pf when
                 _slots.TryGetValue(pv.Name, out var pobj)
@@ -4498,6 +4662,20 @@ public sealed class CodeEmitter(
                 return Unary(u);
             // R12.3. A null test on a `[Plain]` reference in value position is the
             // representation's own question and nothing more: is the pointer null?
+            // R31.13. A region node's back pointer to its owner (`node.list != null`) is a
+            // box stored in the node's record: the test asks only whether it is null.
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } ob when
+                (ob.Left is IrNull ? ob.Right : ob.Right is IrNull ? ob.Left : null) is
+                    IrField { Type: IrClassType { Nullable: true }, Receiver.Type: var backOf } back &&
+                IsRegionType(backOf) && !IsRegionType(back.Type):
+            {
+                // Bound on its own, so the solver sees `is_null`'s refinement (`b <==> x == null`).
+                var t = Expr(back);
+                var name = Fresh();
+                Line($"let {name} = B.is_null {t};");
+                return ob.Op is BinOp.Eq ? name : $"(not {name})";
+            }
+
             case IrBinary { Op: BinOp.Eq or BinOp.Ne } pb when PlainNullTest(pb) is { } pt:
             {
                 var t = Expr(pt.Tested);
@@ -4620,6 +4798,21 @@ public sealed class CodeEmitter(
                 i < call.ParamTypes.Length ? call.ParamTypes[i] : null, call.Args[i], text))
             .ToImmutableArray();
 
+        // R31.11. A ring node's member that reads its owner is called from a method of the
+        // owner's class, on a node of the receiver's region: the receiver's box is passed as
+        // the owner, and the callee's precondition says the node points back to it.
+        if (OwnerBorrows is not null && OwnerBorrows.TryGetValue(call.Callee, out var cob) && call.HasReceiver && args.Length > 0)
+        {
+            if (_method?.DeclaringClass == cob.Owner.Name && _slots.TryGetValue(Names.This, out var ownerSlot) &&
+                _objects.Any(o => o.Name == Names.This))
+                args = args.Insert(1, $"(hide {ownerSlot.Binder})");
+            else
+                diagnostics.Error("PALCS0781", call.Loc,
+                    $"`{call.Callee}` reads the `{cob.Owner.Name}` its node points back to through `{cob.Field}`, " +
+                    $"so it is called only from an instance method of `{cob.Owner.Name}` on a node of the receiver's " +
+                    "ring, with the receiver open (doc/translation.md R31.11).");
+        }
+
         var indexed = false;
         for (var i = 0; i < raw.Length; i++)
         {
@@ -4710,7 +4903,7 @@ public sealed class CodeEmitter(
         // holds, to the caller's `raises`, which owns the objects closed. An object only
         // read (a borrowing struct's owner) is closed around the call, and reopened at the
         // same model after it: the call cannot have changed it.
-        var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow
+        var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow && !_catching
             ? _objects.Where(o => o != self && o.Fraction is not null && o.ViewBase is null &&
                                   o.PostModel == o.PreModel && !raw.Contains(o.Binder) &&
                                   // R32.9. Not the holder whose owned field is the receiver
@@ -4885,11 +5078,12 @@ public sealed class CodeEmitter(
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"
                 : $"(not (Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)}))";
 
-        // R27.50. So is `x == this` of an owner class: each is a box. Other comparisons of
-        // two objects stay refused (R18.1).
+        // R27.50. So is `x == this` of an owner class: each is a box. R31.8: `x` may be
+        // nullable (a node's `list`), a null box being unequal to `this`. Other comparisons
+        // of two objects stay refused (R18.1).
         if (b.Op is BinOp.Eq or BinOp.Ne &&
             (b.Left is IrVar { Name: Names.This } || b.Right is IrVar { Name: Names.This }) &&
-            b.Left.Type is IrClassType { Nullable: false } lc && b.Right.Type is IrClassType { Nullable: false } rc &&
+            b.Left.Type is IrClassType lc && b.Right.Type is IrClassType rc &&
             lc.Name == rc.Name && classes is not null && classes.ContainsKey(lc.Name))
             return b.Op is BinOp.Eq
                 ? $"(Pulse.Lib.CSharp.RefEq.ref_eq {Atom(l)} {Atom(r)})"

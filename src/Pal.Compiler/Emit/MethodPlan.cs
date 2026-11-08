@@ -79,7 +79,8 @@ public sealed class MethodPlan
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
         ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
         ImmutableArray<IrFieldDecl> openFields = default, ImmutableArray<IrFieldDecl> resultOwned = default,
-        bool heapsKept = false, IReadOnlyDictionary<string, IrMethod>? methods = null)
+        bool heapsKept = false, IReadOnlyDictionary<string, IrMethod>? methods = null,
+        OwnerBorrow? ownerBorrow = null)
     {
         _spec = spec;
         Held = held.IsDefault ? [] : held;
@@ -578,6 +579,28 @@ public sealed class MethodPlan
                 postResources.Add(PulseEmitter.RegionAt(k, perm, heap));
                 post.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {heap})", TermKind.Other));
             }
+        }
+
+        // R31.11. A ring node's member that reads its owner is given the owner's box, which
+        // the node's back pointer must be, at some permission; it gives it back unchanged.
+        if (ownerBorrow is { } ob)
+        {
+            var oraw = PulseEmitter.RegionRaw(ob.Owner);
+            var at = -1;
+            for (var i = 0; i < binders.Count; i++)
+                if (binders[i].StartsWith($"({Names.Local(Names.This)}:", StringComparison.Ordinal)) at = i;
+            binders.Insert(at + 1, $"({OwnerBorrow.Binder}: erased (B.box ({oraw})))");
+            ghostBinders.Add($"(#{OwnerBorrow.Perm}: perm)");
+            ghostBinders.Add($"(#{OwnerBorrow.Rep}: erased ({oraw}))");
+            var pts = $"B.pts_to (reveal {OwnerBorrow.Binder}) #{OwnerBorrow.Perm} {OwnerBorrow.Rep}";
+            var view = $"{Names.ClassModule(ob.Node.Name)}.{Frontend.Region.ViewOf(ob.Node.Name)}";
+            preResources.Add(pts);
+            preResources.Add($"pure (Pulse.Lib.CSharp.RegionRing.owner_at {view} " +
+                             $"(reveal {Frontend.Region.HeapBinder(ob.Node.Name)}) {Names.Local(Names.This)} == reveal {OwnerBorrow.Binder})");
+            postResources.Add(pts);
+            var rep = new Term($"(reveal {OwnerBorrow.Rep})", TermKind.Other, ob.Owner);
+            pre.Bind(OwnerBorrow.Key(ob.Field), rep);
+            post.Bind(OwnerBorrow.Key(ob.Field), rep);
         }
 
         // R19.3. What an exception leaves the caller owning: every parameter, as the
