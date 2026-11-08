@@ -802,25 +802,35 @@ public sealed class StmtLowerer(
             return e is IdentifierNameSyntax &&
                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(e).Symbol, symbol);
         }
-        if (scope.DescendantNodes().Any(n => n switch
-            {
-                AssignmentExpressionSyntax a => Names(a.Left),
-                ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => Names(arg.Expression),
-                _ => false,
-            }))
-            return null;
-        var self = symbol.ContainingSymbol.ContainingType;
+        // R33.17. `a = _field;`, as a statement, re-reads the field: `a` is the field again.
+        bool Resync(SyntaxNode? n) =>
+            n is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } ra } &&
+            Names(ra.Left) && ra.Right is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } &&
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(ra.Right).Symbol?.OriginalDefinition, field.OriginalDefinition);
+        var resyncs = new List<SyntaxNode>();
         foreach (var n in scope.DescendantNodes())
         {
-            if (n is AssignmentExpressionSyntax a &&
-                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, field))
-                return null;
-            if (n is InvocationExpressionSyntax inv &&
-                model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
-                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
-                !Declarations.Has(m, known.LemmaAttribute))
+            if (n is AssignmentExpressionSyntax a && Names(a.Left))
+            {
+                if (!Resync(a.Parent)) return null;
+                resyncs.Add(a.Parent!);
+            }
+            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg && Names(arg.Expression))
                 return null;
         }
+        // Whatever may replace the field after the declaration must be a statement that the
+        // next statement of its block follows by re-reading it (R33.17); a call that cannot
+        // replace it is harmless (before R33.17, any instance method was refused).
+        foreach (var n in scope.DescendantNodes().Where(n => n.SpanStart > v.SpanStart))
+        {
+            if (!Replaces(n, field)) continue;
+            var stmt = n.Parent as ExpressionStatementSyntax;
+            if (stmt?.Expression != n || stmt.Parent is not BlockSyntax block) return null;
+            var at = block.Statements.IndexOf(stmt);
+            if (at + 1 >= block.Statements.Count || !Resync(block.Statements[at + 1])) return null;
+        }
+        foreach (var r in resyncs) _resyncs.Add(r);
+        _fieldAliases[symbol] = field;
         return (_code.Lower(init), _spec.Lower(init));
     }
 
@@ -916,35 +926,33 @@ public sealed class StmtLowerer(
         var root = target is ElementAccessExpressionSyntax { Expression: var arr }
             ? model.GetSymbolInfo(arr).Symbol : null;
         // Writing an element is seen through the alias; rebinding the array's name is not.
+        // R33.17. Only a rebinding the alias can see, after its declaration; one that
+        // re-reads a field alias (R24.19) leaves the local naming the same field.
         if (root is ILocalSymbol al && scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-                .Any(a => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
+                .Any(a => a.SpanStart > v.SpanStart && !_resyncs.Contains(a.Parent!) &&
+                          SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
             return null;
         if (root is IParameterSymbol) return null;
         // A field may be replaced by an assignment or by a call of another method of the
         // class; the alias would then name the new array's element, not the old one. The
         // fields the alias can depend on are the array's own, or every field the inlined
         // `ref`-returning method mentions; assigning any other field is harmless.
-        if (target is InvocationExpressionSyntax || root is IFieldSymbol)
+        var aliasOf = root is ILocalSymbol rl && _fieldAliases.TryGetValue(rl, out var af0) ? af0 : null;
+        if (target is InvocationExpressionSyntax || root is IFieldSymbol || aliasOf is not null)
         {
-            var self = symbol.ContainingSymbol.ContainingType;
             var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
             if (root is IFieldSymbol rf) read.Add(rf);
+            if (aliasOf is not null) read.Add(aliasOf);
             if (target is InvocationExpressionSyntax call &&
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol { DeclaringSyntaxReferences: [var callee] } &&
                 callee.SyntaxTree == model.SyntaxTree)
                 foreach (var id in callee.GetSyntax().DescendantNodes().OfType<IdentifierNameSyntax>())
                     if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f) read.Add(f);
-            foreach (var n in scope.DescendantNodes())
-            {
-                if (n is AssignmentExpressionSyntax a && model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol { IsStatic: false } af &&
-                    read.Contains(af))
+            // R33.17. Only what follows the declaration, and only what may replace a field
+            // the alias depends on.
+            foreach (var n in scope.DescendantNodes().Where(n => n.SpanStart > v.SpanStart))
+                if (read.OfType<IFieldSymbol>().Any(f => Replaces(n, f)))
                     return null;
-                if (n is InvocationExpressionSyntax inv &&
-                    model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
-                    SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
-                    !Declarations.Has(m, known.LemmaAttribute))
-                    return null;
-            }
         }
         if (_code.Lower(v.Initializer.Value) is not IrElement element) return null;
         var index = Fresh("ref");
@@ -967,6 +975,9 @@ public sealed class StmtLowerer(
     /// An arithmetic local keeps its cell: its value then reaches the solver as a name
     /// rather than as its initialiser inlined, which arithmetic proofs depend on.
     /// </summary>
+    private bool ThroughReference(ExpressionSyntax e) =>
+        model.GetTypeInfo(e).Type is { IsReferenceType: true };
+
     private bool NeverWritten(ILocalSymbol local, SyntaxNode scope)
     {
         foreach (var n in scope.DescendantNodes())
@@ -984,13 +995,15 @@ public sealed class StmtLowerer(
                 RefExpressionSyntax r => r.Expression,
                 _ => null,
             };
+            // R33.26. A write through a reference (`book._entries[i]`, `ref book._entries[i]`)
+            // reaches the heap, not the local that holds the reference.
             while (target is ParenthesizedExpressionSyntax or MemberAccessExpressionSyntax or ElementAccessExpressionSyntax)
                 target = target switch
                 {
                     ParenthesizedExpressionSyntax p => p.Expression,
-                    MemberAccessExpressionSyntax m => m.Expression,
-                    ElementAccessExpressionSyntax e => e.Expression,
-                    _ => target,
+                    MemberAccessExpressionSyntax m when !ThroughReference(m.Expression) => m.Expression,
+                    ElementAccessExpressionSyntax e when !ThroughReference(e.Expression) => e.Expression,
+                    _ => null,
                 };
             if (target is IdentifierNameSyntax id &&
                 SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local))
@@ -999,8 +1012,100 @@ public sealed class StmtLowerer(
         return true;
     }
 
-    private IrStmt LowerExpressionStatement(ExpressionStatementSyntax node, IrLoc loc) =>
-        LowerSideEffect(node.Expression, loc);
+    private IrStmt LowerExpressionStatement(ExpressionStatementSyntax node, IrLoc loc)
+    {
+        // R33.17. `a = _field;` re-reading a field alias: `a` already is the field.
+        if (_resyncs.Contains(node)) return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
+        // R33.18. A call of a method that does nothing.
+        if (node.Expression is InvocationExpressionSyntax call && DoesNothing(call))
+            return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
+        return LowerSideEffect(node.Expression, loc);
+    }
+
+    /// <summary>R33.17. The statements <c>a = _field;</c> that re-read a field alias.</summary>
+    private readonly HashSet<SyntaxNode> _resyncs = [];
+
+    /// <summary>R33.17. The field each R24.19 alias names.</summary>
+    private readonly Dictionary<ISymbol, IFieldSymbol> _fieldAliases = new(SymbolEqualityComparer.Default);
+
+    /// <summary>
+    /// R33.18. A call, as a statement, of a non-virtual source method whose body, as
+    /// compiled (after preprocessing), is empty and that carries no contract, with arguments
+    /// that are variables, constants or fields, passed by value. Running it changes nothing,
+    /// and it returns.
+    /// </summary>
+    private bool DoesNothing(InvocationExpressionSyntax call)
+    {
+        if (model.GetSymbolInfo(call).Symbol is not IMethodSymbol m) return false;
+        m = m.OriginalDefinition;
+        if (m.IsVirtual || m.IsAbstract || m.IsOverride || m.IsExtern || m.IsPartialDefinition) return false;
+        if (m.DeclaringSyntaxReferences is not [var decl] ||
+            decl.GetSyntax() is not MethodDeclarationSyntax { Body.Statements.Count: 0, ExpressionBody: null } md)
+            return false;
+        if (known.IsPalIntrinsic(m) ||
+            md.AttributeLists.SelectMany(l => l.Attributes).Any(a =>
+                a.Name.ToString() is "Requires" or "Ensures" or "Throws" or "Lemma" or "Spec" or "PulseBody" or "Pure"))
+            return false;
+        if (call.Expression is MemberAccessExpressionSyntax { Expression: not ThisExpressionSyntax }) return false;
+        // An argument under a conversion is lowered for its diagnostics (R17.7's borrow).
+        return call.ArgumentList.Arguments.All(arg =>
+            arg.RefKindKeyword.IsKind(SyntaxKind.None) &&
+            model.GetConversion(arg.Expression).IsIdentity &&
+            arg.Expression is IdentifierNameSyntax or LiteralExpressionSyntax
+                or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax });
+    }
+
+    /// <summary>
+    /// R33.17. Whether calling <paramref name="method"/> may replace <paramref name="field"/>
+    /// of the receiver: its body, or a body it calls on the receiver, assigns the field or
+    /// passes it by reference. A method without a body here, or one an override could
+    /// replace, may.
+    /// </summary>
+    private bool MayReplace(IMethodSymbol method, IFieldSymbol field, HashSet<IMethodSymbol> seen)
+    {
+        method = method.OriginalDefinition;
+        if (!seen.Add(method)) return false;
+        if (Declarations.Has(method, known.LemmaAttribute) || known.IsPalIntrinsic(method)) return false;
+        if ((method.IsVirtual || method.IsAbstract || method.IsOverride) && method.ContainingType is not { IsSealed: true })
+            return true;
+        if (method.DeclaringSyntaxReferences is not [var decl]) return true;
+        var body = decl.GetSyntax();
+        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        foreach (var n in body.DescendantNodes())
+        {
+            if (n is AttributeListSyntax) continue;
+            if (n is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(calleeModel.GetSymbolInfo(a.Left).Symbol?.OriginalDefinition, field.OriginalDefinition))
+                return true;
+            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg &&
+                SymbolEqualityComparer.Default.Equals(calleeModel.GetSymbolInfo(arg.Expression).Symbol?.OriginalDefinition, field.OriginalDefinition))
+                return true;
+            if (n is InvocationExpressionSyntax inv &&
+                calleeModel.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false } m &&
+                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, field.ContainingType.OriginalDefinition) &&
+                (inv.Expression is IdentifierNameSyntax or GenericNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
+                MayReplace(m, field, seen))
+                return true;
+            // A call on another object of the class could reach this one only through a
+            // reference to it, which the class's own methods do not take.
+        }
+        return false;
+    }
+
+    /// <summary>R33.17. Whether <paramref name="n"/> may replace <paramref name="field"/>.</summary>
+    private bool Replaces(SyntaxNode n, IFieldSymbol field) => n switch
+    {
+        AssignmentExpressionSyntax a =>
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol?.OriginalDefinition, field.OriginalDefinition),
+        ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg =>
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(arg.Expression).Symbol?.OriginalDefinition, field.OriginalDefinition),
+        InvocationExpressionSyntax inv when
+            model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+            SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, field.ContainingType.OriginalDefinition) &&
+            !Declarations.Has(m, known.LemmaAttribute) =>
+            MayReplace(m, field, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)),
+        _ => false,
+    };
 
     /// <summary>
     /// Lowers an expression evaluated for its effect. A <c>for</c> loop's initialisers
@@ -1027,7 +1132,7 @@ public sealed class StmtLowerer(
                 return Step(p.Operand, BinOp.Sub, loc);
 
             case InvocationExpressionSyntax call:
-                return RefFieldCopy(call, loc) ?? LowerCallStatement(call, loc);
+                return RefFieldCopy(call, loc) ?? RefElementCopy(call, loc) ?? LowerCallStatement(call, loc);
 
             case ConditionalAccessExpressionSyntax access
                 when known.IsRegionClass(model.GetTypeInfo(access.Expression).Type):
@@ -1218,6 +1323,75 @@ public sealed class StmtLowerer(
         ]);
     }
 
+    /// <summary>
+    /// R33.16. <c>M(ref a[i])</c>, or <c>M(ref x)</c> for a <c>ref</c> local <c>x</c> into
+    /// <c>a[i]</c> (R24.8/R33.5), where the element is a struct, <c>a</c> and <c>i</c> are
+    /// locals, parameters or fields, and <c>M</c> is isolated from the element: neither it nor
+    /// anything it calls names an array of the element type, throws, or fails to return. The
+    /// call is <c>{ var t = a[i]; M(ref t); a[i] = t; }</c>: <c>M</c> can observe and change
+    /// the element only through its parameter, and runs to completion, so the element holds
+    /// what the parameter held at the end, as it would have all along.
+    /// </summary>
+    private IrStmt? RefElementCopy(InvocationExpressionSyntax node, IrLoc loc)
+    {
+        if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return null;
+        var refs = node.ArgumentList.Arguments
+            .Where(a => a.RefKindKeyword.IsKind(SyntaxKind.RefKeyword))
+            .ToList();
+        if (refs is not [var arg]) return null;
+        if (model.GetTypeInfo(arg.Expression).Type is not { IsValueType: true } elementType ||
+            known.MapType(elementType) is not { } mapped)
+            return null;
+        if (!Isolated(method, elementType, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default)))
+            return null;
+        var lowered = LowerCallStatement(node, loc);
+        if (lowered is not IrExprStmt { Expr: IrCall call }) return null;
+        if (call.Args.Count(a => a is IrRefArg) != 1 ||
+            call.Args.FirstOrDefault(a => a is IrRefArg) is not IrRefArg { Operand: IrElement element } ||
+            element.Array is not (IrVar or IrField { Receiver: IrVar }) ||
+            element.Index is not (IrVar or IrLiteral))
+            return null;
+        var temp = Fresh("ref");
+        var cell = new IrVar(loc, temp) { Type = mapped };
+        var args = call.Args.Select(a => a is IrRefArg r ? r with { Operand = cell } : a).ToImmutableArray();
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(loc, temp, mapped, element),
+            new IrExprStmt(loc, call with { Args = args }),
+            new IrAssign(loc, element, cell),
+        ]);
+    }
+
+    /// <summary>R33.16. Whether <paramref name="method"/>'s body, and every body it calls, is isolated from arrays of <paramref name="element"/>.</summary>
+    private bool Isolated(IMethodSymbol method, ITypeSymbol element, HashSet<IMethodSymbol> seen)
+    {
+        method = method.OriginalDefinition;
+        if (!seen.Add(method)) return true;
+        if (method.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute")) return false;
+        if (method.DeclaringSyntaxReferences is not [var decl]) return false;
+        var body = decl.GetSyntax();
+        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        foreach (var n in body.DescendantNodes())
+        {
+            if (n is AttributeListSyntax) continue;
+            if (n is ThrowStatementSyntax or ThrowExpressionSyntax) return false;
+            if (n is ExpressionSyntax e && n.Ancestors().All(x => x is not AttributeSyntax) &&
+                calleeModel.GetTypeInfo(e).Type is IArrayTypeSymbol at &&
+                SymbolEqualityComparer.Default.Equals(at.ElementType.OriginalDefinition, element.OriginalDefinition))
+                return false;
+            if (n is InvocationExpressionSyntax inv &&
+                !(inv.Expression is IdentifierNameSyntax { Identifier.ValueText: "nameof" }))
+            {
+                if (calleeModel.GetSymbolInfo(inv).Symbol is not IMethodSymbol m) return false;
+                if (known.IsPalIntrinsic(m) || Declarations.Has(m, known.LemmaAttribute) ||
+                    m.GetAttributes().Any(a => a.AttributeClass?.Name == "ConditionalAttribute"))
+                    continue;
+                if (!Isolated(m, element, seen)) return false;
+            }
+        }
+        return true;
+    }
+
     private IrStmt LowerCallStatement(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method)
@@ -1266,11 +1440,12 @@ public sealed class StmtLowerer(
 
         // R22.19. `Debug.Assert(c)` fails fast when `c` is false, in the builds that keep
         // it; that it never fails is a proof obligation, so `c` is evaluated and asserted.
-        // A message argument is accepted only as a constant, whose evaluation is no effect.
+        // A message argument is accepted only as a constant, or a message R27.19 accepts
+        // (R33.21), whose evaluation is no effect.
         if (method is { Name: "Assert", IsStatic: true } &&
             method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
             args.Count >= 1 && method.Parameters[0].Type.SpecialType == SpecialType.System_Boolean &&
-            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue))
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue || EffectFreeMessage(a.Expression)))
             return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
 
         // R27.19. `Debug.Fail(m)` is `Debug.Assert(false, m)`: the point is unreachable. A

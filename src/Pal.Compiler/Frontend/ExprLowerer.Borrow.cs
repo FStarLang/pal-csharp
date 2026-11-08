@@ -241,6 +241,9 @@ public sealed partial class ExprLowerer
             // R27.37. An owned object is a parameter of every member but the constructor.
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
+            // R33.26. The struct's auto-property is its backing field.
+            case IPropertySymbol ap when !SpecPosition && !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
+                return new IrField(loc, SelfExpr(loc), ap.Name) { Type = known.MapType(ap.Type) };
             case IFieldSymbol f when bw.IsState(f):
                 if (bw.Constructor && !SpecPosition)
                 {

@@ -35,7 +35,9 @@ public sealed class MethodPlan
     /// R33.15. The receiver's fields an `[Open]` body assigns, or <c>null</c> if it hands the
     /// receiver or a field by reference to a callee, which might assign any of them.
     /// </summary>
-    private static HashSet<string>? OpenAssigned(IrStmt body)
+    /// An `[Open]` callee on the receiver assigns what its own body assigns.
+    internal static HashSet<string>? OpenAssigned(IrStmt body, IReadOnlyDictionary<string, IrMethod>? methods,
+        HashSet<string> visiting)
     {
         var assigned = new HashSet<string>();
         foreach (var stmt in Passes.Check.Statements(body))
@@ -43,9 +45,20 @@ public sealed class MethodPlan
             if (stmt is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This }, Field: var f } })
                 assigned.Add(f);
             foreach (var e in Passes.Check.Expressions(stmt).SelectMany(Passes.Check.Subexpressions))
-                if (e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } ||
-                    e is IrRefArg { Operand: IrField { Receiver: IrVar { Name: Names.This } } })
+            {
+                if (e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } call)
+                {
+                    if (methods is null || !methods.TryGetValue(call.Callee, out var callee) ||
+                        !callee.Open || callee.Body is null)
+                        return null;
+                    if (!visiting.Add(call.Callee)) continue;
+                    var inner = OpenAssigned(callee.Body, methods, visiting);
+                    if (inner is null) return null;
+                    assigned.UnionWith(inner);
+                }
+                else if (e is IrRefArg { Operand: IrField { Receiver: IrVar { Name: Names.This } } })
                     return null;
+            }
         }
         return assigned;
     }
@@ -357,7 +370,7 @@ public sealed class MethodPlan
                         // R33.15. A field the body never assigns, with no other `[Open]`
                         // call that might, is where it was: an array field's reference above
                         // all, which the caller's invariant needs back.
-                        var openAssigned = method.Body is null ? null : OpenAssigned(method.Body);
+                        var openAssigned = method.Body is null ? null : OpenAssigned(method.Body, methods, [method.Name]);
                         foreach (var f in openFields)
                         {
                             var proj = Names.ClassProjection(klass.Name, f.Name);

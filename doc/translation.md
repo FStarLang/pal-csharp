@@ -7044,9 +7044,9 @@ The pattern `c is null`, on a type whose null test is R25.4's opaque `is_null`, 
     `FindLast`, `FindLastIndex`×3, `ForEach`, `RemoveAll` and `TrueForAll`.
   * So are `BinarySearch`×3, `Sort()`, `Sort(IComparer)` and
     `Sort(int, int, IComparer)`.
+  * `ConvertAll`, `GetRange` and `Slice`, which build a second `List` by writing its
+    private fields, are verified since §33 (R33.28).
   * These are not annotated:
-    * `ConvertAll`, `GetRange` and `Slice` build a second `List` by writing its private
-      fields (PALCS0523, another object's field);
     * `AddRange` and `InsertRange` take an `IEnumerable<T>` and dispatch on
       `ICollection<T>` through interface calls that the translation does not have;
     * `Sort(Comparison<T>)` goes through `ArraySortHelper` over a `Span<T>`;
@@ -7056,12 +7056,11 @@ The pattern `c is null`, on a type whose null test is R25.4's opaque `is_null`, 
     `TrimExcess`, `Grow`, `Enqueue`, `Dequeue`, `TryDequeue`, `DequeueEnqueue`,
     `EnqueueDequeue`, `RemoveRootNode`, `GetParentIndex`, `GetFirstChildIndex`,
     `MoveUpDefaultComparer`, `MoveUpCustomComparer`, `MoveDownDefaultComparer` and
-    `MoveDownCustomComparer`.
+    `MoveDownCustomComparer`; since §33 (R33.27) also `FindIndex` and `Remove`.
   * These are not annotated:
     * the constructors, because `InitializeComparer` tests `typeof(TPriority).IsValueType`
       and the `IEnumerable` constructors enumerate;
     * `EnqueueRange` and `Heapify`, which use `IEnumerable` and `ICollection` dispatch;
-    * `Remove`, which uses an `IEqualityComparer<TElement>` and a `Span` copy;
     * `UnorderedItems` and the enumerator;
     * the `Comparer` property, which returns `Comparer<T>.Default` for a null comparer;
       that is a value the model has only as a ghost.
@@ -9459,6 +9458,119 @@ touching a field, so an ordinary method opens its invariant around it and refold
 loop inside an `[Open]` method carries each array field by its own `pts_to` (R5.12), fixed if
 the loop writes no element of it.
 
+**R33.16. A `ref` local into a field's array, passed by `ref`.** `ref Entry entry = ref
+entries[i]; PushEntryIntoBucket(ref entry, i);` hands the callee an element of an array the
+receiver owns. The element is copied into a mutable local before the call and written back
+after it (`write entries i (!entry)`), so the callee's contract about `entry` becomes one
+about `Pal.Contents(_entries)[i]`: the contents after the call are the contents the callee
+left, updated at `i` with the element it returned. A join where one arm replaces the
+`[Open]` receiver's record keeps the arrays it owns reached through the record (rather than
+through a record Pulse generalises afresh), and the array slots are restored between the
+arms of a tail `if`.
+
+**R33.17. Re-reading a field into its local copy.** R24.19's `T[] a = _a;` is refused when
+something after it may replace `_a`, unless the very next statement of the block is
+`a = _a;`. `entries = _entries;` after `Resize(...)` in `TryInsert` is that statement: the
+local is the field again from there on, and R33.10's writes through it are writes of the
+field.
+
+**R33.18. Calls of empty methods.** Under `[TranslateAnnotatedOnly]`, a call of an
+unannotated method whose body is empty (after preprocessing: `RehashIfNecessary` without
+`SYSTEM_COLLECTIONS`) does nothing and is dropped, rather than refused as a call of an
+untranslated method. Its arguments must be names or literals passed without a conversion: an argument
+under one (R17.7's implicit borrow, say) is still lowered, so that its diagnostic is not lost.
+
+**R33.19. `default` of a struct with a type-parameter field.** `default(Entry)`, where
+`Entry` has fields of type `TKey` and `TValue`, is `Inhabited.default_of struct_Entry`: the
+struct's `has_default` instance is field-wise defaults, which is what the CLR produces, and
+the type parameters it needs are added to the method's defaulted ones.
+
+**R33.20. Loops in `[Open]` methods frame what they do not assign.** R33.15's frame now
+follows calls: a call `this.M(...)` of an `[Open]` method with a body assigns what `M`
+assigns, transitively; any other call on the receiver may assign anything. A loop over the
+open receiver names the record before it (`with before. assert (B.pts_to this before)`) and
+adds to its invariant `this.f == before.f` for each field neither the loop nor its `[Open]`
+callees assign, so that the invariant need not restate them. A closed receiver whose record
+a loop writes is named the same way when the loop calls a method on it; a loop with no such
+call states what it keeps itself (R5.8), and the extra frame facts only burden its proof
+(`HashSet.Remove`'s `RemoveWrites` timed out under them).
+
+**R33.21. Switches that end in a non-returning arm.** An `if`/`else` all of whose arms end in
+a `return`, a `throw` or a call of a `[DoesNotReturn]` method, at least one in a `return`, is
+a returning statement for R5.5b. R5.14's expansion of `TryInsert`'s `switch (behavior)` --
+`return true;`, `ThrowDuplicateKey(key); break;`, `return false;` -- is such a chain. A
+`Debug.Assert` message may be an interpolated string over enum and primitive locals and
+parameters (it is effect-free, and dropped).
+
+**R33.22. A raising call while the receiver is open.** A call of a method that may throw,
+made while a non-`[Open]` method holds its receiver opened (R4.10), is bracketed by a
+refold before it and an unfold after it: if it throws, the method's `raises` clause needs the
+invariant. `Resize(HashHelpers.ExpandPrime(_entries.Length))` is the case. A call with an
+object the receiver owns as an argument (`_set.Add(…)` on a `SortedSet` field) is not
+bracketed: the open receiver holds that object's permission, and the call's own raising
+path closes the receiver (R27.38).
+
+**R33.23. Guards nested in an `if`/`else`.** R24.14's copying of the tail into an `if`'s arms
+applies also when the `if` is not a guard chain but holds a `return` somewhere inside it:
+`SetAt(int, TKey, TValue)`'s `if (…) { if (Equals(…)) { …; return; } } else { if (…) { …;
+return; } }` followed by the rest of the method. Each arm that does not already return gets
+the tail, after which every inner `if` is an R5.5b guard with its tail.
+
+**R33.24. A `ref` argument is a write.** R4.11's scan counts a call with a `ref` or `out`
+argument rooted at a `ref` local or an instance field as a write: the callee may write
+through it, and R33.16 writes the element back. Before this, a method whose only write was
+`SetKey(ref s, k)` through `ref Slot s = ref _slots[i]` was classified read-only, and its
+contract stated against the unchanged model (unsound).
+
+**R33.25. Constructors of a class that owns arrays.** Four pieces make
+`OrderedDictionary`'s constructors translate:
+(a) a nullable reference field the constructor does not assign (`_comparer`) starts as
+`None`, the value `new` gives it;
+(b) a constructor's module opens the modules its class's model and invariant read (its
+`[Spec]` helpers), as the class's methods' modules do;
+(c) `x ?? d`, where `x` is nullable and `d` is not, has `d`'s (non-nullable) type, and a
+value is stored into a nullable field or local as `Some` when its type is the same F* type
+as the option's — two spec types are the same when they are bound to the same F* name and
+their arguments are the same, element-wise (`EqualityComparer<T>` and
+`IEqualityComparer<T>` both bind to `Equality.comparer`);
+(d) `x == d` and `x != d` (R20.9) where one side is an option and the other a value compare
+the option with `Some d`; and a constructor that builds an object owning arrays joins the
+record it writes as R33.15's `[Open]` methods do.
+
+**R33.26. Borrowing members that read through a local, and auto-properties.** R28.2's
+`var d = _dictionary;` aliases the borrowed object only if the local is never written. A
+write *through* a reference-typed local — `ref d._entries[i]`, `d._a[i] = …` — writes the
+heap, not the local, so R4.11's never-written check stops at a member or element access on a
+reference: `ref Entry entry = ref d._entries[_index];` leaves `d` an alias. An instance
+auto-property of a borrowing struct (`Current { get; private set; }`) is its backing field
+(R3.4), so a member body reads and assigns it as a field of `self`, and an assignment to it
+makes the member a writer of the struct (R28.2's `ref self`). `OrderedDictionary.Enumerator`
+is the case.
+
+**R33.27. A window of the receiver's array.** `ReadOnlySpan<T> s = _a.AsSpan(0, _n);` in a
+method that opens its receiver (R4.10) borrows the field's array at the receiver's
+permission (R17.5 at the fraction R3.10c gives the receiver). While the span is live, a loop
+carries the span (an ordinary local) instead of the array, and the borrow's receipt is
+framed around it. A window still borrowed when the method returns -- the usual case when a
+loop returns from inside it, where C# has no place for `Pal.Restore` -- is restored before
+the receiver is closed, latest first; an array-range window is first collapsed by
+`splice_same`, so that a window left unwritten gives back the array exactly as it was
+(which a read-only receiver's refold at its model needs). `Pal.Contents` of `.AsSpan`'s
+window is otherwise R17.8's. The borrow's source and bounds are field accesses for R4.10c,
+so a method whose only field access is a span's initializer opens its receiver.
+`PriorityQueue.FindIndex` is the case.
+
+**R33.28. Writing the fields of a fresh object of the class.** R27.44 opens another object
+of the method's class around a read of its field. A statement that *writes* one -- an
+assignment to `o.f`, to `o.a[i]`, or an array copy into `o.a` -- with `o` a local or
+parameter held whole by its invariant (a class without regions) is bracketed the same way,
+but the bracket closes at the model of what the statement left (R4.11a's witness), not the
+one it opened at: so each such statement must leave the class invariant true, as a public
+method's exit must. A loop that writes `o`'s fields changes `o`'s model, which it then
+quantifies. A local has no model named on entry, so a read's bracket names the one its
+invariant holds. `List.GetRange`/`ConvertAll` (`list._items`, `list._size` of the list they
+allocate) are the case.
+
 ### Findings (§33)
 
 * **Soundness (fixed, R33.6).** `x is null` on an array was translated as `false`, and
@@ -9477,6 +9589,33 @@ the loop writes no element of it.
   The model therefore states no distinctness; `IndexOf` promises *a* matching index.
 * (R33.13) An annotated expression-bodied indexer was silently not translated, and an
   expression-bodied constructor's body was dropped.
+* **Soundness (fixed, R33.24).** A write through a `ref` argument rooted at a `ref` local
+  into a field's array was not counted by R4.11, so such a method was read-only.
+* `TryInsert` with `OverwriteExisting` on an existing key replaces the value without
+  incrementing `_version`, as does `SetAt(int, TValue)`, so an enumerator in progress does
+  not fail on a value change (as `Dictionary`'s does not). The contracts say nothing about
+  `_version`, so this is consistent; it is recorded because the indexer's setter is a
+  mutation that enumerators tolerate.
+* `Resize` holds a `Debug.Assert` that the new size is at least `_count`; every caller
+  establishes it (`ExpandPrime`'s result exceeds a full table's length; `EnsureCapacity` and
+  `TrimExcess` pass `GetPrime` of a bound at least `_count`), and `Resize`'s precondition
+  says so.
+* `HashHelpers.GetPrime(min)` throws on a negative `min` and otherwise returns at least
+  `min`; `ExpandPrime(oldSize)` throws exactly when `oldSize >= MaxPrimeArrayLength` (for
+  non-negative `oldSize`). The trusted `GetPrime` contract and `ExpandPrime`'s verified one
+  state these normal-return facts, which `TryInsert`'s growth needs.
+* The harness does not define `SYSTEM_COLLECTIONS`, so the string-comparer special cases
+  (`NonRandomizedStringEqualityComparer`, `RehashIfNecessary`'s randomized rehash and
+  `Resize`'s `forceNewHashCodes` block) are excluded by the preprocessor and not verified.
+* `PriorityQueue.Remove` sifts from an arbitrary index, so it inherits §26's
+  `(index << 2) + 1` wrap: its contract requires `Count <= 2^29`, like `Dequeue`'s.
+  With a null comparer, `FindIndex` compares with `EqualityComparer<TElement>.Default`
+  on the generic path; its contract uses one predicate, `ElemEq`, for both paths, so it
+  promises the first index matching under the comparer in use, and `Remove`'s
+  "non-deterministic" remark is, for a given heap layout, deterministic.
+* `List.ConvertAll`, `GetRange` and `Slice` write the fresh list's `_items` and `_size`
+  directly, bypassing the constructor's checks; the verified contracts confirm that the
+  `List` invariant (`_size <= _items.Length`) holds afterwards (R33.28).
 
 ### Trusted (§33)
 

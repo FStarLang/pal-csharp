@@ -312,7 +312,6 @@ public struct CellsModel
     public SpecInt Count;
 }
 
-[Invariant("_a != null")]
 [Invariant("0 <= _n && _n <= _a.Length")]
 public class Cells
 {
@@ -323,7 +322,9 @@ public class Cells
     private CellsModel Model => new CellsModel { Items = Pal.Contents(_a), Count = _n };
 
     [Spec] internal Seq<int> SpecItems => Model.Items;
+    [Spec] internal SpecInt SpecCount => Model.Count;
 
+    [Ensures("@this.SpecItems.Length == 4 && @this.SpecCount == 0")]
     public Cells()
     {
         _a = new int[4];
@@ -367,4 +368,393 @@ public class Cells
     {
         FillOpen(v);
     }
+
+    // R33.27. A window of the receiver's array, left borrowed when a loop returns.
+    [Ensures("-1 <= Result && Result < @this.SpecCount")]
+    [Ensures("Pal.Implies(Result >= 0, Result < @this.SpecItems.Length && @this.SpecItems[Result] == x)")]
+    public int Find(int x)
+    {
+        ReadOnlySpan<int> s = _a.AsSpan(0, _n);
+        for (int i = 0; i < s.Length; i++)
+        {
+            Pal.Invariant(0 <= i && i <= s.Length);
+            Pal.Invariant(Pal.Implies(Pal.Returned(), i < s.Length && Pal.ReturnValue<int>() == i && Pal.Contents(s)[i] == x));
+            if (s[i] == x)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // R33.28. The fields of a fresh object of the class, written.
+    [Ensures("Result.SpecCount == 1 && 0 < Result.SpecItems.Length && Result.SpecItems[0] == v")]
+    public static Cells One(int v)
+    {
+        Cells c = new Cells();
+        c._a[0] = v;
+        c._n = 1;
+        return c;
+    }
+}
+
+public enum Mode { Keep, Fail, Bump }
+
+[Spec]
+public struct LedgerModel
+{
+    public Seq<OrderedTable.Slot> Slots;
+    public SpecInt Count;
+    public SpecInt Tag;
+}
+
+[Invariant("0 <= _n && _n <= _slots.Length")]
+public class Ledger
+{
+
+    private OrderedTable.Slot[] _slots;
+    private int _n;
+    private int _tag;
+
+    [Model]
+    private LedgerModel Model => new LedgerModel { Slots = Pal.Contents(_slots), Count = _n, Tag = _tag };
+
+    [Spec] internal Seq<OrderedTable.Slot> SpecSlots => Model.Slots;
+    [Spec] internal SpecInt SpecCount => Model.Count;
+    [Spec] internal SpecInt SpecTag => Model.Tag;
+
+    public Ledger()
+    {
+        _slots = new OrderedTable.Slot[4];
+        _n = 0;
+        _tag = 0;
+    }
+
+    [Ensures("s.Key == k && s.Next == Pal.Old(s.Next)")]
+    private static void SetKey(ref OrderedTable.Slot s, int k)
+    {
+        s.Key = k;
+    }
+
+    // R33.18. An unannotated method with an empty body: its calls are dropped.
+    private static void Hook(int k) { }
+
+    // R33.16. An element passed by `ref` is copied in, and the callee's result copied back.
+    [Requires("0 <= i && i < @this.SpecSlots.Length")]
+    [Ensures("@this.SpecSlots.Length == Pal.Old(@this.SpecSlots).Length && @this.SpecSlots[i].Key == k")]
+    public void Rekey(int i, int k)
+    {
+        ref OrderedTable.Slot s = ref _slots[i];
+        SetKey(ref s, k);
+        Hook(k);
+    }
+
+    [Open]
+    [Ensures("Pal.Contents(@this._slots).Length == 4 && @this._n == 0")]
+    private void Enlarge()
+    {
+        _n = 0;
+        _slots = new OrderedTable.Slot[4];
+    }
+
+    // R33.15, transitively: `Reset` assigns `_tag` neither itself nor through `Enlarge`.
+    [Open]
+    [Ensures("Pal.Contents(@this._slots).Length == 4 && @this._n == 0")]
+    private void Reset()
+    {
+        Enlarge();
+    }
+
+    [Ensures("@this.SpecTag == Pal.Old(@this.SpecTag) && @this.SpecCount == 0")]
+    public void Clear()
+    {
+        Reset();
+    }
+
+    // R33.17. The local copy is re-read after the call that may replace the field.
+    [Ensures("@this.SpecSlots.Length > 0 && @this.SpecSlots[0].Key == k")]
+    public void Grow(int k)
+    {
+        OrderedTable.Slot[] a = _slots;
+        if (_n == a.Length)
+        {
+            Enlarge();
+            a = _slots;
+        }
+        if (a.Length == 0)
+        {
+            Enlarge();
+            a = _slots;
+        }
+        a[0].Key = k;
+    }
+
+    // R33.20. The loop does not assign `_n` or `_tag`: the invariant need not say so.
+    [Open]
+    [Requires("0 <= @this._n && @this._n <= Pal.Contents(@this._slots).Length")]
+    [Ensures("Pal.Contents(@this._slots).Length == Pal.Old(Pal.Contents(@this._slots)).Length")]
+    [Ensures("@this._n == Pal.Old(@this._n) && @this._tag == Pal.Old(@this._tag)")]
+    private void ZeroKeys()
+    {
+        for (int k = 0; k < _n; k++)
+        {
+            Pal.Invariant(0 <= k && k <= _n);
+            Pal.Invariant(Pal.Contents(_slots).Length == Pal.Old(Pal.Contents(this._slots)).Length);
+            _slots[k].Key = 0;
+        }
+    }
+
+    [Ensures("@this.SpecTag == Pal.Old(@this.SpecTag) && @this.SpecCount == Pal.Old(@this.SpecCount)")]
+    public void Zero()
+    {
+        ZeroKeys();
+    }
+
+    [Throws(typeof(ArgumentException), "x < 0")]
+    [Ensures("Result == x")]
+    private static int Checked(int x)
+    {
+        if (x < 0) throw new ArgumentException();
+        return x;
+    }
+
+    [Open]
+    [Ensures("@this._tag == t && Pal.Contents(@this._slots) == Pal.Old(Pal.Contents(@this._slots))")]
+    private void SetTag(int t)
+    {
+        _tag = t;
+    }
+
+    // R33.22. A raising call while `this` is open: `this` is closed around it.
+    [Throws(typeof(ArgumentException), "x < 0")]
+    [Ensures("@this.SpecTag == x")]
+    public void Retag(int x)
+    {
+        _tag = 0;
+        SetTag(Checked(x));
+    }
+
+    // R33.21. A `switch` whose arms return or never complete, and an interpolated
+    // `Debug.Assert` message.
+    [Requires("m == Mode.Keep || m == Mode.Fail || m == Mode.Bump")]
+    [Throws(typeof(InvalidOperationException), "!skip && m == Mode.Fail")]
+    [Ensures("Result == (skip ? 2 : (m == Mode.Bump ? 1 : 0))")]
+    public static int Pick(Mode m, bool skip)
+    {
+        if (!skip)
+        {
+            switch (m)
+            {
+                case Mode.Keep:
+                    return 0;
+                case Mode.Fail:
+                    System.Collections.ThrowHelper.ThrowCycle();
+                    break;
+                default:
+                    Debug.Assert(m == Mode.Bump, $"Unknown mode: {m}");
+                    return 1;
+            }
+        }
+        return 2;
+    }
+
+    // R33.23. Guards nested in both arms of an `if`/`else`, with a tail after it.
+    [Ensures("Result == (b ? (a ? 1 : 2) : 3)")]
+    public static int Nested(bool a, bool b)
+    {
+        int r = 3;
+        if (a)
+        {
+            if (b)
+            {
+                return 1;
+            }
+        }
+        else
+        {
+            Debug.Assert(r == 3);
+            if (b)
+            {
+                return 2;
+            }
+        }
+        return r;
+    }
+
+    [Ensures("@this.SpecTag == (b ? 1 : 2)")]
+    public void NestedVoid(bool a, bool b)
+    {
+        if (a)
+        {
+            if (b)
+            {
+                _tag = 1;
+                return;
+            }
+        }
+        else if (b)
+        {
+            _tag = 1;
+            return;
+        }
+        _tag = 2;
+    }
+}
+
+// R33.19. `default` of a struct with a field of type-parameter type, as `OrderedDictionary`'s
+// `Entry` is.
+public class Bag<T>
+{
+    public struct Cell
+    {
+        public T Item;
+        public int N;
+
+        [Ensures("Result == N")]
+        public readonly int Count() => N;
+    }
+
+    [Ensures("Result.N == 0")]
+    public static Cell Empty()
+    {
+        Cell c = default;
+        return c;
+    }
+}
+
+// R33.25. A constructor that leaves a nullable comparer field `null` on some path, fills it
+// with `c ?? EqualityComparer<T>.Default` or compares it against the default, and builds
+// its arrays through an `[Open]` helper.
+[Spec]
+public struct KeyedModel<T>
+{
+    public System.Collections.Generic.IEqualityComparer<T>? Comparer;
+    public SpecInt Length;
+}
+
+[Invariant("_buckets == null || _buckets.Length > 0")]
+public class Keyed<T>
+{
+    private System.Collections.Generic.IEqualityComparer<T>? _comparer;
+    private int[]? _buckets;
+
+    [Model]
+    private KeyedModel<T> Model => new KeyedModel<T> { Comparer = _comparer, Length = Pal.Contents(_buckets!).Length };
+
+    [Spec] public System.Collections.Generic.IEqualityComparer<T>? SpecComparer => Model.Comparer;
+    [Spec] public SpecInt SpecLength => Model.Length;
+
+    [Ensures("Pal.Implies(shared, @this.SpecComparer != null)")]
+    [Ensures("Pal.Implies(capacity > 0, @this.SpecLength == capacity)")]
+    public Keyed(int capacity, System.Collections.Generic.IEqualityComparer<T>? comparer, bool shared)
+    {
+        if (capacity > 0)
+        {
+            Init(capacity);
+        }
+
+        if (shared)
+        {
+            _comparer = comparer ?? System.Collections.Generic.EqualityComparer<T>.Default;
+        }
+        else if (comparer is not null && comparer != System.Collections.Generic.EqualityComparer<T>.Default)
+        {
+            _comparer = comparer;
+        }
+    }
+
+    [Open]
+    [Requires("capacity > 0 && @this._buckets == null")]
+    [Ensures("@this._buckets != null && Pal.Contents(@this._buckets).Length == capacity")]
+    private void Init(int capacity)
+    {
+        _buckets = new int[capacity];
+    }
+}
+
+// R33.26. An enumerator in `OrderedDictionary`'s shape: the borrowed object read through a
+// local, a `ref` local into its array, and `Current` an auto-property with a private setter.
+[Spec]
+public struct BookModel<K, V>
+{
+    public Seq<Book<K, V>.Entry> Entries;
+    public SpecInt Count;
+    public SpecInt Version;
+}
+
+[Invariant("0 <= _count && _count <= _entries.Length")]
+public class Book<K, V>
+{
+    public struct Entry
+    {
+        public K Key;
+        public V Value;
+    }
+
+    private Entry[] _entries;
+    private int _count;
+    [Wrapping] private int _version;
+
+    [Model]
+    private BookModel<K, V> Model => new BookModel<K, V> { Entries = Pal.Contents(_entries), Count = _count, Version = _version };
+
+    [Spec] public Seq<Entry> SpecEntries => Model.Entries;
+    [Spec] public SpecInt SpecCount => Model.Count;
+    [Spec] public SpecInt SpecVersion => Model.Version;
+
+    [Ensures("@this.SpecCount == 0")]
+    public Book()
+    {
+        _entries = new Entry[0];
+        _count = 0;
+        _version = 0;
+    }
+
+    [Ensures("ReferenceEquals(Result._book, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
+    public Enumerator GetEnumerator() => new(this);
+
+#pragma warning disable CS8618 // `Current` is `default` until the first `MoveNext`, as in `OrderedDictionary`.
+    public struct Enumerator
+    {
+        private readonly Book<K, V> _book;
+        private readonly int _version;
+        private int _index;
+
+        [Ensures("ReferenceEquals(@this._book, book) && @this._version == book.SpecVersion && @this._index == 0")]
+        internal Enumerator(Book<K, V> book)
+        {
+            _book = book;
+            _version = _book._version;
+        }
+
+        public K Current { get; private set; }
+
+        [Requires("0 <= @this._index")]
+        [Throws(typeof(InvalidOperationException), "@this._version != @this._book.SpecVersion")]
+        [Ensures("@this._version == @this._book.SpecVersion && 0 <= @this._index")]
+        [Ensures("Result == (Pal.Old(@this._index) < @this._book.SpecCount)")]
+        [Ensures("Pal.Implies(Result, @this._index == Pal.Old(@this._index) + 1 && Pal.Old(@this._index) < @this._book.SpecEntries.Length && Pal.Same(@this.Current, @this._book.SpecEntries[Pal.Old(@this._index)].Key))")]
+        [Ensures("Pal.Implies(!Result, @this._index == Pal.Old(@this._index))")]
+        public bool MoveNext()
+        {
+            Book<K, V> book = _book;
+
+            if (_version != book._version)
+            {
+                throw new InvalidOperationException();
+            }
+
+            if (_index < book._count)
+            {
+                ref Entry entry = ref book._entries[_index];
+                Current = entry.Key;
+                _index++;
+                return true;
+            }
+
+            Current = default!;
+            return false;
+        }
+    }
+#pragma warning restore CS8618
 }

@@ -268,9 +268,17 @@ public static class Declarations
                      Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
                     continue;
                 foreach (var argument in call.ArgumentList.Arguments)
+                {
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
                         return true;
+                    // R33.24. A `ref` argument the callee may write through: a `ref` local
+                    // (R33.16's `ref entry` into a field's array) or a field itself.
+                    if (argument.RefKindKeyword.RawKind is (int)SyntaxKind.RefKeyword or (int)SyntaxKind.OutKeyword &&
+                        model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is ILocalSymbol { RefKind: RefKind.Ref } or IFieldSymbol { IsStatic: false })
+                        return true;
+                }
             }
         }
         return false;

@@ -172,6 +172,9 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public SpanOrigin? Origin { get; init; }
 
+    /// <summary>R33.27. The receiver's array field a span local borrowed, if that is its source.</summary>
+    public string? BorrowedField { get; init; }
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
@@ -1766,7 +1769,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
         var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld,
-            _openMethods, _raising, _readOnly);
+            _openMethods, _raising, _readOnly, _methods);
         var plan = new MethodPlan(method, _spec, diagnostics,
             _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held,
             method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
@@ -1782,8 +1785,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             Names.FunctionModule(method.Name), method.Body,
             method.Requires, method.Ensures, method.Preserves,
             method.Throws.Where(t => t.When is not null).Select(t => t.When!));
-        var classOpens = method.Parameters
-            .Select(p => p.Type is IrClassType ct && _classes.TryGetValue(ct.Name, out var owner) ? owner : null)
+        // R33.25. A constructor folds its class's invariant, whose model it returns.
+        var classOpens = method.Parameters.Select(p => p.Type)
+            .Concat(method.IsConstructor ? [method.ReturnType] : [])
+            .Select(t => t is IrClassType ct && _classes.TryGetValue(ct.Name, out var owner) ? owner : null)
             .OfType<IrClass>()
             .SelectMany(ClassSpecOpens);
         foreach (var open in methodOpens.Union(classOpens).Distinct())

@@ -1282,6 +1282,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private IrExpr Default(ExpressionSyntax node, IrLoc loc)
     {
         if (model.GetTypeInfo(node).Type is not { } type) return Unsupported(node, loc);
+        // R33.19. A struct with a field at a type parameter is its `has_default` instance's
+        // value, each field at its own default, the caller's at a type parameter (R14.2a).
+        if (type is INamedTypeSymbol { TypeKind: TypeKind.Struct } st && !WellKnown.IsPairType(st) &&
+            TypeParametersIn(st).Any() && known.MapType(st) is IrNamedType sty &&
+            StructFields(st).Any(f => f.Type is ITypeParameterSymbol))
+        {
+            foreach (var tp in WellKnown.DefaultedIn(st)) DefaultedTypeParameters.Add(tp.Name);
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Inhabited.default_of", []) { TypeArgs = [sty], Type = sty };
+        }
         if (Zero(loc, type) is { } zero) return zero;
 
         // R14.2a. `default(T)` at an unconstrained `T` is whatever `T`'s default is, which
@@ -1917,7 +1926,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             subject = new IrVar(loc, name) { Type = inner };
         }
 
-        var resultType = fallback.Type is IrOptionType ? inner : fallback.Type ?? inner.Inner;
+        // R33.25. C# types `a ?? b` as `a`'s underlying type when `b` converts to it:
+        // `comparer ?? EqualityComparer<T>.Default` is an `IEqualityComparer<T>`.
+        var resultType = fallback.Type is IrOptionType ? inner : inner.Inner ?? fallback.Type;
         IrExpr present = fallback.Type is IrOptionType
             ? subject
             : new IrOptionOp(loc, OptionOpKind.Value, subject) { Type = inner.Inner };
@@ -2023,9 +2034,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// reference types, but the images differ, <c>T</c> and <c>option T</c>; the
     /// conversion is <c>Some</c>.
     /// </summary>
+    /// <summary>
+    /// R33.25. Two types are the same F* type: a spec type is its binding, so
+    /// `EqualityComparer&lt;T&gt;` is `IEqualityComparer&lt;T&gt;` when both are bound to
+    /// `Equality.comparer`, and its arguments compare element-wise.
+    /// </summary>
+    internal static bool SameType(IrType a, IrType b) =>
+        a.Equals(b) ||
+        a is IrUserSpecType x && b is IrUserSpecType y && x.FStar == y.FStar &&
+        x.Args.Length == y.Args.Length && x.Args.Zip(y.Args, SameType).All(same => same);
+
     public IrExpr ToDeclared(IrExpr value, IrType? declared) =>
         declared is IrOptionType option && value is not IrNull &&
-        value.Type is { } type and not IrOptionType && type.Equals(option.Inner)
+        value.Type is { } type and not IrOptionType && SameType(type, option.Inner)
             ? new IrOptionOp(value.Loc, OptionOpKind.Some, value) { Type = option }
             : value;
 
@@ -2221,6 +2242,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrQuantifier q => [q.Body],
             IrNewArray n => n.Source is { } src ? [n.Length, src] : [n.Length],
             IrContents c => [c.Array],
+            IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
             IrSpecOp o => o.Args,

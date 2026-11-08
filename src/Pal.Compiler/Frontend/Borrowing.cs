@@ -157,12 +157,23 @@ public static class Borrowing
             if (target is null) continue;
             while (target is ParenthesizedExpressionSyntax pe) target = pe.Expression;
             if (target is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } or IdentifierNameSyntax &&
-                model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f &&
-                SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, self.OriginalDefinition))
+                (model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f &&
+                 SymbolEqualityComparer.Default.Equals(f.ContainingType.OriginalDefinition, self.OriginalDefinition) ||
+                 IsAutoProperty(model.GetSymbolInfo(target).Symbol, self)))
                 return true;
         }
         return false;
     }
+
+    /// <summary>
+    /// R33.26. An instance auto-property of the struct (<c>Current { get; private set; }</c>):
+    /// its backing field is one of the struct's fields (R3.4), under the property's name.
+    /// </summary>
+    public static bool IsAutoProperty(ISymbol? symbol, INamedTypeSymbol self) =>
+        symbol is IPropertySymbol { IsStatic: false, IsIndexer: false } p &&
+        SymbolEqualityComparer.Default.Equals(p.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
+        self.OriginalDefinition.GetMembers().OfType<IFieldSymbol>()
+            .Any(f => SymbolEqualityComparer.Default.Equals(f.AssociatedSymbol, p.OriginalDefinition));
 
     /// <summary>
     /// R28.4. The constructor parameter the borrowed object arrives in: the one the
