@@ -9478,6 +9478,10 @@ function (`HashSet<T>.ItemsOf`) did not typecheck.
 `comparer != EqualityComparer<T>.Default`, with `comparer` an `option` and the other side
 not, wraps the other side in `Some`. Two C# types bound to the same F* type
 (`IEqualityComparer<T>` and `EqualityComparer<T>`) count as the same type here.
+The `option` side must be declared nullable (`T?`). In a specification string, types are
+nullable-oblivious and are `option`s only by R20.9's default, which F* sees through.
+Wrapping them broke `OrderedDictionary`'s constructors, which compare
+`OrDefault(...) == EqualityComparer<TKey>.Default`.
 
 ### R30.22 A `return` nested in an `if` with no `else`
 
