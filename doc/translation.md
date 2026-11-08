@@ -9518,6 +9518,48 @@ leads to one borrowing struct, its *core*.
   `trefl`, that the two `reveal`s of the same erased value are equal, triggered on the
   nominal one.
 
+### R32.13 Views
+
+`SortedSet<T>.TreeSubSet` is a *view*: a `sealed` class nested in a generic class `B` with a
+`[Model]`, deriving from `B`, with no `[Model]` of its own and one readonly field typed at `B`
+(the *underlying* object, assigned from a constructor parameter). It is translated as an
+R29.3 borrowing class of `B`:
+
+* Its record holds its own fields and the instance fields it inherits from `B`. A field of
+  `B` with no translation is left out (R25.3), as is `B`'s comparer's null-ness: the
+  comparer is a value (R27.47) and so may be held.
+* Its members are methods of `B` that take the underlying object as `this` and the view's
+  record as `self`, always by reference. A member that calls, transitively through the
+  view's own members, a member of the underlying object that is not read-only holds the
+  underlying object exclusively; otherwise it holds it at a fraction.
+* *Static binding.* A view never exists as an object of `B`: a method returns one only
+  under `[return: Exactly(typeof(B<>.V))]`, and a caller holds the result in a local (as it
+  holds a borrowing struct, R27.41). So every call on a view binds statically, by exact
+  type: to `V`'s override when `V` declares one, and otherwise to a *replica* of `B`'s
+  member. A replica is the member's body lowered again at `V` (`V_at_B_M`), so its own
+  calls on `this` bind at `V` in turn, and `base.M(…)` inside a member of `V` is the
+  replica of `B.M`.
+* *Contracts at a view.* `[Requires]`/`[Ensures]`/`[Throws]` take `At = typeof(B<>.V)`. A
+  clause with `At` is a clause of the member's replica at `V` only; one without is a clause
+  of `B`'s own member only. In such a clause `@this` is the view, and both its own `[Spec]`
+  members and the underlying object's (`@this._underlying.SpecItems`) may be named; `B`'s
+  `[Spec]` members on the view are refused (PALCS0803), since they read `B`'s model, which
+  a view does not have. An override of `V` with no contract of its own takes the `At`
+  clauses of the member it overrides. This needs no behavioural subtyping: no call
+  dispatches dynamically between `B` and `V`.
+* Every member requires and ensures that `self`'s underlying field is `this`, and that its
+  readonly scalar fields are unchanged. A method returning a view ensures that the view's
+  underlying field is its receiver, so a caller's view local is known to borrow it.
+* A view's constructor is `: base(…)` followed by assignments. The base constructor is
+  inlined: its arguments are bound to locals, and its body must be assignments to fields,
+  which become the record's initial values (else PALCS0804). A later read of a field
+  already assigned reads the assigned value.
+* A `[Spec]` member of `V` named on a call's result (`Result.SpecLo`) is inlined at the
+  result, with `B`'s receiver as the underlying object.
+
+`test/sortedset/View.cs` is the test: a view with a write-through override, a replica
+reached through a virtual call, and a version check, used from methods of the base.
+
 ### Verified (§32)
 
 `SortedDictionary<TKey,TValue>` members verified in this section:

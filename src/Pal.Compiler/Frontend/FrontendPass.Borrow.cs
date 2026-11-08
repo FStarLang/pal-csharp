@@ -19,7 +19,7 @@ public static partial class FrontendPass
     private static IrDecl? LowerBorrowingMember(
         Candidate candidate, SemanticModel model, WellKnown known,
         ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics, IrLoc loc,
-        List<IrMethod>? lifted = null)
+        List<IrMethod>? lifted = null, INamedTypeSymbol? view = null)
     {
         // The candidate's symbol is of the compilation before the spec shims were added;
         // the borrowing context is compared against symbols of this one.
@@ -29,7 +29,9 @@ public static partial class FrontendPass
             IPropertySymbol p => p.GetMethod,
             _ => null,
         } ?? candidate.Symbol;
-        var self = symbol.ContainingType;
+        // R32.13. A replica of a base member at a view is a member of the view.
+        var self = view ?? symbol.ContainingType;
+        var viewBase = Borrowing.ViewBase(self, known);
         // R32.12. A wrapping struct's member is one of the object its core borrows.
         var (corePath, core) = Borrowing.Innermost(self, known);
         var owner = Borrowing.OwnerField(core, known)!;
@@ -56,7 +58,7 @@ public static partial class FrontendPass
             return null;
         }
         var borrow = new BorrowContext(self, owner, selfType, ownerType, isCtor, ownerParameter)
-            { Owned = Borrowing.OwnedFields(core, known), CorePath = corePath };
+            { Owned = Borrowing.OwnedFields(core, known), CorePath = corePath, ViewBase = viewBase };
         // R27.37. Each object the struct owns is a further parameter of a member, owned
         // through its invariant as any object parameter is, and held by the field.
         var owned = ImmutableArray.CreateBuilder<(IFieldSymbol Field, IrClassType Type)>();
@@ -88,17 +90,27 @@ public static partial class FrontendPass
             return null;
         }
 
-        var specs = ReadSpecs(candidate.Symbol, candidate.Declaration, known, bound, diagnostics, borrow);
+        // R32.13. A view's override has the contract of the member it overrides at the
+        // view: what a caller of the base member at a view is promised.
+        var overridden = view is null && viewBase is not null && !SpecAttributes(candidate.Declaration, known).Any()
+            ? ViewOverridden(symbol, viewBase) : null;
+        var specs = overridden is not null
+            ? ReadSpecs(overridden, (ISymbol?)overridden.AssociatedSymbol ?? overridden, known, bound, diagnostics, borrow, self)
+            : ReadSpecs(candidate.Symbol, candidate.Declaration, known, bound, diagnostics, borrow, view);
         var parameters = LowerParameters(symbol, model, known, diagnostics)
             .Where(p => ownerParameter is null || p.Name != ownerParameter.Name);
-        var writes = !isCtor && Borrowing.WritesState(candidate.Syntax, model, self);
+        // R32.13. A view's member takes its record by reference: what it reaches through a
+        // virtual call is decided at the view, and so is what it writes.
+        var writes = !isCtor && (viewBase is not null || Borrowing.WritesState(candidate.Syntax, model, self));
+        // R32.13. A view's member that writes the object it borrows holds it exclusively.
+        var writesOwner = viewBase is not null && !isCtor && Borrowing.WritesOwner(candidate.Syntax, model, self, known);
         IrParam[] leading = isCtor
             ? [new IrParam(loc, Names.This, ownerType, ParamMode.Value)]
             : [new IrParam(loc, Names.This, ownerType, ParamMode.Value),
                new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value),
                .. owned.Select(o => new IrParam(loc, Borrowing.OwnedName(o.Field), o.Type, ParamMode.Value))];
 
-        var returnType = isCtor ? selfType : known.MapType(symbol.ReturnType);
+        var returnType = isCtor ? selfType : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -119,6 +131,10 @@ public static partial class FrontendPass
         var requires = isCtor ? [] : ImmutableArray.Create([Holds(selfVar), .. HoldsOwned(selfVar)]);
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
         if (isCtor) ensures.Add(Holds(new IrResult(loc) { Type = selfType }));
+        // R32.13. So does a view another member returns.
+        else if (ExactReturn(symbol, known) is { } exactView && Borrowing.IsView(exactView, known) &&
+                 SymbolEqualityComparer.Default.Equals(Borrowing.OwnerField(exactView, known)?.Type.OriginalDefinition, owner.Type.OriginalDefinition))
+            ensures.Add(Holds(new IrResult(loc) { Type = returnType }));
         else if (writes)
         {
             ensures.Add(Holds(selfVar));
@@ -141,7 +157,7 @@ public static partial class FrontendPass
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
         // R32.11. A lambda a borrowing member passes to a `[Callback]` is lifted as any other's.
-        lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
@@ -152,7 +168,8 @@ public static partial class FrontendPass
                 init.ThisOrBaseKeyword.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.ThisKeyword) &&
                 chained.ExpressionBody is null && chained.Body is { Statements.Count: 0 })
                 body = lowerer.Expressions.ChainedBorrowingConstructor(init, loc);
-            else if (candidate.Syntax is not ConstructorDeclarationSyntax { Initializer: null } c)
+            else if (candidate.Syntax is not ConstructorDeclarationSyntax c ||
+                     c.Initializer is { } ci && !(viewBase is not null && ci.ThisOrBaseKeyword.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.BaseKeyword)))
             {
                 diagnostics.Error("PALCS0730", loc,
                     $"The constructor of `{self.Name}` chains to another. A borrowing struct's constructor " +
@@ -186,11 +203,20 @@ public static partial class FrontendPass
             UnconditionalEnsures = ensures.Count,
             Throws = specs.Throws,
             DeclaringClass = ((INamedTypeSymbol)owner.Type).Name,
-            IsReadOnly = true,
+            IsReadOnly = !writesOwner,
             TypeParameters = typeParameters,
             DefaultedTypeParameters = [.. typeParameters.Where(lowerer.Defaulted)],
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
         };
+    }
+
+    /// <summary>R32.13. The member of the view's base a view member overrides.</summary>
+    private static IMethodSymbol? ViewOverridden(IMethodSymbol symbol, INamedTypeSymbol viewBase)
+    {
+        for (var o = symbol.OverriddenMethod; o is not null; o = o.OverriddenMethod)
+            if (SymbolEqualityComparer.Default.Equals(o.ContainingType.OriginalDefinition, viewBase.OriginalDefinition))
+                return o;
+        return null;
     }
 }

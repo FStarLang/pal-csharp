@@ -117,7 +117,11 @@ public static class Declarations
     // in place is verified member by member, and an unannotated member is outside the scope.
     private static bool InAnnotatedScope(IMethodSymbol method, WellKnown known) =>
         IsAnnotated(method, known)
-        || method.AssociatedSymbol is { } property && IsAnnotated(property, known);
+        || method.AssociatedSymbol is { } property && IsAnnotated(property, known)
+        // R32.13. A view's override of an annotated member of its base is checked against
+        // the member's contract at the view.
+        || method.IsOverride && Borrowing.ViewBase(method.ContainingType, known) is not null &&
+           method.OverriddenMethod is { } o && InAnnotatedScope(o, known);
 
     /// <summary>
     /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the
@@ -229,7 +233,12 @@ public static class Declarations
                 if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol held &&
                     Borrowing.IsMember(held, known) &&
                     call.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax heldLocal } &&
-                    model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol)
+                    model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol &&
+                    // R32.13. Unless it is a view's member that writes the object it borrows.
+                    !(Borrowing.IsView(held.ContainingType, known) &&
+                      held.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } heldBody &&
+                      Borrowing.WritesOwner(heldBody, model.Compilation.GetSemanticModel(heldBody.SyntaxTree),
+                          held.ContainingType.OriginalDefinition, known)))
                     continue;
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&

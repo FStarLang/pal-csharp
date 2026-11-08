@@ -635,8 +635,20 @@ public sealed class StmtLowerer(
     private bool HeldStruct(VariableDeclaratorSyntax v, ILocalSymbol symbol, IrType type,
         ImmutableArray<IrStmt>.Builder statements)
     {
-        if (symbol.Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } st || !Borrowing.IsBorrowing(st, known))
-            return false;
+        // R32.13. A local of a view's base class, initialised by a call returning the view
+        // exactly (or by the view's constructor), holds the view's record.
+        var viewInit = v.Initializer?.Value is { } vi ? Unparenthesized(vi) switch
+        {
+            BaseObjectCreationExpressionSyntax c when model.GetTypeInfo(c).Type is INamedTypeSymbol ct &&
+                Borrowing.IsView(ct, known) => ct,
+            InvocationExpressionSyntax c when model.GetSymbolInfo(c).Symbol is IMethodSymbol cm &&
+                FrontendPass.ExactReturn(cm, known) is { } ex => ex,
+            _ => null,
+        } : null;
+        INamedTypeSymbol st;
+        if (symbol.Type is INamedTypeSymbol { TypeKind: TypeKind.Struct } bst && Borrowing.IsBorrowing(bst, known)) st = bst;
+        else if (viewInit is not null && known.MapType(viewInit) is { } viewType) { st = viewInit; type = viewType; }
+        else return false;
         var loc = Locations.From(v);
         var owner = Borrowing.OwnerField(st, known)!;
         var self = symbol.ContainingSymbol as IMethodSymbol;
@@ -652,7 +664,8 @@ public sealed class StmtLowerer(
         ExpressionSyntax? init = creation;
         if (creation is null && v.Initializer?.Value is InvocationExpressionSyntax inv &&
             model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false } getter &&
-            SymbolEqualityComparer.Default.Equals(getter.ReturnType.OriginalDefinition, st.OriginalDefinition) &&
+            SymbolEqualityComparer.Default.Equals(
+                (FrontendPass.ExactReturn(getter, known) ?? getter.ReturnType).OriginalDefinition, st.OriginalDefinition) &&
             SymbolEqualityComparer.Default.Equals(getter.ContainingType.OriginalDefinition, owner.Type.OriginalDefinition))
         {
             init = inv;
@@ -688,6 +701,7 @@ public sealed class StmtLowerer(
         var owned = Borrowing.OwnedFields(st, known);
         var held = new BorrowContext(st, owner, type, ownerType, false, null)
         {
+            ViewBase = Borrowing.ViewBase(st, known),
             Owned = owned,
             SelfName = name,
             OwnerName = ownerName,

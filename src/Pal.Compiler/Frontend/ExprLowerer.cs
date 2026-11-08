@@ -754,7 +754,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // a struct, a class has a constructor *body* — it allocates — so there is a
         // function to call rather than a record to build.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } klass &&
-            known.HasModel(klass))
+            known.HasModel(klass) && !Borrowing.IsView(klass, known))
         {
             if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol ctor)
                 return Unsupported(node, loc);
@@ -913,7 +913,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     }
 
     /// <summary>The fields of a struct, in declaration order; see R3.4.</summary>
-    private static IEnumerable<(string Name, ITypeSymbol Type)> StructFields(INamedTypeSymbol symbol)
+    private IEnumerable<(string Name, ITypeSymbol Type)> StructFields(INamedTypeSymbol symbol)
+    {
+        // R32.13. A view's record holds the state it inherits, after its own.
+        foreach (var x in OwnFields(symbol)) yield return x;
+        foreach (var f in Borrowing.InheritedState(symbol, known)) yield return (f.Name, f.Type);
+    }
+
+    private static IEnumerable<(string Name, ITypeSymbol Type)> OwnFields(INamedTypeSymbol symbol)
     {
         foreach (var member in symbol.GetMembers())
         {
@@ -2297,6 +2304,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             selfType.FindImplementationForInterfaceMember(method) is IMethodSymbol impl &&
             BorrowingSelfCall(impl, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } dispatched)
             return dispatched;
+        // R32.13. In a view, a call on the view itself, or through `base`.
+        if (Borrow is { ViewBase: not null } &&
+            (node.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax or BaseExpressionSyntax }) &&
+            ViewSelfCall(method, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc,
+                viaBase: node.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax }) is { } viewCall)
+            return viewCall;
         if (Borrowing.IsMember(method, known) && method.MethodKind != MethodKind.Constructor &&
             (node.Expression is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
             BorrowingSelfCall(method, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } selfCall)

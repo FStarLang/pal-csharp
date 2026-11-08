@@ -23,6 +23,13 @@ namespace PalLang;
 public sealed class RequiresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -34,6 +41,13 @@ public sealed class RequiresAttribute(string predicate) : Attribute
 public sealed class EnsuresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -95,7 +109,12 @@ public sealed class ConsumesAttribute : Attribute;
 /// passes an expression whose static type is that class; inside the method, the parameter
 /// is an object of it, and its contracts may name the class's members on it.
 /// </summary>
-[AttributeUsage(AttributeTargets.Parameter)]
+/// <remarks>
+/// R32.13. On a method's return value, it names a view (a sealed nested subclass the
+/// containing class borrows into): the method returns an object of exactly that class, and
+/// its result is the view's record.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.ReturnValue)]
 public sealed class ExactlyAttribute(Type type) : Attribute
 {
     public Type Type { get; } = type;
