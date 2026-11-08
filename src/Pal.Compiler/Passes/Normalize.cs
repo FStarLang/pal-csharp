@@ -49,7 +49,29 @@ public static class Normalize
     /// is copied into both arms, so that R5.5b finds the guard and the rest in one block.
     /// </summary>
     private static IrStmt LoopReturns(IrStmt body) =>
-        LoopReturn(body) ? new IrBlock(body.Loc, Sink(Stmts(body))) : body;
+        LoopReturn(body) || NestedReturn(body) ? new IrBlock(body.Loc, Sink(Stmts(body))) : body;
+
+    /// <summary>
+    /// R32.14. Whether <paramref name="s"/> holds an <c>if</c> with an arm that may return
+    /// but may also complete (<c>if (a) { if (b) return e; }</c>). It is no guard clause
+    /// (R5.5b), so what follows it is copied into each arm, after the arm, as for R24.14.
+    /// </summary>
+    private static bool NestedReturn(IrStmt? s) => s switch
+    {
+        IrIf i => InnerReturn(i.Then) || InnerReturn(i.Else),
+        IrBlock b => b.Statements.Any(NestedReturn),
+        _ => false,
+    };
+
+    private static bool InnerReturn(IrStmt? s) => s is not null && HasReturn(s) && !EndsInReturn(s);
+
+    private static bool HasReturn(IrStmt? s) => s switch
+    {
+        IrReturn => true,
+        IrBlock b => b.Statements.Any(HasReturn),
+        IrIf i => HasReturn(i.Then) || HasReturn(i.Else),
+        _ => false,
+    };
 
     private static ImmutableArray<IrStmt> Stmts(IrStmt? s) =>
         s is null ? [] : s is IrBlock b ? b.Statements : [s];
@@ -83,10 +105,10 @@ public static class Normalize
             var rest = stmts.RemoveRange(0, i + 1);
             switch (s)
             {
-                case IrBlock { Splice: false } b when LoopReturn(b):
+                case IrBlock { Splice: false } b when LoopReturn(b) || rest.Length > 0 && NestedReturn(b):
                     result.AddRange(Sink([.. b.Statements, .. rest]));
                     return [.. result];
-                case IrIf f when LoopReturn(f):
+                case IrIf f when LoopReturn(f) || rest.Length > 0 && NestedReturn(f):
                     result.Add(f with
                     {
                         // A branch that already returns at its end is not followed by `rest`.

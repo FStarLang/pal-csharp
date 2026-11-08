@@ -16,6 +16,10 @@ module Pulse.Lib.CSharp.SetOps
 ///   a member and inserting it (`TopDownHeap.inserted`) if not, as
 ///   `SymmetricExceptWith` computes it; `sym_except_length` bounds its length by
 ///   `|s| + |t|`, which is what keeps `Add`'s count from overflowing.
+/// * R32.14. `all_in c s t`: every element of `t` is a member of `s`, as `IsSubsetOf`/
+///   `IsSupersetOf` decide it; `all_in_step`/`all_in_whole` for the walk over the suffixes
+///   of `t`, `all_in_length` (a strictly sorted `t` all in `s` is no longer than `s`) and
+///   the sorted-bounds lemma the min/max shortcuts use.
 ///
 /// Everything is proved from `Pulse.Lib.CSharp.Order`'s axioms; nothing new is trusted.
 
@@ -270,3 +274,89 @@ let sym_except_length (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) (i: int)
   : Lemma (ensures 0 <= i /\ i <= Seq.length t ==>
                    Seq.length (sym_except c s (Seq.slice t 0 i)) <= Seq.length s + i)
   = if 0 <= i && i <= Seq.length t then sym_except_length_ c s (Seq.slice t 0 i)
+
+
+(* ------------------------------------------------------------------------------------ *)
+(* R32.14. Subsets                                                                       *)
+
+/// Every element of `t` is a member of `s` under `c`: `s` is a superset of `t`, as
+/// `IsSupersetOf`/`IsSubsetOf` decide it.
+let rec all_in (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Tot bool (decreases Seq.length t) =
+  if Seq.length t = 0 then true
+  else S.key_index c s (Seq.index t 0) >= 0 && all_in c s (Seq.tail t)
+
+let all_in_step (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) (i: int)
+  : Lemma (requires 0 <= i /\ i <= Seq.length t)
+          (ensures all_in c s (Seq.slice t i (Seq.length t)) ==
+                   (if i = Seq.length t then true
+                    else S.key_index c s (Seq.index t i) >= 0 &&
+                         all_in c s (Seq.slice t (i + 1) (Seq.length t))))
+  = if i = Seq.length t then ()
+    else Seq.lemma_eq_elim (Seq.tail (Seq.slice t i (Seq.length t))) (Seq.slice t (i + 1) (Seq.length t))
+
+let all_in_whole (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (all_in c s (Seq.slice t 0 (Seq.length t)) == all_in c s t)
+  = Seq.lemma_eq_elim (Seq.slice t 0 (Seq.length t)) t
+
+let all_in_empty (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires Seq.length t == 0) (ensures all_in c s t == true)
+          [SMTPat (all_in c s t)]
+  = ()
+
+/// `all_in` is: every position of `t` holds a member of `s`.
+let rec all_in_at (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (ensures all_in c s t <==>
+                   (forall (i: nat). i < Seq.length t ==> S.key_index c s (Seq.index t i) >= 0))
+          (decreases Seq.length t)
+  = if Seq.length t = 0 then ()
+    else begin
+      all_in_at c s (Seq.tail t);
+      assert (forall (i: nat). 0 < i /\ i < Seq.length t ==> Seq.index (Seq.tail t) (i - 1) == Seq.index t i)
+    end
+
+/// In a strictly sorted `s`, the members' positions are in their order.
+let key_index_lt (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (x y: a)
+  : Lemma (requires S.strictly_sorted c s /\ S.key_index c s x >= 0 /\ S.key_index c s y >= 0 /\
+                    O.compare c x y < 0)
+          (ensures S.key_index c s x < S.key_index c s y)
+  = let j = S.key_index c s x in
+    let k = S.key_index c s y in
+    let sj = Seq.index s j in
+    let sk = Seq.index s k in
+    assert (O.compare c sj x == 0 /\ O.compare c sk y == 0);
+    if j = k then begin
+      O.compare_trans c y sj x
+    end
+    else if j > k then begin
+      assert (O.compare c sk sj < 0);
+      O.compare_trans c y sk sj;
+      O.compare_trans c y sj x
+    end
+
+let rec all_in_index (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) (i: nat)
+  : Lemma (requires S.strictly_sorted c s /\ S.strictly_sorted c t /\ i < Seq.length t /\
+                    (forall (k: nat). k < Seq.length t ==> S.key_index c s (Seq.index t k) >= 0))
+          (ensures S.key_index c s (Seq.index t i) >= i)
+          (decreases i)
+  = if i = 0 then ()
+    else begin
+      all_in_index c s t (i - 1);
+      key_index_lt c s (Seq.index t (i - 1)) (Seq.index t i)
+    end
+
+/// A strictly sorted subset of a strictly sorted `s` is no longer than `s`.
+let all_in_length (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires S.strictly_sorted c s /\ S.strictly_sorted c t)
+          (ensures all_in c s t ==> Seq.length t <= Seq.length s)
+  = all_in_at c s t;
+    if all_in c s t && Seq.length t > 0 then all_in_index c s t (Seq.length t - 1)
+
+/// The elements of a strictly sorted `t` lie between its first and last.
+let sorted_bounds (#a: Type0) (c: O.comparer a) (t: Seq.seq a) (i: int)
+  : Lemma (requires S.strictly_sorted c t)
+          (ensures 0 <= i /\ i < Seq.length t ==>
+                   O.compare c (Seq.index t 0) (Seq.index t i) <= 0 /\
+                   O.compare c (Seq.index t (Seq.length t - 1)) (Seq.index t i) >= 0 /\
+                   O.compare c (Seq.index t 0) (Seq.index t (Seq.length t - 1)) <= 0)
+  = ()

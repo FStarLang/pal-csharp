@@ -9560,6 +9560,77 @@ R29.3 borrowing class of `B`:
 `test/sortedset/View.cs` is the test: a view with a write-through override, a replica
 reached through a virtual call, and a version check, used from methods of the base.
 
+### R32.14 Views used from the base, and writes through them
+
+R32.13 translates a view. This section adds what the base's members need in order to use a
+view, and what a view needs in order to write through to the underlying object.
+
+* *The base's `this as V` (absent views).* A member of `B`, verified at `B`'s exact type
+  (R27.1), may declare `V? x = this as V;` and never write `x`. The receiver is then a `B`
+  exactly, never a view. So `x` is recorded as absent: `x == null` is `true`, and
+  `x != null` is `false`. This holds outside a view's own members and replicas, where
+  `this` may be a view. `SortedSet.UnionWith` and `IntersectWith` test their receiver so.
+* *Scope.* A view's override is checked against the member it overrides only when that
+  member has a clause `At` the view. Overrides with no such contract (e.g. `Clear`, the
+  walks) stay untranslated, and nothing at the view may call them.
+* *Frame.* A view's member ensures that it leaves unchanged every field of its record
+  that it never writes. That covers the view's own fields and those it inherits from `B`.
+  A field counts as written when the body assigns or steps it, or passes it by `ref`. It
+  also counts when a member reached on `this` does so, including properties read or
+  written and lambdas written in those bodies, bound at the view and taken transitively.
+  So `Contains` at a view is known to keep `_min`/`_max` and the inherited `comparer`.
+* *Default arguments.* A call on a view (or of a replica) supplies the callee's default
+  arguments, as `VersionCheck()` relies on.
+* *Shared reference to self at a join.* A view's member holds its record by reference.
+  At an `if` whose arms both pass the record by reference, the two arms' facts about the
+  record are joined after the `if`. Pulse loses them there, so such an `if` is split into
+  two copies, each carrying the code that follows it, as R22.12 does for joins that would
+  lose facts.
+* *Ranges (library).* `Pulse.Lib.CSharp.SearchTree.range_root c t min max lo hi` is the
+  subtree a range search (`FindRange`) stops at: the first node whose item is in the
+  range, or `Leaf`. `SpecSearchTree.RangeRoot` and `InRange` name it and its range test.
+  The lemmas show that a search for an in-range item from `range_root` finds it iff the
+  whole tree has it. `FindRange` ensures that its result is the range root, and is
+  `Unshared` (no other node points to it). That lets a view keep the root without the
+  rest of the region.
+* *Casts to a view in contracts (`((V)x)`).* Take a local typed at `B` that holds a view
+  of exactly `V`, from an Exactly-return (R32.13). In a contract or loop invariant,
+  `((V)x).SpecM` names `V`'s `[Spec]` members on the view it holds. This is how
+  `IsSubsetOf`'s loop states the view's coherence. A cast of anything else is refused as
+  before.
+* *Views of another object.* `other.GetViewBetween(…)` on an object other than `this`
+  yields a view that borrows `other`'s region. It is held at `other`'s heaps, like
+  R32.13's views of `this`, and not as a plain local.
+* *Returns inside nested ifs.* For `if (a) { if (b) return e; } rest`, the code after the
+  `if` (`rest`) is copied into its arms, as for a `return` inside a loop (R24.14, R26.2). Before,
+  this was PALCS0001.
+* *Write-through and the version (library `Pulse.Lib.CSharp.Wrap`).*
+  `SpecWrap.Int32(n)` is `n` wrapped to 32 bits, the value a `[Wrapping]` `version++`
+  leaves (lemma `int32_add_wrap`).
+  * `SortedSet.Add`/`AddIfNotPresent` ensure `version == Int32(old version + 1)`.
+  * `Remove`/`DoRemove` ensure the same when the set was non-empty, and an unchanged set
+    and version when it was empty.
+  * A view's write-through (`AddIfNotPresent`, `DoRemove`) requires that the view's
+    version is not `Int32(set's version + 1)`: see §32 Findings. Given that, the view's
+    stale root is never mistaken for current. The re-check that follows (`VersionCheck`)
+    re-establishes coherence: a version equal to the set's implies that the root is the
+    range root of the set's tree.
+* *`SerializationInfo` (request (b)).* It needs no new rule. A field or member whose type
+  does not translate is left out (R25.3), and no translated member reads it.
+  `GetObjectData`/`OnDeserialization` are not translated (§32 Not verified).
+* *Subset family (library `Pulse.Lib.CSharp.SetOps`).*
+  * `all_in c s t` holds when every item of `t` is a member of `s`, with lemmas for one
+    step, the whole sequence, a length bound, and the bounds of a sorted sequence.
+  * `SpecSetOps.AllIn`/`AllInStep`/`AllInWhole`/`AllInLength`/`SortedBounds` name them.
+  * `IsSubsetOfSortedSetWithSameComparer` walks this set while checking membership in a
+    view of the other set, restricted to this set's min and max. Its loop invariant
+    states that the visited prefix is `AllIn` the other set.
+
+`test/sortedset/View.cs` adds the tests:
+* `CountAboveOf`: a view of another object, used in a loop invariant through `((Top)v)`.
+* `Nested`: a nested `return`.
+* `Kind`/`Pick`/`Current`: an absent view, a join, and a default argument.
+
 ### Verified (§32)
 
 `SortedDictionary<TKey,TValue>` members verified in this section:
@@ -9593,6 +9664,25 @@ reached through a virtual call, and a version check, used from methods of the ba
 `InOrderTreeWalk`, `RemoveWhere`, the three `SortedSet.CopyTo` overloads and
 `SortedDictionary.CopyTo` were re-verified with the walk `[Frac]` (R32.8, R32.9).
 
+`SortedSet<T>` and `TreeSubSet` members verified under R32.13/R32.14. Here *coherent* means
+that the view shares the set's comparer and, when its version is the set's, its root is
+`RangeRoot` of the set's tree.
+
+| Member | Contract |
+| --- | --- |
+| `GetViewBetween(lo, hi)` | throws `ArgumentException` when `lo > hi`; the view has bounds `lo`/`hi`, both active, its root is the range root, and it is coherent; the set is unchanged |
+| `TreeSubSet` constructor | the fields are the arguments, `version == _countVersion == -1`, and the root is the range root |
+| `IsWithinRange(x)` | `InRange` of the bounds |
+| `TreeSubSet.TotalCount()` | the underlying set's item count; the set is unchanged |
+| `VersionCheck()`, `VersionCheckImpl(false)` | coherent and current afterwards (version is the set's, root is the range root) |
+| `TreeSubSet.Contains(x)`, `FindNode(x)`, and the replicas of `SortedSet.Contains`/`FindNode`/`Comparer` | `x` is in range and in the set (`FindNode`: non-null iff); coherence kept |
+| `TreeSubSet.AddIfNotPresent(x)` | out of range: throws `ArgumentOutOfRangeException`; else as the set's `AddIfNotPresent`, the view coherent and current; requires the version precondition (Findings) |
+| `TreeSubSet.DoRemove(x)` | `Result` iff in range and present; in range: the set's items are `Removed(x)`, else unchanged; coherence kept under the version precondition |
+| `SortedSet.Add`, `AddIfNotPresent`, `Remove`, `DoRemove`, and `TreeSet.AddIfNotPresent`/`Add` (strengthened) | additionally the version moves to `Int32(old + 1)` on a write and stays put on `Remove` from an empty set |
+| `IsSubsetOfSortedSetWithSameComparer(other)` | `Result` iff `AllIn(c, other.items, items)`; both sets and comparers unchanged |
+| `IsSubsetOf`, `IsProperSubsetOf`, `IsSupersetOf`, `IsProperSupersetOf` (same-comparer `SortedSet` branch) | requires the same comparer; `AllIn` of the two sets' items in the direction named (and, for the proper forms, a strict size inequality) |
+| `UnionWith`, `IntersectWith` (re-verified) | as before (R32.5), with `this as TreeSubSet` absent (R32.14) |
+
 ### Trusted (§32)
 
 * The R32.3 `EqualityComparer` bindings (the hashing harness's).
@@ -9613,37 +9703,29 @@ reached through a virtual call, and a version check, used from methods of the ba
   object)`, `Contains(object)`, `Remove(object)`, `SyncRoot`): they type-test `object`
   keys and values (`is TKey`) and cast them, catching `InvalidCastException`; neither is
   modelled for type parameters.
-* `TreeSubSet` and `GetViewBetween`, and so the `IsSubsetOf` family's view branches.
-  A view is a subclass that borrows its underlying set's region while owning its own range
-  fields, and its `VersionCheckImpl` writes its own count from inside a walk of that region.
-  The `IsSubsetOf`/`IsProperSubsetOf`/`IsSupersetOf`/`IsProperSupersetOf` SortedSet
-  branches all go through `GetViewBetween`, so they are blocked with it.
-
-  *Design (not implemented).* Treat a view as a borrowing class (R29.3) that derives from
-  its exact-type owner:
-  1. Its record holds its own fields and the inherited `root`/`comparer`/`count`/`version`,
-     and it borrows `_underlying`'s region.
-  2. Its constructor `: base(underlying.Comparer)` assigns the record and calls
-     `_underlying.FindRange`.
-  3. `GetViewBetween` gets an exact-return contract, so a caller's view local binds
-     statically to `TreeSubSet`'s overrides.
-  4. The inherited `Contains`/`FindNode` are replicated at the view (R27.57-style). Their
-     coherence invariant is: `version == underlying.version` implies `root` is
-     `FindRange(min, max)` of the underlying tree. That can only hold up to the version
-     wrap above, so it must also carry a ghost "checked" flag.
-  5. One F* lemma: for an in-range item, a search from `FindRange`'s node finds it iff the
-     item is in the tree.
-  6. `VersionCheckImpl(updateCount: true)` recounts through a pruned `InOrderTreeWalk`,
-     which needs R32.11's bounded walk restricted to a range.
-
-  *Where the attempt stopped.* Classifying `TreeSubSet` as such a view showed four gaps:
-  * Subclassing a generic class is refused generally (PALCS0581, R15.1).
-  * The already-verified `SortedSet` methods (`UnionWith`, `IntersectWith`) test
-    `this as TreeSubSet`. Once the view is translated, that test must stay statically false
-    at the exact-type receiver, and the R29.3 null-identity checks start rejecting it.
-  * `GetObjectData`'s `SerializationInfo` is not modelled.
-  * Writes through the view (`AddIfNotPresent`, `DoRemove`, `Clear`) cannot preserve
-    coherence because of the version-sentinel finding below.
+* `TreeSubSet` members other than those verified above (R32.14):
+  * `Clear` builds a `List<T>` of the in-range items in a breadth-first walk lambda, then
+    removes them through the set. Its contract would need the walk's per-element trace
+    over a queue of region pointers (R32.9 covers only the in-order walk).
+  * `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides: range-pruned walks over a
+    `Stack<Node>`/`Queue<Node>`. They would need R32.11's bounded walk restricted to
+    `range_root`.
+  * The re-count `VersionCheckImpl(updateCount: true)`, and so `Count`, `MinInternal` and
+    `MaxInternal` at a view.
+    * The re-count's lambda writes the view's `count` while the walk holds the view (a
+      PALCS0579 cycle), so `VersionCheckImpl` requires `!updateCount`.
+    * `MinInternal`/`MaxInternal` are reached only through `Min`/`Max`, which read
+      `Count` first.
+  * `InternalIndexOf`: it enumerates the view (`foreach (T i in this)`), and a view's
+    enumerator is a borrowing struct of a borrowing class, which is not translated.
+  * `GetViewBetween` on a view returns a view of the *underlying* set. R32.13's
+    Exactly-return contract makes the result borrow the receiver, so a view of a view's
+    underlying set is not expressible.
+  * `GetObjectData`/`OnDeserialization`: their `SerializationInfo` parameter does not
+    translate (R25.3). They only throw `PlatformNotSupportedException`.
+* `IsSubsetOf`/`IsSupersetOf` and their proper forms on an `IEnumerable<T>` that is not a
+  same-comparer `SortedSet<T>`: they go through `CheckUniqueAndUnfoundElements` (BitHelper,
+  §27 Findings).
 
 ### Findings (§32)
 
@@ -9661,4 +9743,13 @@ reached through a virtual call, and a version check, used from methods of the ba
   versions agree, and the view keeps the `root` it found before the modification, which may
   be a removed node. Both need about 2^32 modifications first. The contracts therefore
   cannot let a view's count or root rest on version equality alone.
+* Writes through a view rest on a version precondition. `TreeSubSet.AddIfNotPresent` and
+  `DoRemove` write the set, which moves its version to `Int32(v + 1)`, then call
+  `VersionCheck`. That re-finds the root only if the view's version differs. If the view's
+  version already equals `Int32(v + 1)`, the view keeps its old root, which is stale. That
+  happens with the `-1` sentinel when the set's version is `-2`, or with a view
+  re-synchronised about 2^32 writes earlier. Its later `Contains`/`FindNode` then search
+  the wrong subtree, and may follow a node the write removed. The contracts say so
+  honestly: both writes require `version != Int32(underlying.version + 1)`. The
+  precondition is what coherence needs, and nothing stronger.
 

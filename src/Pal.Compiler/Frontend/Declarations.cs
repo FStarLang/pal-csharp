@@ -118,10 +118,16 @@ public static class Declarations
     private static bool InAnnotatedScope(IMethodSymbol method, WellKnown known) =>
         IsAnnotated(method, known)
         || method.AssociatedSymbol is { } property && IsAnnotated(property, known)
-        // R32.13. A view's override of an annotated member of its base is checked against
-        // the member's contract at the view.
+        // R32.13. A view's override of a member of its base with a contract at the view
+        // (`At`) is checked against it.
         || method.IsOverride && Borrowing.ViewBase(method.ContainingType, known) is not null &&
-           method.OverriddenMethod is { } o && InAnnotatedScope(o, known);
+           method.OverriddenMethod is { } o && HasViewContract(o, method.ContainingType);
+
+    /// <summary>R32.13. Whether <paramref name="method"/> (or its property) has a contract clause <c>At</c> <paramref name="view"/>.</summary>
+    private static bool HasViewContract(IMethodSymbol method, INamedTypeSymbol view) =>
+        method.GetAttributes().Concat(method.AssociatedSymbol?.GetAttributes() ?? [])
+            .Any(a => a.NamedArguments.Any(n => n.Key == "At" && n.Value.Value is INamedTypeSymbol at &&
+                SymbolEqualityComparer.Default.Equals(at.OriginalDefinition, view.OriginalDefinition)));
 
     /// <summary>
     /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the

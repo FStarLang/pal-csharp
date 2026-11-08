@@ -779,7 +779,9 @@ public sealed class CodeEmitter(
         // R32.12. A wrapping struct's guard tests what a call of the wrapped struct returned.
         (ThrowGuard(i) && Check.Subexpressions(i.Cond).Any(e => e is IrCall)
             && _method?.Parameters.Any(p => p.Name == Frontend.BorrowContext.Self) == true) ||
-        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i);
+        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i) ||
+        // R32.14. A view's member called with the record by reference rebinds the record.
+        Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf);
 
     /// <summary>
     /// R32.6. An arm that passes a lambda to a <c>[Callback]</c> parameter (R27.39): what the
@@ -859,7 +861,9 @@ public sealed class CodeEmitter(
         };
         bool Splits(IrExpr arm) =>
             _objects.Length > 0 && CallsOpenReceiver(new IrExprStmt(arm.Loc, arm)) ||
-            value is IrConditional && MovesRegion(new IrExprStmt(arm.Loc, arm));
+            value is IrConditional && MovesRegion(new IrExprStmt(arm.Loc, arm)) ||
+            // R32.14. Or calls a view's member that takes the view's record by reference.
+            value is IrConditional && PassesRefSelf(arm);
         if (arms is not { } a || !Splits(a.Then) && !Splits(a.Else))
             return s;
         IrStmt With(IrExpr v) => s switch
@@ -2364,8 +2368,9 @@ public sealed class CodeEmitter(
                 ArrayLocal(d);
                 return;
 
-            case IrLocalDecl { Owned.IsDefaultOrEmpty: false } d:
-                HeldStruct(d);
+            // R32.14. So is a view of another object of the class, which owns nothing.
+            case IrLocalDecl { Owned.IsDefaultOrEmpty: false } or IrLocalDecl { HeldOwner: not null }:
+                HeldStruct((IrLocalDecl)stmt);
                 return;
 
             case IrLocalDecl d:
@@ -3751,8 +3756,10 @@ public sealed class CodeEmitter(
             // that moves its receiver: Pulse joins the two arms' calls at a fresh model and
             // keeps the facts of one arm only, so the declaration becomes an `if` whose arms
             // each bind the local and run the rest.
+            // R32.14. So does one an arm of which calls a view's member that takes the
+            // view's record by reference: Pulse rebinds the record at a fresh value there too.
             if (statements[k] is IrLocalDecl { Init: IrConditional ce } d &&
-                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else)))
+                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else) || PassesRefSelf(ce.Then) || PassesRefSelf(ce.Else)))
             {
                 UnitTail(new IrIf(d.Loc, ce.Cond,
                     new IrBlock(ce.Then.Loc, [d with { Init = ce.Then }, .. rest]),
@@ -3786,6 +3793,11 @@ public sealed class CodeEmitter(
         }
         Line("()");
     }
+
+    /// <summary>R32.14. Whether an expression passes a view member's by-reference record on to a call.</summary>
+    private bool PassesRefSelf(IrExpr e) =>
+        _method is { } m && m.Parameters.Any(p => p.Name == Frontend.BorrowContext.Self && p.Mode == ParamMode.Ref) &&
+        Passes.Check.Subexpressions(e).OfType<IrCall>().Any(c => c.Args.Any(a => a is IrVar { Name: Frontend.BorrowContext.Self } or IrRefArg { Operand: IrVar { Name: Frontend.BorrowContext.Self } }));
 
     /// <summary>R27.53. Whether an expression calls a method that may move its receiver.</summary>
     private static bool MovesReceiver(IrExpr e) =>

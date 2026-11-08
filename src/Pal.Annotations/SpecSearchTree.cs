@@ -71,6 +71,14 @@ public static class SpecSearchTree
     public static bool RangeHit<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive) =>
         throw Ghost();
 
+    /// <summary>
+    /// R32.14. The subtree rooted at the node the top-down range search over <paramref name="tree"/>
+    /// stops at, or the empty tree: the tree a view of the set searches.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.SearchTree.range_root")]
+    public static SpecTree<(T, TTag)> RangeRoot<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive) =>
+        throw Ghost();
+
     /// <summary>R27.11. The keys in order: the set a search tree holds once they are strictly sorted.</summary>
     [SpecOp("Pulse.Lib.CSharp.SearchTree.keys")]
     public static Seq<T> Keys<T, TTag>(SpecTree<(T, TTag)> tree) => throw Ghost();

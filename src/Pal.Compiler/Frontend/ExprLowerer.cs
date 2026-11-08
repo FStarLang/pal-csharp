@@ -162,6 +162,37 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return declared is null ? null : known.MapType(declared);
     }
 
+    /// <summary>
+    /// R32.14. Locals that hold <c>this as V</c> for a view <c>V</c>, in a member of <c>V</c>'s
+    /// base verified at its exact type (R27.1): always <c>null</c>.
+    /// </summary>
+    private readonly HashSet<ISymbol> _absentViews = new(SymbolEqualityComparer.Default);
+
+    /// <summary>
+    /// R32.14. Whether <paramref name="local"/>, declared as <c>V? x = this as V;</c> and never
+    /// written, is such a local; it is recorded if so. <c>this</c> is a <c>B</c> exactly, never
+    /// a view, outside a view's own members and replicas.
+    /// </summary>
+    public bool AbsentView(ISymbol local, ExpressionSyntax init)
+    {
+        if (Borrow is not null || Unparenthesized(init) is not BinaryExpressionSyntax { RawKind: (int)SyntaxKind.AsExpression } a ||
+            Unparenthesized(a.Left) is not ThisExpressionSyntax ||
+            model.GetTypeInfo(a.Right).Type is not INamedTypeSymbol v || Borrowing.ViewBase(v, known) is not { } vb ||
+            model.GetTypeInfo(a.Left).Type is not INamedTypeSymbol self ||
+            !SymbolEqualityComparer.Default.Equals(self.OriginalDefinition, vb.OriginalDefinition))
+            return false;
+        _absentViews.Add(local);
+        return true;
+    }
+
+    /// <summary>R32.14. For <c>x == null</c> or <c>x != null</c> on an absent view local, <c>true</c> (it is null).</summary>
+    private bool? AbsentViewTest(BinaryExpressionSyntax b)
+    {
+        bool Absent(ExpressionSyntax e) => model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l && _absentViews.Contains(l);
+        bool Null(ExpressionSyntax e) => Unparenthesized(e).IsKind(SyntaxKind.NullLiteralExpression);
+        return Absent(b.Left) && Null(b.Right) || Null(b.Left) && Absent(b.Right) ? true : null;
+    }
+
     private ITypeSymbol? BorrowedIdentity(ExpressionSyntax node, TypeInfo info)
     {
         ITypeSymbol? Borrowed(ExpressionSyntax e) =>
@@ -285,6 +316,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             type is IrUserSpecType { FStar: Sorted.ComparerType } nullCmp)
             return new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", [])
                 { TypeArgs = nullCmp.Args, Type = nullCmp };
+
+        // R32.14. `x == null` / `x != null` on a local holding `this as V` in a member of
+        // `V`'s base: decided, as the `as` was.
+        if (node is BinaryExpressionSyntax { RawKind: (int)SyntaxKind.EqualsExpression or (int)SyntaxKind.NotEqualsExpression } absentTest &&
+            AbsentViewTest(absentTest) is { } absentIsNull)
+            return absentTest.IsKind(SyntaxKind.EqualsExpression) == absentIsNull ? True(loc) : False(loc);
 
         // R29.3. A borrowing class is its record: whether a reference to one is null, or
         // is the same as another, is not in the model.

@@ -199,7 +199,19 @@ public sealed partial class ExprLowerer
         WrappedField(Unparenthesized(e)) ??
         (model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
         (_aliases.TryGetValue(l0, out var l) ? l : l0) is var l1 && _held.TryGetValue(l1, out var c) ? c
-        : ForEachEnumerator(Unparenthesized(e)));
+        : ForEachEnumerator(Unparenthesized(e))) ??
+        ViewCast(Unparenthesized(e));
+
+    /// <summary>
+    /// R32.14. <c>((V)x)</c> in a contract, where the local <c>x</c> of a view's base class
+    /// holds a view of exactly <c>V</c>: the view itself, so that its <c>[Spec]</c> members
+    /// may be named. The cast cannot fail, since the local holds exactly a <c>V</c>.
+    /// </summary>
+    private BorrowContext? ViewCast(ExpressionSyntax e) =>
+        SpecPosition && e is CastExpressionSyntax ce && model.GetTypeInfo(ce.Type).Type is INamedTypeSymbol ct &&
+        Borrowing.IsView(ct, known) && HeldContext(ce.Expression) is { ViewBase: not null } hc &&
+        SymbolEqualityComparer.Default.Equals(hc.Struct.OriginalDefinition, ct.OriginalDefinition)
+            ? hc : null;
 
     /// <summary>R27.51. <c>Pal.Enumerator&lt;E&gt;(x)</c>, in a contract: the enumerator of the `foreach` over <c>x</c>.</summary>
     private BorrowContext? ForEachEnumerator(ExpressionSyntax e) =>
@@ -545,7 +557,13 @@ public sealed partial class ExprLowerer
     private IrCall ViewCall(BorrowContext bw, string name, IMethodSymbol callee, IrExpr self, IEnumerable<IrExpr> args, IrLoc loc)
     {
         var targs = WellKnown.AllTypeArguments(bw.Struct).Select(known.MapType).ToList();
-        return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. args])
+        var given = args.ToList();
+        // R27.38. An omitted optional argument is the parameter's constant default.
+        for (var k = given.Count; k < callee.Parameters.Length; k++)
+            if (callee.Parameters[k] is { HasExplicitDefaultValue: true, ExplicitDefaultValue: bool or int } dp &&
+                known.MapType(dp.Type) is { } dt)
+                given.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
+        return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. given])
         {
             Kind = CalleeKind.Method,
             ResultType = ViewResultType(callee),

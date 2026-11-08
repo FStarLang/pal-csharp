@@ -153,6 +153,21 @@ public static partial class FrontendPass
                 ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
                     { Type = IrPrim.Bool });
             }
+            // R32.14. A view's member leaves the fields of its record it never writes (in its
+            // body, or in the members of the view it reaches) as they were.
+            if (viewBase is not null)
+            {
+                var written = Borrowing.ViewWrites(candidate.Syntax, model, self, known);
+                foreach (var f in self.GetMembers().OfType<IFieldSymbol>().Concat(Borrowing.InheritedState(self, known)))
+                {
+                    if (f.IsStatic || f.IsConst || borrow.IsOwner(f) || written.Contains(f.Name) ||
+                        f.IsReadOnly && known.MapType(f.Type) is IrPrim ||
+                        known.MapType(f.Type) is not { } fieldType) continue;
+                    var field = new IrField(loc, selfVar, f.Name) { Type = fieldType };
+                    ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
+                        { Type = IrPrim.Bool });
+                }
+            }
         }
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);

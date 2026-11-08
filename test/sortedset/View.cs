@@ -97,8 +97,52 @@ public class Pile<T>
         return view.AtLeast(k);
     }
 
+    // R32.14. `this as Top` in a member of the base translated at the base: the receiver is
+    // exactly a `Pile<T>`, never a view.
+    [Ensures("Result == 0")]
+    public int Kind()
+    {
+        Top? top = this as Top;
+        if (top != null) return 1;
+        return 0;
+    }
+
+    // R32.14. A view of another object of the class, named in a loop invariant through a
+    // cast to the view's type.
+    [Requires("lo >= 0 && other.SpecCount < 1000")]
+    [Ensures("Result == (other.SpecCount > lo ? other.SpecCount - lo : 0)")]
+    public int CountAboveOf(Pile<T> other, int lo)
+    {
+        Pile<T> view = other.Above(lo);
+        int r = view.Count;
+        int i = 0;
+        while (i < 2)
+        {
+            Pal.Invariant(0 <= i && i <= 2 && ((Top)view).SpecCoherent && ((Top)view).SpecLo == lo &&
+                          r == ((Top)view).SpecViewCount);
+            Pal.Decreases(2 - i);
+            r = view.Count;
+            i++;
+        }
+        return r;
+    }
+
+    // R32.14. A `return` in an arm that may also complete.
+    [Ensures("Result == (b && k == 0 ? 1 : 2)")]
+    public static int Nested(bool b, int k)
+    {
+        if (b)
+        {
+            if (k == 0)
+                return 1;
+        }
+        return 2;
+    }
+
     internal sealed class Top : Pile<T>
     {
+        private int _hi;
+
         private readonly Pile<T> _underlying;
         private readonly int _lo;
         private int _countVersion;
@@ -115,6 +159,7 @@ public class Pile<T>
         {
             _underlying = u;
             _lo = lo;
+            _hi = lo;
             version = -1;
             _countVersion = u.version == -1 ? -2 : -1;
         }
@@ -129,6 +174,24 @@ public class Pile<T>
                 count = _underlying.count > _lo ? _underlying.count - _lo : 0;
                 _countVersion = _underlying.version;
             }
+        }
+
+        // R32.14. A call with an omitted optional argument, in an arm of a conditional; and a
+        // field no member it reaches writes (`_hi`) is the same after the call.
+        [Requires("@this.SpecCoherent && @this._underlying.SpecCount < 1000")]
+        [Ensures("Result == (b ? @this.SpecViewCount : @this._hi) && @this.SpecCoherent")]
+        internal int Pick(bool b)
+        {
+            int r = b ? Current() : _hi;
+            return r;
+        }
+
+        [Requires("@this.SpecCoherent && @this._underlying.SpecCount < 1000 && 0 <= extra && extra <= 1")]
+        [Ensures("Result == @this.SpecViewCount + extra && @this.SpecCoherent")]
+        internal int Current(int extra = 0)
+        {
+            VersionCheck();
+            return count + extra;
         }
 
         internal override void Push()

@@ -559,6 +559,10 @@ public sealed class StmtLowerer(
                 _spec.Alias(symbol, arrayField);
                 continue;
             }
+            // R32.14. `V? x = this as V;` in a member of a view's base: `x` is null.
+            if (symbol is not null && v.Initializer?.Value is { } viewInit &&
+                NeverWritten(symbol, node.Parent ?? node) && _code.AbsentView(symbol, viewInit))
+                continue;
             // R27.46. `C? x = p as C;`, never written, where `p` is an `[Exactly(typeof(C))]`
             // parameter: `p` is a `C`, so `x` is another name for it.
             if (symbol is not null && v.Initializer?.Value is { } asInit &&

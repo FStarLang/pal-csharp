@@ -274,6 +274,71 @@ public static class Borrowing
     }
 
     /// <summary>
+    /// R32.14. The names of the view's state fields (its own and its base's) a member of the
+    /// view may write: by assignment, step or <c>ref</c> argument in its body, or in the
+    /// body of a member of the view or its base it calls or reads on itself (bound at the
+    /// view: an override of the view's, else the base's), transitively. Lambdas' bodies are
+    /// part of the body they are written in.
+    /// </summary>
+    public static HashSet<string> ViewWrites(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known)
+    {
+        var written = new HashSet<string>();
+        ViewWrites(body, model, view, known, written, new HashSet<SyntaxNode>());
+        return written;
+    }
+
+    private static void ViewWrites(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known,
+        HashSet<string> written, HashSet<SyntaxNode> seen)
+    {
+        if (!seen.Add(body) || ViewBase(view, known) is not { } vb) return;
+        bool Ours(ISymbol m) =>
+            SymbolEqualityComparer.Default.Equals(m.ContainingType.OriginalDefinition, view.OriginalDefinition) ||
+            SymbolEqualityComparer.Default.Equals(m.ContainingType.OriginalDefinition, vb.OriginalDefinition);
+        void Into(IMethodSymbol? callee, bool viaBase)
+        {
+            if (callee is null) return;
+            var target = viaBase ? callee : Subclasses.OverrideOf(view, callee) ?? callee;
+            foreach (var r in target.DeclaringSyntaxReferences)
+                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree))
+                    ViewWrites(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, written, seen);
+        }
+        foreach (var node in body.DescendantNodes())
+        {
+            var target = node switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                PostfixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg => arg.Expression,
+                _ => null,
+            };
+            if (target is not null)
+            {
+                while (target is ParenthesizedExpressionSyntax pe) target = pe.Expression;
+                if (target is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax or BaseExpressionSyntax } &&
+                    model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f && Ours(f))
+                    written.Add(f.Name);
+            }
+            // A member of the view reached on itself: an invocation, or a property read or written.
+            if (node is not (IdentifierNameSyntax or MemberAccessExpressionSyntax) ||
+                node.Parent is MemberAccessExpressionSyntax pm && pm.Name == node) continue;
+            var receiver = node is MemberAccessExpressionSyntax ma ? ma.Expression : null;
+            if (receiver is not (null or ThisExpressionSyntax or BaseExpressionSyntax)) continue;
+            var viaBase = receiver is BaseExpressionSyntax;
+            switch (model.GetSymbolInfo(node).Symbol)
+            {
+                case IMethodSymbol { IsStatic: false } m when Ours(m):
+                    Into(m, viaBase);
+                    break;
+                case IPropertySymbol { IsStatic: false } prop when Ours(prop):
+                    Into(prop.GetMethod, viaBase);
+                    Into(prop.SetMethod, viaBase);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
     /// R32.13. Whether a member of the view <paramref name="view"/> writes the object it
     /// borrows: it calls a method of it that is not read-only, or calls (on itself, or on
     /// <c>base</c>) a member of the view or its base that does, transitively.
