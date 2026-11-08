@@ -9574,6 +9574,34 @@ leads to one borrowing struct, its *core*.
 * `TreeSubSet` and `GetViewBetween`, and so the `IsSubsetOf` family's view branches.
   A view is a subclass that borrows its underlying set's region while owning its own range
   fields, and its `VersionCheckImpl` writes its own count from inside a walk of that region.
+  The `IsSubsetOf`/`IsProperSubsetOf`/`IsSupersetOf`/`IsProperSupersetOf` SortedSet
+  branches all go through `GetViewBetween`, so they are blocked with it.
+
+  *Design (not implemented).* Treat a view as a borrowing class (R29.3) that derives from
+  its exact-type owner:
+  1. Its record holds its own fields and the inherited `root`/`comparer`/`count`/`version`,
+     and it borrows `_underlying`'s region.
+  2. Its constructor `: base(underlying.Comparer)` assigns the record and calls
+     `_underlying.FindRange`.
+  3. `GetViewBetween` gets an exact-return contract, so a caller's view local binds
+     statically to `TreeSubSet`'s overrides.
+  4. The inherited `Contains`/`FindNode` are replicated at the view (R27.57-style). Their
+     coherence invariant is: `version == underlying.version` implies `root` is
+     `FindRange(min, max)` of the underlying tree. That can only hold up to the version
+     wrap above, so it must also carry a ghost "checked" flag.
+  5. One F* lemma: for an in-range item, a search from `FindRange`'s node finds it iff the
+     item is in the tree.
+  6. `VersionCheckImpl(updateCount: true)` recounts through a pruned `InOrderTreeWalk`,
+     which needs R32.11's bounded walk restricted to a range.
+
+  *Where the attempt stopped.* Classifying `TreeSubSet` as such a view showed four gaps:
+  * Subclassing a generic class is refused generally (PALCS0581, R15.1).
+  * The already-verified `SortedSet` methods (`UnionWith`, `IntersectWith`) test
+    `this as TreeSubSet`. Once the view is translated, that test must stay statically false
+    at the exact-type receiver, and the R29.3 null-identity checks start rejecting it.
+  * `GetObjectData`'s `SerializationInfo` is not modelled.
+  * Writes through the view (`AddIfNotPresent`, `DoRemove`, `Clear`) cannot preserve
+    coherence because of the version-sentinel finding below.
 
 ### Findings (§32)
 
