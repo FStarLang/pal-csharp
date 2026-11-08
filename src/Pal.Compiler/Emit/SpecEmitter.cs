@@ -262,6 +262,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrField { Receiver: IrResult } rf when scope.TryGet(MethodPlan.OwnedResultKey(rf.Field), out var ownedModel):
                 return ownedModel;
 
+            // R31.11. A field of the owner a ring node's back pointer names, in a contract
+            // of a member that is given the owner: read off the owner's representation.
+            case IrField { Receiver: IrField { Receiver: IrVar { Name: Names.This }, Field: var backField } } of
+                when scope.TryGet(OwnerBorrow.Key(backField), out var ownerRep) && ownerRep.Type is IrClassType orc:
+                return new Term($"{Receiver(ownerRep.Text)}.{Names.ClassProjection(orc.Name, of.Field)}",
+                    MethodPlan.KindOf(of.Type ?? IrPrim.Int), of.Type);
+
             case IrField { Receiver.Type: IrClassType oc } cf:
                 diagnostics.Unsupported(cf.Loc,
                     $"The field `{cf.Field}` in this specification",
@@ -398,6 +405,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
             case IrBinary b when DecimalOrder(b, scope) is { } ordered:
                 return ordered;
+
+            // A reference tested against null as a boolean (a conditional's guard): the
+            // box type has no decidable equality, so `=` would not typecheck.
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
+                (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is { Type: IrClassType } boxed:
+                return b.Op == BinOp.Eq ? $"(B.is_null {Emit(boxed, scope).Text})" : $"(not (B.is_null {Emit(boxed, scope).Text}))";
 
             case IrBinary b:
             {

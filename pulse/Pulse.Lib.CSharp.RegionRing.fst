@@ -830,3 +830,212 @@ let nodes_first (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: 
           (ensures n > 0 ==> Seq.length (nodes view nx pv h hd n) == n /\ Seq.index (nodes view nx pv h hd n) 0 == hd)
           [SMTPat (nodes view nx pv h hd n)]
   = ends view nx pv h hd n
+
+(* ------------------------------------------------------------------------------------ *)
+(* A node's neighbours as its owner sees them (R31.11)                                    *)
+(* ------------------------------------------------------------------------------------ *)
+
+/// `LinkedListNode.Next`: the box after `x`, or null when that is the ring's first box `hd`
+/// again (or `x` is detached).
+let succ (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h: heap a) (hd x: B.box a) : B.box a =
+  let y = link_at nx h x in
+  if B.is_null y || Pulse.Lib.CSharp.RefEq.ref_eq y hd then B.null else y
+
+/// `LinkedListNode.Previous`: the box before `x`, or null when `x` is the first box `hd`
+/// (or is detached).
+let pred (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h: heap a) (hd x: B.box a) : B.box a =
+  let y = link_at pv h x in
+  if B.is_null y || Pulse.Lib.CSharp.RefEq.ref_eq x hd then B.null else y
+
+/// In a ring, `succ` and `pred` are the next and the previous box of the sequence, null at its ends.
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 20"
+let succ_at (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h: heap a) (hd: B.box a) (n: int) (x: B.box a)
+  : Lemma (requires shape view nx pv h hd n /\ pos (walk nx h hd n) x >= 0)
+          (ensures (let s = walk nx h hd n in
+                    let i = pos s x in
+                    Seq.length s == n /\ 0 <= i /\ i < n /\
+                    succ view nx pv h hd x == (if i + 1 < n then Seq.index s (i + 1) else B.null) /\
+                    pred view nx pv h hd x == (if i > 0 then Seq.index s (i - 1) else B.null) /\
+                    (i + 1 < n ==> pos s (Seq.index s (i + 1)) == i + 1) /\
+                    (i > 0 ==> pos s (Seq.index s (i - 1)) == i - 1)))
+          [SMTPat (succ view nx pv h hd x); SMTPat (walk nx h hd n)]
+  = neighbours view nx pv h hd n x;
+    shape_def view nx pv h hd n;
+    walk_head nx h hd n;
+    let s = walk nx h hd n in
+    let i = pos s x in
+    if i + 1 < n then pos_index s (i + 1);
+    if i > 0 then pos_index s (i - 1)
+#pop-options
+
+/// `succ_at`, triggered by `pred`.
+let pred_at (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h: heap a) (hd: B.box a) (n: int) (x: B.box a)
+  : Lemma (requires shape view nx pv h hd n /\ pos (walk nx h hd n) x >= 0)
+          (ensures (let s = walk nx h hd n in
+                    let i = pos s x in
+                    Seq.length s == n /\ 0 <= i /\ i < n /\
+                    pred view nx pv h hd x == (if i > 0 then Seq.index s (i - 1) else B.null)))
+          [SMTPat (pred view nx pv h hd x); SMTPat (walk nx h hd n)]
+  = succ_at view nx pv h hd n x
+
+(* ------------------------------------------------------------------------------------ *)
+(* Clearing a ring (LinkedList.Clear)                                                     *)
+(* ------------------------------------------------------------------------------------ *)
+
+/// The first `k` boxes of `s` (a ring at `h0`) are detached at `h`: their links and owner
+/// are null and they keep their items. Every other box holds what it held at `h0`.
+let cleared (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0 h: heap a) (s: Seq.seq (B.box a)) (k: int) : prop =
+  0 <= k /\ k <= Seq.length s /\
+  (forall (x: B.box a). mem h x <==> mem h0 x) /\
+  (forall (x: B.box a). ~(in_seq (Seq.slice s 0 k) x) ==> lookup h x == lookup h0 x) /\
+  (forall (j: nat). j < k ==>
+     mem h (Seq.index s j) /\
+     B.is_null (link_at nx h (Seq.index s j)) /\ B.is_null (link_at pv h (Seq.index s j)) /\
+     B.is_null (owner_at view h (Seq.index s j)) /\
+     (mem h (Seq.index s j) /\ mem h0 (Seq.index s j) ==>
+        item_at view h (Seq.index s j) == item_at view h0 (Seq.index s j)))
+
+/// Nothing is cleared yet, and the walk starts at the first box.
+let clear_start (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0: heap a) (hd: B.box a) (n: int)
+  : Lemma (requires shape view nx pv h0 hd n)
+          (ensures cleared view nx pv h0 h0 (walk nx h0 hd n) 0 /\
+                   (n > 0 ==> pos (walk nx h0 hd n) hd == 0) /\ (n == 0 <==> B.is_null hd))
+  = at view nx pv h0 hd n 0;
+    if n > 0 then walk_head nx h0 hd n;
+    let s = walk nx h0 hd n in
+    assert (forall (x: B.box a). ~(in_seq (Seq.slice s 0 0) x))
+
+/// The box at the cleared prefix's end is still the ring's: it is held, owned by `o`, and
+/// its successor is the next box of the ring (null after the last).
+#push-options "--z3rlimit 40"
+let clear_next (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0 h: heap a) (hd: B.box a) (n: int) (x: B.box a) (o: B.box b)
+  : Lemma (requires ring view nx pv h0 hd n o /\ pos (walk nx h0 hd n) x >= 0 /\
+                    cleared view nx pv h0 h (walk nx h0 hd n) (pos (walk nx h0 hd n) x))
+          (ensures (let s = walk nx h0 hd n in
+                    let i = pos s x in
+                    Seq.length s == n /\ 0 <= i /\ i < n /\
+                    mem h x /\ ~(B.is_null x) /\ owner_at view h x == o /\
+                    succ view nx pv h hd x == (if i + 1 < n then Seq.index s (i + 1) else B.null) /\
+                    (i + 1 < n ==> pos s (Seq.index s (i + 1)) == i + 1) /\
+                    (B.is_null (succ view nx pv h hd x) <==> i + 1 == n)))
+  = let s = walk nx h0 hd n in
+    let i = pos s x in
+    neighbours view nx pv h0 hd n x;
+    succ_at view nx pv h0 hd n x;
+    shape_def view nx pv h0 hd n;
+    owned_def view h0 s o;
+    pos_spec s x;
+    assert (in_seq s x);
+    assert (~(in_seq (Seq.slice s 0 i) x))
+      by (FStar.Tactics.V2.smt ());
+    assert (lookup h x == lookup h0 x)
+#pop-options
+
+/// Detaching the box at the cleared prefix's end extends the prefix by one.
+#push-options "--z3rlimit 40"
+let clear_step (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0 h1 h2: heap a) (hd: B.box a) (n: int) (x: B.box a)
+  : Lemma (requires shape view nx pv h0 hd n /\ pos (walk nx h0 hd n) x >= 0 /\
+                    cleared view nx pv h0 h1 (walk nx h0 hd n) (pos (walk nx h0 hd n) x) /\
+                    detached view nx pv h1 h2 x)
+          (ensures cleared view nx pv h0 h2 (walk nx h0 hd n) (pos (walk nx h0 hd n) x + 1))
+  = let s = walk nx h0 hd n in
+    let i = pos s x in
+    shape_def view nx pv h0 hd n;
+    pos_spec s x;
+    let pre = Seq.slice s 0 i in
+    let post = Seq.slice s 0 (i + 1) in
+    assert (~(in_seq pre x));
+    let in_post (y: B.box a) : Lemma (in_seq post y <==> (in_seq pre y \/ y == x)) =
+      assert (Seq.index post i == x);
+      assert (forall (j: nat). j < i ==> Seq.index post j == Seq.index pre j)
+    in
+    FStar.Classical.forall_intro in_post;
+    assert (forall (j: nat). j < i ==> ~(Seq.index s j == x))
+#pop-options
+
+/// A ring cleared to its end leaves `o` owning no box: it is the empty ring.
+#push-options "--z3rlimit 40"
+let clear_done (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0 h: heap a) (hd: B.box a) (n: int) (o: B.box b)
+  : Lemma (requires ring view nx pv h0 hd n o /\ cleared view nx pv h0 h (walk nx h0 hd n) n)
+          (ensures ring view nx pv h B.null 0 o /\ nodes view nx pv h B.null 0 == Seq.empty /\
+                   items view nx pv h Seq.empty == Seq.empty)
+  = let s = walk nx h0 hd n in
+    shape_def view nx pv h0 hd n;
+    owned_def view h0 s o;
+    Seq.lemma_eq_intro (Seq.slice s 0 n) s;
+    assert (forall (x: B.box a). mem h x ==> ~(owner_at view h x == o));
+    empty view nx pv h o
+#pop-options
+
+(* ------------------------------------------------------------------------------------ *)
+(* Reattaching a detached box                                                             *)
+(* ------------------------------------------------------------------------------------ *)
+
+/// A write that changes `x`'s owner but not its links keeps a ring through it.
+#push-options "--z3rlimit 20"
+let reowned (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h1 h2: heap a) (hd: B.box a) (n: int) (x: B.box a)
+  : Lemma (requires shape view nx pv h1 hd n /\ mem h1 x /\ frame h1 h2 x /\
+                    link_at nx h2 x == link_at nx h1 x /\ link_at pv h2 x == link_at pv h1 x)
+          (ensures shape view nx pv h2 hd n /\ walk nx h2 hd n == walk nx h1 hd n)
+  = let s = walk nx h1 hd n in
+    shape_def view nx pv h1 hd n;
+    shape_def view nx pv h2 hd n;
+    assert (forall (y: B.box a). link_at nx h2 y == link_at nx h1 y /\ link_at pv h2 y == link_at pv h1 y);
+    assert (forall (y: B.box a). mem h2 y <==> mem h1 y);
+    if n = 0 then Seq.lemma_eq_intro (walk nx h2 hd n) s
+    else begin
+      walk_head nx h1 hd n;
+      assert (ring_seq nx pv h2 s);
+      walk_ring nx pv h2 s
+    end
+#pop-options
+
+/// A box of the heap that had no owner, inserted into `o`'s ring at `k` (heap `h1`, views
+/// kept) and then given `o` as its owner (heap `h2`): `o`'s ring, with its item at `k`.
+#push-options "--fuel 0 --ifuel 0 --z3rlimit 40"
+let reattached (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h0 h1 h2: heap a) (hd0: B.box a) (n0: int) (hd1 nw: B.box a) (k: int) (o: B.box b)
+  : Lemma (requires ring view nx pv h0 hd0 n0 o /\ mem h0 nw /\ B.is_null (owner_at view h0 nw) /\
+                    views_kept view nx pv h0 h1 /\ mem h1 nw /\ frame h1 h2 nw /\
+                    owner_at view h2 nw == o /\ item_at view h2 nw == item_at view h1 nw /\
+                    shape view nx pv h2 hd1 (n0 + 1) /\ 0 <= k /\ k <= n0 /\
+                    walk nx h2 hd1 (n0 + 1) == insert_at (walk nx h0 hd0 n0) k nw)
+          (ensures ring view nx pv h2 hd1 (n0 + 1) o /\
+                   items_of view h2 (walk nx h2 hd1 (n0 + 1)) ==
+                     insert_at (items_of view h0 (walk nx h0 hd0 n0)) k (item_at view h0 nw))
+  = let s0 = walk nx h0 hd0 n0 in
+    let s1 = walk nx h2 hd1 (n0 + 1) in
+    shape_def view nx pv h0 hd0 n0;
+    shape_def view nx pv h2 hd1 (n0 + 1);
+    owned_def view h0 s0 o;
+    owned_def view h2 s1 o;
+    views_kept_def view nx pv h0 h1;
+    insert_at_spec s0 k nw;
+    assert (item_at view h1 nw == item_at view h0 nw);
+    introduce forall (x: B.box a). mem h2 x ==> (owner_at view h2 x == o <==> in_seq s1 x)
+    with introduce _ ==> _ with begin
+      in_seq_insert_at s0 k nw x;
+      assert (~ (x == nw) ==> owner_at view h2 x == owner_at view h0 x)
+    end;
+    items_of_spec view h0 s0;
+    items_of_spec view h2 s1;
+    let i0 = items_of view h0 s0 in
+    insert_at_spec i0 k (item_at view h0 nw);
+    introduce forall (j: nat). j < n0 + 1 ==>
+        Seq.index (items_of view h2 s1) j == Seq.index (insert_at i0 k (item_at view h0 nw)) j
+    with introduce _ ==> _ with begin
+      if j = k then ()
+      else assert (item_at view h2 (Seq.index s1 j) == item_at view h0 (Seq.index s1 j))
+    end;
+    Seq.lemma_eq_intro (items_of view h2 s1) (insert_at i0 k (item_at view h0 nw))
+#pop-options

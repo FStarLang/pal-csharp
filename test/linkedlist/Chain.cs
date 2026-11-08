@@ -3,7 +3,10 @@
 // (R31.3), `SpecRing` (R31.4), the receiver as a region operation's owner (R31.5),
 // `x?.F` as a value (R31.6) and the model's refinement (R31.7); unlinking compares the
 // owner with `this` (R31.8), clears the node with a typed null (R31.9) and splits the
-// write of the entry pointer (R31.10).
+// write of the entry pointer (R31.10). `Link.Next` reads its owner through the back
+// pointer, and `Clear` calls it with the receiver as that owner (R31.11). `Fresh` tests
+// the back pointer for null (R31.13); `Guard` calls it with the receiver open (R31.14).
+using System;
 using PalLang;
 
 [Spec]
@@ -137,6 +140,48 @@ public sealed class Chain<T>
         SpecRing.Removed<Link<T>, Chain<T>>(h0.Value, Pal.Heap<Link<T>>(), f0.Value, n0.Value, at, first, this);
         size--;
     }
+
+    [Ensures("@this.SpecSize == 0")]
+    [Ensures("SpecRing.Cleared<Link<T>>(Pal.Old(Pal.Heap<Link<T>>()), Pal.Heap<Link<T>>(), Pal.Old(@this.SpecLinks), Pal.Old(@this.SpecSize))")]
+    public void Clear()
+    {
+        Ghost<SpecHeap<Link<T>>> h0 = Pal.Heap<Link<T>>();
+        SpecRing.ClearStart<Link<T>>(h0.Value, first, size);
+        Link<T>? current = first;
+        while (current != null)
+        {
+            Pal.Invariant(SpecRing.Ring<Link<T>, Chain<T>>(h0.Value, first, size, this));
+            Pal.Invariant(current == null || SpecRing.Pos<Link<T>>(SpecRing.Nodes<Link<T>>(h0.Value, first, size), current) >= 0);
+            Pal.Invariant(SpecRing.Cleared<Link<T>>(h0.Value, Pal.Heap<Link<T>>(), SpecRing.Nodes<Link<T>>(h0.Value, first, size), current == null ? size : SpecRing.Pos<Link<T>>(SpecRing.Nodes<Link<T>>(h0.Value, first, size), current)));
+            Pal.Decreases(current == null ? 0 : size - SpecRing.Pos<Link<T>>(SpecRing.Nodes<Link<T>>(h0.Value, first, size), current));
+            Link<T> temp = current!;
+            SpecRing.ClearNext<Link<T>, Chain<T>>(h0.Value, Pal.Heap<Link<T>>(), first, size, current!, this);
+            current = current!.Next;
+            Ghost<SpecHeap<Link<T>>> h1 = Pal.Heap<Link<T>>();
+            temp.Detach();
+            SpecRing.ClearStep<Link<T>>(h0.Value, h1.Value, Pal.Heap<Link<T>>(), first, size, temp);
+        }
+        SpecRing.ClearDone<Link<T>, Chain<T>>(h0.Value, Pal.Heap<Link<T>>(), first, size, this);
+        first = null;
+        size = 0;
+    }
+
+    [Requires("Pal.InRegion(l)")]
+    [Throws(typeof(InvalidOperationException), "SpecRing.Owner<Link<T>, Chain<T>>(Pal.Heap<Link<T>>(), l) != null")]
+    [Ensures("SpecRing.Owner<Link<T>, Chain<T>>(Pal.Heap<Link<T>>(), l) == null")]
+    internal static void Fresh(Link<T> l)
+    {
+        if (l.owner != null) throw new InvalidOperationException();
+    }
+
+    [Requires("Pal.InRegion(l)")]
+    [Throws(typeof(InvalidOperationException), "SpecRing.Owner<Link<T>, Chain<T>>(Pal.Heap<Link<T>>(), l) != null")]
+    [Ensures("@this.SpecSize == Pal.Old(@this.SpecSize) && SpecRing.Owner<Link<T>, Chain<T>>(Pal.Heap<Link<T>>(), l) == null")]
+    public void Guard(Link<T> l)
+    {
+        Fresh(l);
+        Ghost<SpecInt> n = (SpecInt)size;
+    }
 }
 
 [Region(Cyclic = true)]
@@ -154,6 +199,10 @@ public sealed class Link<T>
         this.owner = owner;
         this.value = value;
     }
+
+    [Requires("Pal.InRegion(@this)")]
+    [Ensures("Result == SpecRing.Succ<Link<T>>(Pal.Heap<Link<T>>(), @this.owner!.first, @this)")]
+    public Link<T>? Next => next == null || next == owner!.first ? null : next;
 
     [Requires("Pal.InRegion(@this)")]
     [Ensures("SpecRing.Detached<Link<T>>(Pal.Old(Pal.Heap<Link<T>>()), Pal.Heap<Link<T>>(), @this)")]

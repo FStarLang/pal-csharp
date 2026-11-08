@@ -155,4 +155,43 @@ public static class SpecRing
     /// <summary>A lemma: the node at position <paramref name="k"/> of the ring, when there is one, is held, non-null, and at <paramref name="k"/>.</summary>
     [RegionOp("Pulse.Lib.CSharp.RegionRing.at")]
     public static void At<K>(SpecHeap<K> h, K? hd, SpecInt n, SpecInt k) where K : class => throw Ghost();
+    /// <summary>The node after <paramref name="x"/> (<c>LinkedListNode.Next</c>): its next link, or null when that is the ring's first node <paramref name="hd"/> again or <paramref name="x"/> is detached.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.succ")]
+    public static K? Succ<K>(SpecHeap<K> h, K? hd, K x) where K : class => throw Ghost();
+
+    /// <summary>The node before <paramref name="x"/> (<c>LinkedListNode.Previous</c>): its previous link, or null when <paramref name="x"/> is the first node <paramref name="hd"/> or is detached.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.pred")]
+    public static K? Pred<K>(SpecHeap<K> h, K? hd, K x) where K : class => throw Ghost();
+
+    /// <summary>A lemma: in a ring, <see cref="Succ{K}"/> and <see cref="Pred{K}"/> of a node at position <c>i</c> are the nodes at <c>i + 1</c> and <c>i - 1</c>, null past the ends.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.succ_at")]
+    public static void SuccAt<K>(SpecHeap<K> h, K? hd, SpecInt n, K x) where K : class => throw Ghost();
+
+    /// <summary>The first <paramref name="k"/> nodes of <paramref name="s"/> are detached at <paramref name="h"/> (links and owner null, items kept); every other node holds what it held at <paramref name="h0"/>.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.cleared")]
+    public static bool Cleared<K>(SpecHeap<K> h0, SpecHeap<K> h, Seq<K> s, SpecInt k) where K : class => throw Ghost();
+
+    /// <summary>A lemma: nothing of the ring is cleared yet, and a nonempty ring's first node is at position 0.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.clear_start")]
+    public static void ClearStart<K>(SpecHeap<K> h0, K? hd, SpecInt n) where K : class => throw Ghost();
+
+    /// <summary>A lemma: the node at the end of a cleared prefix of <paramref name="o"/>'s ring is held, owned by <paramref name="o"/>, and its <see cref="Succ{K}"/> is the ring's next node (null after the last).</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.clear_next")]
+    public static void ClearNext<K, O>(SpecHeap<K> h0, SpecHeap<K> h, K? hd, SpecInt n, K x, O o) where K : class where O : class => throw Ghost();
+
+    /// <summary>A lemma: detaching the node at the end of a cleared prefix extends the prefix by one.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.clear_step")]
+    public static void ClearStep<K>(SpecHeap<K> h0, SpecHeap<K> h1, SpecHeap<K> h2, K? hd, SpecInt n, K x) where K : class => throw Ghost();
+
+    /// <summary>A lemma: <paramref name="o"/>'s ring cleared to its end leaves <paramref name="o"/> the empty ring.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.clear_done")]
+    public static void ClearDone<K, O>(SpecHeap<K> h0, SpecHeap<K> h, K? hd, SpecInt n, O o) where K : class where O : class => throw Ghost();
+
+    /// <summary>A lemma: a write that changes <paramref name="x"/>'s owner but not its links keeps the ring through it.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.reowned")]
+    public static void Reowned<K>(SpecHeap<K> h1, SpecHeap<K> h2, K? hd, SpecInt n, K x) where K : class => throw Ghost();
+
+    /// <summary>A lemma: a node of the heap with no owner, inserted into <paramref name="o"/>'s ring at <paramref name="k"/> and then given <paramref name="o"/> as its owner, is <paramref name="o"/>'s, with its item at <paramref name="k"/>.</summary>
+    [RegionOp("Pulse.Lib.CSharp.RegionRing.reattached")]
+    public static void Reattached<K, O>(SpecHeap<K> h0, SpecHeap<K> h1, SpecHeap<K> h2, K? hd0, SpecInt n0, K? hd1, K nw, SpecInt k, O o) where K : class where O : class => throw Ghost();
 }

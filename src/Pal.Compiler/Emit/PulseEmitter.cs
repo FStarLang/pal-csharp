@@ -347,6 +347,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         _readOnly = [.. program.Declarations.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
         _compared = [.. program.Declarations.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
         _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
+        _ownerBorrows = OwnerBorrows(program.Declarations.OfType<IrMethod>().ToImmutableArray());
         _raising = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
         // R27.38. A call to an owner's method that gives its heaps back writes no region.
         foreach (var kept in _heapsKept)
@@ -1350,6 +1351,41 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     private Dictionary<string, ImmutableArray<RegionUse>> _regionHeld = [];
 
+    /// <summary>R31.11. The ring node members that read their owner, by method name.</summary>
+    private Dictionary<string, OwnerBorrow> _ownerBorrows = [];
+
+    /// <summary>
+    /// R31.11. A member of a cyclic region class whose body reads a field of the owner
+    /// through the node's back pointer (<c>list!.head</c>, where <c>list</c> is a field of
+    /// the node whose class owns the node's region).
+    /// </summary>
+    private Dictionary<string, OwnerBorrow> OwnerBorrows(ImmutableArray<IrMethod> methods)
+    {
+        var found = new Dictionary<string, OwnerBorrow>();
+        foreach (var m in methods)
+        {
+            if (m.Body is null || m.IsLemma || m.IsConstructor ||
+                m.Parameters.FirstOrDefault(p => p.Name == Names.This)?.Type is not IrClassType self ||
+                !_classes.TryGetValue(self.Name, out var kd) || !kd.IsRegion || !kd.IsCyclic)
+                continue;
+            foreach (var e in Passes.Check.Statements(m.Body)
+                         .SelectMany(Passes.Check.Expressions).SelectMany(Passes.Check.Subexpressions))
+            {
+                if (OwnerRead(kd, e) is { } ob) { found[m.Name] = ob with { Node = self with { Nullable = false } }; break; }
+            }
+        }
+        return found;
+    }
+
+    /// <summary>R31.11. <c>f.g</c> where <c>f</c> is the node's back pointer to its region's owner.</summary>
+    internal OwnerBorrow? OwnerRead(IrClass node, IrExpr e) =>
+        e is IrField { Receiver: IrField { Receiver: IrVar { Name: Names.This }, Field: var of } } &&
+        node.Fields.FirstOrDefault(f => f.Name == of)?.Type is IrClassType ot &&
+        _classes.TryGetValue(ot.Name, out var od) && !od.IsPlain && !od.IsRegion &&
+        od.Fields.Any(f => IsRegionField(f) && f.Type is IrClassType ft && ft.Name == node.Name)
+            ? new OwnerBorrow(of, ot with { Nullable = false }, new IrClassType(node.Name))
+            : null;
+
     /// <summary>R27.38. The methods with a <c>[Throws]</c>: a call to one may raise.</summary>
     private HashSet<string> _raising = [];
 
@@ -1844,13 +1880,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
         var body = new CodeEmitter(_spec, diagnostics, _classes, _overrides, _slots, _consumed, _heapIndexed, _regionHeld,
-            _openMethods, _raising, _readOnly);
+            _openMethods, _raising, _readOnly) { OwnerBorrows = _ownerBorrows, Methods = _methods };
         var plan = new MethodPlan(method, _spec, diagnostics,
             _heapIndexed.TryGetValue(method.Name, out var heaps) ? heaps : [], held,
             method.Open && method.DeclaringClass is { } oc && _classes.TryGetValue(oc, out var openClass)
                 ? openClass.Fields : default,
             method.ReturnType is IrNamedType rn && _ownedFields.TryGetValue(rn.Name, out var ro) ? ro : default,
-            _heapsKept.Contains(method.Name), _methods);
+            _heapsKept.Contains(method.Name), _methods,
+            _ownerBorrows.TryGetValue(method.Name, out var ownerBorrow) ? ownerBorrow : null);
 
         var sb = new StringBuilder();
         sb.AppendLine($"module {Names.FunctionModule(method.Name)}");
@@ -2231,3 +2268,15 @@ public static class Preamble
 
 /// <summary>R27.16. A region a method holds itself, and whether it writes it.</summary>
 public sealed record RegionUse(IrClassType Region, bool Mutates);
+
+/// <summary>
+/// R31.11. A member of a ring node class that reads its owner through the node's back
+/// pointer (<c>list!.head</c>): the field, the owner's class and the node's class.
+/// </summary>
+public sealed record OwnerBorrow(string Field, IrClassType Owner, IrClassType Node)
+{
+    public const string Binder = "owner_this";
+    public const string Perm = "p_owner_this";
+    public const string Rep = "rep_owner_this";
+    public static string Key(string field) => "owner." + field;
+}

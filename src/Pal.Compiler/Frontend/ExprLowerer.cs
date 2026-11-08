@@ -25,6 +25,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public bool SpecPosition { get; } = specPosition;
 
+    private static ExpressionSyntax Unbanged(ExpressionSyntax e) => e switch
+    {
+        PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn => Unbanged(sn.Operand),
+        ParenthesizedExpressionSyntax pe => Unbanged(pe.Expression),
+        _ => e,
+    };
+
     /// <summary>
     /// §3.4. The members of the class being lowered, which a body inside that class names
     /// without a receiver: the fields a <c>[Model]</c> abstraction reads, and the
@@ -1571,6 +1578,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             node.Expression is IdentifierNameSyntax { Identifier.ValueText: Names.This })
             return new IrField(loc, new IrVar(loc, Names.This), openField.Name);
 
+        // R31.11. In a ring node's member, a field of the owner its back pointer names
+        // (`list!.head`, `@this.list!.head` in a contract): the member is given the owner's
+        // box, and the emitter reads the field through the pointer, or off the
+        // representation the owner is held at.
+        if (symbol is IFieldSymbol { IsStatic: false } ownerField &&
+            Unbanged(node.Expression) is var back &&
+            back is IdentifierNameSyntax or MemberAccessExpressionSyntax
+            {
+                Expression: ThisExpressionSyntax or IdentifierNameSyntax { Identifier.ValueText: Names.This },
+            } &&
+            model.GetSymbolInfo(back).Symbol is IFieldSymbol { IsStatic: false, ContainingType: { } backOwner } &&
+            known.IsRegionClass(backOwner) && receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } ownerClass &&
+            !known.IsRegionClass(ownerClass))
+            return new IrField(loc, Lower(node.Expression), ownerField.Name);
+
         // R3.9c: reading a member off an object. Only a [Spec] member is readable, because
         // a caller holds the model and nothing else; a field read here would be a fact
         // about the representation, which no caller can see.
@@ -1806,7 +1828,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private bool NeverNull(ExpressionSyntax e, IrExpr lowered) =>
         lowered.Type is IrClassType { Nullable: false } &&
         model.GetTypeInfo(e).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, NullableAnnotation: not NullableAnnotation.Annotated } t &&
-        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t);
+        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t) &&
+        // R31.13. A spec function declared to return `O?` may return null, whatever
+        // nullable context the attribute string was bound in.
+        !(model.GetSymbolInfo(e).Symbol is IMethodSymbol { OriginalDefinition.ReturnType.NullableAnnotation: NullableAnnotation.Annotated });
 
     /// <summary>R27.46. The expression is an <c>[Exactly]</c> parameter, or a local aliasing one.</summary>
     private bool ExactOperand(ExpressionSyntax e)
