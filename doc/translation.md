@@ -9317,3 +9317,93 @@ KeyValuePair)` is translated as written; no translation at the dynamic type was 
 `Pulse.Lib.CSharp.Obj` is implemented (`obj = unit`), so its interface carries no
 assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
 only new trust: each says the read or call is pure and does not throw.
+
+## 33. `OrderedDictionary<TKey,TValue>` and leftovers
+
+dotnet/runtime's `OrderedDictionary<TKey,TValue>` (System.Collections) is verified in place
+by the harness `pal/OrderedDictionary`, against a functional model: the keys and the values
+as sequences in insertion order, and the comparer. Its table is the separate-chaining
+table of `Dictionary`/`HashSet` (`Pulse.Lib.CSharp.HashChain`) without a free list: every
+entry below `_count` is live, and removal shifts the later entries down. The glue theory
+(`OrderedDictionaryChain.fst`) states the table's well-formedness `wf` and the chain walk
+`search` as opaque predicates, reached only through lemmas; with them transparent, the
+lookup's queries did not finish in 15 minutes, and opaque they take seconds.
+
+The test `test/ordereddict` exercises each rule below.
+
+**R33.1. System.Collections' guard polyfills.** System.Collections compiles its own
+`ThrowHelper.ThrowIfNegative`, `ThrowIfLessThan` and `ThrowIfGreaterThan` where the BCL's
+`ArgumentOutOfRangeException.ThrowIfNegative` (R23.2) is missing. A call of one of them on
+an integral argument is read as the BCL guard: `if (x < 0) throw ...`.
+
+**R33.2. Forward `goto`.** `goto L;` where `L` labels a statement of the method's outermost
+block after the jump, and the code from `L` to the end of that block cannot run off the end
+of the method, is that code, copied to the jump. A local of the outermost block declared
+between the jump and the label, and used from the label on, is declared (uninitialised) at
+the jump; C#'s definite assignment makes the copied code assign it before reading it. A
+labelled statement that the statement before it cannot fall into — by C#'s reachability, or
+because that statement is a call of a `[DoesNotReturn]` method — is reached only by jumps,
+so it and what follows are not lowered where they stand. A backward jump, a jump out of a
+`try`, lambda or local function, and a jump whose tail can fall off the method are reported.
+
+**R33.3. Inlined `ref` helpers.** R24.9's inlining of a `ref`-returning method also skips
+`Debug.Assert` statements among its locals, and accepts a body ending in
+`if (c) return ref a[i]; else return ref a[j];` into one array `a`, which is `a[c ? i : j]`
+(`GetBucketRef`'s two arms for 32- and 64-bit).
+
+**R33.4. Bound machine-integer members.** A `[SpecBinding]`-bound property or field of a
+machine-integer type (`IntPtr.Size`, bound to `Pulse.Lib.CSharp.Platform.intptr_size`) is
+a machine integer: in code it is the bound value, and in a specification its mathematical
+value (`.v`).
+
+**R33.5. Rebound `ref` locals.** A `ref` local that is rebound (`x = ref a[e];`), where
+every binding (and the initialiser, unless it is `ref Unsafe.NullRef<T>()`) is an element
+of one array `a` named by a local never assigned or by a field of `this` that the scope
+neither assigns nor can replace by a call, is a mutable index into `a`: each binding
+assigns the index, and each use of `x` is `a[index]`. A null reference is index `-1`, so a
+use of it is an out-of-bounds access the proof must rule out. The array may be declared
+after `x`; the uses are lowered where they occur.
+
+**R33.6. `is null` on an array.** `a is null` and `a is not null` on an array are R24.7's
+`a == null` and `a != null`. They were folded to the constants `false` and `true`, as for a
+non-nullable value — a soundness bug (see Findings).
+
+**R33.7. Arguments nobody reads back.** An `out _` discard is a fresh local, initialised
+to its type's default, passed by reference. So is a `ref x` argument when an earlier
+argument of the same call also passes `ref x` (`IndexOf(key, ref _, ref _)`, with `_` a
+local), provided `x` is used nowhere else in its method and the callee's parameter is only
+ever assigned (reads inside `Pal` intrinsics, which are ghost, aside). Pulse cannot pass
+one reference twice; under these conditions the aliasing is unobservable — the callee never
+reads the parameter, and nothing reads `x` afterwards — so separate locals behave alike.
+Any other repeated `ref` is reported, as before.
+
+**R33.8. `a?.Length ?? d` on an array.** It is `a == null ? d : a.Length` (R24.7), when `a`
+has no effects.
+
+### Findings (§33)
+
+* **Soundness (fixed, R33.6).** `x is null` on an array was translated as `false`, and
+  `x is not null` as `true`. `OrderedDictionary.Clear`'s `if (_buckets is null)` and
+  `IndexOf`'s `if (_buckets is not null)` were translated as constants.
+* `HashHelpers.ExpandPrime` throws `ArgumentException` once `oldSize` reaches
+  `MaxPrimeArrayLength`.
+* `SetAt(int, TKey, TValue)` compares `Equals(key, e.Key)`, while `IndexOf` compares
+  `Equals(entry.Key, key)`: the two orders agree only for a symmetric comparer, which the
+  contract of `IEqualityComparer<T>` does not require.
+* The public `IndexOf(TKey)` passes one local, `_`, by `ref` to both of the private
+  `IndexOf`'s out-parameters; harmless only because that callee never reads them (R33.7).
+
+### Trusted (§33)
+
+* `Pulse.Lib.CSharp.Platform.intptr_size`: an unspecified `int` (`IntPtr.Size`), bound by
+  `pal/OrderedDictionary/Support.cs`.
+* `pal/OrderedDictionary/HashHelpers.cs` replaces two of `HashHelpers`' bodies:
+  `GetPrime` (a prime at least `min`, at most `MaxPrimeArrayLength` when `min` is) by a
+  search with the same contract but not the BCL's prime table, and `FastMod` (Lemire's
+  multiply-shift remainder) by `value % divisor`, which the BCL asserts it equals for a
+  divisor at most `int.MaxValue`. `ExpandPrime` and `GetFastModMultiplier` are the real
+  bodies, verified.
+* System.Collections' `ThrowHelper.ThrowKeyNotFound`, `ThrowDuplicateKey`,
+  `ThrowConcurrentOperation`, `ThrowIndexArgumentOutOfRange` and `ThrowVersionCheckFailed`
+  carry `[Throws]` and `[Ensures("false")]`; their bodies (a `throw`) are translated and
+  checked against these contracts.

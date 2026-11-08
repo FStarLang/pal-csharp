@@ -63,6 +63,7 @@ public sealed class StmtLowerer(
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
             GotoStatementSyntax g => LowerGoto(g, loc),
+            LabeledStatementSyntax l => Lower(l.Statement),
             EmptyStatementSyntax => new IrBlock(loc, []),
             YieldStatementSyntax y => LowerYield(y, loc),
             ThrowStatementSyntax t => new IrThrow(loc,
@@ -140,6 +141,7 @@ public sealed class StmtLowerer(
             SyntaxKind.GotoDefaultStatement => "`goto default`",
             _ => null,
         };
+        if (node.IsKind(SyntaxKind.GotoStatement)) return LowerForwardGoto(node, loc);
         if (jump is null) return UnsupportedStatement(node, loc);
 
         diagnostics.Unsupported(loc, $"A {jump} statement",
@@ -150,6 +152,66 @@ public sealed class StmtLowerer(
         return new IrBlock(loc, []);
     }
 
+    /// <summary>
+    /// R33.2. <c>goto L;</c> to a label later in the method's outermost block is the code
+    /// from <c>L</c> to the end of that block, copied to the jump. That code must end by
+    /// leaving the method (its end point is unreachable), so it never falls back into
+    /// what follows the jump; and a label whose block position is reachable only by
+    /// jumps is not lowered where it stands (<see cref="LowerStatements"/>).
+    /// </summary>
+    private IrStmt LowerForwardGoto(GotoStatementSyntax node, IrLoc loc)
+    {
+        var name = (node.Expression as IdentifierNameSyntax)?.Identifier.ValueText;
+        var body = node.Ancestors().Select(a => a switch
+        {
+            BaseMethodDeclarationSyntax m => m.Body,
+            AccessorDeclarationSyntax a2 => a2.Body,
+            _ => null,
+        }).FirstOrDefault(b => b is not null);
+        var statements = body?.Statements ?? default;
+        var at = body is null ? -1 : statements.IndexOf(st => st is LabeledStatementSyntax l && l.Identifier.ValueText == name);
+        string? why =
+            at < 0 ? "its label is not a statement of the method's outermost block"
+            : statements[at].SpanStart < node.SpanStart ? "it jumps backwards"
+            : node.Ancestors().TakeWhile(a => a != body).Any(a => a is TryStatementSyntax or
+                AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)
+                ? "it leaves a `try`, a lambda or a local function"
+            : model.AnalyzeControlFlow(statements[^1]) is { Succeeded: true, EndPointIsReachable: false }
+                ? null : "the code from its label on can run off the end of the method";
+        if (why is not null)
+        {
+            diagnostics.Unsupported(loc, "A `goto` statement",
+                $"Only a forward jump to a label of the method's outermost block, whose code " +
+                $"then leaves the method, is translated (doc/translation.md R33.2); {why}.");
+            return new IrBlock(loc, []);
+        }
+        // A local of the outermost block declared between the jump and its label is in scope
+        // at the label but not yet declared here; C#'s definite assignment makes the code
+        // from the label assign it before reading it.
+        var from = statements.IndexOf(st => st.Span.Contains(node.Span));
+        var tail = statements.Skip(at).ToList();
+        var declared = ImmutableArray.CreateBuilder<IrStmt>();
+        foreach (var st in statements.Skip(from + 1).Take(at - from - 1).OfType<LocalDeclarationStatementSyntax>())
+            foreach (var v in st.Declaration.Variables)
+                if (model.GetDeclaredSymbol(v) is ILocalSymbol local &&
+                    tail.Any(t => t.DescendantNodes().OfType<IdentifierNameSyntax>().Any(id =>
+                        SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local))) &&
+                    known.MapType(local.Type) is { } localType)
+                    declared.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, localType, null));
+        return new IrBlock(loc, [.. declared, .. LowerStatements(tail)]);
+    }
+
+    /// <summary>
+    /// R33.2. Whether control can reach the end of <paramref name="statement"/>: C#'s
+    /// reachability, except that a call of a <c>[DoesNotReturn]</c> method does not return.
+    /// </summary>
+    private bool FallsThrough(StatementSyntax statement) =>
+        statement is LabeledStatementSyntax labeled ? FallsThrough(labeled.Statement) :
+        model.AnalyzeControlFlow(statement) is not { Succeeded: true, EndPointIsReachable: false } &&
+        !(statement is ExpressionStatementSyntax { Expression: InvocationExpressionSyntax call } &&
+          model.GetSymbolInfo(call).Symbol is IMethodSymbol callee &&
+          callee.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute"));
+
     private IrBlock LowerBlock(BlockSyntax block) =>
         new(Locations.From(block), LowerStatements([.. ReachableStatements(block.Statements)]));
 
@@ -158,6 +220,10 @@ public sealed class StmtLowerer(
         var lowered = ImmutableArray.CreateBuilder<IrStmt>();
         for (var i = 0; i < statements.Count; i++)
         {
+            // R33.2. A label the statement before it cannot fall into is reached only by
+            // `goto`, each of which has a copy of what follows.
+            if (i > 0 && statements[i] is LabeledStatementSyntax && !FallsThrough(statements[i - 1]))
+                break;
             if (HeldChoice(statements[i]) is var (x, cond, a, b))
             {
                 var rest = statements.Skip(i + 1).ToList();
@@ -533,6 +599,7 @@ public sealed class StmtLowerer(
             // at that local.
             if (symbol is { RefKind: RefKind.Ref or RefKind.RefReadOnly })
             {
+                if (ReboundRefLocal(v, symbol, node, statements)) continue;
                 if (RefLocal(v, symbol, node, statements) is null)
                     diagnostics.Unsupported(Locations.From(v), $"The `ref` local `{v.Identifier.ValueText}`",
                         "Only `ref` locals bound to an element of an array named by an unrebound " +
@@ -753,6 +820,84 @@ public sealed class StmtLowerer(
         return (_code.Lower(init), _spec.Lower(init));
     }
 
+    /// <summary>R33.5. The index local of each rebound <c>ref</c> local.</summary>
+    private readonly Dictionary<ISymbol, IrVar> _rebound = new(SymbolEqualityComparer.Default);
+
+    /// <summary>
+    /// R33.5. A <c>ref</c> local that is rebound, <c>x = ref a[e];</c>, where every binding
+    /// (its initialiser too, unless that is <c>ref Unsafe.NullRef&lt;T&gt;()</c>) is an element
+    /// of the same array <c>a</c>, named by a local that is never assigned or by a field of
+    /// this object that the scope neither assigns nor can replace by a call. The local is
+    /// then a mutable index into <c>a</c>: each binding assigns the index, and each use of
+    /// the name is <c>a[index]</c>. A null reference is the index <c>-1</c>, so that a use
+    /// of it is an out-of-bounds access the proof must rule out.
+    /// </summary>
+    private bool ReboundRefLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (v.Initializer?.Value is not RefExpressionSyntax { Expression: var init }) return false;
+        var scope = node.Parent ?? node;
+        static ExpressionSyntax Strip(ExpressionSyntax e)
+        {
+            while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+            return e;
+        }
+        var writes = scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+            .Where(a => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(Strip(a.Left)).Symbol, symbol) &&
+                        Strip(a.Left) is IdentifierNameSyntax)
+            .ToList();
+        if (writes.Count == 0 || writes.Any(a => a.Right is not RefExpressionSyntax || a.Parent is not ExpressionStatementSyntax))
+            return false;
+        var nullRef = Strip(init) is InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } call &&
+                      model.GetSymbolInfo(call).Symbol is IMethodSymbol
+                      {
+                          Name: "NullRef", ContainingType: { Name: "Unsafe", ContainingNamespace: var ns }
+                      } && ns.ToDisplayString() == "System.Runtime.CompilerServices";
+        var targets = writes.Select(a => Strip(((RefExpressionSyntax)a.Right).Expression)).ToList();
+        if (!nullRef) targets.Insert(0, Strip(init));
+        if (targets.Any(t => t is not ElementAccessExpressionSyntax
+            {
+                ArgumentList.Arguments.Count: 1,
+                Expression: IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax },
+            }))
+            return false;
+        var arrays = targets.Cast<ElementAccessExpressionSyntax>().Select(t => t.Expression).ToList();
+        var root = model.GetSymbolInfo(arrays[0]).Symbol;
+        if (root is not (ILocalSymbol { Type: IArrayTypeSymbol } or IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol }) ||
+            arrays.Any(a => !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a).Symbol, root)))
+            return false;
+        // The array a binding names must be the array every use reads.
+        var self = symbol.ContainingSymbol.ContainingType;
+        foreach (var n in scope.DescendantNodes())
+        {
+            if (n is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(Strip(a.Left)).Symbol, root))
+                return false;
+            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(Strip(arg.Expression)).Symbol, root))
+                return false;
+            if (root is IFieldSymbol && n is InvocationExpressionSyntax inv &&
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
+                !Declarations.Has(m, known.LemmaAttribute))
+                return false;
+        }
+        var loc = Locations.From(v);
+        IrExpr initIndex;
+        if (nullRef) initIndex = new IrLiteral(loc, -1) { Type = IrPrim.Int };
+        else if (_code.Lower(Strip(init)) is IrElement e) initIndex = e.Index;
+        else return false;
+        var index = new IrVar(loc, Fresh("ref")) { Type = IrPrim.Int };
+        statements.Add(new IrLocalDecl(loc, index.Name, IrPrim.Int, _code.ToDeclared(initIndex, IrPrim.Int)));
+        var arraySyntax = arrays[0];
+        _rebound[symbol] = index;
+        _code.LazyAlias(symbol, () => new IrElement(loc, _code.Lower(arraySyntax), index)
+            { Type = known.MapType(symbol.Type) });
+        _spec.LazyAlias(symbol, () => new IrElement(loc, _spec.Lower(arraySyntax), index)
+            { Type = known.MapType(symbol.Type) });
+        return true;
+    }
+
     private IrExpr? RefLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
         ImmutableArray<IrStmt>.Builder statements)
     {
@@ -965,6 +1110,13 @@ public sealed class StmtLowerer(
                     new IrSpecOp(loc, "snd", [pair]) { MachineArgs = true, Type = pairType.Args[1] }),
             ]);
         }
+
+        // R33.5. Rebinding a rebound `ref` local assigns its index.
+        if (op is null && node.Right is RefExpressionSyntax { Expression: var rebind } &&
+            model.GetSymbolInfo(node.Left).Symbol is { } reboundSymbol &&
+            _rebound.TryGetValue(reboundSymbol, out var reboundIndex) &&
+            _code.Lower(rebind) is IrElement reboundElement)
+            return new IrAssign(loc, reboundIndex, _code.ToDeclared(reboundElement.Index, IrPrim.Int));
 
         if (_code.SpecIndexerWrite(node, loc) is { } indexerWrite) return indexerWrite;
         if (_code.ComputedWrite(node, loc) is { } setterCall) return new IrExprStmt(loc, setterCall);
@@ -1518,8 +1670,17 @@ public sealed class StmtLowerer(
             nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
             return new IrBlock(loc, []);
 
-        if (owner != "System.ArgumentOutOfRangeException" || !method.IsGenericMethod ||
-            method.TypeArguments is not [var ty] || !IsIntegral(ty.SpecialType))
+        // R33.1. System.Collections' own polyfills of the same guards (its `ThrowHelper`,
+        // compiled where the BCL's are missing) are read as the BCL's.
+        ITypeSymbol? ty = null;
+        if (owner == "System.ArgumentOutOfRangeException" && method.IsGenericMethod &&
+            method.TypeArguments is [var bclTy])
+            ty = bclTy;
+        else if (owner == "System.Collections.ThrowHelper" && method.IsStatic &&
+                 method.Name is "ThrowIfNegative" or "ThrowIfLessThan" or "ThrowIfGreaterThan" &&
+                 method.Parameters is [var first, ..])
+            ty = method.IsGenericMethod ? method.TypeArguments[0] : first.Type;
+        if (ty is null || !IsIntegral(ty.SpecialType))
             return null;
         (BinOp op, bool unary)? shape = method.Name switch
         {

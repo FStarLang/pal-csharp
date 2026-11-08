@@ -765,7 +765,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         var text = operands.Count == 0
             ? op.Function
             : $"({op.Function} {string.Join(" ", operands)})";
-        return new Term(text, Kind(op.Type));
+        return op is { MachineValue: true, Type: IrPrim machine }
+            ? new Term(text, TermKind.Machine, machine)
+            : new Term(text, Kind(op.Type));
     }
 
     /// <summary>

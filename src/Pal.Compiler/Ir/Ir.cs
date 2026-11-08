@@ -283,6 +283,13 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     public bool EnumCase { get; init; }
 
     /// <summary>
+    /// R33.4. The operation is a bound static member of a machine-integer type
+    /// (<c>IntPtr.Size</c>): its value is a machine integer, which a contract reads through
+    /// <c>.v</c>.
+    /// </summary>
+    public bool MachineValue { get; init; }
+
+    /// <summary>
     /// R20.10. The operation models a BCL member over program values, so its arguments
     /// are at their machine types in a contract too -- `set.Contains(i)` asks about the
     /// `I32.t` <c>i</c>, not about <c>I32.v i</c>.
