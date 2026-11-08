@@ -1060,15 +1060,54 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // F35. The three declarations are one mutually recursive group whether or not the
         // class actually refers to itself, which costs nothing and means a self-reference
         // needs no separate rule.
+        // R31.2. An owner that its region's nodes point back to has its record in this
+        // group, so neither module depends on the other.
+        var group = CycleOwners(c);
+        string Local(string t) => group.Aggregate(t.Replace(Names.ClassModule(c.Name) + ".", ""),
+            (acc, d) => acc.Replace(Names.ClassModule(d.Name) + ".", ""));
         sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
         foreach (var f in c.Fields)
-            sb.AppendLine($"  {Names.Field(f.Name)}: {PlainFieldType(c, f.Type, opt, self)};");
+            sb.AppendLine($"  {Names.Field(f.Name)}: {Local(PlainFieldType(c, f.Type, opt, self))};");
         sb.AppendLine("}");
         sb.AppendLine($"and {Names.ClassOpt(c.Name)}{tb.Explicit} = B.box {raw}");
         sb.AppendLine($"and {Names.ClassType(c.Name)}{tb.Explicit} = b: {opt} {{ not (B.is_null b) }}");
+        foreach (var d in group)
+        {
+            var db = TypeBinders.Of(d);
+            sb.Append("and ").Append(Names.ClassRaw(d.Name)).Append(db.Explicit).AppendLine(" = {");
+            foreach (var f in d.Fields)
+                sb.AppendLine($"  {Names.Field(f.Name)}: {Local(Types.Render(f.Type))};");
+            sb.AppendLine("}");
+            sb.AppendLine($"and {Names.ClassOpt(d.Name)}{db.Explicit} = B.box {db.App(Names.ClassRaw(d.Name))}");
+        }
         if (c.IsRegion) EmitRegionShape(sb, c, tb, raw, opt);
         return sb.ToString();
     }
+
+    /// <summary>
+    /// R31.3. Whether a class's invariant or abstraction names <c>@this</c>, so that the
+    /// functions stating it of a record take the reference first.
+    /// </summary>
+    internal static bool InvariantNamesThis(IrClass c) =>
+        c.Invariants.Concat(c.ModelBody is null ? [] : [c.ModelBody])
+            .SelectMany(Passes.Check.Subexpressions).OfType<IrVar>().Any(v => v.Name == Names.This);
+
+    /// <summary>
+    /// R31.2. The owners whose records a <c>[Region]</c> class's module declares: each
+    /// translated, non-plain class that holds a pointer into the region and is pointed back
+    /// to by a field of the region class.
+    /// </summary>
+    private ImmutableArray<IrClass> CycleOwners(IrClass c) =>
+        !c.IsRegion ? [] :
+        [.. c.Fields.Select(f => f.Type).OfType<IrClassType>().Select(t => t.Name).Distinct()
+            .Where(n => n != c.Name && _classes.TryGetValue(n, out var d) && !d.IsPlain &&
+                        d.Recursion is null && !d.InHierarchy &&
+                        d.Fields.Any(g => g.Type is IrClassType gt && gt.Name == c.Name))
+            .Select(n => _classes[n])];
+
+    /// <summary>R31.2. The region class whose module declares this owner's record, if any.</summary>
+    private IrClass? CycleRegionOf(IrClass d) =>
+        _classes.Values.FirstOrDefault(c => CycleOwners(c).Any(o => o.Name == d.Name));
 
     /// <summary>
     /// R27.7. What a <c>[Region]</c> class adds to its representation: the two child
@@ -1080,11 +1119,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var children = c.Fields
             .Where(f => f.Type is IrClassType { Nullable: true } ct && ct.Name == c.Name)
             .Take(2).ToArray();
-        var viewType = c.ModelBody is null ? "unit" : Types.Render(c.ModelType);
+        // R31.2. The owners declared in this module are named unqualified here.
+        var group = CycleOwners(c);
+        string Local(string t) => group.Aggregate(t, (acc, d) => acc.Replace(Names.ClassModule(d.Name) + ".", ""));
+        var viewType = c.ModelBody is null ? "unit" : Local(Types.Render(c.ModelType));
         var scope = new SpecScope { DefiningClass = c.Name };
         foreach (var f in c.Fields)
             scope.Bind(f.Name, new Term($"r.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
-        var view = c.ModelBody is null ? "()" : _spec.Emit(c.ModelBody, scope).Text;
+        var view = c.ModelBody is null ? "()" : Local(_spec.Emit(c.ModelBody, scope).Text);
         var R = Frontend.Region.Module;
         var heap = $"{R}.heap {raw}";
         string App(string f) => tb.Explicit.Length == 0 ? f : $"({f}{string.Concat(c.TypeParameters.Select(t => " #" + Names.TypeParam(t)))})";
@@ -1092,6 +1134,21 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine($"let {Frontend.Region.LeftOf(c.Name)}{tb.Implicit} (r: {raw}) : {opt} = r.{Names.Field(children[0].Name)}");
         sb.AppendLine($"let {Frontend.Region.RightOf(c.Name)}{tb.Implicit} (r: {raw}) : {opt} = r.{Names.Field(children[1].Name)}");
         sb.AppendLine($"let {Frontend.Region.ViewOf(c.Name)}{tb.Implicit} (this: {opt}) (r: {raw}) : {viewType} = {view}");
+        // R31.1. A ring has no tree, and a read needs only that the node is in the region.
+        if (c.IsCyclic)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"inline_for_extraction noextract");
+            sb.AppendLine($"fn {Frontend.Region.ReadOf(c.Name)}{tb.Implicit} (x: {opt}) (#p: perm) (#h: erased ({heap}))");
+            sb.AppendLine($"  preserves {R}.region #{Types.Atom(new IrPulseType(raw, raw))} #p h");
+            sb.AppendLine($"  requires pure ({R}.mem h x)");
+            sb.AppendLine($"  returns v: {raw}");
+            sb.AppendLine($"  ensures pure ({R}.mem h x /\\ not (B.is_null x) /\\ v == {R}.get h x)");
+            sb.AppendLine("{");
+            sb.AppendLine($"  {R}.read x");
+            sb.AppendLine("}");
+            return;
+        }
         var shape = $"{App(Frontend.Region.ViewOf(c.Name))} {App(Frontend.Region.LeftOf(c.Name))} {App(Frontend.Region.RightOf(c.Name))}";
         var lr = $"{App(Frontend.Region.LeftOf(c.Name))} {App(Frontend.Region.RightOf(c.Name))}";
         sb.AppendLine($"let {Frontend.Region.TreeOf(c.Name)}{tb.Implicit} (h: {heap}) (x: {opt}) " +
@@ -1338,6 +1395,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R3.7: inside the defining module a field needs no qualifier, and must not have
         // one, or F*'s dependency scan reads the module as depending on itself.
+        var tb0 = TypeBinders.Of(c);
         var repScope = new SpecScope();
         foreach (var f in c.Fields)
         {
@@ -1372,6 +1430,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         foreach (var k in regions)
             repScope.Bind(Frontend.Region.HeapName(k.Name),
                 new Term(Frontend.Region.HeapBinder(k.Name), TermKind.Other));
+        // R31.3. `@this` in an [Invariant] is the reference itself: the predicate is of it.
+        repScope.Bind(Names.This, new Term("this", TermKind.Other, new IrClassType(c.Name, false)
+            { TypeArguments = [.. c.TypeParameters.Select(t => (IrType)new IrTypeParamType(t))] }));
+        var thisParam = InvariantNamesThis(c) ? $"(this: {tb0.App(Names.ClassType(c.Name))}) " : "";
 
         // R3.9d: the model refinement is stated over the model value, which a [Refine]
         // on the [Model] member names `Result`, as an [Ensures] does.
@@ -1398,7 +1460,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             conjuncts.Add($"Seq.length {Names.Contents(f.Name)} <= 2147483647");
         // R27.4. Every pointer the owner holds into a region is unshared in it (R27.16):
         // well-formed, and reaching no box twice.
-        foreach (var f in regionFields)
+        foreach (var f in regionFields.Where(f => !_classes[((IrClassType)f.Type).Name].IsCyclic))
         {
             var k = (IrClassType)f.Type;
             conjuncts.Add($"{Names.ClassModule(k.Name)}.{Frontend.Region.UnsharedOf(k.Name)} " +
@@ -1427,11 +1489,20 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine();
 
         var tb = TypeBinders.Of(c);
-        sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
-        foreach (var f in c.Fields)
-            sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
-        sb.AppendLine("}");
-        sb.AppendLine();
+        // R31.2. A record its region's module declares is included from there.
+        if (CycleRegionOf(c) is { } home)
+        {
+            sb.AppendLine($"include {Names.ClassModule(home.Name)}");
+            sb.AppendLine();
+        }
+        else
+        {
+            sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
+            foreach (var f in c.Fields)
+                sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
 
         // R3.8: a CLR object reference is a `Box.box` of the representation. `Box` is the
         // sound heap cell (F14); `Reference.alloc` is marked unsound and never emitted.
@@ -1488,7 +1559,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         if (arrays.IsEmpty && objects.IsEmpty)
         {
             sb.AppendLine();
-            sb.AppendLine($"let {Names.ClassAbs(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}) " +
+            sb.AppendLine($"let {Names.ClassAbs(c.Name)}{tb.Implicit} {thisParam}(r: {tb.App(Names.ClassRaw(c.Name))}) " +
                           string.Concat(regions.Select(k =>
                               $"({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)}) ")) +
                           $"(m: {tb.App(Names.ClassModel(c.Name))}) : prop =");
@@ -1502,10 +1573,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 var heapParams = string.Concat(regions.Select(k =>
                     $" ({Frontend.Region.HeapBinder(k.Name)}: {Frontend.Region.Module}.heap {RegionRaw(k)})"));
                 sb.AppendLine();
-                sb.AppendLine($"let {Names.ClassAbsRep(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} : prop =");
+                sb.AppendLine($"let {Names.ClassAbsRep(c.Name)}{tb.Implicit} {thisParam}(r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} : prop =");
                 sb.AppendLine($"  {SpecEmitter.Conjunction([.. conjuncts.Take(conjuncts.Count - 1).DefaultIfEmpty("True")])}");
                 sb.AppendLine();
-                sb.AppendLine($"let {Names.ClassAbsModel(c.Name)}{tb.Implicit} (r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} =");
+                sb.AppendLine($"let {Names.ClassAbsModel(c.Name)}{tb.Implicit} {thisParam}(r: {tb.App(Names.ClassRaw(c.Name))}){heapParams} =");
                 sb.AppendLine($"  {abstraction}");
             }
         }

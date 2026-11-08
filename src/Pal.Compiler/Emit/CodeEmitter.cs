@@ -555,8 +555,9 @@ public sealed class CodeEmitter(
                 field.Type is IrPrim or IrTypeParamType or IrNamedType)
                 value = Default(field.Type);
             // R27.6. A pointer into a region starts null, in a region that starts empty.
+            // Typed (R31.2): in a ring's owner nothing else names the type arguments.
             if (value is null && IsRegionType(field.Type))
-                value = "B.null";
+                value = $"(B.null #{PulseEmitter.RegionRaw((IrClassType)field.Type!)})";
             if (value is null)
             {
                 diagnostics.Unsupported(method.Loc,
@@ -1087,7 +1088,8 @@ public sealed class CodeEmitter(
         if (reopened && unchanged && receiver.ViewBase is null &&
             decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
-            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {record} " +
+            var selfArg = PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "";
+            pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbs(klass.Name)} {selfArg}{record} " +
                      $"{string.Concat(heapsOfRecord.Select(h => h + " "))}{receiver.PreModel}");
             // R27.50. The receiver is at its model throughout, so a measure reads it there.
             if (receiver.PreModel is { } pm)
@@ -1101,7 +1103,7 @@ public sealed class CodeEmitter(
                  decl.Fields.All(f => IsRegionType(f.Type) || f.Type is not (IrArrayType or IrClassType)))
         {
             var m = FreshValue(klass.Name);
-            var args = $"{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
+            var args = $"{(PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "")}{record}{string.Concat(heapsOfRecord.Select(h => " " + h))}";
             existentials.Add($"({m}: {PulseEmitter.SubModelType(klass)})");
             resources.Add($"pure ({m} == {Names.ClassModule(klass.Name)}.{Names.ClassAbsModel(klass.Name)} {args})");
             pure.Add($"{Names.ClassModule(klass.Name)}.{Names.ClassAbsRep(klass.Name)} {args}");
@@ -2904,8 +2906,13 @@ public sealed class CodeEmitter(
         // identity coercion is F*'s. What remains is not about the reference but about its
         // invariant, which is stated through R10.3a's abbreviation and must be unfolded.
         // R12.2. A plain reference carries no invariant, so for it there is nothing at all.
-        if (classes is not null && classes.TryGetValue(k.Name, out var kd) && kd.IsPlain)
-            return text;
+        if (classes is not null && classes.TryGetValue(k.Name, out var kd))
+        {
+            if (kd.IsPlain) return text;
+            // R31.2. Nor has any class that is not recursive (a ring's owner): R10.3a's
+            // abbreviation is only a recursive class's.
+            if (kd.Recursion is null) return text;
+        }
         Line($"{Names.ClassModule(k.Name)}.{Names.ClassAsOpt(k.Name)} {text};");
         return text;
     }

@@ -750,7 +750,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     {
         var operands = op.TypeArgs.Select(Types.Atom)
             .Concat(op.Args.Select((a, i) =>
-                i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
+                // R31.5. A method body's `this` is its model (R4.2); a region operation over
+                // heaps asks about the reference, which is the receiver itself -- the owner a
+                // ring's nodes point back to.
+                op.Region && a is IrVar { Name: Names.This } &&
+                scope.TryGet(Names.This, out var self) && self.Kind == TermKind.Math
+                    ? Names.Local(Names.This)
+                : i < op.ParamTypes.Length && op.ParamTypes[i] is IrClassType
                     ? Argument(a, op.ParamTypes[i], scope)
                     // R27.22. A `bool` literal passed as a `bool` is the boolean, not the
                     // proposition `True`/`False`.

@@ -895,6 +895,7 @@ public static partial class FrontendPass
 
         /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>
         public bool IsRegion { get; init; }
+        public bool IsCyclic { get; init; }
 
         /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
         public ExpressionSyntax? ForgetBody { get; init; }
@@ -990,6 +991,8 @@ public static partial class FrontendPass
                     }
                     if (CollectPlainFields(symbol, known, diagnostics) is not { } regionFields)
                         continue;
+                    var cyclic = Declarations.Find(symbol, known.RegionAttribute) is { } regionData &&
+                                 Declarations.NamedFlag(regionData, "Cyclic");
                     var children = regionFields.Count(f =>
                         f.Mapped is IrClassType { Nullable: true } ct && ct.Name == symbol.Name);
                     if (children != 2)
@@ -1024,6 +1027,7 @@ public static partial class FrontendPass
                     {
                         IsPlain = true,
                         IsRegion = true,
+                        IsCyclic = cyclic,
                     });
                     continue;
                 }
@@ -1805,7 +1809,9 @@ public static partial class FrontendPass
         var sites = ImmutableArray.CreateBuilder<SpecSite>();
         foreach (var c in classes)
         {
-            var fieldParams = c.Fields.Select(f => new SpecParam(f.Name, f.Type)).ToImmutableArray();
+            // R31.3. An invariant may name the object itself, as `@this`.
+            var fieldParams = c.Fields.Select(f => new SpecParam(f.Name, f.Type))
+                .Append(new SpecParam(Names.This, c.Symbol)).ToImmutableArray();
             var index = 0;
             foreach (var (text, location) in ClassInvariants(c))
                 sites.Add(new SpecSite(
@@ -1925,6 +1931,7 @@ public static partial class FrontendPass
             {
                 IsPlain = true,
                 IsRegion = c.IsRegion,
+                IsCyclic = c.IsCyclic,
                 TypeParameters = c.IsRegion
                     ? [.. WellKnown.OuterAndOwnTypeParameters(c.Symbol).Select(t => t.Name)]
                     : [.. c.Symbol.TypeParameters.Select(t => t.Name)],

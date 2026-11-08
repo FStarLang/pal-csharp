@@ -2013,6 +2013,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var resultType = known.MapType(model.GetTypeInfo(node).Type);
         var tested = Lower(node.Expression);
+        // R31.6. `x?.F` on a region pointer, as a value, is `x != null ? x.F : null`: R27.29's
+        // statement form, as an expression. The pointer is a value, so testing and reading it
+        // read the same `x`; one with an effect would be evaluated twice, and is refused.
+        if (known.IsRegionClass(model.GetTypeInfo(node.Expression).Type) &&
+            tested.Type is IrClassType pointer && !HasEffect(tested) &&
+            resultType is IrClassType { Nullable: true } or IrOptionType)
+        {
+            var bound = tested with { Type = pointer with { Nullable = false } };
+            var read = WithBound(bound, node.Expression, () => Lower(node.WhenNotNull));
+            if (resultType is IrOptionType && read.Type is not IrOptionType)
+                read = new IrOptionOp(loc, OptionOpKind.Some, read) { Type = resultType };
+            var test = new IrBinary(loc, BinOp.Ne, tested, new IrNull(loc) { Type = pointer with { Nullable = true } })
+            {
+                Type = IrPrim.Bool,
+            };
+            return new IrConditional(loc, test, read, new IrNull(loc) { Type = resultType }) { Type = resultType };
+        }
         if (tested.Type is not IrOptionType inner || resultType is not IrOptionType result)
             return Unsupported(node, loc);
 
@@ -2484,6 +2501,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             {
                 Type = method.ReturnsVoid ? null : known.MapType(method.ReturnType),
                 ParamTypes = SpecParamTypes(method, lowered),
+                Region = true,
             };
         }
 
@@ -2875,6 +2893,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     diagnostics.Error("PALCS0703", loc,
                         $"`Pal.{method.Name}` takes a reference to a `[Region]` class " +
                         "(doc/translation.md R27.7).");
+                    return new IrLiteral(loc, null);
+                }
+                // R31.1. A ring has no tree: its shape is stated through `SpecRing`.
+                if (method.Name is nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed)
+                        or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped) &&
+                    Declarations.Find(rc.OriginalDefinition, known.RegionAttribute) is { } ra &&
+                    Declarations.NamedFlag(ra, "Cyclic"))
+                {
+                    diagnostics.Error("PALCS0780", loc,
+                        $"`Pal.{method.Name}` describes a tree, and `{rc.Name}` is `[Region(Cyclic = true)]`: " +
+                        "its nodes form rings, whose shape `SpecRing` states (doc/translation.md R31.1).");
                     return new IrLiteral(loc, null);
                 }
                 var heap = new IrVar(loc, HeapVarName(rc.Name)) { Type = IrPrim.SpecIntType };

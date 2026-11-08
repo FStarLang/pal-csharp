@@ -282,6 +282,9 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// <summary>R27.17. The operation is a constant of a <c>[SpecType]</c> enum (R21.8).</summary>
     public bool EnumCase { get; init; }
 
+    /// <summary>R27.22. The operation is a <c>[RegionOp]</c>, over a region's heap.</summary>
+    public bool Region { get; init; }
+
     /// <summary>
     /// R20.10. The operation models a BCL member over program values, so its arguments
     /// are at their machine types in a contract too -- `set.Contains(i)` asks about the
@@ -1067,6 +1070,12 @@ public sealed record IrClass(
     /// first two nullable fields of the class's own type are the children.
     /// </summary>
     public bool IsRegion { get; init; }
+
+    /// <summary>
+    /// R31.1. <c>[Region(Cyclic = true)]</c>: the two self-typed fields are ring links, not
+    /// children, so no tree shape is derived for the region.
+    /// </summary>
+    public bool IsCyclic { get; init; }
 
     /// <summary>
     /// R9.1. The translated class this one derives from, if any. Non-null and

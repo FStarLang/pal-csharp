@@ -139,7 +139,19 @@ public sealed class PlainAttribute : Attribute;
 /// which <c>Pal.Tree</c> maps over the tree a pointer reaches.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class)]
-public sealed class RegionAttribute : Attribute;
+public sealed class RegionAttribute : Attribute
+{
+    /// <summary>
+    /// R31.1. The nodes form rings rather than trees: the two self-typed fields are the
+    /// <em>next</em> and <em>previous</em> links of a circular doubly-linked list
+    /// (<c>LinkedListNode&lt;T&gt;</c>). The owner's invariant does not require its pointers
+    /// to be unshared trees, a read requires only that the node is in the region, and the
+    /// tree intrinsics (<c>Pal.Tree</c>, <c>Pal.WellFormed</c>, <c>Pal.Unshared</c>,
+    /// <c>Pal.Reshaped</c>) are refused (PALCS0780). The shape is the user's to state, through
+    /// <c>SpecRing</c>.
+    /// </summary>
+    public bool Cyclic { get; set; }
+}
 
 /// <summary>
 /// R22.14. Arithmetic that writes this integer field -- or, on a method or constructor, all the integer

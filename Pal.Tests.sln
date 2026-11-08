@@ -74,6 +74,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "lemma_call", "test/lemma_ca
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "linked_list", "test/linked_list/linked_list.csproj", "{719094C8-8AFE-0A4A-395A-202E243D8101}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "linkedlist", "test/linkedlist/linkedlist.csproj", "{F2E64EC4-901D-2305-70F5-FC3177D6AD66}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "list_cursor", "test/list_cursor/list_cursor.csproj", "{B097205E-239D-E893-74F1-07E676FB22E6}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "nested_class", "test/nested_class/nested_class.csproj", "{4B9AED7B-53B3-557E-9D59-BBB72BD45910}"
@@ -286,6 +288,10 @@ Global
 		{719094C8-8AFE-0A4A-395A-202E243D8101}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{719094C8-8AFE-0A4A-395A-202E243D8101}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{719094C8-8AFE-0A4A-395A-202E243D8101}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F2E64EC4-901D-2305-70F5-FC3177D6AD66}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F2E64EC4-901D-2305-70F5-FC3177D6AD66}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F2E64EC4-901D-2305-70F5-FC3177D6AD66}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F2E64EC4-901D-2305-70F5-FC3177D6AD66}.Release|Any CPU.Build.0 = Release|Any CPU
 		{B097205E-239D-E893-74F1-07E676FB22E6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{B097205E-239D-E893-74F1-07E676FB22E6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B097205E-239D-E893-74F1-07E676FB22E6}.Release|Any CPU.ActiveCfg = Release|Any CPU
