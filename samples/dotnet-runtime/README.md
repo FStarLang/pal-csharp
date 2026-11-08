@@ -40,6 +40,10 @@ holds a `SortedSet<T>` (or `TreeSet`) that it constructed. `GetViewBetween` and 
 The other `.cs` files under `src/` are unmodified upstream files that the annotated ones
 need in order to compile.
 
+[`FINDINGS.md`](FINDINGS.md) logs what verification found: a reproduced wrong-result bug in
+`SortedSet`, latent overflows, untrue nullability annotations, and defects in pal-csharp
+itself.
+
 ## Changes to the upstream code
 
 Besides the pal-csharp attributes and `Pal.*` ghost calls:
