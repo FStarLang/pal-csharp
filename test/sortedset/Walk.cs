@@ -306,6 +306,7 @@ public sealed class WalkSet<T>
     [Ensures("SpecWalk.Walked(@this.SpecItems, Pal.Trace<(T, bool), bool>(action), Result)")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
     [Rlimit(4)]
+    [Frac("p")]
     internal bool InOrderTreeWalk([Callback] WalkPredicate<T> action)
     {
         if (root == null)
@@ -372,7 +373,8 @@ public sealed class WalkSet<T>
     }
 
     // R27.39. `SortedSet<T>.CopyTo(T[], int, int)`: a lambda that writes a captured index.
-    [Requires("0 <= index && 0 <= count && index <= array.Length - count")]
+    [Requires("0 <= index && 0 <= count")]
+    [Throws(typeof(System.ArgumentException), "index > array.Length - count")]
     [Ensures("SpecWalk.CopyResult(@this.SpecItems, Pal.Old(Pal.Contents(array)), Pal.Contents(array), index, index + count)")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
     internal void CopyTo(T[] array, int index, int count)
@@ -841,5 +843,65 @@ public sealed class WalkSet<T>
 
         [Model]
         private (T, bool) View => (Item, IsRed);
+    }
+}
+
+// R32.5, R32.6. A holder that walks its owned set's region with an anonymous method, in a
+// non-tail `if` arm on each side: what each walk ensures of the captured local survives the join.
+public sealed class WalkHolder<T>
+{
+    private readonly WalkSet<T> _set;
+
+    [Model]
+    private WalkModel<T> Model => new WalkModel<T> { Tree = _set.SpecNodes, Count = _set.SpecCount, Version = _set.SpecVersion };
+
+    [Spec] public SpecTree<(T, bool)> SpecNodes => Model.Tree;
+
+    public WalkHolder()
+    {
+        _set = new WalkSet<T>();
+    }
+
+    [Ensures("0 <= Result")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    internal int CountUnless(bool flag, System.Predicate<T> match)
+    {
+        System.ArgumentNullException.ThrowIfNull(match);
+        int n = 0;
+        if (flag)
+        {
+            _set.InOrderTreeWalk(delegate (WalkSet<T>.WNode node)
+            {
+                Pal.Protocol<(T, bool), bool>(tr => 0 <= n && n <= tr.Length);
+                if (match(node.Item))
+                {
+                    n++;
+                }
+                return true;
+            });
+        }
+        else
+        {
+            _set.InOrderTreeWalk(delegate (WalkSet<T>.WNode node)
+            {
+                Pal.Protocol<(T, bool), bool>(tr => 0 <= n && n <= tr.Length);
+                if (!match(node.Item))
+                {
+                    n++;
+                }
+                return true;
+            });
+        }
+        return n;
+    }
+
+    // R32.9. A call that may raise, on the owned field, from a method that is read-only (its
+    // callee walks at a fraction) and rules the raise out: the holder is not closed around
+    // the call, as the field's invariant is opened from it.
+    [Requires("0 <= index && 0 <= count && index <= array.Length - count")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    internal void CopyTo(T[] array, int index, int count)
+    {
+        _set.CopyTo(array, index, count);
     }
 }

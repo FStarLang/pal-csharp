@@ -776,7 +776,16 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
-        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i);
+        MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i);
+
+    /// <summary>
+    /// R32.6. An arm that passes a lambda to a <c>[Callback]</c> parameter (R27.39): what the
+    /// call ensures of the trace, and so of the lambda's captures, is stated over an
+    /// existential trace, and Pulse's join keeps it of one arm only.
+    /// </summary>
+    private static bool PassesLambda(IrStmt s) =>
+        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .Any(e => e is IrLambdaRef);
 
     /// <summary>
     /// R27.54. An arm with a loop that breaks: the break flag is a mutable local, which Pulse
@@ -4645,7 +4654,10 @@ public sealed class CodeEmitter(
         // same model after it: the call cannot have changed it.
         var bracketed = raising?.Contains(call.Callee) == true && _windows.Count == 0 && !_receiverClosedForThrow
             ? _objects.Where(o => o != self && o.Fraction is not null && o.ViewBase is null &&
-                                  o.PostModel == o.PreModel && !raw.Contains(o.Binder)).ToList()
+                                  o.PostModel == o.PreModel && !raw.Contains(o.Binder) &&
+                                  // R32.9. Not the holder whose owned field is the receiver
+                                  // (R27.58): the field's invariant is unfolded from it.
+                                  !(fieldRecv && o.Name == Names.This)).ToList()
             : [];
         foreach (var o in bracketed) CloseObject(_method!, o);
         if (convert is not null)

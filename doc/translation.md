@@ -9370,6 +9370,57 @@ Both appeared in `SortedDictionary`'s explicit `ICollection<KeyValuePair<,>>.Rem
   returned without closing it. Each arm of a tail `if` (including R10/R24 null windows) now
   starts from the open fields as they were before the `if`.
 
+### R32.5 Anonymous methods as callbacks
+
+A `[Callback]` argument (R27.39) may be an anonymous method,
+`delegate (Node node) { … }`, as well as a lambda. dotnet/runtime's
+`SortedDictionary.ContainsValue` passes two. Both are lifted to the same function, with
+the same captures and protocol (`Pal.Protocol`, R27.39); an anonymous method's parameter
+list must be present and have one parameter.
+
+### R32.6 A callback passed in a non-tail `if` arm
+
+What a walk ensures of its callback's trace, and so of the captured locals the protocol
+names, is stated over an existential trace. Pulse's join after a non-tail `if` keeps only
+one arm's existential facts. An `if` with an arm that passes a lambda to a `[Callback]`
+parameter is therefore one whose join loses (R22.12): the rest of the block is moved into
+both arms. `ContainsValue`'s `if (value == null) walk(…); else walk(…); return found;` needs it.
+
+### R32.7 Binding a field of an unmodelled class
+
+`SortedDictionary.Comparer` reads `((KeyValuePairComparer)_set.Comparer).keyComparer`. The
+pair comparer is modelled as `KeyComparer`'s comparer of pairs, from which `key_of` recovers
+the key comparer (§27.3). The harness binds the field
+`KeyValuePairComparer.keyComparer` to `key_of`, and the downcast is the identity, as both
+types are the same F* type. Both are trusted (they hold because the dictionary's
+constructors build the set's comparer from the key comparer and nothing else).
+
+### R32.8 Searching values
+
+`Pulse.Lib.CSharp.ValueSearch` (C# `SpecValueSearch`) states `ContainsValue`:
+
+- `Matches(x, y)` is `x == null` when `y` is null and `Pal.DefaultEquals(x, y)` otherwise, as
+  the method tests it;
+- `HasValue(pairs, y)` is whether some pair's value matches `y`;
+- `Searched(tr, y, found)` is the callback's protocol: each call returned false exactly on a
+  match, and `found` says whether one was made.
+
+Its lemmas (with SMT patterns) take the protocol from the empty trace, through one call,
+to the walk's end, where `found == HasValue(pairs, y)`. `ContainsValue` and
+`InOrderTreeWalk` are `[Frac("p")]` (R27.24), so that the borrowing
+`ValueCollection.Contains` (R29.3) may call `ContainsValue`; by R32.2 the walk's callers
+(the `SortedSet.CopyTo` overloads, `SortedDictionary.CopyTo`) become read-only too.
+
+### R32.9 A read-only holder's call on its owned field
+
+Under R32.2 a method of a holder (R27.58) whose calls are all read-only holds its receiver
+at a fraction. A call that may raise from such a method closes the objects held at a
+fraction around it, so that the raise leaves them whole. The receiver is not one of
+them when the call's receiver is its own owned field: that field's invariant is opened from
+the receiver's, so closing the receiver would need the field closed first.
+`SortedDictionary.CopyTo` (whose `_set.CopyTo` may raise, but whose `Requires` rule it out)
+needs it.
+
 ### Verified (§32)
 
 `SortedDictionary<TKey,TValue>` members verified in this section:
@@ -9386,8 +9437,33 @@ Both appeared in `SortedDictionary`'s explicit `ICollection<KeyValuePair<,>>.Rem
 | `ICollection<KVP>.Add(p)` | as `Add(p.Key, p.Value)`: requires the key absent and below `int.MaxValue` pairs |
 | `ICollection<KVP>.Contains(p)` | the key is present, and its value is null when `p.Value` is null, else `DefaultEquals` to it |
 | `ICollection<KVP>.Remove(p)` | `Result` iff the key is present with a `DefaultEquals` value; the pairs are then `Removed(p)`, else unchanged |
+| `ContainsValue(v)` | `SpecValueSearch.HasValue(pairs, v)`; pairs unchanged |
+| `ValueCollection` `ICollection<T>.Contains(v)` | `HasValue` of the dictionary's pairs |
+| `Comparer` | the key comparer (`SpecKeyComparer`) |
 
 `ContainsKey`, `TryGetValue` and `SortedSet.TryGetValue` were re-verified under R32.2.
+`InOrderTreeWalk`, `RemoveWhere`, the three `SortedSet.CopyTo` overloads and
+`SortedDictionary.CopyTo` were re-verified with the walk `[Frac]` (R32.8, R32.9).
+
+### Trusted (§32)
+
+* The R32.3 `EqualityComparer` bindings (the hashing harness's).
+* The R32.7 binding of `KeyValuePairComparer.keyComparer` to `key_of`, and the downcast to
+  `KeyValuePairComparer` as the identity.
+
+### Not verified (§32)
+
+* `KeyCollection.CopyTo`/`ValueCollection.CopyTo` (and their `ICollection` forms). Their
+  callbacks write `array[index++]` with no bound check. The callback type of R27.39 bounds
+  the trace only by its call budget, not by the walked tree's size, so the write cannot be
+  proved in bounds. A callee-stated bound on the trace would be needed.
+* The indexer setter, which replaces a found pair's value in place: a region write
+  through an owned field, needing a same-key replacement lemma for the in-order sequence.
+* The dictionary's and the views' enumerators, the `IDictionary` constructors, and the
+  non-generic `IDictionary`/`ICollection` members.
+* `TreeSubSet` and `GetViewBetween`, and so the `IsSubsetOf` family's view branches.
+  A view is a subclass that borrows its underlying set's region while owning its own range
+  fields, and its `VersionCheckImpl` writes its own count from inside a walk of that region.
 
 ### Findings (§32)
 

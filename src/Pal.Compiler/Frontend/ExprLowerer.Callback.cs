@@ -104,7 +104,8 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr LowerCallbackArgument(ArgumentSyntax arg, IrCallback cb, IrLoc loc)
     {
-        if (arg.Expression is not LambdaExpressionSyntax lambda ||
+        // R32.5. An anonymous method (`delegate (Node n) { … }`) is lifted as a lambda is.
+        if (arg.Expression is not AnonymousFunctionExpressionSyntax lambda ||
             model.GetSymbolInfo(lambda).Symbol is not IMethodSymbol { Parameters: [var nodeParam] } lambdaSymbol)
             return Refused("PALCS0709", loc,
                 "The argument to a `[Callback]` parameter is a lambda of one parameter " +
