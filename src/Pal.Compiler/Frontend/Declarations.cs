@@ -150,6 +150,11 @@ public static class Declarations
         // virtual method read-only — including the mutating ones.
         if (method.IsAbstract)
             return method.GetAttributes().Any(a => a.AttributeClass?.Name == "FracAttribute");
+        // R32.2. So does it on a method with a body, as the method's own signature has it
+        // (FrontendPass): R4.11c has F* check that body read-only.
+        if (method.MethodKind == MethodKind.Ordinary &&
+            method.OriginalDefinition.GetAttributes().Any(a => a.AttributeClass?.Name == "FracAttribute"))
+            return true;
 
         // A method already on the stack is one this analysis cannot finish, and an
         // unfinished answer is a mutating one.

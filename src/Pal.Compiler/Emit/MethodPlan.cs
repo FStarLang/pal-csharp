@@ -519,7 +519,11 @@ public sealed class MethodPlan
                     var isCell = assigned.Contains(p.Name) && !p.IsContext;
                     var binder = isCell ? Names.Argument(p.Name) : name;
                     binders.Add($"({binder}: {Types.Render(p.Type)})");
-                    if (isCell) prologue.Add((name, binder));
+                    // R32.4. A tuple's universe is inferred, and `let mut` needs it to be zero
+                    // (as a local's cell, CodeEmitter's declaration).
+                    if (isCell)
+                        prologue.Add((p.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType }
+                            ? $"{name} : {Types.Render(p.Type)}" : name, binder));
                     var term = new Term(binder, KindOf(p.Type), p.Type);
                     pre.Bind(p.Name, term);
                     post.Bind(p.Name, term);

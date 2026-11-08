@@ -9317,3 +9317,84 @@ KeyValuePair)` is translated as written; no translation at the dynamic type was 
 `Pulse.Lib.CSharp.Obj` is implemented (`obj = unit`), so its interface carries no
 assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
 only new trust: each says the read or call is pure and does not throw.
+
+## 32. SortedSet views and the rest of SortedDictionary
+
+This section continues §27.3 (`SortedDictionary<TKey,TValue>` over `TreeSet`). Its
+rules make the dictionary's key and value collections, and its explicit
+`ICollection<KeyValuePair<TKey,TValue>>` members, verifiable.
+
+### R32.1 A borrowing constructor's null guard
+
+A borrowing class's constructor (R29.3, R28.5) may only assign its fields. dotnet/runtime's
+`KeyCollection(SortedDictionary<TKey,TValue> dictionary)` first calls
+`ArgumentNullException.ThrowIfNull(dictionary)`.
+
+Under R10.2 a non-nullable class-typed parameter is never null, so the guard cannot
+throw. It is skipped, as it is in any body (R23.2). A guard on a nullable or
+non-class argument is still refused (PALCS0730).
+
+### R32.2 `[Frac]` methods are read-only to their callers
+
+`Declarations.IsReadOnly` decides whether a caller may hold an object at a fraction across
+a call. An interface call (an `IComparer<T>.Compare`) counts as possibly mutating, because
+the callee is unknown.
+
+A concrete method marked `[Frac]` (R27.24) is checked by R4.11c to need only a fraction of
+its receiver, so it is read-only whatever it calls. `IsReadOnly` now says so, which is
+what the front end's own test already did. Without this rule:
+- `SortedDictionary.ContainsKey` (which calls `SortedSet.Contains`, a `[Frac]` method calling
+  `comparer.Compare`) was taken to mutate the dictionary;
+- so `KeyCollection.Contains`, a borrowing member holding the dictionary at a fraction,
+  could not call it.
+
+### R32.3 The default equality in the SortedSet harness
+
+`EqualityComparer<TValue>.Default.Equals` is bound in `pal/SortedSet/Bindings.cs` exactly as
+in the hashing harness: the type to `Pulse.Lib.CSharp.Equality.comparer`, `Default` to
+`default_comparer`, and `Equals` to `equals`. The library lemma `default_equals_def` turns
+`equals (default_comparer t) x y` into R22.25's `default_equals x y`, which contracts write
+as `Pal.DefaultEquals(x, y)`. No new trust is added: these are the hashing harness's
+bindings, reused.
+
+### R32.4 Two emitter fixes for holders
+
+Both appeared in `SortedDictionary`'s explicit `ICollection<KeyValuePair<,>>.Remove`.
+
+- **Tuple parameter cells.** A by-value parameter that becomes a cell (R4.2) of tuple type
+  (a `KeyValuePair`) is declared with its type, `let mut x : tuple2 a b = arg_x`, as a local's
+  cell already was. Otherwise the tuple's universe is inferred, and `let mut` needs it to be
+  zero.
+- **Open fields in tail `if` arms.** A field a call left open at a heap (R27.59) and one arm
+  of a tail `if` closed was taken as closed in the other arm as well. That arm then
+  returned without closing it. Each arm of a tail `if` (including R10/R24 null windows) now
+  starts from the open fields as they were before the `if`.
+
+### Verified (§32)
+
+`SortedDictionary<TKey,TValue>` members verified in this section:
+
+| Member | Contract |
+| --- | --- |
+| `Keys`, `Values` (view-cache fills, R29.3b) | `ReferenceEquals(Result._dictionary, this)` |
+| `KeyCollection(d)`, `ValueCollection(d)` | `ReferenceEquals(_dictionary, d)` |
+| `KeyCollection.Count`, `ValueCollection.Count` | `_dictionary.SpecPairs.Length` |
+| `KeyCollection.Contains(k)` | `KeyIndex(keys, k) >= 0`; throws `ArgumentNullException` on a null `k` |
+| `ICollection<T>.IsReadOnly` (both views) | `true` |
+| `ICollection<T>.Add`/`Clear`/`Remove` (both views) | always throw `NotSupportedException` |
+| `ICollection<KVP>.IsReadOnly` | `false` |
+| `ICollection<KVP>.Add(p)` | as `Add(p.Key, p.Value)`: requires the key absent and below `int.MaxValue` pairs |
+| `ICollection<KVP>.Contains(p)` | the key is present, and its value is null when `p.Value` is null, else `DefaultEquals` to it |
+| `ICollection<KVP>.Remove(p)` | `Result` iff the key is present with a `DefaultEquals` value; the pairs are then `Removed(p)`, else unchanged |
+
+`ContainsKey`, `TryGetValue` and `SortedSet.TryGetValue` were re-verified under R32.2.
+
+### Findings (§32)
+
+* `ICollection<KVP>.Contains` and `Remove` disagree on null values. `Contains` tests a
+  null `p.Value` with `== null`, but `Remove` always calls
+  `EqualityComparer<TValue>.Default.Equals`. These agree for the default comparer, but
+  the contracts state each as written.
+* `ICollection<KVP>.Add`, like `Add`, requires the key to be absent: a holder cannot pass on
+  the exception its owned set raises (§27.3).
+

@@ -31,6 +31,7 @@ public sealed class SearchTree<T>
 
     [Ensures("Result == SpecSearchTree.Contains(@this.SpecComparer, @this.SpecNodes, item)")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Frac("p")]
     public bool Contains(T item)
     {
         Node? current = root;

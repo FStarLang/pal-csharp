@@ -377,16 +377,24 @@ public sealed class CodeEmitter(
 
             case IrIf { Else: not null } i:
             {
+                // R32.4. Each arm ends the method, so a field one arm closes (R27.59) is
+                // still open in the other.
+                var fieldsOpen = _fieldOpen.ToList();
+                void RestoreFieldsOpen()
+                {
+                    _fieldOpen.Clear();
+                    foreach (var (k, v) in fieldsOpen) _fieldOpen[k] = v;
+                }
                 if (NullTest(i.Cond) is { } window)
                 {
                     var dirtyAtWindow = _receiverDirty;
-                    NullWindow(window, i, branch => { _receiverDirty = dirtyAtWindow; Tail(branch!, method, plan); }, tail: true);
+                    NullWindow(window, i, branch => { _receiverDirty = dirtyAtWindow; RestoreFieldsOpen(); Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
                 {
                     var dirtyAtPlain = _receiverDirty;
-                    PlainNullWindow(ptest, i, branch => { _receiverDirty = dirtyAtPlain; Tail(branch!, method, plan); }, tail: true);
+                    PlainNullWindow(ptest, i, branch => { _receiverDirty = dirtyAtPlain; RestoreFieldsOpen(); Tail(branch!, method, plan); }, tail: true);
                     return;
                 }
                 var cond = Expr(i.Cond);
@@ -401,6 +409,7 @@ public sealed class CodeEmitter(
                 _receiverDirty = dirty;
                 _objectLocals.Clear();
                 _objectLocals.AddRange(owned);
+                RestoreFieldsOpen();
                 _indent--;
                 Line("} else {");
                 _indent++;

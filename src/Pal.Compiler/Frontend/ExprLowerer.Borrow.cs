@@ -470,6 +470,17 @@ public sealed partial class ExprLowerer
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
                 continue;
+            // R32.1. `ArgumentNullException.ThrowIfNull(x)` at a non-nullable class type does
+            // nothing, as in any body (R23.2): such a reference is not null.
+            if (expr is InvocationExpressionSyntax guard &&
+                model.GetSymbolInfo(guard).Symbol is IMethodSymbol { IsStatic: true, Name: "ThrowIfNull" } gm &&
+                gm.ContainingType?.ToDisplayString() == "System.ArgumentNullException" &&
+                guard.ArgumentList.Arguments is [var ga, ..] &&
+                guard.ArgumentList.Arguments.Skip(1).All(x => model.GetConstantValue(x.Expression).HasValue) &&
+                model.GetTypeInfo(ga.Expression) is { Type: { TypeKind: TypeKind.Class } } gt &&
+                gt.Nullability.FlowState == NullableFlowState.NotNull &&
+                gt.Type!.NullableAnnotation != NullableAnnotation.Annotated)
+                continue;
             if (extended && expr is InvocationExpressionSyntax call &&
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol callee)
             {

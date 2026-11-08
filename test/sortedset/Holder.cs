@@ -34,4 +34,44 @@ public sealed class TreeHolder<U>
         found = node.Item;
         return true;
     }
+
+    // R32.2. `Contains` is `[Frac]` and calls the comparer through its interface: it is
+    // read-only, so this method (and the borrowing class's below) is too.
+    [Ensures("Result == SpecSearchTree.Contains(@this.SpecComparer, @this.SpecNodes, item)")]
+    public bool Has(U item) => _tree.Contains(item);
+
+    // R32.4. A tuple parameter rebound as a cell, and a field a call left open (R27.59) that
+    // one arm of a tail `if` closes by calling on it, and the other closes at the return.
+    [Ensures("Result == (flag && SpecSearchTree.Contains(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecNodes), pair.Item1))")]
+    public bool ClearIfFound((U, bool) pair, bool flag)
+    {
+        pair = (pair.Item1, flag);
+        SearchTree<U>.Node? node = _tree.FindNode(pair.Item1);
+        if (node == null)
+        {
+            return false;
+        }
+        if (pair.Item2)
+        {
+            _tree.Clear();
+            return true;
+        }
+        return false;
+    }
+
+    // R29.3, R32.1. A borrowing class whose constructor guards its non-nullable owner.
+    public sealed class Items
+    {
+        private readonly TreeHolder<U> _holder;
+
+        [Ensures("ReferenceEquals(@this._holder, holder)")]
+        public Items(TreeHolder<U> holder)
+        {
+            System.ArgumentNullException.ThrowIfNull(holder);
+            _holder = holder;
+        }
+
+        [Ensures("Result == SpecSearchTree.Contains(@this._holder.SpecComparer, @this._holder.SpecNodes, item)")]
+        public bool Contains(U item) => _holder.Has(item);
+    }
 }
