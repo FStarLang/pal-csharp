@@ -821,3 +821,12 @@ let at (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.bo
                      pos (walk nx h hd n) (Seq.index (walk nx h hd n) k) == k))
   = shape_def view nx pv h hd n;
     if 0 <= k && k < n then pos_index (walk nx h hd n) k
+
+/// The first node is the entry pointer (for a borrowing constructor, which has no ghost
+/// statements: R28.5).
+let nodes_first (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.box a)
+    (h: heap a) (hd: B.box a) (n: int)
+  : Lemma (requires shape view nx pv h hd n)
+          (ensures n > 0 ==> Seq.length (nodes view nx pv h hd n) == n /\ Seq.index (nodes view nx pv h hd n) 0 == hd)
+          [SMTPat (nodes view nx pv h hd n)]
+  = ends view nx pv h hd n
