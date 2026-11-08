@@ -159,6 +159,9 @@ namespace System.Collections.Generic
         // interface, which in that case must be implemented by the keys of all
         // entries added to the sorted list.
         //
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == 0")]
+        [Ensures("@this.SpecComparer == (comparer ?? Comparer<TKey>.Default)")]
         public SortedList(IComparer<TKey>? comparer)
             : this()
         {
@@ -251,11 +254,21 @@ namespace System.Collections.Generic
             Insert(~i, key, value);
         }
 
+        [Rlimit(4)]
+        [Requires("@this.SpecCount < int.MaxValue")]
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(keyValuePair.Key)")]
+        [Throws(typeof(ArgumentException), "!Pal.IsNull(keyValuePair.Key) && Pal.KeyIndex(@this.SpecComparer, @this.SpecKeys, keyValuePair.Key) >= 0")]
+        [Ensures("!Pal.IsNull(keyValuePair.Key) && Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key) == -1")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecKeys == Pal.Concat(Pal.Snoc(Pal.Slice(Pal.Old(@this.SpecKeys), 0, Pal.LowerBound(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)), keyValuePair.Key), Pal.Slice(Pal.Old(@this.SpecKeys), Pal.LowerBound(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key), Pal.Old(@this.SpecCount)))")]
+        [Ensures("@this.SpecValues == Pal.Concat(Pal.Snoc(Pal.Slice(Pal.Old(@this.SpecValues), 0, Pal.LowerBound(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)), keyValuePair.Value), Pal.Slice(Pal.Old(@this.SpecValues), Pal.LowerBound(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key), Pal.Old(@this.SpecCount)))")]
         void ICollection<KeyValuePair<TKey, TValue>>.Add(KeyValuePair<TKey, TValue> keyValuePair)
         {
             Add(keyValuePair.Key, keyValuePair.Value);
         }
 
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(keyValuePair.Key)")]
+        [Ensures("Result == (Pal.KeyIndex(@this.SpecComparer, @this.SpecKeys, keyValuePair.Key) >= 0 && Pal.DefaultEquals(@this.SpecValues[Pal.KeyIndex(@this.SpecComparer, @this.SpecKeys, keyValuePair.Key)], keyValuePair.Value))")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Contains(KeyValuePair<TKey, TValue> keyValuePair)
         {
             int index = IndexOfKey(keyValuePair.Key);
@@ -266,6 +279,11 @@ namespace System.Collections.Generic
             return false;
         }
 
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(keyValuePair.Key)")]
+        [Ensures("Result == (Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key) >= 0 && Pal.DefaultEquals(Pal.Old(@this.SpecValues)[Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)], keyValuePair.Value))")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("Result ? @this.SpecKeys == Pal.Concat(Pal.Slice(Pal.Old(@this.SpecKeys), 0, Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)), Pal.Slice(Pal.Old(@this.SpecKeys), Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key) + 1, Pal.Old(@this.SpecCount))) : @this.SpecKeys == Pal.Old(@this.SpecKeys)")]
+        [Ensures("Result ? @this.SpecValues == Pal.Concat(Pal.Slice(Pal.Old(@this.SpecValues), 0, Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key)), Pal.Slice(Pal.Old(@this.SpecValues), Pal.KeyIndex(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecKeys), keyValuePair.Key) + 1, Pal.Old(@this.SpecCount))) : @this.SpecValues == Pal.Old(@this.SpecValues)")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Remove(KeyValuePair<TKey, TValue> keyValuePair)
         {
             int index = IndexOfKey(keyValuePair.Key);

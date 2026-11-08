@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Runtime.Serialization;
+using PalLang;
 
 namespace System.Collections.Generic
 {
@@ -28,6 +29,26 @@ namespace System.Collections.Generic
             private readonly bool _lBoundActive, _uBoundActive;
             // used to see if the count is out of date
 
+            // pal: R32.13. A view of `_underlying`: its record borrows the set's region, and its
+            // `root` is the subtree `FindRange` returns (R32.14) whenever its version is the set's.
+            [Spec] internal T? SpecMin => _min;
+            [Spec] internal T? SpecMax => _max;
+            [Spec] internal bool SpecLowerActive => _lBoundActive;
+            [Spec] internal bool SpecUpperActive => _uBoundActive;
+
+            /// <summary>R32.14. The root is the subtree the range search stops at in the set's tree.</summary>
+            [Spec] internal bool SpecRootOk =>
+                (root == null || Pal.Unshared(root)) &&
+                Pal.Tree<(T, bool)>(root) == SpecSearchTree.RangeRoot(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+
+            /// <summary>
+            /// R32.14. The view shares the set's comparer, and its root is the set's range
+            /// subtree whenever its version is the set's (a stale version is re-synchronised by
+            /// <see cref="VersionCheckImpl"/>).
+            /// </summary>
+            [Spec] internal bool SpecCoherent =>
+                comparer == _underlying.SpecComparer && Pal.Implies(version == _underlying.SpecVersion, SpecRootOk);
+
 #if DEBUG
             internal override bool versionUpToDate()
             {
@@ -35,6 +56,9 @@ namespace System.Collections.Generic
             }
 #endif
 
+            [Ensures("ReferenceEquals(@this._underlying, Underlying) && Pal.Same(@this._min, Min) && Pal.Same(@this._max, Max)")]
+            [Ensures("@this._lBoundActive == lowerBoundActive && @this._uBoundActive == upperBoundActive")]
+            [Ensures("@this.version == -1 && @this._countVersion == -1 && @this.SpecRootOk && @this.SpecCoherent")]
             public TreeSubSet(SortedSet<T> Underlying, T? Min, T? Max, bool lowerBoundActive, bool upperBoundActive)
                 : base(Underlying.Comparer)
             {
@@ -49,6 +73,17 @@ namespace System.Collections.Generic
                 _countVersion = -1;
             }
 
+            // R32.14. Through the view the set is written: in range, as `Add` on it; out of
+            // range, `ArgumentOutOfRangeException`. The view's version must not be the one the
+            // set's write moves to, or its stale root would pass for current (doc/translation.md
+            // §32 Findings).
+            [Requires("@this.SpecCoherent && @this._underlying.SpecItems.Length < int.MaxValue && @this.version != SpecWrap.Int32(@this._underlying.SpecVersion + 1)")]
+            [Throws(typeof(ArgumentOutOfRangeException), "!SpecSearchTree.InRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item)")]
+            [Ensures("Result == (Pal.KeyIndex(Pal.Old(@this._underlying.SpecComparer), Pal.Old(@this._underlying.SpecItems), item) < 0)")]
+            [Ensures("Pal.Implies(Result, @this._underlying.SpecItems == SpecTopDown.Inserted(Pal.Old(@this._underlying.SpecComparer), Pal.Old(@this._underlying.SpecItems), item))")]
+            [Ensures("Pal.Implies(!Result, @this._underlying.SpecItems == Pal.Old(@this._underlying.SpecItems))")]
+            [Ensures("@this.SpecCoherent && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override bool AddIfNotPresent(T item)
             {
                 if (!IsWithinRange(item))
@@ -65,6 +100,10 @@ namespace System.Collections.Generic
                 return ret;
             }
 
+            [Requires("@this.SpecCoherent")]
+            [Ensures("Result == (SpecSearchTree.InRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item) && Pal.KeyIndex(@this._underlying.SpecComparer, @this._underlying.SpecItems, item) >= 0)")]
+            [Ensures("@this.SpecCoherent")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             public override bool Contains(T item)
             {
                 VersionCheck();
@@ -74,6 +113,14 @@ namespace System.Collections.Generic
                 return base.Contains(item);
             }
 
+            // R32.14. Through the view an item in range is removed from the set; one out of
+            // range is not looked for. The version caveat is `AddIfNotPresent`'s.
+            [Requires("@this.SpecCoherent && @this.version != SpecWrap.Int32(@this._underlying.SpecVersion + 1)")]
+            [Ensures("Result == (SpecSearchTree.InRange(Pal.Old(@this._underlying.SpecComparer), @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item) && Pal.KeyIndex(Pal.Old(@this._underlying.SpecComparer), Pal.Old(@this._underlying.SpecItems), item) >= 0)")]
+            [Ensures("Pal.Implies(SpecSearchTree.InRange(Pal.Old(@this._underlying.SpecComparer), @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item), @this._underlying.SpecItems == SpecTopDownRemove.Removed(Pal.Old(@this._underlying.SpecComparer), Pal.Old(@this._underlying.SpecItems), item))")]
+            [Ensures("Pal.Implies(!SpecSearchTree.InRange(Pal.Old(@this._underlying.SpecComparer), @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item), @this._underlying.SpecItems == Pal.Old(@this._underlying.SpecItems))")]
+            [Ensures("@this.SpecCoherent")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override bool DoRemove(T item)
             {
                 if (!IsWithinRange(item))
@@ -109,6 +156,7 @@ namespace System.Collections.Generic
                 version = _underlying.version;
             }
 
+            [Ensures("Result == SpecSearchTree.InRange(@this.comparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item)")]
             internal override bool IsWithinRange(T item)
             {
                 int comp = _lBoundActive ? Comparer.Compare(_min, item) : -1;
@@ -273,6 +321,10 @@ namespace System.Collections.Generic
                 return true;
             }
 
+            [Requires("@this.SpecCoherent")]
+            [Ensures("(Result != null) == (SpecSearchTree.InRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item) && Pal.KeyIndex(@this._underlying.SpecComparer, @this._underlying.SpecItems, item) >= 0)")]
+            [Ensures("@this.SpecCoherent")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override SortedSet<T>.Node? FindNode(T item)
             {
                 if (!IsWithinRange(item))
@@ -310,6 +362,12 @@ namespace System.Collections.Generic
             /// <param name="updateCount">Updates the count variable if necessary.</param>
             internal override void VersionCheck(bool updateCount = false) => VersionCheckImpl(updateCount);
 
+            // pal: R32.14. The re-count calls the view's walk with a lambda that writes the
+            // view's own `count` while the walk holds the view: not translated (§32 Not
+            // verified), so the path is required dead.
+            [Requires("!updateCount && @this.SpecCoherent")]
+            [Ensures("@this.SpecCoherent && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             private void VersionCheckImpl(bool updateCount)
             {
                 Debug.Assert(_underlying != null);
@@ -321,6 +379,7 @@ namespace System.Collections.Generic
 
                 if (updateCount && _countVersion != _underlying.version)
                 {
+                    Pal.Unreachable();
                     count = 0;
                     InOrderTreeWalk(n => { count++; return true; });
                     _countVersion = _underlying.version;
