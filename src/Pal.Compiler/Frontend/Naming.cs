@@ -74,6 +74,11 @@ public static class Naming
         IMethodSymbol { MethodKind: MethodKind.PropertyGet,
                         AssociatedSymbol: IPropertySymbol { IsIndexer: false, ExplicitInterfaceImplementations: [var ip, ..] } p }
             => Explicit(p, ip),
+        // R33.12. Any other explicit accessor (an explicit indexer's `get_Item`, an explicit
+        // setter) is named by the interface accessor it implements: `IList1_get_Item`.
+        IMethodSymbol { MethodKind: MethodKind.PropertyGet or MethodKind.PropertySet,
+                        ExplicitInterfaceImplementations: [var ia, ..] } a
+            => Explicit(a, ia),
         // R22.13. An indexer's C# name is `this[]`; its accessors keep `get_Item`/`set_Item`.
         IMethodSymbol { MethodKind: MethodKind.PropertyGet, AssociatedSymbol: IPropertySymbol { IsIndexer: false } p } => p.Name,
         // R28.2. `void IEnumerator.Reset()` is named `System.Collections.IEnumerator.Reset`.

@@ -236,6 +236,7 @@ public static partial class FrontendPass
             MethodDeclarationSyntax m => m.Identifier,
             ConstructorDeclarationSyntax c => c.Identifier,
             PropertyDeclarationSyntax p => p.Identifier,
+            IndexerDeclarationSyntax ix => ix.ThisKeyword,
             AccessorDeclarationSyntax { Parent.Parent: IndexerDeclarationSyntax ix } => ix.ThisKeyword,
             AccessorDeclarationSyntax { Parent.Parent: PropertyDeclarationSyntax p } => p.Identifier,
             _ => Syntax.GetFirstToken(),
@@ -248,6 +249,7 @@ public static partial class FrontendPass
             // `T P => e;` and `T P { get => e; }` are the same declaration with the same
             // body; the accessor form is where an attribute could never have gone.
             PropertyDeclarationSyntax p => p.ExpressionBody ?? Getter(p)?.ExpressionBody,
+            IndexerDeclarationSyntax ix => ix.ExpressionBody,
             AccessorDeclarationSyntax a => a.ExpressionBody,
             _ => null,
         };
@@ -256,7 +258,8 @@ public static partial class FrontendPass
         /// method itself — which for a property is its getter when the attributes are
         /// written on the <c>get</c>.</summary>
         public ISymbol Declaration => ContractOverride ??
-            (Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
+            (Syntax is IndexerDeclarationSyntax && Symbol.AssociatedSymbol is { } ixp ? ixp :
+            Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
             !(Getter(pd) is { } g && g.AttributeLists.SelectMany(l => l.Attributes).Any(IsContractAttribute)) ? p : Symbol);
 
         /// <summary>R27.12. The `get` accessor, when the contract was written there.</summary>
@@ -352,6 +355,16 @@ public static partial class FrontendPass
             // could not say which one it meant.
             foreach (var ix in tree.GetRoot().DescendantNodes().OfType<IndexerDeclarationSyntax>())
             {
+                // R33.13. `T this[int i] => e;` has no accessor to write the contract on, so
+                // it is written on the indexer, as R9.20 has it for `T P => e;`.
+                if (ix is { AccessorList: null, ExpressionBody: not null })
+                {
+                    if (model.GetDeclaredSymbol(ix) is not IPropertySymbol { GetMethod: { } g } ip) continue;
+                    if (known.IsSpecTypeDeclaration(ip.ContainingType)) continue;
+                    if (Declarations.KindOf(g, known) is not { } gk) continue;
+                    result.Add(new Candidate(ix, g, gk));
+                    continue;
+                }
                 if (ix.AccessorList is null) continue;
                 foreach (var accessor in ix.AccessorList.Accessors)
                 {
@@ -2797,6 +2810,7 @@ public static partial class FrontendPass
     {
         BaseMethodDeclarationSyntax m => m.ExpressionBody,
         PropertyDeclarationSyntax p => p.ExpressionBody ?? Candidate.Getter(p)?.ExpressionBody,
+        IndexerDeclarationSyntax ix => ix.ExpressionBody,
         AccessorDeclarationSyntax a => a.ExpressionBody,
         _ => null,
     };
@@ -2825,7 +2839,9 @@ public static partial class FrontendPass
                 // to another of its own class -- which is C#'s own rule, not a choice.
                 stmts.AddRange(FieldInitialisers(c, lowerer));
 
-            var rest = c.Body is { } body ? lowerer.Lower(body) : null;
+            // R33.13. `C(T v) => _f = v;` is the body `{ _f = v; }`.
+            var rest = c.Body is { } body ? lowerer.Lower(body)
+                : c.ExpressionBody is { } ctorArrow ? lowerer.LowerArrow(ctorArrow) : null;
             if (rest is IrBlock inner) stmts.AddRange(inner.Statements);
             else if (rest is not null) stmts.Add(rest);
             return new IrBlock(Locations.From(c), stmts.ToImmutable());

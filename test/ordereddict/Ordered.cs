@@ -215,3 +215,33 @@ public class OrderedTable
         return c != null;
     }
 }
+
+// R33.12. Explicit indexer accessors and an explicit setter, two of them sharing `get_Item`.
+// R33.13. An expression-bodied constructor and an expression-bodied indexer.
+public interface IRow { bool this[int i] { get; set; } }
+public interface IRowReadOnly { bool this[int i] { get; } }
+
+public sealed class Row : IRow, IRowReadOnly
+{
+    private bool _value;
+
+    [Model]
+    private bool Model => _value;
+
+    [Spec] internal bool SpecValue => Model;
+
+    [Ensures("@this.SpecValue == v")]
+    public Row(bool v) => _value = v;
+
+    bool IRow.this[int i]
+    {
+        [Ensures("Result == @this.SpecValue")]
+        get => _value;
+        [Throws(typeof(NotSupportedException))]
+        [Ensures("false")]
+        set => throw new NotSupportedException();
+    }
+
+    [Ensures("Result == @this.SpecValue")]
+    bool IRowReadOnly.this[int i] => _value;
+}

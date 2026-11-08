@@ -9406,6 +9406,21 @@ is another C# type bound to the same F* type (`EqualityComparer<T>.Default` for 
 `IEqualityComparer<T>?`), the `Some` is given the option's type. A field's `??=` is still
 R29.3b's view cache or nothing.
 
+**R33.12. An explicit accessor is named by the interface accessor it implements.** R29.4 names
+an explicit non-indexer getter by its property; any other explicit accessor -- an explicit
+indexer's `get_Item`/`set_Item`, an explicit property's setter -- is named by R28.2's rule
+applied to the accessor it implements: `IList1_get_Item`, `IReadOnlyList1_get_Item` and
+`IList_get_Item` when a view implements all three, plain `set_Item` when it is the only one.
+Before, the module and the spec shim were named by C#'s metadata name
+(`System.Collections.Generic.IList<TKey>.get_Item`), which is no identifier and no shim.
+
+**R33.13. Expression-bodied indexers and constructors.** `T this[int i] => e;` is an indexer
+whose getter is `e`; it has no accessor to carry a contract, so the contract is written on
+the indexer, as R9.20 has it for `T P => e;`. Before, it was skipped -- and an annotation on
+it silently dropped. `C(T v) => _f = v;` is the constructor `{ _f = v; }`; before, the
+arrow was not read at all and the constructor was translated as assigning nothing (refused
+by the verifier, not unsound, but every expression-bodied constructor was unprovable).
+
 ### Findings (§33)
 
 * **Soundness (fixed, R33.6).** `x is null` on an array was translated as `false`, and
@@ -9418,6 +9433,8 @@ R29.3b's view cache or nothing.
   contract of `IEqualityComparer<T>` does not require.
 * The public `IndexOf(TKey)` passes one local, `_`, by `ref` to both of the private
   `IndexOf`'s out-parameters; harmless only because that callee never reads them (R33.7).
+* (R33.13) An annotated expression-bodied indexer was silently not translated, and an
+  expression-bodied constructor's body was dropped.
 
 ### Trusted (§33)
 
