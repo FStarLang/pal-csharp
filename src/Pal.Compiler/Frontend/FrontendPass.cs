@@ -118,10 +118,10 @@ public static partial class FrontendPass
                     foreach (var tp in callee.DefaultedTypeParameters)
                     {
                         var k = callee.TypeParameters.IndexOf(tp);
-                        if (k >= 0 && k < call.TypeArguments.Length &&
-                            call.TypeArguments[k] is IrTypeParamType { Name: var name } &&
-                            m.TypeParameters.Contains(name))
-                            needed.Add(name);
+                        if (k >= 0 && k < call.TypeArguments.Length)
+                            foreach (var name in DefaultedIn(call.TypeArguments[k]))
+                                if (m.TypeParameters.Contains(name))
+                                    needed.Add(name);
                     }
                 }
                 if (needed.Count == m.DefaultedTypeParameters.Length) continue;
@@ -133,6 +133,17 @@ public static partial class FrontendPass
             }
         } while (changed);
     }
+
+    // R22.22. The type parameters a `has_default` instance at `t` is resolved from: `t`
+    // itself, or those of a tuple's or a struct's arguments (their instances are built
+    // from their components').
+    private static IEnumerable<string> DefaultedIn(IrType t) => t switch
+    {
+        IrTypeParamType p => [p.Name],
+        IrUserSpecType u => u.Args.SelectMany(DefaultedIn),
+        IrNamedType n => n.TypeArguments.SelectMany(DefaultedIn),
+        _ => [],
+    };
 
     /// <summary>
     /// R9.7. A virtual method's contract is written once, on the <c>abstract</c>
@@ -744,7 +755,7 @@ public static partial class FrontendPass
                (known.HasModel(owner) || known.IsRegionClass(owner))
             // R28.2. A borrowing struct's getter is a member of the borrowed object's class.
             // R29.4. An explicit one (`object IEnumerator.Current`) when it carries a contract.
-            || Borrowing.IsBorrowing(p.ContainingType, known) &&
+            || (Borrowing.IsBorrowing(p.ContainingType, known) || Borrowing.IsWrapping(p.ContainingType, known)) &&
                (p.ExplicitInterfaceImplementations.IsEmpty || Declarations.IsAnnotated(p, known)));
 
     private static bool IsAuto(IPropertySymbol p) =>

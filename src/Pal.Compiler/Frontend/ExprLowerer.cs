@@ -808,7 +808,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // borrowing class's, which returns the record of the new object's fields.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol bnamed &&
             model.GetSymbolInfo(node).Symbol is IMethodSymbol bctor && Borrowing.IsMember(bctor, known))
+        {
+            if (Borrowing.IsWrapping(bnamed, known)) return WrappingRefused(node, bnamed, loc);
             return BorrowingConstruction(node, bctor, bnamed, loc);
+        }
 
         if (model.GetTypeInfo(node).Type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } named)
             return Unsupported(node, loc);

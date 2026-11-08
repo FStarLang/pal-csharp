@@ -628,6 +628,8 @@ public static class Normalize
                 return;
             case IrElement el: MutatedIn(el.Array, into); MutatedIn(el.Index, into); return;
             case IrField f: MutatedIn(f.Receiver, into); return;
+            // R29.1. `kvp.Key`/`.Value` of a call's result: the call may change its arguments.
+            case IrSpecOp o: foreach (var a in o.Args) MutatedIn(a, into); return;
             default: return;
         }
     }

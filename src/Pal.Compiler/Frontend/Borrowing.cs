@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -104,6 +105,53 @@ public static class Borrowing
     public static bool IsBorrowing(ITypeSymbol? type, WellKnown known) => OwnerField(type, known) is not null;
 
     /// <summary>
+    /// R32.12. The wrapped field of a *wrapping* struct: a struct that borrows nothing itself
+    /// (R28.1), whose one instance field of struct type is a borrowing or wrapping struct,
+    /// and whose other instance fields are values that hold no reference.
+    /// </summary>
+    public static IFieldSymbol? InnerField(ITypeSymbol? type, WellKnown known) => InnerField(type, known, 0);
+
+    private static IFieldSymbol? InnerField(ITypeSymbol? type, WellKnown known, int depth)
+    {
+        if (depth > 8 || type is not INamedTypeSymbol { TypeKind: TypeKind.Struct } s || OwnerField(s, known) is not null)
+            return null;
+        IFieldSymbol? found = null;
+        foreach (var f in s.GetMembers().OfType<IFieldSymbol>())
+        {
+            if (f.IsStatic || f.IsConst) continue;
+            if (f.Type is INamedTypeSymbol { TypeKind: TypeKind.Struct } ft &&
+                (IsBorrowing(ft, known) || InnerField(ft, known, depth + 1) is not null))
+            {
+                if (found is not null) return null;
+                found = f;
+                continue;
+            }
+            if (f.Type.IsReferenceType || f.Type.TypeKind == TypeKind.TypeParameter ||
+                f.Type is { TypeKind: TypeKind.Struct, SpecialType: SpecialType.None }) return null;
+        }
+        return found;
+    }
+
+    /// <summary>R32.12. Whether <paramref name="type"/> is a wrapping struct.</summary>
+    public static bool IsWrapping(ITypeSymbol? type, WellKnown known) => InnerField(type, known) is not null;
+
+    /// <summary>
+    /// R32.12. The wrapped fields from a wrapping struct down to the borrowing struct at its
+    /// core, and that struct: each field is of the struct the next is a field of.
+    /// </summary>
+    public static (ImmutableArray<IFieldSymbol> Path, INamedTypeSymbol Core) Innermost(ITypeSymbol type, WellKnown known)
+    {
+        var path = ImmutableArray.CreateBuilder<IFieldSymbol>();
+        var t = (INamedTypeSymbol)type;
+        while (InnerField(t, known) is { } f)
+        {
+            path.Add(f);
+            t = (INamedTypeSymbol)f.Type;
+        }
+        return (path.ToImmutable(), t);
+    }
+
+    /// <summary>
     /// R28.2. Whether <paramref name="method"/> is a member of a borrowing struct that is
     /// translated: an instance method, accessor, constructor, or explicit interface
     /// implementation.
@@ -112,7 +160,7 @@ public static class Borrowing
         method is { IsStatic: false,
                     MethodKind: MethodKind.Ordinary or MethodKind.Constructor or MethodKind.PropertyGet or MethodKind.PropertySet
                                 or MethodKind.ExplicitInterfaceImplementation }
-        && IsBorrowing(method.ContainingType, known);
+        && (IsBorrowing(method.ContainingType, known) || IsWrapping(method.ContainingType, known));
 
     private static bool Encloses(INamedTypeSymbol outer, INamedTypeSymbol inner)
     {
@@ -146,6 +194,22 @@ public static class Borrowing
                 callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } decl &&
                 model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) &&
                 WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), self, seen))
+                return true;
+            // R32.12. A call of a writer member of the struct a wrapping struct wraps writes it.
+            if (node is InvocationExpressionSyntax
+                {
+                    Expression: MemberAccessExpressionSyntax
+                    {
+                        Expression: var wrapped and (IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }),
+                    },
+                } inner &&
+                model.GetSymbolInfo(wrapped).Symbol is IFieldSymbol { IsStatic: false, Type: INamedTypeSymbol { TypeKind: TypeKind.Struct } wt } wf &&
+                SymbolEqualityComparer.Default.Equals(wf.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
+                model.GetSymbolInfo(inner).Symbol is IMethodSymbol { IsStatic: false } innerCallee &&
+                SymbolEqualityComparer.Default.Equals(innerCallee.ContainingType.OriginalDefinition, wt.OriginalDefinition) &&
+                innerCallee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } innerDecl &&
+                model.Compilation.ContainsSyntaxTree(innerDecl.SyntaxTree) &&
+                WritesState(innerDecl, model.Compilation.GetSemanticModel(innerDecl.SyntaxTree), wt, seen))
                 return true;
             var target = node switch
             {

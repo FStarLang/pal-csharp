@@ -30,7 +30,17 @@ public static partial class FrontendPass
             _ => null,
         } ?? candidate.Symbol;
         var self = symbol.ContainingType;
-        var owner = Borrowing.OwnerField(self, known)!;
+        // R32.12. A wrapping struct's member is one of the object its core borrows.
+        var (corePath, core) = Borrowing.Innermost(self, known);
+        var owner = Borrowing.OwnerField(core, known)!;
+        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor)
+        {
+            diagnostics.Error("PALCS0801", loc,
+                $"The constructor of the wrapping struct `{self.Name}`. A wrapping struct's members are " +
+                "verified as members of the object its core borrows; its constructors are not " +
+                "(doc/translation.md R32.12).");
+            return null;
+        }
         if (known.MapType(owner.Type) is not IrClassType ownerType || known.MapType(self) is not { } selfType)
         {
             diagnostics.Unsupported(loc, $"The borrowing struct `{self.Name}`");
@@ -46,7 +56,7 @@ public static partial class FrontendPass
             return null;
         }
         var borrow = new BorrowContext(self, owner, selfType, ownerType, isCtor, ownerParameter)
-            { Owned = Borrowing.OwnedFields(self, known) };
+            { Owned = Borrowing.OwnedFields(core, known), CorePath = corePath };
         // R27.37. Each object the struct owns is a further parameter of a member, owned
         // through its invariant as any object parameter is, and held by the field.
         var owned = ImmutableArray.CreateBuilder<(IFieldSymbol Field, IrClassType Type)>();
@@ -98,13 +108,13 @@ public static partial class FrontendPass
         // R28.2. The borrowing field holds the receiver, before and after.
         IrExpr Holds(IrExpr structValue) =>
             new IrBinary(loc, BinOp.Eq,
-                new IrField(loc, structValue, owner.Name) { Type = ownerType },
+                new IrField(loc, borrow.Core(structValue, known), owner.Name) { Type = ownerType },
                 new IrRefOf(loc, Names.This) { Type = ownerType }) { Type = IrPrim.Bool };
         var selfVar = new IrVar(loc, BorrowContext.Self) { Type = selfType };
         // R27.37. Each owned field holds the object passed for it.
         IEnumerable<IrExpr> HoldsOwned(IrExpr structValue) => owned.Select(o =>
             (IrExpr)new IrBinary(loc, BinOp.Eq,
-                new IrField(loc, structValue, o.Field.Name) { Type = o.Type },
+                new IrField(loc, borrow.Core(structValue, known), o.Field.Name) { Type = o.Type },
                 new IrRefOf(loc, Borrowing.OwnedName(o.Field)) { Type = o.Type }) { Type = IrPrim.Bool });
         var requires = isCtor ? [] : ImmutableArray.Create([Holds(selfVar), .. HoldsOwned(selfVar)]);
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
@@ -113,12 +123,17 @@ public static partial class FrontendPass
         {
             ensures.Add(Holds(selfVar));
             ensures.AddRange(HoldsOwned(selfVar));
-            // R28.4. A readonly field of the struct is not written by its members.
-            foreach (var f in self.GetMembers().OfType<IFieldSymbol>())
+            // R28.4. A readonly field of the struct is not written by its members. R32.12: nor
+            // is one of a struct it wraps, whose members it calls.
+            var levels = new List<(IrExpr Value, INamedTypeSymbol Type)> { (selfVar, self) };
+            foreach (var pf in corePath)
+                levels.Add((new IrField(loc, levels[^1].Value, pf.Name) { Type = known.MapType(pf.Type) }, (INamedTypeSymbol)pf.Type));
+            foreach (var (level, levelType) in levels)
+            foreach (var f in levelType.GetMembers().OfType<IFieldSymbol>())
             {
                 if (f.IsStatic || f.IsConst || !f.IsReadOnly || borrow.IsOwner(f) ||
                     known.MapType(f.Type) is not IrPrim fieldType) continue;
-                var field = new IrField(loc, selfVar, f.Name) { Type = fieldType };
+                var field = new IrField(loc, level, f.Name) { Type = fieldType };
                 ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
                     { Type = IrPrim.Bool });
             }

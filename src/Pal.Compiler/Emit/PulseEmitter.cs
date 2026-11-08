@@ -530,6 +530,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     .. lm.Lambda.Bound is null ? ImmutableArray<Provenance>.Empty :
                         [new Provenance(Names.LambdaBound(lm.Name), decl.Loc)],
                 ],
+                // R32.12. A wrapping struct's member adds the bridges of its wrapped copies.
+                IrMethod wm => [new Provenance(construct, decl.Loc),
+                    .. RevealBridges(wm).Select(b => new Provenance(b.Name, decl.Loc))],
                 _ => [new Provenance(construct, decl.Loc)],
             };
 
@@ -1138,6 +1141,21 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var regions = c.Fields.Where(IsRegionField).Select(f => (IrClassType)f.Type)
             .GroupBy(t => t.Name).Select(g => g.First()).ToImmutableArray();
         if (regions.IsEmpty) return [];
+        // R32.12. A wrapping struct's member is one of its core's owner at the instance the
+        // struct names (`Owner<KeyValuePair<K, V>>`), so the regions are too.
+        if (m.Parameters.FirstOrDefault(p => p.Name == Names.This)?.Type is IrClassType { TypeArguments: var targs }
+            && targs.Length == c.TypeParameters.Length && !targs.IsEmpty)
+        {
+            var map = c.TypeParameters.Zip(targs, (n, t) => (n, t)).ToDictionary(x => x.n, x => x.t);
+            IrType Sub(IrType t) => t switch
+            {
+                IrTypeParamType tp when map.TryGetValue(tp.Name, out var r) => r,
+                IrClassType ct => ct with { TypeArguments = ct.TypeArguments.Select(Sub).ToImmutableArray() },
+                IrNamedType nt => nt with { TypeArguments = nt.TypeArguments.Select(Sub).ToImmutableArray() },
+                _ => t,
+            };
+            regions = regions.Select(k => (IrClassType)Sub(k)).ToImmutableArray();
+        }
         if (m.Open) return regions;
         var names = m.Requires.Concat(m.Ensures).Concat(m.Preserves)
             .SelectMany(Passes.Check.Subexpressions)
@@ -1765,6 +1783,44 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     // Methods (R4.1)
     // =======================================================================
 
+    /// <summary>
+    /// R32.12. The copy of a wrapped struct a writer member is passed has the struct's type
+    /// at the wrapper's instance (<c>struct_E (tuple2 ty_K ty_V)</c>). The callee's
+    /// post-state names the struct at the unfolded refinement instead, and the SMT encoding
+    /// gives the two instances unrelated names, so what the callee ensures of its `self`
+    /// says nothing of the field the copy is written back to. A lemma per such instance
+    /// equates the two `reveal`s, proved by unfolding (`trefl`).
+    /// </summary>
+    internal static ImmutableArray<(string Name, IrNamedType Type)> RevealBridges(IrMethod m) =>
+        m.Body is null ? [] :
+        [.. AllStatements(m.Body).OfType<IrLocalDecl>()
+            .Where(d => d.Name.StartsWith("__pal_inner", StringComparison.Ordinal)
+                        && d.Type is IrNamedType { TypeArguments: var a } && a.Any(t => t is not IrTypeParamType))
+            .Select(d => (IrNamedType)d.Type)
+            .GroupBy(Types.Render).Select(g => g.First())
+            .Select((t, i) => ($"pal_reveal_bridge_{i}", t))];
+
+    // Statements, including those of a statement-expression's prelude (where R32.12's
+    // write-back cell is declared).
+    private static IEnumerable<IrStmt> AllStatements(IrStmt root) =>
+        Passes.Check.Statements(root).SelectMany(s =>
+            new[] { s }.Concat(Passes.Check.Expressions(s)
+                .SelectMany(Passes.Check.Subexpressions).OfType<IrStmtExpr>()
+                .SelectMany(se => se.Prelude).SelectMany(AllStatements)));
+
+    private static string RevealBridge(string name, IrNamedType t, ImmutableArray<string> typeParameters)
+    {
+        var nominal = Types.Render(t);
+        var raw = Types.Applied($"{Names.StructModule(t.Name)}.{Names.StructRaw(t.Name)}", t.TypeArguments);
+        var refined = $"(pal_v: {raw} {{ {Names.StructModule(t.Name)}.{Names.StructPred(t.Name)} pal_v }})";
+        var binders = string.Concat(typeParameters.Select(p => $" ({Names.TypeParam(p)}: Type0)"));
+        var eq = $"reveal #({nominal}) x == reveal #{refined} x";
+        return $"let {name}{binders} (x: erased {refined})\n" +
+               $"  : Lemma ({eq})\n" +
+               $"          [SMTPat (reveal #({nominal}) x)]\n" +
+               $"  = assert ({eq}) by (FStar.Tactics.V2.trefl ())\n\n";
+    }
+
     private EmittedModule EmitMethod(IrMethod method)
     {
         var held = _regionHeld.TryGetValue(method.Name, out var hr) ? hr : [];
@@ -1800,6 +1856,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"#set-options \"--z3rlimit_factor {factor}\"");
             sb.AppendLine();
         }
+
+        foreach (var (name, type) in RevealBridges(method))
+            sb.Append(RevealBridge(name, type, method.TypeParameters));
 
         var origins = ImmutableArray.CreateBuilder<LineOrigin>();
 

@@ -28,6 +28,26 @@ public sealed record BorrowContext(
     public ImmutableArray<IFieldSymbol> Owned { get; init; } = [];
 
     /// <summary>
+    /// R32.12. For a wrapping struct, the wrapped fields down to the borrowing struct at its
+    /// core, whose borrowing field <see cref="Owner"/> and owned fields <see cref="Owned"/> are.
+    /// Empty for a borrowing struct.
+    /// </summary>
+    public ImmutableArray<IFieldSymbol> CorePath { get; init; } = [];
+
+    /// <summary>
+    /// R32.12. The wrapped fields the struct is read through from <see cref="SelfName"/>: empty
+    /// for the struct a member is of; the path to it, for a struct a wrapping struct wraps.
+    /// </summary>
+    public ImmutableArray<IFieldSymbol> SelfPath { get; init; } = [];
+
+    /// <summary>R32.12. Whether the struct wraps another rather than borrowing itself.</summary>
+    public bool Wrapping => !CorePath.IsEmpty;
+
+    /// <summary>R32.12. <paramref name="value"/>'s borrowing struct at its core: the value itself, or its wrapped field's, recursively.</summary>
+    public IrExpr Core(IrExpr value, WellKnown known) =>
+        CorePath.Aggregate(value, (v, f) => new IrField(v.Loc, v, f.Name) { Type = known.MapType(f.Type) });
+
+    /// <summary>
     /// R27.41. The IR name the struct is read under: <c>self</c> in its own members, the
     /// local in an owner's method that holds one.
     /// </summary>
@@ -85,7 +105,59 @@ public sealed partial class ExprLowerer
     private IrExpr SelfExpr(IrLoc loc) =>
         Borrow!.Constructor
             ? new IrResult(loc) { Type = Borrow.StructType }
-            : new IrVar(loc, Borrow.SelfName) { Type = Borrow.StructType };
+            : SelfOf(Borrow, loc);
+
+    /// <summary>R32.12. The struct <paramref name="held"/> is of, read through its wrapped fields.</summary>
+    private IrExpr SelfOf(BorrowContext held, IrLoc loc) =>
+        held.SelfPath.Aggregate((IrExpr)new IrVar(loc, held.SelfName) { Type = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType) },
+            (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+
+    /// <summary>
+    /// R32.12. The context of the struct a wrapping struct wraps, read through the wrapped
+    /// field: the same borrowed object, owned objects and struct local, one field further in.
+    /// </summary>
+    private BorrowContext InnerContext(BorrowContext outer)
+    {
+        var field = outer.CorePath[0];
+        var type = (INamedTypeSymbol)field.Type;
+        var (path, core) = Borrowing.Innermost(type, known);
+        return new BorrowContext(type, Borrowing.OwnerField(core, known)!, known.MapType(type)!, outer.OwnerType, false, null)
+        {
+            Owned = outer.Owned,
+            CorePath = path,
+            SelfName = outer.SelfName,
+            SelfPath = outer.SelfPath.Add(field),
+            OwnerName = outer.OwnerName,
+            OwnedNames = outer.OwnedNames,
+        };
+    }
+
+    /// <summary>R32.12. Whether <paramref name="e"/> is the wrapped field of the struct a wrapping member is of.</summary>
+    private BorrowContext? WrappedField(ExpressionSyntax e)
+    {
+        if (Borrow is not { Wrapping: true } bw) return null;
+        var target = e switch
+        {
+            IdentifierNameSyntax => e,
+            MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } => e,
+            MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv } m when
+                model.GetSymbolInfo(recv).Symbol is IParameterSymbol { Name: Names.This } tp && IsShim(tp.ContainingSymbol) => m,
+            _ => null,
+        };
+        return target is not null && model.GetSymbolInfo(target).Symbol is IFieldSymbol f &&
+               SymbolEqualityComparer.Default.Equals(f.OriginalDefinition, bw.CorePath[0].OriginalDefinition)
+            ? InnerContext(bw)
+            : null;
+    }
+
+    private IrExpr WrappingRefused(ExpressionSyntax node, INamedTypeSymbol type, IrLoc loc)
+    {
+        diagnostics.Error("PALCS0801", loc,
+            $"`{node}` creates the wrapping struct `{type.Name}`. A wrapping struct's members are " +
+            "verified as members of the object its core borrows; creating one is not supported " +
+            "(doc/translation.md R32.12).");
+        return new IrLiteral(loc, null);
+    }
 
     // R27.41. The borrowing structs this method holds in locals, by local.
     private readonly Dictionary<ISymbol, BorrowContext> _held = new(SymbolEqualityComparer.Default);
@@ -115,9 +187,10 @@ public sealed partial class ExprLowerer
     public void Unalias(ILocalSymbol x) => _aliases.Remove(x);
 
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
-        model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
+        WrappedField(Unparenthesized(e)) ??
+        (model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
         (_aliases.TryGetValue(l0, out var l) ? l : l0) is var l1 && _held.TryGetValue(l1, out var c) ? c
-        : ForEachEnumerator(Unparenthesized(e));
+        : ForEachEnumerator(Unparenthesized(e)));
 
     /// <summary>R27.51. <c>Pal.Enumerator&lt;E&gt;(x)</c>, in a contract: the enumerator of the `foreach` over <c>x</c>.</summary>
     private BorrowContext? ForEachEnumerator(ExpressionSyntax e) =>
@@ -153,7 +226,7 @@ public sealed partial class ExprLowerer
         if (SpecPosition || !Borrowing.IsMember(method, known) || method.IsStatic)
             return HeldRefused(node, loc);
         var args = node.ArgumentList.Arguments.Select(a => Lower(a.Expression)).ToList();
-        return WithHeld(held, () => HeldCall(held, method, args, loc));
+        return WithHeld(held, () => HeldCall(held, method, args, loc, node));
     }
 
     /// <summary>
@@ -167,7 +240,7 @@ public sealed partial class ExprLowerer
             return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
         if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
             Borrowing.IsMember(getter, known))
-            return WithHeld(held, () => HeldCall(held, getter, [], loc));
+            return WithHeld(held, () => HeldCall(held, getter, [], loc, node));
         return HeldRefused(node, loc);
     }
 
@@ -179,17 +252,49 @@ public sealed partial class ExprLowerer
         return new IrLiteral(loc, null);
     }
 
-    private IrExpr HeldCall(BorrowContext held, IMethodSymbol callee, IReadOnlyList<IrExpr> args, IrLoc loc)
+    private IrExpr HeldCall(BorrowContext held, IMethodSymbol callee, IReadOnlyList<IrExpr> args, IrLoc loc,
+        SyntaxNode? site = null)
     {
         var decl = callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
         if (decl?.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
-        var local = new IrVar(loc, held.SelfName) { Type = held.StructType };
-        IrExpr self = decl is not null &&
-                      Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct)
-            ? new IrRefArg(loc, local)
-            : local;
-        return BorrowingCall(callee, self, args, loc);
+        var writes = decl is not null &&
+                     Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct);
+        var local = SelfOf(held, loc);
+        if (!writes) return BorrowingCall(callee, local, args, loc);
+        if (held.SelfPath.IsEmpty) return BorrowingCall(callee, new IrRefArg(loc, local), args, loc);
+
+        // R32.12. A writer member of the wrapped struct: the struct is copied to a local, the
+        // member writes the local by reference, and the local is written back to the field.
+        // A raise skips the write-back, and is then the member's own: its struct after a
+        // raise is unconstrained (R28.4), so nothing can tell. A `try` could, and is refused.
+        if (site?.Ancestors().Any(a => a is TryStatementSyntax) == true)
+        {
+            diagnostics.Error("PALCS0802", loc,
+                $"`{site}` writes the wrapped struct inside a `try`. A wrapping struct's write through " +
+                "its wrapped field is written back when the call returns, so a handler could see the " +
+                "field before the call (doc/translation.md R32.12).");
+            return new IrLiteral(loc, null);
+        }
+        var cell = Fresh("inner");
+        var cellVar = new IrVar(loc, cell) { Type = held.StructType };
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        prelude.Add(new IrLocalDecl(loc, cell, held.StructType, local));
+        var call = BorrowingCall(callee, new IrRefArg(loc, cellVar), args, loc);
+        IrExpr value;
+        if (call.ResultType is null or IrPrim { Kind: PrimKind.Void })
+        {
+            prelude.Add(new IrExprStmt(loc, call));
+            value = new IrLiteral(loc, null) { Type = call.ResultType };
+        }
+        else
+        {
+            var result = Fresh("innerResult");
+            prelude.Add(new IrLocalDecl(loc, result, call.ResultType, call) { Immutable = true });
+            value = new IrVar(loc, result) { Type = call.ResultType };
+        }
+        prelude.Add(new IrAssign(loc, local, cellVar));
+        return new IrStmtExpr(loc, prelude.ToImmutable(), value) { Type = value.Type };
     }
 
     /// <summary>
@@ -266,6 +371,13 @@ public sealed partial class ExprLowerer
     {
         if (Borrow is { } sb && symbol is IPropertySymbol && node.Expression is ThisExpressionSyntax)
             return BorrowedIdentifier(symbol, SyntaxFactory_Identifier(node), loc);
+        // R32.12. `@this.SpecP` in a contract: the struct's own `[Spec]` property, expanded.
+        if (Borrow is { } spb && SpecPosition && symbol is IPropertySymbol { IsStatic: false } own &&
+            Declarations.Has(own, known.SpecAttribute) &&
+            SymbolEqualityComparer.Default.Equals(own.ContainingType.OriginalDefinition, spb.Struct.OriginalDefinition) &&
+            model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } shimThis &&
+            IsShim(shimThis.ContainingSymbol))
+            return InlineSpec(spb, own, loc);
         if (Borrow is not { } bw || symbol is not IFieldSymbol { IsStatic: false } f) return null;
         if (bw.IsOwner(f) && node.Expression is ThisExpressionSyntax) return BorrowedObject(loc);
         if (bw.IsOwned(f) && !bw.Constructor &&
@@ -559,12 +671,12 @@ public static class BorrowFacts
     {
         var self = new IrVar(loc, borrow.SelfName) { Type = borrow.StructType };
         yield return new IrBinary(loc, BinOp.Eq,
-            new IrField(loc, self, borrow.Owner.Name) { Type = borrow.OwnerType },
+            new IrField(loc, borrow.Core(self, known), borrow.Owner.Name) { Type = borrow.OwnerType },
             new IrRefOf(loc, borrow.OwnerName) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
         // R27.37. Each owned field holds its parameter.
         foreach (var f in borrow.Owned)
             if (known.MapType(f.Type) is IrClassType ot)
-                yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, self, f.Name) { Type = ot },
+                yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, borrow.Core(self, known), f.Name) { Type = ot },
                     new IrRefOf(loc, borrow.OwnedLocal(f)) { Type = ot }) { Type = IrPrim.Bool };
         if (!snapshots) yield break;
         foreach (var (f, type) in ReadOnlyFields(borrow, known))

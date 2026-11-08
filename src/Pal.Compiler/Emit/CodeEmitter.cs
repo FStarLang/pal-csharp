@@ -776,6 +776,9 @@ public sealed class CodeEmitter(
     /// </summary>
     private bool JoinLoses(IrIf i) =>
         (_objects.Length > 0 && (ReplacesArrayField(i) || CallsOpenReceiver(i) || ThrowGuard(i))) || CopiesArray(i) ||
+        // R32.12. A wrapping struct's guard tests what a call of the wrapped struct returned.
+        (ThrowGuard(i) && Check.Subexpressions(i.Cond).Any(e => e is IrCall)
+            && _method?.Parameters.Any(p => p.Name == Frontend.BorrowContext.Self) == true) ||
         MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i);
 
     /// <summary>
@@ -2588,7 +2591,9 @@ public sealed class CodeEmitter(
              d.Type is IrSeqType ||
              // R27.37. The struct a borrowing constructor builds is passed by reference to
              // its writer members, which take a reference to the (refined) struct type.
-             d.Name == Frontend.BorrowContext.SelfCell
+             d.Name == Frontend.BorrowContext.SelfCell ||
+             // R32.12. So is the copy of a wrapped struct a writer member is passed.
+             d.Name.StartsWith("__pal_inner", StringComparison.Ordinal)
             ? $"let mut {cell} : {Types.Render(d.Type)} = {init};"
             : $"let mut {cell} = {init};");
     }

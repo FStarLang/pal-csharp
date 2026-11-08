@@ -706,6 +706,14 @@ public sealed class WalkSet<T>
         [Spec] internal bool SpecReady =>
             SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), _stack.Items) && _stack.SpecCapacity == _tree.SpecCount &&
             SpecPending.Length <= _tree.SpecCount && _version == _tree.SpecVersion;
+        // R32.12. What a wrapping struct states of the one it wraps.
+        [Spec] internal bool SpecWalking =>
+            SpecWalk.Walkable<WNode, T>(Pal.Heap<WNode>(), _stack.Items) && _stack.SpecCapacity == _tree.SpecCount &&
+            SpecPending.Length <= _tree.SpecCount;
+        [Spec] internal bool SpecFresh => _version == _tree.SpecVersion;
+        [Spec] internal bool SpecCurrentOk => _current == null || Pal.InRegion(_current);
+        [Spec] internal bool SpecEnded => _current == null;
+        [Spec] internal bool SpecCurrentWf => _current != null && Pal.WellFormed(_current);
 
         [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && @this._reverse == reverse")]
         [Ensures("SpecWalk.Walkable<WalkSet<T>.WNode, T>(Pal.Heap<WalkSet<T>.WNode>(), @this._stack.Items)")]
@@ -813,6 +821,9 @@ public sealed class WalkSet<T>
             }
         }
 
+        [Ensures("Result == (@this._current == null)")]
+        internal bool NotStartedOrEnded => _current == null;
+
         [Requires("@this._stack.SpecCapacity == @this._tree.SpecCount")]
         [Throws(typeof(System.InvalidOperationException), "@this._version != @this._tree.SpecVersion")]
         [Ensures("SpecWalk.Walkable<WalkSet<T>.WNode, T>(Pal.Heap<WalkSet<T>.WNode>(), @this._stack.Items)")]
@@ -914,6 +925,65 @@ public sealed class WalkHolder<T>
             });
         }
         return n;
+    }
+
+    // R32.12. A wrapping struct: its one struct field is a borrowing struct of the set,
+    // and its members are the set's, with the wrapped struct read through the field.
+    public struct Enumerator
+    {
+        private WalkSet<T>.Enumerator _inner;
+        private readonly int _kind;
+
+        [Spec] internal Seq<T> SpecPending => _inner.SpecPending;
+        [Spec] internal bool SpecWalking => _inner.SpecWalking;
+        [Spec] internal bool SpecCurrentOk => _inner.SpecCurrentOk;
+        [Spec] internal bool SpecEnded => _inner.SpecEnded;
+
+        [Ensures("Result == @this._kind")]
+        public int Kind => _kind;
+
+        [Requires("@this._inner.SpecWalking")]
+        [Throws(typeof(System.InvalidOperationException), "!@this._inner.SpecFresh")]
+        [Ensures("@this.SpecWalking && @this.SpecCurrentOk")]
+        [Ensures("Result == (Pal.Old(@this.SpecPending).Length > 0)")]
+        [Ensures("Pal.Implies(Result, @this._inner.SpecCurrentWf && Pal.Same(SpecSearchTree.RootKey(@this._inner.SpecCurrentTree, Pal.Old(@this.SpecPending)[0]), Pal.Old(@this.SpecPending)[0]))")]
+        [Ensures("@this.SpecPending == Pal.Slice(Pal.Old(@this.SpecPending), Result ? 1 : 0, Pal.Old(@this.SpecPending).Length)")]
+        public bool MoveNext()
+        {
+            return _inner.MoveNext();
+        }
+
+        [Requires("@this.SpecCurrentOk")]
+        [Ensures("Pal.Implies(!@this.SpecEnded, Pal.Same(Result, SpecSearchTree.RootKey(@this._inner.SpecCurrentTree, Result)))")]
+        public T Current => _inner.Current;
+
+        [Requires("@this.SpecCurrentOk")]
+        [Throws(typeof(System.InvalidOperationException), "@this.SpecEnded")]
+        [Ensures("!@this.SpecEnded && Pal.Same(Result, SpecSearchTree.RootKey(@this._inner.SpecCurrentTree, Result))")]
+        public T Checked
+        {
+            get
+            {
+                if (_inner.NotStartedOrEnded)
+                {
+                    throw new System.InvalidOperationException();
+                }
+                return Current;
+            }
+        }
+    }
+
+    // R32.12. A struct that wraps a wrapping struct.
+    public struct Items
+    {
+        private Enumerator _outer;
+
+        [Requires("@this._outer.SpecWalking")]
+        [Throws(typeof(System.InvalidOperationException), "true")]
+        [Ensures("@this._outer.SpecWalking")]
+        [Ensures("Result == (Pal.Old(@this._outer.SpecPending).Length > 0)")]
+        [Ensures("@this._outer.SpecPending == Pal.Slice(Pal.Old(@this._outer.SpecPending), Result ? 1 : 0, Pal.Old(@this._outer.SpecPending).Length)")]
+        public bool MoveNext() => _outer.MoveNext();
     }
 
     // R32.9. A call that may raise, on the owned field, from a method that is read-only (its

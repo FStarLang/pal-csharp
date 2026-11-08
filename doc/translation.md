@@ -9479,6 +9479,45 @@ lifted like those of other classes. Before, their lifted methods were dropped.
 walk's bound set to the pair count, the views' `CopyTo` write `array[index++]` in range,
 and their contents become the old contents spliced with the keys or values from `index` on.
 
+### R32.12 Wrapping structs
+
+`SortedDictionary.Enumerator` holds a `SortedSet<KVP>.Enumerator`, and the key and value
+enumerators hold a `SortedDictionary.Enumerator`. A *wrapping struct* is a struct, not
+itself borrowing (R28.1), with exactly one field whose type is a borrowing or wrapping
+struct (its *wrapped field*). Its other fields are primitive. Following wrapped fields
+leads to one borrowing struct, its *core*.
+
+* A wrapping struct's members are translated as members of the core's owner. They take
+  the owner (`this`), the wrapping struct as `self` (by reference if the member writes it),
+  and the objects the core owns (R27.41). The member requires and ensures that
+  `self`'s path to the core borrows exactly these, and that each readonly field along
+  the path is unchanged.
+* In a member, `_inner.M(…)` is a call of the core's member (or of the next wrapper's) on
+  `self._inner`. A call that writes the wrapped struct copies the field to a local
+  (`__pal_innerN`), passes the local by reference, and writes it back to the field after
+  the call. A raise skips the write-back. That is sound because a struct's state after a
+  raise is existential. In a `try` a handler could see the field before the call, so the
+  call is refused there (PALCS0802).
+* Contracts may name the wrapped struct's `[Spec]` members (`_inner.SpecWalking`), which
+  are inlined at `self._inner`; its private fields are not visible to them.
+* The constructors of a wrapping struct, and `new W(…)` of one, are refused (PALCS0801).
+  Building the core needs its owner, and the dictionary's enumerator gets it from
+  `dictionary._set.GetEnumerator()`: a holder cannot expose the region heap of the set it
+  owns, so the caller cannot be told what the new core borrows.
+* `if (_inner.Test()) throw …;` in such a member nests the rest of the body in the `else`
+  arm, as R27.38 does for owners, so that the rest knows the call's result was false.
+* The owner's type parameters in the region heaps a member takes are those of `this`'s
+  type: the dictionary's members hold `SortedSet<KeyValuePair<TKey,TValue>>`'s node heap at
+  `Node<(TKey & TValue)>`.
+* A `has_default` need (R22.22) at a compound type argument (`KeyValuePair<TKey,TValue>`)
+  is a need at each type parameter inside it, since the instance is built from theirs.
+* When the core is generic and instantiated at a compound type, the copy `__pal_innerN`
+  has the core's nominal type while the core member's post-state is typed at the unfolded
+  refinement. F* gives the two refinements distinct SMT symbols, so nothing links the copy
+  to the result. The module gets a *reveal bridge* for each such type: a lemma, proved by
+  `trefl`, that the two `reveal`s of the same erased value are equal, triggered on the
+  nominal one.
+
 ### Verified (§32)
 
 `SortedDictionary<TKey,TValue>` members verified in this section:
@@ -9500,6 +9539,13 @@ and their contents become the old contents spliced with the keys or values from 
 | `Comparer` | the key comparer (`SpecKeyComparer`) |
 | `KeyCollection.CopyTo(a, i)`, `ValueCollection.CopyTo(a, i)` | `a` spliced at `[i, i + Count)` with the keys (values) in order; throws `ArgumentOutOfRangeException` on `i < 0`, `ArgumentException` when `a.Length - i < Count` |
 | indexer setter `this[key] = value` | key present: pairs `SetAt` the key's index to `(key at that index, value)`; absent: `Inserted`; requires a non-null key and fewer than `int.MaxValue` pairs |
+| `Enumerator.MoveNext` (R32.12) | as `SortedSet.Enumerator.MoveNext`: fail-fast on a stale version; `Result` iff items were pending; the pending items lose their head, which is the new current key |
+| `Enumerator.Current` | the current node's pair, once started and not ended |
+| `Enumerator.Reset`, `IEnumerator.Reset` | fail-fast on a stale version; pending is the whole in-order sequence again |
+| `Enumerator.Dispose`, `NotStartedOrEnded` | nothing; `Result` iff the walk has no current node |
+| `IDictionaryEnumerator.Key`/`Value` | throw `InvalidOperationException` when not started or ended |
+| `KeyCollection.Enumerator`, `ValueCollection.Enumerator`: `MoveNext`, `Current`, `IEnumerator.Current`, `IEnumerator.Reset`, `Dispose` | as the dictionary's enumerator, projected to the key (value); `IEnumerator.Current` boxes it (`Pal.Boxes`) and throws when not started or ended |
+| `IDictionary.IsFixedSize`, `IDictionary.IsReadOnly`, `ICollection.IsSynchronized` (dictionary and both views) | `false` |
 
 `ContainsKey`, `TryGetValue` and `SortedSet.TryGetValue` were re-verified under R32.2.
 `InOrderTreeWalk`, `RemoveWhere`, the three `SortedSet.CopyTo` overloads and
@@ -9516,8 +9562,15 @@ and their contents become the old contents spliced with the keys or values from 
 * The `ICollection.CopyTo(Array, int)` forms (of the dictionary and both views). They test
   `array.Rank` and `GetLowerBound`, type-test `array` (`is TKey[]`, `as object[]`) and
   rely on array covariance raising `ArrayTypeMismatchException`. None of these is modelled.
-* The dictionary's and the views' enumerators, the `IDictionary` constructors, and the
-  non-generic `IDictionary`/`ICollection` members.
+* The enumerators' constructors and the `GetEnumerator`s that call them, and the
+  `IDictionary` constructors: the core is built by `dictionary._set.GetEnumerator()`, and a
+  holder cannot expose the region heap of the set it owns (R32.12).
+* The dictionary enumerator's `IEnumerator.Current` and `Entry`: they build a
+  `DictionaryEntry`, which is not modelled.
+* The other non-generic `IDictionary`/`ICollection` members (`this[object]`, `Add(object,
+  object)`, `Contains(object)`, `Remove(object)`, `SyncRoot`): they type-test `object`
+  keys and values (`is TKey`) and cast them, catching `InvalidCastException`; neither is
+  modelled for type parameters.
 * `TreeSubSet` and `GetViewBetween`, and so the `IsSubsetOf` family's view branches.
   A view is a subclass that borrows its underlying set's region while owning its own range
   fields, and its `VersionCheckImpl` writes its own count from inside a walk of that region.
