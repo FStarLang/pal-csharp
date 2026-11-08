@@ -4245,6 +4245,10 @@ public sealed class CodeEmitter(
                 {
                     OptionOpKind.HasValue => $"(Some? {operand})",
                     OptionOpKind.Value => $"(Some?.v {operand})",
+                    // R33.11. A value of another type the same F* type stands for (two
+                    // bindings of one type) is given the option's type explicitly.
+                    _ when oo.Type is IrOptionType on && oo.Operand.Type is { } ot && !ot.Equals(on.Inner) =>
+                        $"(Some #{Types.Atom(on.Inner)} {operand})",
                     _ => $"(Some {operand})",
                 };
             }

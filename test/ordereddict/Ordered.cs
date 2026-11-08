@@ -9,6 +9,10 @@ using static System.Collections.ThrowHelper;
 // the member that names it.
 [assembly: TranslateAnnotatedOnly]
 [assembly: SpecBinding("P:System.IntPtr.Size", "Pulse.Lib.CSharp.Platform.intptr_size")]
+[assembly: SpecBinding("T:System.Collections.Generic.IEqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
+[assembly: SpecBinding("M:System.Collections.Generic.IEqualityComparer`1.Equals(`0,`0)", "Pulse.Lib.CSharp.Equality.equals")]
+[assembly: SpecBinding("T:System.Collections.Generic.EqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
+[assembly: SpecBinding("P:System.Collections.Generic.EqualityComparer`1.Default", "Pulse.Lib.CSharp.Equality.default_comparer")]
 
 [Spec]
 public struct OrderedTableModel
@@ -150,5 +154,64 @@ public class OrderedTable
     {
         int _ = 0;
         return Fill(k, out int _, ref _, ref _);
+    }
+    [Ensures("Result == (n >= 0) && h == n / 2")]
+    private static bool Half(int n, out int h)
+    {
+        h = n / 2;
+        return n >= 0;
+    }
+
+    // R33.9. An `out` variable declared in an `if`'s condition, read after the `if`.
+    [Ensures("n >= 0 ? Result == n / 2 : Result == -1")]
+    public static int HalfOr(int n)
+    {
+        if (!Half(n, out int h))
+        {
+            return -1;
+        }
+        return h;
+    }
+
+    // R33.10. Writing an element through a local copy of a field's array writes the field;
+    // a local that only ever holds new arrays does not.
+    [Requires("0 < @this.SpecSlots.Length")]
+    [Ensures("@this.SpecSlots.Length == Pal.Old(@this.SpecSlots).Length && @this.SpecSlots[0].Key == k")]
+    public void SetFirstKey(int k)
+    {
+        Slot[] slots = _slots;
+        Slot s = slots[0];
+        s.Key = k;
+        slots[0] = s;
+    }
+
+    [Ensures("Result == k")]
+    public static int Scratch(int k)
+    {
+        int[] a = new int[1];
+        a[0] = k;
+        return a[0];
+    }
+
+    // R33.11. `??=` on a parameter: a comparer, an `int?`, and a bound comparer type.
+    [Ensures("Result == (c ?? System.Collections.Generic.Comparer<int>.Default)")]
+    public static System.Collections.Generic.IComparer<int> OrderOrDefault(System.Collections.Generic.IComparer<int>? c)
+    {
+        c ??= System.Collections.Generic.Comparer<int>.Default;
+        return c;
+    }
+
+    [Ensures("n != null ? Result == n : Result == 0")]
+    public static int OrZero(int? n)
+    {
+        n ??= 0;
+        return n.Value;
+    }
+
+    [Ensures("Result")]
+    public static bool SelfEqual<T>(System.Collections.Generic.IEqualityComparer<T>? c, T x)
+    {
+        c ??= System.Collections.Generic.EqualityComparer<T>.Default;
+        return c != null;
     }
 }

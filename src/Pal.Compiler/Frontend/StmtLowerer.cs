@@ -47,6 +47,10 @@ public sealed class StmtLowerer(
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
             IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
+            // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
+            IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
+                new IrBlock(loc, [.. outs, new IrIf(loc, _code.Lower(i.Condition),
+                    Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement))]) { Splice = true },
             IfStatementSyntax i => new IrIf(loc, _code.Lower(i.Condition),
                 Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement)),
             WhileStatementSyntax w when OutDeclarations(w.Condition, loc) is { IsEmpty: false } outs =>
@@ -1088,6 +1092,28 @@ public sealed class StmtLowerer(
             // §18's totality is a property of the frontend, not of the operators it knows.
             _ => null,
         };
+
+        // R33.11. `x ??= d;` on a local or parameter is `x = x ?? d;`: for a comparer, whose
+        // null the model cannot see, `is_null x ? d : x` (R25.4); for an `option`,
+        // `Some? x ? x : Some d`.
+        if (node.IsKind(SyntaxKind.CoalesceAssignmentExpression) &&
+            model.GetSymbolInfo(node.Left).Symbol is ILocalSymbol { IsRef: false } or IParameterSymbol { RefKind: RefKind.None } &&
+            _code.Lower(node.Left) is { Type: { } coalescedType } coalesced && !ExprLowerer.HasEffect(coalesced))
+        {
+            if (Sorted.IsComparer(coalescedType))
+                return new IrAssign(loc, coalesced,
+                    new IrConditional(loc, Sorted.IsNull(loc, coalesced), _code.Lower(node.Right), coalesced)
+                        { Type = coalescedType });
+            if (coalescedType is IrOptionType && _code.Lower(node.Right) is { Type: { } fallbackType } fallback)
+                return new IrAssign(loc, coalesced,
+                    new IrConditional(loc,
+                        new IrOptionOp(loc, OptionOpKind.HasValue, coalesced) { Type = IrPrim.Bool },
+                        coalesced,
+                        fallbackType is IrOptionType
+                            ? fallback
+                            : new IrOptionOp(loc, OptionOpKind.Some, fallback) { Type = coalescedType })
+                        { Type = coalescedType });
+        }
 
         if (op is null && !node.IsKind(SyntaxKind.SimpleAssignmentExpression))
         {

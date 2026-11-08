@@ -203,6 +203,13 @@ public static class Declarations
                 model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
                 return true;
 
+            // R33.10. An element written through a local array may be one of a field's
+            // (R24.19's `T[] nodes = _nodes;`), unless every value the local takes is fresh.
+            if (target is ElementAccessExpressionSyntax &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { Type: IArrayTypeSymbol } arrayLocal &&
+                !AlwaysFresh(arrayLocal, syntax, model))
+                return true;
+
             // R27.16. An auto-property of a class is a field (R27.3), however it is written.
             if (target is not null &&
                 model.GetSymbolInfo(RootOf(target)).Symbol is IPropertySymbol
@@ -249,6 +256,34 @@ public static class Declarations
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// R33.10. Whether every value <paramref name="local"/> takes in <paramref name="body"/>
+    /// is a newly created array, so that writing its elements writes no object's field.
+    /// </summary>
+    private static bool AlwaysFresh(ILocalSymbol local, SyntaxNode body, SemanticModel model)
+    {
+        static bool Fresh(ExpressionSyntax? e) =>
+            e is ArrayCreationExpressionSyntax or ImplicitArrayCreationExpressionSyntax or CollectionExpressionSyntax;
+        if (local.DeclaringSyntaxReferences is not [var decl] || decl.GetSyntax() is not VariableDeclaratorSyntax ||
+            local.IsRef)
+            return false;
+        foreach (var node in body.DescendantNodes())
+        {
+            if (node is VariableDeclaratorSyntax v &&
+                SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(v), local) &&
+                !Fresh(v.Initializer?.Value))
+                return false;
+            if (node is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, local) &&
+                !(a.IsKind(SyntaxKind.SimpleAssignmentExpression) && Fresh(a.Right)))
+                return false;
+            if (node is ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(arg.Expression).Symbol, local))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>

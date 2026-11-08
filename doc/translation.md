@@ -9380,6 +9380,32 @@ Any other repeated `ref` is reported, as before.
 **R33.8. `a?.Length ?? d` on an array.** It is `a == null ? d : a.Length` (R24.7), when `a`
 has no effects.
 
+**R33.9. `out var` in an `if`'s condition.** `if (!TryGetValue(key, out TValue? value)) …`
+declares `value` in the enclosing block, as C# scopes it: the declaration is hoisted ahead of
+the `if` at its type's `default`, as R27.43 does for a loop's condition. The call writes it
+before anything reads it.
+
+**R33.10. A write through a local array is a write.** R4.11 decides whether a method leaves
+its receiver's model unchanged by scanning its body. An element written through a local
+array (`nodes[i] = x` after R24.19's `T[] nodes = _nodes;`) now counts as a write, unless
+every value the local takes is a new array (an array creation or a collection expression,
+never passed by `ref`). `PriorityQueue`'s `MoveDown*` had been classified as mutators only
+because they call a comparer; had they not, the emitted code would not have verified, so
+the gap was incompleteness, not unsoundness.
+
+Treating comparer calls (`Equals`, `GetHashCode`, `Compare`) as pure, so that more methods
+would be read-only, was tried and withdrawn: the read-only translation does not yet cover
+`HashSet.FindItemIndex`'s `Entry[]` local, `Stack.CopyTo` or `SortedSet.Overlaps`, which
+then fail. `OrderedDictionary`'s `IndexOf` and `TryGetValue` instead promise in their
+contracts that the model is unchanged, which is what the indexer's getter needs.
+
+**R33.11. `x ??= d;` on a local or parameter** is `x = x ?? d;`, `x` read once (it is a
+variable). For a comparer, whose null the model cannot see (R25.4), it is
+`x = (is_null x ? d : x)`; for an `option` it is `x = (Some? x ? x : Some d)`. When `d`'s type
+is another C# type bound to the same F* type (`EqualityComparer<T>.Default` for an
+`IEqualityComparer<T>?`), the `Some` is given the option's type. A field's `??=` is still
+R29.3b's view cache or nothing.
+
 ### Findings (§33)
 
 * **Soundness (fixed, R33.6).** `x is null` on an array was translated as `false`, and
