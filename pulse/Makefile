@@ -12,15 +12,15 @@ all: verify
 FSTAR_EXE ?= ../tools/run-fstar.sh
 CACHE_DIR ?= _cache
 
-ADMIT ?=
-MAYBE_ADMIT = $(if $(ADMIT),--admit_smt_queries true)
+ifneq ($(strip $(ADMIT)),)
+$(error ADMIT is not allowed in the support-library gate; use a separate scratch verification)
+endif
 
 FSTAR = $(FSTAR_EXE) \
 	--cache_checked_modules \
 	--cache_dir $(CACHE_DIR) \
 	--already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' \
-	--include $(CACHE_DIR) \
-	$(MAYBE_ADMIT)
+	--include $(CACHE_DIR)
 
 FSTAR_FILES := $(wildcard *.fst) $(wildcard *.fsti)
 

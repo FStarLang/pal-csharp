@@ -4,14 +4,14 @@ module Pulse.Lib.CSharp.NullableArray
 /// A C# array reference that may be `null` (`T[]?`), as a field of a class owns it
 /// (doc/translation.md R24.7).
 ///
-/// `pts_to a #p s` is `Pulse.Lib.Array.pts_to a #p s` when `a` is not null, and owns
+/// `pts_to a #p s` is `Pulse.Lib.CSharp.Array.pts_to a #p s` when `a` is not null, and owns
 /// nothing, with empty contents, when it is. Every operation on such an array is the
 /// ordinary one (`Pulse.Lib.CSharp.Array`) bracketed by `elim`, which needs the array
 /// to be non-null, and `intro`; storing a fresh array into the field is `intro`, and a
 /// field left `null` by a constructor is `intro_null`. Nothing here is assumed.
 
 open Pulse
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module Seq = FStar.Seq
 module T = FStar.Tactics
 

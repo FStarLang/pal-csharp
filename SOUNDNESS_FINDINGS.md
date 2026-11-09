@@ -1,5 +1,11 @@
 # Soundness audit of `pal-csharp`
 
+> Historical report. Its trust-boundary assessment below is superseded by
+> [the soundness campaign](doc/soundness-campaign.md): the array/span length
+> axioms are inconsistent with the larger types they quantify over, and further
+> semantic counterexamples have been reproduced. Do not treat this report's
+> "all true of the CLR" language as a current soundness claim.
+
 An adversarial review of the C#→Pulse verification pipeline, looking for the one thing
 that matters: a C# program that **should** fail verification and does not. Five holes were
 found, all five confirmed by running the program, all five fixed, all five pinned by new

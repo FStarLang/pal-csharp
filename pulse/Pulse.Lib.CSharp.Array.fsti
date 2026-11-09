@@ -9,7 +9,7 @@ module Pulse.Lib.CSharp.Array
 ///
 ///   * There is no partially-initialized state, so the mask/`MaybeUninit`
 ///     machinery `Pulse.Lib.C.Array` needs has no analogue here. The resource
-///     for `T[] a` is just `Pulse.Lib.Array.pts_to a #p (s: Seq.seq t)`.
+///     for `T[] a` is `pts_to a #p (s: Seq.seq t)`, lifted from the raw array.
 ///   * The length is a runtime value, obtained with `length_i32`, whereas
 ///     `Pulse.Lib.Array.Core.length` is ghost.
 ///
@@ -19,28 +19,24 @@ module Pulse.Lib.CSharp.Array
 /// exactly one place, `Pulse.Lib.CSharp.Casts.idx`, and this module supplies the
 /// `int`-indexed read and write built on it.
 
-include Pulse.Lib.Array
+include Pulse.Lib.CSharp.Array.Base
 
 open Pulse
 open Pulse.Lib.CSharp.Assumptions
 open Pulse.Lib.CSharp.Casts
 open Pulse.Lib.CSharp.Inhabited
 open Pulse.Lib.SmallType
+open Pulse.Lib.CSharp.Array.Base
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array.Base
 module I32 = FStar.Int32
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module CS = Pulse.Lib.CSharp.Seq
 
-/// The pure model of the CLR array-length header field.
-///
-/// MODELING AXIOM, in two parts. A CLR array's length is fixed at allocation and
-/// stored in the object header, so `a.Length` is a *pure* function of `a` --
-/// unlike `Pulse.Lib.Array.length`, which is ghost, and unlike a C array, which
-/// has no length at all. And because `System.Array.Length` has type `int`, no
-/// CLR array holds more than `Int32.MaxValue` elements; `arr_length_v` is what
-/// makes that bound available to every index obligation.
+/// The immutable runtime length stored alongside the underlying Pulse array.
+/// Its agreement with the storage and its bound are representation invariants,
+/// not axioms about arbitrary Pulse arrays.
 val arr_length (#t: Type0) (a: array t) : I32.t
 
 val arr_length_v (#t: Type0) (a: array t)
@@ -88,10 +84,9 @@ fn write (#t: Type0) (a: array t) (i: I32.t) (x: t)
 
 /// `new T[n]`, which the CLR zero-fills with `default(T)`.
 ///
-/// MODELING AXIOM. `Pulse.Lib.Array.alloc` is documented as unsound (it has no
-/// companion `free` obligation, and C stack arrays do not outlive their frame);
-/// for the CLR, where allocation is garbage collected and always succeeds, an
-/// allocation with no deallocation obligation is exactly right.
+/// Implemented with `Pulse.Lib.Vec.alloc`, transferring its ownership to the
+/// underlying array. As elsewhere in this model, resource exhaustion is excluded
+/// and unreachable allocations are reclaimed by the target's garbage collector.
 fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
   requires emp
   returns  a : array t
@@ -99,7 +94,7 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
 
 /// `new T[0]`, which needs no `default(T)` because it has no cells to fill.
 ///
-/// MODELING AXIOM, as `alloc`. It is stated separately because a zero-length
+/// REMAINING MODELING ASSUMPTION. It is stated separately because a zero-length
 /// array exists at every element type, inhabited or not -- which is what lets a
 /// generic class read its shared empty array (doc/translation.md R22.8) without
 /// asking its caller for a default value it does not use.

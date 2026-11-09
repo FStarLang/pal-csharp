@@ -9,6 +9,9 @@ module I32 = FStar.Int32
 /// `int` and every such literal, since a double holds every `int` exactly and the
 /// rounded product of two numbers of magnitude at most `|n|` and `1` cannot exceed
 /// `|n|`.
-val scale_unit (n: I32.t)
+/// `factor_bits` is the IEEE-754 representation of the constant factor. Keeping
+/// it as an argument is essential: different factors must not denote the same
+/// deterministic function of `n`.
+val scale_unit (n: I32.t) (factor_bits: FStar.Int64.t)
   : r: I32.t { (I32.v n >= 0 ==> 0 <= I32.v r /\ I32.v r <= I32.v n) /\
                (I32.v n < 0 ==> I32.v n <= I32.v r /\ I32.v r <= 0) }

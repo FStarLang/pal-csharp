@@ -485,11 +485,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                                         model.GetConstantValue(c) is { HasValue: true, Value: { } folded } =>
                 new IrLiteral(loc, folded),
             CastExpressionSyntax c when ScaledInt(c) is { } scaled =>
-                new IrSpecOp(loc, "Pulse.Lib.CSharp.Scale.scale_unit", [Lower(scaled)]) { Type = IrPrim.Int },
+                new IrSpecOp(loc, "Pulse.Lib.CSharp.Scale.scale_unit",
+                    [Lower(scaled.Value), new IrLiteral(loc, BitConverter.DoubleToInt64Bits(scaled.Factor))
+                        { Type = new IrPrim(PrimKind.Long) }]) { Type = IrPrim.Int },
             // R26.7. `(IComparer<T>?)null` is the null comparer, as the uncast literal is.
             CastExpressionSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) &&
                                         known.MapType(model.GetTypeInfo(c.Type).Type) is IrUserSpecType { FStar: Sorted.ComparerType } castCmp =>
                 new IrSpecOp(loc, "Pulse.Lib.CSharp.Comparer.null_comparer", []) { TypeArgs = castCmp.Args, Type = castCmp },
+            CastExpressionSyntax c when
+                model.GetOperation(c) is Microsoft.CodeAnalysis.Operations.IConversionOperation { IsChecked: true } &&
+                known.MapType(model.GetTypeInfo(c.Expression).Type) is IrPrim { IsMachineInt: true } castFrom &&
+                known.MapType(model.GetTypeInfo(c.Type).Type) is IrPrim { IsMachineInt: true } castTo &&
+                !Types.RangeFits(castFrom.Kind, castTo.Kind) =>
+                Refused("PALCS0001", loc,
+                    "A checked numeric conversion that can overflow is not translated. " +
+                    "Its OverflowException must not be replaced by an unchecked truncation."),
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -651,6 +661,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public IrExpr LowerConstructorInitializer(ConstructorInitializerSyntax node)
     {
+        if (!ArgumentsInOrder(node.ArgumentList)) return new IrLiteral(Locations.From(node), null);
         var loc = Locations.From(node);
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol ctor ||
             ctor.ContainingType is not { } klass || !known.HasModel(klass))
@@ -731,6 +742,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerObjectCreation(BaseObjectCreationExpressionSyntax node, IrLoc loc)
     {
+        if (node.ArgumentList is { } arguments && !ArgumentsInOrder(arguments))
+            return new IrLiteral(loc, null);
         // R29.1. `new KeyValuePair<K, V>(k, v)` is the pair `(k, v)`.
         // R29.4. So is `new DictionaryEntry(k, v)`, a pair of boxes.
         if (model.GetTypeInfo(node).Type is { } kvpType &&
@@ -2469,7 +2482,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// in <c>[0, 1]</c>: the one floating-point idiom in the collections (a capacity
     /// threshold), translated without floating point to a trusted bound on its result.
     /// </summary>
-    private ExpressionSyntax? ScaledInt(CastExpressionSyntax c)
+    private (ExpressionSyntax Value, double Factor)? ScaledInt(CastExpressionSyntax c)
     {
         static ExpressionSyntax Strip(ExpressionSyntax e) =>
             e is ParenthesizedExpressionSyntax p ? Strip(p.Expression) : e;
@@ -2487,9 +2500,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             n = m.Left;
         else
             return null;
-        if (model.GetConstantValue(m.Right) is not { HasValue: true, Value: double k } || k < 0 || k > 1)
+        if (model.GetConstantValue(m.Right) is not { HasValue: true, Value: double k } || !(k >= 0 && k <= 1))
             return null;
-        return n;
+        return (n, k);
     }
 
     /// <summary>R26.8/R29.1. A pair is built by F*'s constructor; its components keep their types.</summary>
@@ -2498,8 +2511,26 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             [ToDeclared(Lower(first), pair.Args[0]), ToDeclared(Lower(second), pair.Args[1])])
             { MachineArgs = true, Type = pair };
 
+    public bool ArgumentsInOrder(ArgumentListSyntax list)
+    {
+        for (var i = 0; i < list.Arguments.Count; i++)
+        {
+            var arg = list.Arguments[i];
+            if (arg.NameColon is null) continue;
+            if (model.GetOperation(arg) is Microsoft.CodeAnalysis.Operations.IArgumentOperation
+                { Parameter: { Ordinal: var ordinal } } && ordinal == i)
+                continue;
+            diagnostics.Unsupported(Locations.From(arg), "An out-of-position named argument",
+                "The translation currently requires parameter order. Reordering arguments " +
+                "without first evaluating them in source order changes C# semantics.");
+            return false;
+        }
+        return true;
+    }
+
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
     {
+        if (!ArgumentsInOrder(node.ArgumentList)) return new IrLiteral(loc, null);
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return Unsupported(node, loc);
 
         var args = node.ArgumentList.Arguments;

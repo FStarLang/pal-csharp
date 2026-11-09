@@ -228,6 +228,7 @@ namespace System.Collections.Generic
         [Requires("0 <= i && i < entries.Length")]
         [Ensures("-1 <= entries[i].Next && entries[i].Next < entries.Length")]
         [Ensures("-1 <= freeList && freeList < entries.Length")]
+        [Ensures("last < 0 || (0 <= last && last < entries.Length && last != i)")]
         [PulseBody("HashSetChain.search_next $(buckets) $(entries) $(count) $(freeList) $(freeCount) $(comparer) $(item) $(i) $(q) $(last)")]
         [Conditional("PAL")]
         private static void SearchNext(Seq<int> buckets, Seq<Entry> entries, SpecInt count, SpecInt freeList,
