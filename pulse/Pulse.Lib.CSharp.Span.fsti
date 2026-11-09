@@ -5,7 +5,7 @@ module Pulse.Lib.CSharp.Span
 ///
 /// A span is a *borrowed window* onto memory somebody else owns. That is the whole
 /// of its design in C# and the whole of its translation here: `Span<T>` is
-/// `Pulse.Lib.Slice.slice T`, and the operations below are the C#-shaped face of
+/// a length-bounded `Pulse.Lib.Slice.slice T`, and the operations below are the C#-shaped face of
 /// `Pulse.Lib.Slice`, exactly as `Pulse.Lib.CSharp.Array` is the C#-shaped face of
 /// `Pulse.Lib.Array` — `int` indices instead of `size_t`, a non-ghost length, and
 /// nothing else new.
@@ -27,8 +27,6 @@ module Pulse.Lib.CSharp.Span
 /// | `a.AsSpan(i, n)` | `of_array_range` | `is_range_of a w _ i j _` | `restore_array_range` |
 /// | `s.Slice(i, n)`, `s[i..j]` | `sub` | `is_sub_of s w _ i j _` | `restore_sub` |
 
-include Pulse.Lib.Slice
-
 open Pulse
 open Pulse.Lib.CSharp.Assumptions
 open Pulse.Lib.CSharp.Casts
@@ -36,40 +34,39 @@ open Pulse.Lib.CSharp.Inhabited
 open Pulse.Lib.CSharp.Seq
 open Pulse.Lib.SmallType
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module S = Pulse.Lib.Slice
 module I32 = FStar.Int32
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 
-/// The pure model of `Span<T>.Length`.
-///
-/// MODELING AXIOM, in the same two parts as `Pulse.Lib.CSharp.Array.arr_length`.
-/// `Slice.len` is already a pure, non-ghost function of the slice, so the first part
-/// costs nothing; what has to be assumed is the second, that the length fits in an
-/// `int`. Every span a C# program can construct is a window on a CLR array, whose
-/// length is an `int` already, so the bound holds — but it is not derivable from
-/// `Pulse.Lib.Slice`, which knows nothing about where its slices came from.
-val span_length (#t: Type0) (s: S.slice t) : I32.t
+type span (t: Type0) = s: S.slice t { SZ.v (S.len s) < pow2 31 }
 
-val span_length_v (#t: Type0) (s: S.slice t)
+/// Keep the wrapper in the receipt's matching key, rather than trying to infer
+/// the wrapper from its raw storage projection when restoring ownership.
+val is_from_array (#t: Type0) (a: A.array t) (s: S.slice t) : slprop
+
+/// `Slice.len` is executable; the refinement makes conversion to `int` safe.
+val span_length (#t: Type0) (s: span t) : I32.t
+
+val span_length_v (#t: Type0) (s: span t)
   : Lemma (I32.v (span_length s) == SZ.v (S.len s))
           [SMTPat (I32.v (span_length s))]
 
-val span_length_bound (#t: Type0) (s: S.slice t)
+val span_length_bound (#t: Type0) (s: span t)
   : Lemma (SZ.v (S.len s) < pow2 31)
           [SMTPat (SZ.v (S.len s))]
 
 /// `s.Length`. The `rewrites_to` is load-bearing for the same reason it is on
 /// `arr_length` (R3.3): without it a loop guard `k < s.Length` has no pure form.
-fn length_i32 (#t: Type0) (s: S.slice t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
+fn length_i32 (#t: Type0) (s: span t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   preserves S.pts_to s #p v
   returns  n : I32.t
   ensures  rewrites_to n (span_length s)
   ensures  pure (I32.v n == Seq.length v)
 
 /// `s[i]`, at a C# `int` index. The caller owes both bounds (R6.4).
-fn read (#t: Type0) (s: S.slice t) (i: I32.t)
+fn read (#t: Type0) (s: span t) (i: I32.t)
         (#p: perm)
         (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v i < Seq.length v })
   preserves S.pts_to s #p v
@@ -78,7 +75,7 @@ fn read (#t: Type0) (s: S.slice t) (i: I32.t)
 
 /// `s[i] = x`. There is no `ReadOnlySpan<T>` counterpart and none is needed: its
 /// indexer returns `ref readonly T`, so C# itself rejects the assignment (R17.4).
-fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
+fn write (#t: Type0) (s: span t) (i: I32.t) (x: t)
          (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v i < Seq.length v })
   requires S.pts_to s v
   ensures  S.pts_to s (Seq.upd v (I32.v i) x)
@@ -94,9 +91,9 @@ fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
 /// are writes to the same memory, and no sound rule lets both be owned at once.
 fn of_array (#t: Type0) (a: A.array t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   requires A.pts_to a #p v
-  returns  s : S.slice t
+  returns  s : span t
   ensures  S.pts_to s #p v
-  ensures  S.is_from_array a s
+  ensures  is_from_array a s
 
 /// `Pal.Restore(s)` for a span borrowed with `of_array`.
 ///
@@ -108,7 +105,7 @@ ghost
 fn restore_array (#t: Type0) (s: S.slice t)
                  (#a: A.array t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   requires S.pts_to s #p v
-  requires S.is_from_array a s
+  requires is_from_array a s
   ensures  A.pts_to a #p v
 
 (* ---------------------------------------------------------------------- *)
@@ -136,7 +133,7 @@ fn of_array_range (#t: Type0) (a: A.array t) (i: I32.t) (n: I32.t)
                   (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\
                                                   I32.v i + I32.v n <= Seq.length v })
   requires A.pts_to a #p v
-  returns  w : S.slice t
+  returns  w : span t
   ensures  S.pts_to w #p (Seq.slice v (I32.v i) (I32.v i + I32.v n))
   ensures  is_range_of a w p (I32.v i) (I32.v i + I32.v n) v
 
@@ -165,12 +162,12 @@ val is_sub_of (#t: Type0) (s: S.slice t) (w: S.slice t) (p: perm) (i j: nat)
   : slprop
 
 /// `s.Slice(i, n)` and `s[i .. i+n]`, with `j = i + n`.
-fn sub (#t: Type0) (s: S.slice t) (i: I32.t) (n: I32.t)
+fn sub (#t: Type0) (s: span t) (i: I32.t) (n: I32.t)
        (#p: perm)
        (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\
                                        I32.v i + I32.v n <= Seq.length v })
   requires S.pts_to s #p v
-  returns  w : S.slice t
+  returns  w : span t
   ensures  S.pts_to w #p (Seq.slice v (I32.v i) (I32.v i + I32.v n))
   ensures  is_sub_of s w p (I32.v i) (I32.v i + I32.v n) v
 

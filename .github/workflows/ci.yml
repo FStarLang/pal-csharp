@@ -55,12 +55,14 @@ jobs:
           path: tools/fstar
           key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
 
-      # Only a source pin (tools/fstar-source.txt) needs OCaml; a nightly is a binary.
-      - name: Set up OCaml for a source-pinned F*
-        if: steps.fstar-cache.outputs.cache-hit != 'true' && hashFiles('tools/fstar-source.txt') != ''
+      # Extracted execution tests need OCaml even when the F* binary is cached.
+      - name: Set up OCaml
         uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: '5.3.0'
+
+      - name: Install extracted-runtime dependencies
+        run: opam install --yes ocamlfind batteries pprint ppx_deriving ppx_deriving_yojson stdint yojson zarith
 
       - name: Install F* toolchain
         if: steps.fstar-cache.outputs.cache-hit != 'true'
@@ -120,7 +122,7 @@ jobs:
       # examples. It runs one F* job per core: the samples alone are over an hour
       # sequentially.
       - name: Test
-        run: make -j"$(nproc)" test
+        run: opam exec -- make -j"$(nproc)" test
 
       # `make test` has already run these; naming the two anti-contortion detectors
       # (doc/translation.md §7.2) separately is for the CI summary, where "the compiler

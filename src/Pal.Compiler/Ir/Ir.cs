@@ -761,8 +761,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-/// <summary><c>DebugAssert</c> is R22.19's <c>Debug.Assert(c)</c>: <c>Prop</c> is an executable expression.</summary>
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert, Let, Unreachable }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);

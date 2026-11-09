@@ -1814,6 +1814,7 @@ public sealed class StmtLowerer(
 
     private IrStmt LowerCallStatement(InvocationExpressionSyntax node, IrLoc loc)
     {
+        if (!_code.ArgumentsInOrder(node.ArgumentList)) return new IrBlock(loc, []);
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method)
             return UnsupportedStatement(node, loc);
 
@@ -1858,24 +1859,11 @@ public sealed class StmtLowerer(
             }
         }
 
-        // R22.19. `Debug.Assert(c)` fails fast when `c` is false, in the builds that keep
-        // it; that it never fails is a proof obligation, so `c` is evaluated and asserted.
-        // A message argument is accepted only as a constant, or a message R27.19 accepts
-        // (R33.21), whose evaluation is no effect.
-        if (method is { Name: "Assert", IsStatic: true } &&
-            method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
-            args.Count >= 1 && method.Parameters[0].Type.SpecialType == SpecialType.System_Boolean &&
-            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue || EffectFreeMessage(a.Expression)))
-            return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
-
-        // R27.19. `Debug.Fail(m)` is `Debug.Assert(false, m)`: the point is unreachable. A
-        // message may interpolate locals and parameters of primitive or enum type, whose
-        // formatting has no effect the proof could observe.
-        if (method is { Name: "Fail", IsStatic: true } &&
-            method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
-            args.Count == 1 && EffectFreeMessage(args[0].Expression))
-            return new IrGhostStmt(loc, GhostKind.DebugAssert,
-                new IrLiteral(loc, false) { Type = IrPrim.Bool }, null);
+        // Model Release C#: Conditional("DEBUG") removes the whole call, including
+        // argument evaluation. Use Pal.Assert for an assertion that verification checks.
+        if (method is { Name: "Assert" or "Fail", IsStatic: true } &&
+            method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug")
+            return new IrBlock(loc, []);
 
         // R23.2, R25.7. The BCL's argument guards are the `if … throw` they abbreviate.
         if (ArgumentGuard(method, args, loc) is { } guard)
@@ -2423,15 +2411,4 @@ public sealed class StmtLowerer(
         }
         return null;
     }
-
-    /// <summary>R27.19. A <c>Debug.Fail</c> message whose evaluation has no observable effect.</summary>
-    private bool EffectFreeMessage(ExpressionSyntax e) =>
-        model.GetConstantValue(e).HasValue ||
-        e is InterpolatedStringExpressionSyntax interp &&
-        interp.Contents.OfType<InterpolationSyntax>().All(h =>
-            model.GetConstantValue(h.Expression).HasValue ||
-            h.Expression is IdentifierNameSyntax &&
-            model.GetSymbolInfo(h.Expression).Symbol is ILocalSymbol or IParameterSymbol &&
-            model.GetTypeInfo(h.Expression).Type is { } ht &&
-            (ht.TypeKind == TypeKind.Enum || ht.SpecialType is >= SpecialType.System_Boolean and <= SpecialType.System_Double));
 }

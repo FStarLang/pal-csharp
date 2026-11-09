@@ -459,7 +459,7 @@ public static class Types
         // R17.1. A span is a `Pulse.Lib.Slice.slice`, which is a first-class value
         // with a length and a `pts_to` -- an array-shaped slot that need not be a
         // whole array.
-        IrSpanType s => $"S.slice {Atom(s.Element)}",
+        IrSpanType s => $"Span.span {Atom(s.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments),

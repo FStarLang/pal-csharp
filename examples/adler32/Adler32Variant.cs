@@ -112,7 +112,7 @@ public static class Adler32Variant
                 Pal.Invariant(low % MOD == Lo(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at)) % MOD);
                 Pal.Invariant(high % MOD == Hi(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at)) % MOD);
 
-                Pal.GhostStmt("Pulse.Lib.Array.pts_to_len $&(data)");
+                Pal.GhostStmt("Pulse.Lib.CSharp.Array.pts_to_len $&(data)");
                 Unfold(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at));
                 CongAdd(low, Lo(Pal.Contents(data), Pal.Old(at), at - Pal.Old(at)),
                        Pal.Contents(data)[at], Pal.Contents(data)[at]);

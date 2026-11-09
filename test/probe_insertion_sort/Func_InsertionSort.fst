@@ -22,7 +22,7 @@ open Pulse.Lib.CSharp.Casts
 open Let_Sorted
 
 module R = Pulse.Lib.Reference
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module I32 = FStar.Int32
 module Seq = FStar.Seq
 module CS = Pulse.Lib.CSharp.Seq

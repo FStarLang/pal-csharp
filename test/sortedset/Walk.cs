@@ -619,6 +619,7 @@ public sealed class WalkSet<T>
             Pal.Decreases(this.SpecItems.Length - n);
             n++;
             mineEnded = !mine.MoveNext();
+            Pal.Assert(n + (mineEnded ? 0 : 1) + mine.SpecPending.Length == this.SpecItems.Length);
             theirsEnded = !theirs.MoveNext();
         }
         version++;

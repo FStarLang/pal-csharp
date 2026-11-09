@@ -1,0 +1,17 @@
+using System;
+using PalCSharp.Tests;
+
+foreach (bool x in new[] { false, true })
+    foreach (bool y in new[] { false, true })
+        Console.WriteLine($"{Semantics.Xor(x, y)} {Semantics.And(x, y)} {Semantics.Or(x, y)}".ToLowerInvariant());
+foreach (bool x in new[] { false, true })
+    Console.WriteLine($"{Semantics.EagerAnd(x)} {Semantics.ShortAnd(x)}");
+foreach (int x in new[] { -1, 0, 255, 256, 511 })
+    Console.WriteLine(Semantics.Narrow(x));
+Console.WriteLine(Semantics.Widen(255));
+Console.WriteLine(Semantics.Named());
+Console.WriteLine(Semantics.DebugErasure());
+Console.WriteLine(Semantics.ArrayOps());
+Console.WriteLine(Shapes.MakeAndSum());
+Console.WriteLine(Shapes.GrowTile());
+Console.WriteLine(Shapes.GrowAndMeasureSide());

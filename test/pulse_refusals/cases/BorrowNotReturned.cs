@@ -1,4 +1,4 @@
-// EXPECT-PULSE: S.is_from_array var_a var_s
+// EXPECT-PULSE: Span.is_from_array var_a var_s
 // R17.5/R17.6. Creating a span consumes the parent array's ownership, and `Pal.Restore`
 // is what gives it back. Nothing infers where a borrow ends -- that is the design, not an
 // omission -- so a method that lends its array out and never takes it back cannot state a

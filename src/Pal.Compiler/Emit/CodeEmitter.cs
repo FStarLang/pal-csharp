@@ -4446,19 +4446,6 @@ public sealed class CodeEmitter(
             case GhostKind.Assert:
                 Line($"assert (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
-            // R23.6. Two arrays this method holds are distinct when one of them has a cell:
-            // whole permission to each could not otherwise be held at once.
-            case GhostKind.DebugAssert when g.Prop is IrBinary
-                { Op: BinOp.Ne, Left.Type: IrArrayType, Right.Type: IrArrayType } distinct:
-                Line($"Pulse.Lib.CSharp.QueueStack.distinct {Expr(distinct.Left)} {Expr(distinct.Right)};");
-                return;
-            case GhostKind.DebugAssert:
-            {
-                var c = Fresh();
-                Line($"let {c} = {Expr(g.Prop!)};");
-                Line($"assert (pure ({c} == true));");
-                return;
-            }
             case GhostKind.Assume:
                 Line($"assume (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
@@ -5455,12 +5442,18 @@ public sealed class CodeEmitter(
         // Booleans have no machine-integer module; they use F*'s own operators.
         if (b.Left.Type is IrPrim { Kind: PrimKind.Bool })
         {
-            return b.Op switch
+            var boolean = b.Op switch
             {
                 BinOp.Eq => $"({l} = {r})",
                 BinOp.Ne => $"(not ({l} = {r}))",
-                _ => $"({l} {(b.Op == BinOp.BitAnd ? "&&" : "||")} {r})",
+                BinOp.BitAnd => $"({l} && {r})",
+                BinOp.BitOr => $"({l} || {r})",
+                BinOp.BitXor => $"(not ({l} = {r}))",
+                _ => null,
             };
+            if (boolean is not null) return boolean;
+            diagnostics.Unsupported(b.Loc, $"The Boolean operator `{b.Op}`");
+            return "()";
         }
 
         var call = $"({module}.{op} {l} {r})";
