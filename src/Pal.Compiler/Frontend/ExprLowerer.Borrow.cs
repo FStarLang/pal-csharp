@@ -690,6 +690,8 @@ public sealed partial class ExprLowerer
                 ((SyntaxNode)st, st is ExpressionStatementSyntax es ? es.Expression : null));
         foreach (var (node, expr) in steps)
         {
+            if (expr is InvocationExpressionSyntax invocation && !ArgumentsInOrder(invocation.ArgumentList))
+                continue;
             if (tail.Count == 0 &&
                 expr is AssignmentExpressionSyntax { Left: var left, Right: var right } a &&
                 a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
