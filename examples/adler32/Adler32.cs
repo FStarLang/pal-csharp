@@ -188,7 +188,7 @@ public static class Adler32
                 // `buf.Length` is an `int`, so it is below 2^31 and `offset + 1` cannot
                 // overflow — but the invariant speaks of the *sequence's* length, and
                 // nothing ties that to the array's until the two are identified here.
-                Pal.GhostStmt("Pulse.Lib.Array.pts_to_len $&(buf)");
+                Pal.GhostStmt("Pulse.Lib.CSharp.Array.pts_to_len $&(buf)");
                 Step(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset));
                 ModAdd(s1, A1(Pal.Contents(buf), Pal.Old(offset), offset - Pal.Old(offset)),
                        Pal.Contents(buf)[offset], Pal.Contents(buf)[offset]);

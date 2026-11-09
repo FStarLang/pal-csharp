@@ -287,7 +287,7 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: S.slice {Types.Atom(span.Element)})");
+                    binders.Add($"({name}: Span.span {Types.Atom(span.Element)})");
                     ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(span.Element)}))");
 
                     var perm = p.Fraction is null ? "" : $"#{p.Fraction} ";

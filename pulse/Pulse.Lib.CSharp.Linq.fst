@@ -3,7 +3,7 @@ module Pulse.Lib.CSharp.Linq
 
 open Pulse
 open Pulse.Lib.CSharp.Array
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module Seq = FStar.Seq
 module SP = FStar.Seq.Properties
 

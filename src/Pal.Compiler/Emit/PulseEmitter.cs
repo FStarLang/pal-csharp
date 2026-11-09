@@ -2323,7 +2323,7 @@ public static class Preamble
     public const string Modules =
         """
         module R = Pulse.Lib.Reference
-        module A = Pulse.Lib.Array
+        module A = Pulse.Lib.CSharp.Array
         module S = Pulse.Lib.Slice
         module Span = Pulse.Lib.CSharp.Span
         module B = Pulse.Lib.Box

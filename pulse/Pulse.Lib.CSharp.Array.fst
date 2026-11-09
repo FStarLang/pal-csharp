@@ -6,21 +6,16 @@ open Pulse.Lib.CSharp.Assumptions
 open Pulse.Lib.CSharp.Casts
 open Pulse.Lib.CSharp.Inhabited
 open Pulse.Lib.SmallType
+open Pulse.Lib.CSharp.Array.Base
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array.Base
 module I32 = FStar.Int32
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module R = Pulse.Lib.Reference
 module CS = Pulse.Lib.CSharp.Seq
 
-(* MODELING AXIOM: the CLR array-length header field is immutable, so reading it
-   is pure, and it has type `int`, so its value is below 2^31. *)
-assume
-val clr_array_length_header (#t: Type0) (a: array t)
-  : (n: I32.t { I32.v n == A.length a })
-
-let arr_length (#t: Type0) (a: array t) : I32.t = clr_array_length_header a
+let arr_length (#t: Type0) (a: array t) : I32.t = a.count
 
 let arr_length_v (#t: Type0) (a: array t)
   : Lemma (I32.v (arr_length a) == A.length a)
@@ -34,7 +29,7 @@ let arr_length_v (#t: Type0) (a: array t)
 let arr_length_bound (#t: Type0) (a: array t)
   : Lemma (A.length a < pow2 31)
           [SMTPat (A.length a)]
-  = let _ = clr_array_length_header a in ()
+  = ()
 
 fn length_i32 (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
   preserves A.pts_to a #p s
@@ -43,7 +38,7 @@ fn length_i32 (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
   ensures  pure (I32.v n == Seq.length s)
 {
   A.pts_to_len a;
-  admit()
+  arr_length a
 }
 
 fn read (#t: Type0) (a: array t) (i: I32.t)
@@ -69,9 +64,7 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
   returns  a : array t
   ensures  A.pts_to a (Seq.create (I32.v n) init)
 {
-  (* MODELING AXIOM: `new T[n]` on a garbage-collected heap always succeeds and
-     zero-fills, and imposes no deallocation obligation. *)
-  admit()
+  A.alloc n init
 }
 
 fn alloc_empty (#t: Type0) (_: unit)

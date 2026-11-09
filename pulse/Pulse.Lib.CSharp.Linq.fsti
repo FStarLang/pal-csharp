@@ -16,7 +16,7 @@ module Pulse.Lib.CSharp.Linq
 
 open Pulse
 open Pulse.Lib.CSharp.Array
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module Seq = FStar.Seq
 
 let rec insert (#t #k: Type) (key: t -> k) (le: k -> k -> bool) (x: t) (s: Seq.seq t)

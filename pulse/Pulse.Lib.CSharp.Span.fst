@@ -8,43 +8,38 @@ open Pulse.Lib.CSharp.Inhabited
 open Pulse.Lib.CSharp.Seq
 open Pulse.Lib.SmallType
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module S = Pulse.Lib.Slice
 module I32 = FStar.Int32
 module SZ = FStar.SizeT
 module Seq = FStar.Seq
 
-(* MODELING AXIOM: every span a C# program can build is a window on a CLR array,
-   whose length is an `int`. `Pulse.Lib.Slice` does not record provenance, so the
-   bound cannot be derived there; it is assumed here in exactly the shape
-   `Pulse.Lib.CSharp.Array.clr_array_length_header` assumes it for arrays. *)
-assume
-val clr_span_length_header (#t: Type0) (s: S.slice t)
-  : (n: I32.t { I32.v n == SZ.v (S.len s) })
+let is_from_array (#t: Type0) (a: A.array t) (s: S.slice t) : slprop =
+  S.is_from_array a.storage s
 
-let span_length (#t: Type0) (s: S.slice t) : I32.t = clr_span_length_header s
+let span_length (#t: Type0) (s: span t) : I32.t = sizet_to_int32 (S.len s)
 
-let span_length_v (#t: Type0) (s: S.slice t)
+let span_length_v (#t: Type0) (s: span t)
   : Lemma (I32.v (span_length s) == SZ.v (S.len s))
           [SMTPat (I32.v (span_length s))]
   = ()
 
-let span_length_bound (#t: Type0) (s: S.slice t)
+let span_length_bound (#t: Type0) (s: span t)
   : Lemma (SZ.v (S.len s) < pow2 31)
           [SMTPat (SZ.v (S.len s))]
-  = let _ = clr_span_length_header s in ()
+  = ()
 
-fn length_i32 (#t: Type0) (s: S.slice t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
+fn length_i32 (#t: Type0) (s: span t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   preserves S.pts_to s #p v
   returns  n : I32.t
   ensures  rewrites_to n (span_length s)
   ensures  pure (I32.v n == Seq.length v)
 {
   S.pts_to_len s;
-  admit()
+  span_length s
 }
 
-fn read (#t: Type0) (s: S.slice t) (i: I32.t)
+fn read (#t: Type0) (s: span t) (i: I32.t)
         (#p: perm)
         (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v i < Seq.length v })
   preserves S.pts_to s #p v
@@ -54,7 +49,7 @@ fn read (#t: Type0) (s: S.slice t) (i: I32.t)
   S.op_Dot_Lparen_Rparen s (idx i)
 }
 
-fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
+fn write (#t: Type0) (s: span t) (i: I32.t) (x: t)
          (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v i < Seq.length v })
   requires S.pts_to s v
   ensures  S.pts_to s (Seq.upd v (I32.v i) x)
@@ -66,23 +61,30 @@ fn write (#t: Type0) (s: S.slice t) (i: I32.t) (x: t)
 
 fn of_array (#t: Type0) (a: A.array t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   requires A.pts_to a #p v
-  returns  s : S.slice t
+  returns  s : span t
   ensures  S.pts_to s #p v
-  ensures  S.is_from_array a s
+  ensures  is_from_array a s
 {
   A.pts_to_len a;
+  A.pts_to_not_null a;
   let n = Pulse.Lib.CSharp.Array.length_i32 a;
-  S.from_array a (idx n)
+  A.to_raw a;
+  let s = S.from_array a.storage (idx n);
+  S.pts_to_len s;
+  fold (is_from_array a s);
+  s
 }
 
 ghost
 fn restore_array (#t: Type0) (s: S.slice t)
                  (#a: A.array t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   requires S.pts_to s #p v
-  requires S.is_from_array a s
+  requires is_from_array a s
   ensures  A.pts_to a #p v
 {
-  S.to_array s
+  unfold (is_from_array a s);
+  S.to_array s;
+  A.of_raw a
 }
 
 (* ---------------------------------------------------------------------- *)
@@ -139,7 +141,7 @@ let is_range_of (#t: Type0) (a: A.array t) (w: S.slice t) (p: perm) (i j: nat)
                 (v: Seq.seq t { i <= j /\ j <= Seq.length v })
   : slprop
   = exists* (s: S.slice t).
-      S.is_from_array a s **
+      S.is_from_array a.storage s **
       rest s w p i j v **
       pure (SZ.v (S.len w) == j - i)
 
@@ -148,13 +150,15 @@ fn of_array_range (#t: Type0) (a: A.array t) (i: I32.t) (n: I32.t)
                   (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\
                                                   I32.v i + I32.v n <= Seq.length v })
   requires A.pts_to a #p v
-  returns  w : S.slice t
+  returns  w : span t
   ensures  S.pts_to w #p (Seq.slice v (I32.v i) (I32.v i + I32.v n))
   ensures  is_range_of a w p (I32.v i) (I32.v i + I32.v n) v
 {
   A.pts_to_len a;
+  A.pts_to_not_null a;
   let alen = Pulse.Lib.CSharp.Array.length_i32 a;
-  let s = S.from_array a (idx alen);
+  A.to_raw a;
+  let s = S.from_array a.storage (idx alen);
   let lo = idx i;
   let hi = idx (I32.add i n);
   let w = S.subslice s lo hi;
@@ -177,9 +181,10 @@ fn restore_array_range (#t: Type0) (w: S.slice t)
 {
   S.pts_to_len w;
   unfold (is_range_of a w p i j v);
-  with s. assert (S.is_from_array a s);
+  with s. assert (S.is_from_array a.storage s);
   elim_rest w;
   S.to_array s;
+  A.of_raw a;
 }
 
 (* ---------------------------------------------------------------------- *)
@@ -189,12 +194,12 @@ let is_sub_of (#t: Type0) (s: S.slice t) (w: S.slice t) (p: perm) (i j: nat)
   : slprop
   = rest s w p i j v ** pure (SZ.v (S.len w) == j - i)
 
-fn sub (#t: Type0) (s: S.slice t) (i: I32.t) (n: I32.t)
+fn sub (#t: Type0) (s: span t) (i: I32.t) (n: I32.t)
        (#p: perm)
        (#v: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\
                                        I32.v i + I32.v n <= Seq.length v })
   requires S.pts_to s #p v
-  returns  w : S.slice t
+  returns  w : span t
   ensures  S.pts_to w #p (Seq.slice v (I32.v i) (I32.v i + I32.v n))
   ensures  is_sub_of s w p (I32.v i) (I32.v i + I32.v n) v
 {
