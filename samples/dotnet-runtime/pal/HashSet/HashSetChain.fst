@@ -103,8 +103,17 @@ let search_next (#t: Type0) (bs: seq I32.t) (es: seq (entry t)) (n fl fc: int) (
                 (x: t) (i q last: int)
   : Lemma (requires search_last bs es n fl fc c x i q last /\ 0 <= i /\ i < Seq.length es)
           (ensures -1 <= I32.v (Seq.index es i).E.fld_Next /\ I32.v (Seq.index es i).E.fld_Next < Seq.length es /\
-                   -1 <= fl /\ fl < Seq.length es)
-  = HC.search_next (ops t) (eff c) bs es n fl fc x i q
+                   -1 <= fl /\ fl < Seq.length es /\
+                   (last < 0 \/ (0 <= last /\ last < Seq.length es /\ last <> i)))
+  = HC.search_next (ops t) (eff c) bs es n fl fc x i q;
+    let b = HC.bkt (HC.hv (eff c) x) (Seq.length es) in
+    let h = I32.v (Seq.index bs b) - 1 in
+    let l = HC.chain_of (ops t) (eff c) bs es n fl fc b in
+    if q >= l then HC.walk_end (ops t) es h l q;
+    if q > 0 then begin
+      HC.chain_live (ops t) es n (-1) b h l (q - 1);
+      HC.chain_distinct (ops t) es n (-1) b h l (q - 1) q
+    end
 
 let search_last_absent (#t: Type0) (bs: seq I32.t) (es: seq (entry t)) (n fl fc: int) (c: option (Eq.comparer t))
                        (x: t) (i q last: int)
