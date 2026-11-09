@@ -105,7 +105,7 @@ with the master of nightly-2026-10-31, with Z3 5.3.0. That build's installed
 | F3 | A `decreases` measure **may dereference mutable locals** (`!i`), but **may not** mention invariant-bound existentials. | `Pulse.Lib.Array.fst:49`, `Pulse.Lib.ArrayPtr.fst:385`; local `W3.fst` failed with `reveal v`, succeeded with `!i`. |
 | F4 | Pulse source requires the `#lang-pulse` pragma after the module header and `open`s. | `pal/pulse/Pulse.Lib.C.Array.fst:9`; local `Smoke.fst`, verified. |
 | F5 | The F* binary release bundles Pulse; no separate install is needed. | `tools/fstar/lib/fstar/pulse/` present after `make tools`. |
-| F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the insertion-sort probe (`test/probe_insertion_sort`): both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Dot_Lparen_Rparen` and PAL's `array_read_all` do the same. |
+| F6 | Every support-library operation whose result is consumed inside a `while` guard **must** specify its result with `rewrites_to`, not `pure (x == …)`. A `pure` postcondition leaves the let-bound intermediate existentially quantified, and Pulse then cannot infer the guard's postcondition — it reports `Cannot find witness for exists* (t: …)`. | Discovered by the original insertion-sort study, now covered by the compiler tests in `test/insertion_sort`: both `Array.length_i32` and `Array.read` failed this way and were respecified with `rewrites_to`. Pulse's own `op_Dot_Lparen_Rparen` and PAL's `array_read_all` do the same. |
 | F7 | `Pulse.Lib.Array` provides no SMT-patterned link between `Array.Core.length a` and `Seq.length s`; `pts_to_len` must be invoked explicitly. Modelling `a.Length` as a *pure* function of the array (sound, because a CLR array's length is immutable) avoids needing it at every guard. | `Pulse.Lib.Array.fst:38,65,117` all call `pts_to_len` by hand; `Pulse.Lib.CSharp.Array.arr_length` takes the pure route. |
 | F8 | A **stateful block may appear in term position**, as the scrutinee of a `let`: `let t = if (c) { <stateful block> } else { e };` is well-formed Pulse. This is what makes the short-circuit rule R6.3 compositional — the same lowering serves a loop guard, an `if` condition and an assignment right-hand side, with no context-dependent special case. | `test/pulse_facts/PulseFacts.fst:short_circuit_in_term_position`, verified; relied on by every generated short-circuit. |
 | F9 | A `decreases` measure may dereference a mutable local, but **not underneath an `if`**. `decreases (if !b then 0 else I32.v !r)` is rejected with "Expected type `FStar.Int32.t` but `!r` has type `fn …`", because the `!` sugar is elaborated only outside the branches. A conditional measure must keep its dereferences out of the branches. | `test/pulse_facts/PulseFacts.fst:decreases_conditional_without_deref`, verified; the failing form was reproduced while writing `test/binary_search`. |
@@ -617,11 +617,9 @@ The second row is not a preference; it is forced by **F17**. A caller holds
 `class_C__inv this m` and nothing else. A model-level fact sitting inside that predicate
 cannot be reached without unfolding — and once R3.9's deferred `.fsti` step makes the
 predicate opaque, cannot be reached at all. Stated as a refinement it travels in the *type*
-of `m`, so it arrives with the model, everywhere, for free. This is pinned in both probes:
-weakening the model predicate turns `client_sees_model_invariant` (`test/pulse_facts`) and
-`func_CounterClient_ValueIsNonNegative` (`test/objects_probe`) from verified into `Error 19`,
-while every other module in the probe keeps verifying — which is the precise statement that
-the fact is *unreachable to callers*, not merely absent.
+of `m`, so it arrives with the model, everywhere, for free. This is covered by
+`client_sees_model_invariant` in `test/pulse_facts/ObjectFacts.fst` and the generated
+translation of `CounterClient.ValueIsNonNegative` in `test/counter_class`.
 
 So each class emits a **refined model type**, in R3.5's shape verbatim:
 
@@ -637,12 +635,12 @@ and `class_C__inv` is indexed by `class_C__model`. Three details are deliberate.
 * It is named after the **class**, not after the model type. This is what lets an *atomic*
   model such as `SpecInt` or `Seq<int>` carry a refinement at all: there is no user-declared
   struct to put one on. Naming it after the model type would also collide whenever two
-  classes share one. Verified for the atomic case by `test/objects_probe`.
+  classes share one. Verified for the atomic case by `test/counter_class`.
 * It **composes with**, rather than replaces, R3.5. When the model is a `[Spec]` struct, a
   fact intrinsic to the type is better placed on the struct itself, where it is simply an
   ordinary struct refinement and is shared by everything using that model; `[Refine]` on
   `[Model]` is for a fact this *class* guarantees. Both shapes are verified — the struct form
-  by `test/pulse_facts/ObjectFacts.fst`, the member form by `test/objects_probe`.
+  by `test/pulse_facts/ObjectFacts.fst`, the member form by `test/counter_class`.
 
 In a `[Refine]` on the `[Model]` member the model value is named `Result`, as it is in an
 `[Ensures]`; in a `[Refine]` on a struct, fields are named directly, as R3.5 already
@@ -1364,8 +1362,8 @@ named by anything, so the emitter re-reads the representation and applies the ab
 this is not an invented proof step but the *definition* of the model, the one the user
 supplied in `[Model]` (R3.9), transcribed at a second program point.
 
-Both branches, with the constructor and the class module, are hand-executed and verified in
-`test/objects_probe/`.
+Both branches, with the constructor and the class module, are generated and verified in
+`test/counter_class/`.
 
 **R4.12 (constructor).** `new C(args)` emits a function that allocates, establishes the
 invariant, and returns the object:

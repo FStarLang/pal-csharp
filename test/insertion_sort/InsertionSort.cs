@@ -3,13 +3,9 @@ using PalLang;
 namespace PalCSharp.Tests;
 
 /// <summary>
-/// The source of truth for the library-adequacy probe in this directory.
-///
-/// `Func_InsertionSort.fst` and `Let_Sorted.fst` were produced by hand-executing
-/// `doc/translation.md` on this file, rule by rule, before any emitter existed.
-/// Each annotation below is load-bearing: removing it makes the derived Pulse
-/// fail to verify. That is the point — the proof burden is carried by the
-/// annotations and by `Pulse.Lib.CSharp.*`, never by the translator.
+/// End-to-end insertion-sort regression: the compiler translates this C# and the
+/// generated Pulse proves length preservation and permutation. The stronger
+/// sortedness contract is covered by <c>test/insertion_sort_sorted</c>.
 /// </summary>
 public static class Sorting
 {
