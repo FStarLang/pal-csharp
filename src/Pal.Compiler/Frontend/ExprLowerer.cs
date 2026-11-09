@@ -1412,7 +1412,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // the user's program; it denotes the value the method returns.
         if (symbol is IParameterSymbol { Name: SpecBinder.ResultParameter } p &&
             p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal))
-            return new IrResult(loc);
+            // R30.29. A snapshot method's `Result` is what the reference it returns refers to.
+            return SnapshotResult is { } snapshotResult
+                ? Deref(new IrResult(loc) { Type = snapshotResult })
+                : new IrResult(loc);
 
         // R28.2. Inside a borrowing struct's member.
         if (BorrowedIdentifier(symbol, node, loc) is { } borrowed) return borrowed;
@@ -2420,7 +2423,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         !SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
         CallbackOf(method.Parameters[i], known, diagnostics) is { } cb
             ? LowerCallbackArgument(arg, cb, Locations.From(arg))
+            // R30.30. In a specification, a non-null reference passed for a nullable parameter
+            // (`SameEquality(Result, ...)`, `Result` an `IEqualityComparer<T>`) is `Some`.
+            : SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
+              arg.RefKindKeyword.IsKind(SyntaxKind.None) &&
+              method.Parameters[i].Type is { IsReferenceType: true, NullableAnnotation: NullableAnnotation.Annotated } pt
+            ? SpecArgument(arg, known.MapType(pt))
             : LowerArgument(arg);
+
+    private IrExpr SpecArgument(ArgumentSyntax arg, IrType? declared)
+    {
+        var lowered = LowerArgument(arg);
+        // A postcondition's `Result` is typed by the method's declared return type.
+        return declared is IrOptionType option && lowered is IrResult &&
+               DeclaredResult is { } t and not IrOptionType && SameType(t, option.Inner)
+            ? new IrOptionOp(lowered.Loc, OptionOpKind.Some, lowered) { Type = option }
+            : ToDeclared(lowered, declared);
+    }
 
     public IrExpr LowerArgument(ArgumentSyntax arg)
     {
@@ -2578,6 +2597,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             method.ContainingType?.ToDisplayString() == "System.Collections.Generic.KeyValuePair" &&
             known.MapType(method.ReturnType) is IrUserSpecType created)
             return Pair(loc, created, args[0].Expression, args[1].Expression);
+
+        // R30.29. `Unsafe.IsNullRef(ref r)`; and `Pal.Result`, `Pal.ResultRef` read in a
+        // snapshot method's contract or loop.
+        if (LowerIsNullRef(node, method, loc) is { } isNull) return isNull;
+        if (known.IsPalIntrinsic(method) && method.Name is nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef) &&
+            EnclosingSnapshot(node) is { } snapshotType)
+            return Deref(InLoop(node)
+                ? new IrVar(loc, StmtLowerer.ReturnedValue) { Type = snapshotType }
+                : new IrResult(loc) { Type = snapshotType });
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
@@ -2809,7 +2837,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return SpecMember(method, ops.ToImmutable(), node, loc);
         }
 
-        if (method.ReturnsByRef && InlineRef(node, method, args, loc) is { } inlined) return inlined;
+        // R30.29. A snapshot method's call is the `option` it returns; read, the value.
+        var snapshot = SnapshotType(method);
+        if (snapshot is not null && !_snapshotRaw)
+            return Deref(LowerRaw(node) ?? new IrLiteral(loc, null));
+        if (snapshot is null && method.ReturnsByRef && InlineRef(node, method, args, loc) is { } inlined) return inlined;
 
         if (Bcl.Models(method))
         {
@@ -2922,7 +2954,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 : [receiver, .. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted])
         {
             Kind = kind.Value,
-            ResultType = known.MapType(method.ReturnType),
+            ResultType = snapshot ?? known.MapType(method.ReturnType),
+            Type = snapshot,
             HasReceiver = receiver is not null,
             KeepsArguments = method.MethodKind != MethodKind.Constructor &&
                 !method.Parameters.Any(p => Declarations.Has(p, known.ConsumesAttribute)),
@@ -3029,10 +3062,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             case nameof(PalLang.Pal.Old): return new IrOld(loc, Arg(0));
             // R24.14. Inside a loop, the method's result is the cell its `return` stored to.
-            case nameof(PalLang.Pal.Result) when InLoop(node):
+            case nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedValue)
                     { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapType(rm.ReturnType) : null };
-            case nameof(PalLang.Pal.Result): return new IrResult(loc);
+            case nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef): return new IrResult(loc);
             case nameof(PalLang.Pal.Returned) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.Returned):

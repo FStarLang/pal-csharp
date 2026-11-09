@@ -192,10 +192,18 @@ public static class Declarations
     public static bool Mutates(SyntaxNode syntax, SemanticModel model, WellKnown? known = null) =>
         Mutates(syntax, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
 
+    /// <summary>R30.29. Whether a node of <paramref name="scope"/> that <paramref name="at"/> accepts moves an object's model.</summary>
+    public static bool MutatesAt(SyntaxNode scope, Func<SyntaxNode, bool> at, SemanticModel model, WellKnown? known) =>
+        Mutates(scope.DescendantNodes().Where(at), scope, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
+
     private static bool Mutates(
-        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known)
+        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known) =>
+        Mutates(syntax.DescendantNodes(), syntax, model, visiting, known);
+
+    private static bool Mutates(
+        IEnumerable<SyntaxNode> nodes, SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known)
     {
-        foreach (var node in syntax.DescendantNodes())
+        foreach (var node in nodes)
         {
             // R29.3b. Filling a view cache writes a field outside the representation.
             if (known is not null && node is AssignmentExpressionSyntax fill &&
@@ -249,6 +257,9 @@ public static class Declarations
 
             if (node is InvocationExpressionSyntax call)
             {
+                // R30.29. `Unsafe.IsNullRef(ref r)` only tests the reference.
+                if (model.GetSymbolInfo(call).Symbol is IMethodSymbol isNull && RefSnapshots.IsIsNullRef(isNull))
+                    continue;
                 // R27.41. A member of a borrowing struct held in a local writes the local,
                 // and takes the object it borrows read-only.
                 if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol held &&

@@ -2698,6 +2698,9 @@ public static partial class FrontendPass
         var returnType = symbol.MethodKind == MethodKind.Constructor
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
+            // R30.29. A lookup returning a reference that may be null returns an `option`.
+            : RefSnapshots.IsSnapshot(symbol, model.Compilation) && known.MapType(symbol.ReturnType) is { } snapshotOf
+                ? new IrOptionType(snapshotOf)
             // R32.13. A method returning a view exactly returns its record.
             : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
@@ -3012,7 +3015,10 @@ public static partial class FrontendPass
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
                 { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow,
-                  OpenFields = OpenFields(symbol, known) };
+                  OpenFields = OpenFields(symbol, known),
+                  SnapshotResult = RefSnapshots.IsSnapshot(symbol, spec.Model.Compilation) &&
+                                   known.MapType(symbol.ReturnType) is { } resultOf ? new IrOptionType(resultOf) : null,
+                  DeclaredResult = symbol.ReturnsVoid ? null : known.MapType(symbol.ReturnType) };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;

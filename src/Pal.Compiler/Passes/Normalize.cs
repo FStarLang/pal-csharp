@@ -141,10 +141,11 @@ public static class Normalize
                 case IrIf f when LoopReturn(f) || rest.Length > 0 && (NestedReturn(f) || ReturnInside(f) && !GuardChain(f)):
                     result.Add(f with
                     {
-                        // A branch that already returns at its end is not followed by `rest`.
-                        Then = new IrBlock(f.Then.Loc, Sink([.. Stmts(f.Then), .. (EndsInReturn(f.Then) ? ImmutableArray<IrStmt>.Empty : rest)])),
+                        // A branch that already returns at its end is not followed by `rest`;
+                        // R30.29: nor is one that never completes.
+                        Then = new IrBlock(f.Then.Loc, Sink([.. Stmts(f.Then), .. (EndsInExit(f.Then) ? ImmutableArray<IrStmt>.Empty : rest)])),
                         Else = new IrBlock(f.Else?.Loc ?? f.Loc,
-                            Sink([.. Stmts(f.Else), .. (f.Else is not null && EndsInReturn(f.Else) ? ImmutableArray<IrStmt>.Empty : rest)])),
+                            Sink([.. Stmts(f.Else), .. (f.Else is not null && EndsInExit(f.Else) ? ImmutableArray<IrStmt>.Empty : rest)])),
                     });
                     return [.. result];
                 default:

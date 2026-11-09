@@ -165,6 +165,13 @@ public static class Pal
     public static T Result<T>() => throw Ghost();
 
     /// <summary>
+    /// In the contract of a method that returns a reference which may be null, and in its
+    /// loops' invariants, the reference it returns: <c>Unsafe.IsNullRef(ref Pal.ResultRef&lt;T&gt;())</c>
+    /// says it is null, and <c>Pal.ResultRef&lt;T&gt;()</c> read is what it refers to (R30.29).
+    /// </summary>
+    public static ref T ResultRef<T>() => throw Ghost();
+
+    /// <summary>
     /// In the invariant of a loop that contains a <c>return</c>: whether that <c>return</c>
     /// has run, so the loop is exiting to return <see cref="Result{T}"/> (R24.14, R26.2).
     /// </summary>

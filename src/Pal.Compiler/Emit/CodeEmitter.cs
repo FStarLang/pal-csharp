@@ -4152,7 +4152,9 @@ public sealed class CodeEmitter(
             }
             // R27.27. An escaping `if` whose join would lose a moved region (R22.12): the rest
             // goes into the arm that falls through; the escaping arm keeps none of it.
-            if (statements[k] is IrIf ei && _escape is not null && MayEscape(ei) && MovesRegion(ei))
+            // R30.29. So does one an arm of which declares a cell (R30.10), as a `return` of a
+            // snapshot local from a loop does.
+            if (statements[k] is IrIf ei && _escape is not null && MayEscape(ei) && (MovesRegion(ei) || ArmDeclaresCell(ei)))
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc)
                 {

@@ -9529,6 +9529,63 @@ reopen for; the record stays named, and a measure may still mention a field
 measure's field read was refused as unsupported. R30.26 made `HashSet<T>.FindItemIndex`
 read-only, which is how it was found.
 
+### R30.28 Constructors that call `Initialize` before setting the comparer (library)
+
+`Dictionary(int capacity, comparer)` calls `Initialize(capacity)` before it assigns
+`_comparer`, so the invariant, which names the comparer, does not hold at the call.
+`Initialize` is `[Open]` (R27.23, R33.15): it takes the raw record and returns the fields
+it assigned, with `Wf` at whatever `_comparer` holds then. Two lemmas of
+`pal/Dictionary/DictionaryChain.fst` then carry the table to the comparer the constructor
+stores: `wf_rebind` (an empty table is well formed at any comparer, since only live
+entries' hashes depend on it) and `string_swap` (replacing a string-keyed dictionary's
+comparer by what `NonRandomizedStringEqualityComparer.GetStringComparer` returned keeps its
+equality, from R30.18's `string_comparer_equals`). `GetStringComparer(_comparer!)` boxes the
+non-null comparer, where `string_comparer`'s argument is the boxed option, so
+`Pulse.Lib.CSharp.Obj` gained `box_some : box (Some x) == box x`, proved in `Obj.fst`, whose
+`obj` (abstract in the interface) is `unit`. No compiler change.
+
+### R30.29 A `ref` return that may be `Unsafe.NullRef`: snapshots
+
+A method that returns `ref T` and whose body calls `Unsafe.NullRef` (a *snapshot method*,
+`Dictionary<TKey,TValue>.FindValue`) is translated as one returning `option T`: the value
+the reference designates when the method returns, or `None` for the null reference.
+
+* In the method, a `ref` local of type `T` is an `option T` local (`ref Unsafe.NullRef<T>()`
+  is `None`, `ref a[i]` is `Some a[i]`, `ref x.f` of another such local is
+  `Some (Some?.v x).f`); a use of it is `Some?.v x`, whose precondition `Some? x` is the
+  proof obligation that the reference is not null. It may be rebound by statement, as
+  R33.5's locals are.
+* In a caller, `ref T v = ref M(...)` binds `v` to the option the call returns, and is
+  read as `Some?.v v`; `M(...)` used as a value is `Some?.v` of the call.
+* `Unsafe.IsNullRef(ref v)` (or `(ref M(...))`) is `not (Some? v)`. In a contract,
+  `Unsafe.IsNullRef(ref Result)` and `Result` are the option and its value; in a loop
+  invariant, `Pal.ResultRef<T>()` names the value R26.2's return cell holds, as
+  `Pal.Result<T>()` does for a by-value return.
+* The snapshot is sound only while nothing can change the element, so **PALCS0751**
+  refuses a `ref` local that is written through (`v = e`, `v++`), passed by reference to
+  anything but `Unsafe.IsNullRef`, or has a reference into it taken other than to return
+  it or bind another such local; a snapshot method that is not read-only (R4.11); and, in a
+  caller, a field or any array element that may be written (directly, or by a call passed
+  an array whose body writes an element) while the local is live. `Unsafe.IsNullRef` of
+  anything else is PALCS0751 too.
+
+R33.2's `goto` is extended for `FindValue`'s shape: a jump back to a label (`goto Return;`
+from below it) is followed as a forward one is, so long as the code it copies does not
+contain the jump itself; a local declared under a label between the jump and its target is
+hoisted with the others (a snapshot local as `None`). R5.5b's sinking of what follows an
+`if` into its arms skips an arm that never completes (a throw, a `[DoesNotReturn]` call),
+as R33.21 already did for a returning `if`. In an escaping loop, an `if` an arm of which
+declares a cell (the copied `ref TValue value = ref entry.value;` inside the loop) takes
+the rest of the body into its other arm, as R27.27 does for a moved region.
+
+`FindValue`'s contract is `IsNullRef(ref Result) <==> !Mem(comparer, keys, key)` and, when
+not null, `Maps(comparer, keys, values, key, Result)`; its callers (`ContainsKey`,
+`TryGetValue`, the indexer's getter, `ICollection<KeyValuePair>.Contains`/`Remove`,
+`KeyCollection.Contains`) are verified against it. The do-while loops need
+`Pal.Broke() == Pal.Returned()` in their invariants: the loop's condition
+(`collisionCount <= (uint)entries.Length`) never fails, by `SearchStep`, so it is left only
+by a jump to a label, which is a return.
+
 ### Trusted assumptions
 
 * `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
@@ -9583,13 +9640,15 @@ the sequences before and after.
 * **`Remove(key, out value)`** cannot state *which* value it returned: C#'s definite
   assignment rejects naming the `out` parameter in a loop invariant before it is assigned.
   Its contract says what `Remove(key)`'s does.
-* **Unverifiable lookups.** `FindValue` uses `goto` and returns a `ref`, so it and its
-  callers (`ContainsKey`, `TryGetValue`, the indexer's getter, `ICollection.Contains` /
-  `Remove`) are not verified.
-  `KeyCollection.Contains` calls `ContainsKey` and is not verified either.
+* **Lookups.** `FindValue` uses `goto` (including a backward one) and returns a `ref` that
+  may be `Unsafe.NullRef`; R30.29 reads it as an option-returning method. Its
+  concurrent-modification throw is unreachable: the chain walk ends within
+  `entries.Length` steps by the invariant.
 * **Constructor order.** `Dictionary(int capacity, comparer)` calls `Initialize` before it
   sets `_comparer`, so the invariant (which names the comparer) does not hold at that call;
-  it and the constructors that chain to it are not verified.
+  R30.28 opens `Initialize` and rebinds the empty table's invariant to the final comparer.
+* **Boxing.** `GetStringComparer(_comparer!)` boxes the comparer, not the nullable field;
+  `Obj.box_some` relates the two.
 * **Broken invariant across calls.** `TrimExcess` / `CopyEntries` call instance methods
   while the table is half rebuilt; `RemoveWhere`
   holds an alias of `_entries` across calls to `Remove`, which may replace it. Neither is

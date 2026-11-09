@@ -61,8 +61,7 @@ public sealed class StmtLowerer(
             ForEachStatementSyntax f => LowerForEach(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
             ReturnStatementSyntax r => new IrReturn(loc,
-                r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
-                    known.MapType(ReturnType(r)))),
+                r.Expression is null ? null : Returned(r, ReturnedType(r))),
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
@@ -174,9 +173,11 @@ public sealed class StmtLowerer(
         }).FirstOrDefault(b => b is not null);
         var statements = body?.Statements ?? default;
         var at = body is null ? -1 : statements.IndexOf(st => st is LabeledStatementSyntax l && l.Identifier.ValueText == name);
+        // R30.29. A jump back to a label is followed as one forward is, so long as the code it
+        // copies does not contain the jump.
         string? why =
             at < 0 ? "its label is not a statement of the method's outermost block"
-            : statements[at].SpanStart < node.SpanStart ? "it jumps backwards"
+            : _expanding.Contains(name!) ? "it jumps back into the code it is part of"
             : node.Ancestors().TakeWhile(a => a != body).Any(a => a is TryStatementSyntax or
                 AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)
                 ? "it leaves a `try`, a lambda or a local function"
@@ -195,15 +196,34 @@ public sealed class StmtLowerer(
         var from = statements.IndexOf(st => st.Span.Contains(node.Span));
         var tail = statements.Skip(at).ToList();
         var declared = ImmutableArray.CreateBuilder<IrStmt>();
-        foreach (var st in statements.Skip(from + 1).Take(at - from - 1).OfType<LocalDeclarationStatementSyntax>())
+        // R30.29. So may one under a label.
+        static StatementSyntax Unlabeled(StatementSyntax st) => st is LabeledStatementSyntax l ? Unlabeled(l.Statement) : st;
+        foreach (var st in statements.Skip(from + 1).Take(Math.Max(0, at - from - 1)).Select(Unlabeled)
+                     .OfType<LocalDeclarationStatementSyntax>())
             foreach (var v in st.Declaration.Variables)
                 if (model.GetDeclaredSymbol(v) is ILocalSymbol local &&
                     tail.Any(t => t.DescendantNodes().OfType<IdentifierNameSyntax>().Any(id =>
                         SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local))) &&
                     known.MapType(local.Type) is { } localType)
+                {
+                    // R30.29. A snapshot local starts as the null reference.
+                    if (local.IsRef && RefSnapshots.Enclosing(node, model) is not null)
+                    {
+                        var optionType = new IrOptionType(localType);
+                        declared.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, optionType,
+                            new IrNull(Locations.From(v)) { Type = optionType }));
+                        RegisterSnapshot(local, optionType, Locations.From(v));
+                        continue;
+                    }
                     declared.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, localType, null));
-        return new IrBlock(loc, [.. declared, .. LowerStatements(tail)]);
+                }
+        _expanding.Add(name!);
+        try { return new IrBlock(loc, [.. declared, .. LowerStatements(tail)]); }
+        finally { _expanding.Remove(name!); }
     }
+
+    /// <summary>R30.29. The labels whose code is being copied to a jump.</summary>
+    private readonly HashSet<string> _expanding = [];
 
     /// <summary>
     /// R33.2. Whether control can reach the end of <paramref name="statement"/>: C#'s
@@ -414,7 +434,27 @@ public sealed class StmtLowerer(
         ]);
     }
     private ITypeSymbol? _loopReturnType;
+    private IrType? _loopReturnMapped;
+    private bool _loopReturnNull;
     private bool _loopReturnVoid;
+
+    /// <summary>R30.29. The type a <c>return</c> stores: for a snapshot method, its <c>option</c>.</summary>
+    private IrType? ReturnedType(ReturnStatementSyntax r) =>
+        RefSnapshots.Enclosing(r, model) is { } m ? _code.SnapshotType(m) : known.MapType(ReturnType(r));
+
+    private IrExpr Returned(ReturnStatementSyntax r, IrType? mapped) =>
+        mapped is IrOptionType snapshot && RefSnapshots.Enclosing(r, model) is not null &&
+        r.Expression is RefExpressionSyntax { Expression: var target }
+            ? SnapshotTarget(target, snapshot)
+            : _code.ToDeclared(_code.Lower(r.Expression!), mapped);
+
+    /// <summary>
+    /// R30.29. The <c>option</c> <c>ref target</c> is, in a snapshot: <c>None</c> for a null
+    /// reference, another snapshot as it is, and <c>Some</c> of any other location's value.
+    /// </summary>
+    private IrExpr SnapshotTarget(ExpressionSyntax target, IrOptionType type) =>
+        _code.LowerRaw(target, type) ??
+        new IrOptionOp(Locations.From(target), OptionOpKind.Some, _code.ToDeclared(_code.Lower(target), type.Inner)) { Type = type };
 
     /// <summary>Whether a <c>return</c> inside a loop was rewritten, so the body needs its cells.</summary>
     public bool ReturnsInLoop => _loopReturnType is not null || _loopReturnVoid;
@@ -426,11 +466,12 @@ public sealed class StmtLowerer(
     private IrStmt LowerReturnInLoop(ReturnStatementSyntax r, IrLoc loc)
     {
         var stmts = ImmutableArray.CreateBuilder<IrStmt>();
-        if (r.Expression is not null && ReturnType(r) is { } rt && known.MapType(rt) is { } mapped)
+        if (r.Expression is not null && ReturnType(r) is { } rt && ReturnedType(r) is { } mapped)
         {
             _loopReturnType = rt;
-            stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedValue) { Type = mapped },
-                _code.ToDeclared(_code.Lower(r.Expression), mapped)));
+            _loopReturnMapped = mapped;
+            _loopReturnNull = RefSnapshots.Enclosing(r, model) is not null;
+            stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedValue) { Type = mapped }, Returned(r, mapped)));
         }
         else if (r.Expression is null) _loopReturnVoid = true;
         else return UnsupportedStatement(r, loc);
@@ -456,8 +497,8 @@ public sealed class StmtLowerer(
         var flag = new IrVar(loc, ReturnedFlag) { Type = IrPrim.Bool };
         IrStmt owed = _loopDepth > 0
             ? new IrBreak(loc) { FromReturn = true }
-            : new IrReturn(loc, _loopReturnType is { } rt
-                ? new IrVar(loc, ReturnedValue) { Type = known.MapType(rt) }
+            : new IrReturn(loc, _loopReturnType is not null
+                ? new IrVar(loc, ReturnedValue) { Type = _loopReturnMapped }
                 : _iterator is not null ? TraceVar(loc) : null);
         return new IrBlock(loc, [.. lowered is IrBlock { Splice: true } spliced ? spliced.Statements : [lowered],
             new IrIf(loc, flag, owed, null)]) { Splice = true };
@@ -479,9 +520,11 @@ public sealed class StmtLowerer(
         if (!ReturnsInLoop) return [];
         var cells = ImmutableArray.CreateBuilder<IrStmt>();
         cells.Add(new IrLocalDecl(loc, ReturnedFlag, IrPrim.Bool, new IrLiteral(loc, false) { Type = IrPrim.Bool }));
-        if (_loopReturnType is { } rt && known.MapType(rt) is { } mapped)
+        if (_loopReturnType is { } rt && _loopReturnMapped is { } mapped)
         {
-            if (_code.DefaultValue(rt, loc) is { } init)
+            // R30.29. A snapshot method's cell starts as the null reference.
+            if ((_loopReturnNull && mapped is IrOptionType
+                    ? new IrNull(loc) { Type = mapped } : _code.DefaultValue(rt, loc)) is { } init)
                 cells.Add(new IrLocalDecl(loc, ReturnedValue, mapped, init));
             else
                 diagnostics.Error("PALCS0686", loc,
@@ -603,6 +646,7 @@ public sealed class StmtLowerer(
             // at that local.
             if (symbol is { RefKind: RefKind.Ref or RefKind.RefReadOnly })
             {
+                if (SnapshotLocal(v, symbol, node, statements)) continue;
                 if (ReboundRefLocal(v, symbol, node, statements)) continue;
                 if (RefLocal(v, symbol, node, statements) is null && !_staleReported.Contains(symbol))
                     diagnostics.Unsupported(Locations.From(v), $"The `ref` local `{v.Identifier.ValueText}`",
@@ -886,6 +930,159 @@ public sealed class StmtLowerer(
         if (!flow.Check(scope, node, current: true)) { StaleAlias(symbol, flow); return null; }
         _fieldRebinds.Add(symbol);
         return (_code.Lower(init), _spec.Lower(init));
+    }
+
+    /// <summary>R30.29. The <c>option</c> type of each snapshot <c>ref</c> local.</summary>
+    private readonly Dictionary<ISymbol, IrOptionType> _snapshotLocals = new(SymbolEqualityComparer.Default);
+
+    private void RegisterSnapshot(ILocalSymbol symbol, IrOptionType type, IrLoc loc)
+    {
+        _snapshotLocals[symbol] = type;
+        var raw = new IrVar(loc, symbol.Name) { Type = type };
+        _code.Snapshot(symbol, raw);
+        _spec.Snapshot(symbol, raw);
+    }
+
+    /// <summary>The block a declaration is in, past the labels on it.</summary>
+    private static SyntaxNode BlockOf(SyntaxNode node) =>
+        node.Ancestors().FirstOrDefault(a => a is not LabeledStatementSyntax) ?? node;
+
+    /// <summary>
+    /// R30.29. A <c>ref</c> local in a snapshot method, or bound to a call of one, is an
+    /// <c>option</c> local: <c>None</c> where it is a null reference, <c>Some</c> of the value
+    /// it refers to otherwise, read when it is bound (<see cref="RefSnapshots"/>). It may be
+    /// rebound, by a statement, only in a snapshot method; it is never written through, nor
+    /// passed by reference except to <c>Unsafe.IsNullRef</c>; and outside a snapshot method,
+    /// nothing may write the object's state while it is live.
+    /// </summary>
+    private bool SnapshotLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (v.Initializer?.Value is not RefExpressionSyntax { Expression: var target }) return false;
+        var inner = target;
+        while (inner is ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression })
+            inner = inner is ParenthesizedExpressionSyntax p ? p.Expression : ((PostfixUnaryExpressionSyntax)inner).Operand;
+        var method = RefSnapshots.Enclosing(node, model);
+        var call = inner is InvocationExpressionSyntax inv && model.GetSymbolInfo(inv).Symbol is IMethodSymbol callee &&
+                   RefSnapshots.IsSnapshot(callee, model.Compilation);
+        if (method is null && !call) return false;
+        if (known.MapType(symbol.Type) is not { } element) return false;
+        var type = new IrOptionType(element);
+        var loc = Locations.From(v);
+        var scope = BlockOf(node);
+        if (SnapshotRefusal(symbol, scope, node, method) is { } why)
+        {
+            diagnostics.Error("PALCS0751", loc,
+                $"`{symbol.Name}` holds a reference that may be null, read once as an `option` " +
+                $"(doc/translation.md R30.29), but {why}.");
+            return true;
+        }
+        var rebound = scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a =>
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, symbol));
+        statements.Add(new IrLocalDecl(loc, symbol.Name, type, SnapshotTarget(target, type)) { Immutable = !rebound });
+        RegisterSnapshot(symbol, type, loc);
+        return true;
+    }
+
+    /// <summary>R30.29. Why the snapshot local <paramref name="symbol"/> cannot be one, if it cannot.</summary>
+    private string? SnapshotRefusal(ILocalSymbol symbol, SyntaxNode scope, SyntaxNode decl, IMethodSymbol? method)
+    {
+        ExpressionSyntax Root(ExpressionSyntax e)
+        {
+            while (true)
+            {
+                switch (e)
+                {
+                    case ParenthesizedExpressionSyntax p: e = p.Expression; continue;
+                    case PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn: e = sn.Operand; continue;
+                    case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } m: e = m.Expression; continue;
+                    case ElementAccessExpressionSyntax el: e = el.Expression; continue;
+                    default: return e;
+                }
+            }
+        }
+        bool Is(ExpressionSyntax e) => Root(e) is IdentifierNameSyntax &&
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(Root(e)).Symbol, symbol);
+        bool SnapshotSink(SyntaxNode? n) => n switch
+        {
+            ReturnStatementSyntax => true,
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax d } =>
+                model.GetDeclaredSymbol(d) is ILocalSymbol { IsRef: true },
+            AssignmentExpressionSyntax a => model.GetSymbolInfo(a.Left).Symbol is ILocalSymbol { IsRef: true },
+            _ => false,
+        };
+        foreach (var n in scope.DescendantNodes())
+        {
+            var written = n switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PreIncrementExpression) ||
+                                                   u.IsKind(SyntaxKind.PreDecrementExpression) => u.Operand,
+                PostfixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PostIncrementExpression) ||
+                                                    u.IsKind(SyntaxKind.PostDecrementExpression) => u.Operand,
+                _ => null,
+            };
+            if (written is not null && Is(written))
+            {
+                if (n is AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression, Right: RefExpressionSyntax, Left: IdentifierNameSyntax } rebind &&
+                    rebind.Parent is ExpressionStatementSyntax)
+                {
+                    if (method is null) return "it is rebound outside the method that may return a null reference";
+                    continue;
+                }
+                return "it is written through";
+            }
+            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg && Is(arg.Expression) &&
+                !(arg.Parent?.Parent is InvocationExpressionSyntax isNull &&
+                  model.GetSymbolInfo(isNull).Symbol is IMethodSymbol isNullMethod && RefSnapshots.IsIsNullRef(isNullMethod)))
+                return "it is passed by reference to something other than `Unsafe.IsNullRef`";
+            if (n is RefExpressionSyntax r && Is(r.Expression) && (method is null || !SnapshotSink(r.Parent)))
+                return "a reference into it is taken other than to return it or bind another such local";
+        }
+        if (method is not null)
+            return Declarations.IsReadOnly(method, model.Compilation, known) ? null
+                : $"`{method.Name}` may write its object's state, which the reference would see";
+        var live = LiveStretch(scope, decl, symbol);
+        if (Declarations.MutatesAt(scope, live, model, known) || WritesArrayAt(scope, live))
+            return "the object's state, or an array, may be written while it is live";
+        return null;
+    }
+
+    /// <summary>
+    /// R30.29. Whether an array element may be written in <paramref name="at"/>: through any
+    /// array, a parameter's too, which <see cref="Declarations.MutatesAt"/> does not count
+    /// as the object's state; or by a call that is passed an array and whose body writes an
+    /// element or passes an array on.
+    /// </summary>
+    private bool WritesArrayAt(SyntaxNode scope, Func<SyntaxNode, bool> at)
+    {
+        static bool WritesElement(SyntaxNode n) => n switch
+        {
+            AssignmentExpressionSyntax a => a.Left is ElementAccessExpressionSyntax,
+            PrefixUnaryExpressionSyntax u => u.Operand is ElementAccessExpressionSyntax,
+            PostfixUnaryExpressionSyntax u => u.Operand is ElementAccessExpressionSyntax,
+            ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => arg.Expression is ElementAccessExpressionSyntax,
+            _ => false,
+        };
+        static bool PassesArray(InvocationExpressionSyntax call, SemanticModel m) =>
+            call.ArgumentList.Arguments.Any(a => m.GetTypeInfo(a.Expression).Type is IArrayTypeSymbol);
+        var visiting = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        bool Writes(InvocationExpressionSyntax call, SemanticModel m)
+        {
+            if (!PassesArray(call, m)) return false;
+            if (m.GetSymbolInfo(call).Symbol is not IMethodSymbol callee) return true;
+            if (RefSnapshots.IsIsNullRef(callee) || callee.ContainingNamespace?.ToDisplayString() == "PalLang") return false;
+            if (callee.GetAttributes().Any(a => a.AttributeClass?.Name is "SpecAttribute" or "LemmaAttribute" or "PureAttribute"))
+                return false;
+            var body = callee.OriginalDefinition.DeclaringSyntaxReferences.Select(r => r.GetSyntax()).FirstOrDefault();
+            if (body is null || !m.Compilation.ContainsSyntaxTree(body.SyntaxTree)) return true;
+            if (!visiting.Add(callee.OriginalDefinition)) return false;
+            var calleeModel = m.Compilation.GetSemanticModel(body.SyntaxTree);
+            return body.DescendantNodes().Any(n => WritesElement(n) ||
+                n is InvocationExpressionSyntax inner && Writes(inner, calleeModel));
+        }
+        return scope.DescendantNodes().Where(at).Any(n =>
+            WritesElement(n) || n is InvocationExpressionSyntax call && Writes(call, model));
     }
 
     /// <summary>R33.5. The index local of each rebound <c>ref</c> local.</summary>
@@ -1382,6 +1579,13 @@ public sealed class StmtLowerer(
 
     private IrStmt LowerAssignment(AssignmentExpressionSyntax node, IrLoc loc)
     {
+        // R30.29. Rebinding a snapshot.
+        if (node.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+            node.Right is RefExpressionSyntax { Expression: var snapshotTarget } &&
+            model.GetSymbolInfo(node.Left).Symbol is ILocalSymbol snapshotLocal &&
+            _snapshotLocals.TryGetValue(snapshotLocal, out var snapshotType))
+            return new IrAssign(loc, new IrVar(loc, snapshotLocal.Name) { Type = snapshotType },
+                SnapshotTarget(snapshotTarget, snapshotType));
         // R30.1, R30.2. Rebinding an alias: a `ref` local's index, or nothing at all.
         if (model.GetSymbolInfo(node.Left).Symbol is ILocalSymbol rebound)
         {
