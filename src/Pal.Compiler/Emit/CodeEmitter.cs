@@ -4397,19 +4397,6 @@ public sealed class CodeEmitter(
             case GhostKind.Assert:
                 Line($"assert (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
-            // R23.6. Two arrays this method holds are distinct when one of them has a cell:
-            // whole permission to each could not otherwise be held at once.
-            case GhostKind.DebugAssert when g.Prop is IrBinary
-                { Op: BinOp.Ne, Left.Type: IrArrayType, Right.Type: IrArrayType } distinct:
-                Line($"Pulse.Lib.CSharp.QueueStack.distinct {Expr(distinct.Left)} {Expr(distinct.Right)};");
-                return;
-            case GhostKind.DebugAssert:
-            {
-                var c = Fresh();
-                Line($"let {c} = {Expr(g.Prop!)};");
-                Line($"assert (pure ({c} == true));");
-                return;
-            }
             case GhostKind.Assume:
                 Line($"assume (pure ({spec.AsProp(spec.Emit(g.Prop!, scope))}));");
                 return;
