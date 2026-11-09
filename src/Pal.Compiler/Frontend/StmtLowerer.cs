@@ -2009,15 +2009,4 @@ public sealed class StmtLowerer(
         }
         return null;
     }
-
-    /// <summary>R27.19. A <c>Debug.Fail</c> message whose evaluation has no observable effect.</summary>
-    private bool EffectFreeMessage(ExpressionSyntax e) =>
-        model.GetConstantValue(e).HasValue ||
-        e is InterpolatedStringExpressionSyntax interp &&
-        interp.Contents.OfType<InterpolationSyntax>().All(h =>
-            model.GetConstantValue(h.Expression).HasValue ||
-            h.Expression is IdentifierNameSyntax &&
-            model.GetSymbolInfo(h.Expression).Symbol is ILocalSymbol or IParameterSymbol &&
-            model.GetTypeInfo(h.Expression).Type is { } ht &&
-            (ht.TypeKind == TypeKind.Enum || ht.SpecialType is >= SpecialType.System_Boolean and <= SpecialType.System_Double));
 }

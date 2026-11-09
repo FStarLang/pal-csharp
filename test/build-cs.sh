@@ -32,6 +32,7 @@ EOF
 
 # Independent MSBuild processes otherwise race while rebuilding their shared
 # Pal.Annotations project. Only C# compilation is serialized, not verification.
+# Close the child descriptor so persistent MSBuild workers cannot retain the lock.
 mkdir -p "$root/src/Pal.Annotations/obj"
-flock "$root/src/Pal.Annotations/obj/pal-tests.lock" \
+flock --close "$root/src/Pal.Annotations/obj/pal-tests.lock" \
   dotnet build -v q --nologo "$work/$name.csproj"
