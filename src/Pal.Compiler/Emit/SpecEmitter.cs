@@ -556,6 +556,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             BinOp.Implies => new Term(Infix("==>", TermKind.Prop, mathematical: false), TermKind.Prop),
             BinOp.Iff => new Term(Infix("<==>", TermKind.Prop, mathematical: false), TermKind.Prop),
 
+            BinOp.BitAnd when b.Left.Type is IrPrim { Kind: PrimKind.Bool }
+                => new Term(Infix("/\\", TermKind.Prop, mathematical: false), TermKind.Prop),
+            BinOp.BitOr when b.Left.Type is IrPrim { Kind: PrimKind.Bool }
+                => new Term(Infix("\\/", TermKind.Prop, mathematical: false), TermKind.Prop),
+            BinOp.BitXor when b.Left.Type is IrPrim { Kind: PrimKind.Bool }
+                => new Term(Equality(b, scope, negated: true), TermKind.Prop),
+
             // R6.4b. A bitwise operator over machine integers is exactly what the code
             // emits: `FStar.Int32.logand a b` is specified as `v c == Int.logand (v a)
             // (v b)`, so naming `Int.logand` on the operands' values makes a contract

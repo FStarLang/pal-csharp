@@ -1412,6 +1412,7 @@ public sealed class StmtLowerer(
 
     private IrStmt LowerCallStatement(InvocationExpressionSyntax node, IrLoc loc)
     {
+        if (!_code.ArgumentsInOrder(node.ArgumentList)) return new IrBlock(loc, []);
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method)
             return UnsupportedStatement(node, loc);
 
@@ -1464,7 +1465,17 @@ public sealed class StmtLowerer(
             method.ContainingType.ToDisplayString() == "System.Diagnostics.Debug" &&
             args.Count >= 1 && method.Parameters[0].Type.SpecialType == SpecialType.System_Boolean &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue || EffectFreeMessage(a.Expression)))
-            return new IrGhostStmt(loc, GhostKind.DebugAssert, _code.Lower(args[0].Expression), null);
+        {
+            var condition = _code.Lower(args[0].Expression);
+            if (ExprLowerer.HasEffect(condition))
+            {
+                diagnostics.Unsupported(loc, "A Debug.Assert condition with side effects",
+                    "Release builds erase the call and its arguments. The proof may assert " +
+                    "an effect-free condition, but must not execute an erased mutation or call.");
+                return new IrBlock(loc, []);
+            }
+            return new IrGhostStmt(loc, GhostKind.DebugAssert, condition, null);
+        }
 
         // R27.19. `Debug.Fail(m)` is `Debug.Assert(false, m)`: the point is unreachable. A
         // message may interpolate locals and parameters of primitive or enum type, whose

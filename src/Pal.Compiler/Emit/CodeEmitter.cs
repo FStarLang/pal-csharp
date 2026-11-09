@@ -5406,12 +5406,18 @@ public sealed class CodeEmitter(
         // Booleans have no machine-integer module; they use F*'s own operators.
         if (b.Left.Type is IrPrim { Kind: PrimKind.Bool })
         {
-            return b.Op switch
+            var boolean = b.Op switch
             {
                 BinOp.Eq => $"({l} = {r})",
                 BinOp.Ne => $"(not ({l} = {r}))",
-                _ => $"({l} {(b.Op == BinOp.BitAnd ? "&&" : "||")} {r})",
+                BinOp.BitAnd => $"({l} && {r})",
+                BinOp.BitOr => $"({l} || {r})",
+                BinOp.BitXor => $"(not ({l} = {r}))",
+                _ => null,
             };
+            if (boolean is not null) return boolean;
+            diagnostics.Unsupported(b.Loc, $"The Boolean operator `{b.Op}`");
+            return "()";
         }
 
         var call = $"({module}.{op} {l} {r})";

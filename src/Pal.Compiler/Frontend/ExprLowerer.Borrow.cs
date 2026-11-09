@@ -638,6 +638,7 @@ public sealed partial class ExprLowerer
     private IrExpr ConstructorCall(ArgumentListSyntax argList, IMethodSymbol ctor, INamedTypeSymbol named,
         IParameterSymbol op, IrLoc loc)
     {
+        if (!ArgumentsInOrder(argList)) return new IrLiteral(loc, null);
         var receiver = default(IrExpr);
         var rest = new List<IrExpr>();
         var types = new List<IrType?> { null };
@@ -767,6 +768,7 @@ public sealed partial class ExprLowerer
     private bool BaseConstructorFields(ConstructorInitializerSyntax init, BorrowContext bw,
         List<IrFieldInit> given, List<IrStmt> prefix, IrLoc loc)
     {
+        if (!ArgumentsInOrder(init.ArgumentList)) return false;
         if (model.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
             target.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl ||
             !model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) || decl.Initializer is not null)
