@@ -30,4 +30,8 @@ $(for f in "$@"; do printf '    <Compile Include="%s/%s" />\n' "$(pwd)" "$f"; do
 </Project>
 EOF
 
-dotnet build -v q --nologo "$work/$name.csproj"
+# Independent MSBuild processes otherwise race while rebuilding their shared
+# Pal.Annotations project. Only C# compilation is serialized, not verification.
+mkdir -p "$root/src/Pal.Annotations/obj"
+flock "$root/src/Pal.Annotations/obj/pal-tests.lock" \
+  dotnet build -v q --nologo "$work/$name.csproj"
