@@ -15,7 +15,7 @@ module SZ = FStar.SizeT
 module Seq = FStar.Seq
 
 let is_from_array (#t: Type0) (a: A.array t) (s: S.slice t) : slprop =
-  S.is_from_array a.storage s
+  S.is_from_array (A.storage a) s
 
 let span_length (#t: Type0) (s: span t) : I32.t = sizet_to_int32 (S.len s)
 
@@ -69,7 +69,7 @@ fn of_array (#t: Type0) (a: A.array t) (#p: perm) (#v: Ghost.erased (Seq.seq t))
   A.pts_to_not_null a;
   let n = Pulse.Lib.CSharp.Array.length_i32 a;
   A.to_raw a;
-  let s = S.from_array a.storage (idx n);
+  let s = S.from_array (A.storage a) (idx n);
   S.pts_to_len s;
   fold (is_from_array a s);
   s
@@ -141,7 +141,7 @@ let is_range_of (#t: Type0) (a: A.array t) (w: S.slice t) (p: perm) (i j: nat)
                 (v: Seq.seq t { i <= j /\ j <= Seq.length v })
   : slprop
   = exists* (s: S.slice t).
-      S.is_from_array a.storage s **
+      S.is_from_array (A.storage a) s **
       rest s w p i j v **
       pure (SZ.v (S.len w) == j - i)
 
@@ -158,7 +158,7 @@ fn of_array_range (#t: Type0) (a: A.array t) (i: I32.t) (n: I32.t)
   A.pts_to_not_null a;
   let alen = Pulse.Lib.CSharp.Array.length_i32 a;
   A.to_raw a;
-  let s = S.from_array a.storage (idx alen);
+  let s = S.from_array (A.storage a) (idx alen);
   let lo = idx i;
   let hi = idx (I32.add i n);
   let w = S.subslice s lo hi;
@@ -181,7 +181,7 @@ fn restore_array_range (#t: Type0) (w: S.slice t)
 {
   S.pts_to_len w;
   unfold (is_range_of a w p i j v);
-  with s. assert (S.is_from_array a.storage s);
+  with s. assert (S.is_from_array (A.storage a) s);
   elim_rest w;
   S.to_array s;
   A.of_raw a;

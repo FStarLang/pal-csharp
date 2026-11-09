@@ -15,7 +15,7 @@ module Seq = FStar.Seq
 module R = Pulse.Lib.Reference
 module CS = Pulse.Lib.CSharp.Seq
 
-let arr_length (#t: Type0) (a: array t) : I32.t = a.count
+let arr_length (#t: Type0) (a: array t) : I32.t = A.count a
 
 let arr_length_v (#t: Type0) (a: array t)
   : Lemma (I32.v (arr_length a) == A.length a)

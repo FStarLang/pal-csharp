@@ -8,17 +8,16 @@ module SZ = FStar.SizeT
 module Seq = FStar.Seq
 module T = FStar.Tactics.V2
 
-noeq type array (t: Type0) = {
-  count: (n: I32.t { I32.v n >= 0 });
-  storage: (a: Raw.array t {
-    (Raw.is_null a ==> I32.v count == 0) /\
-    (not (Raw.is_null a) ==> Raw.length a == I32.v count)
-  })
+val array (t: Type0) : Type0
+val count (#t: Type0) (a: array t) : n: I32.t { I32.v n >= 0 }
+val storage (#t: Type0) (a: array t) : r: Raw.array t {
+  (Raw.is_null r ==> I32.v (count a) == 0) /\
+  (not (Raw.is_null r) ==> Raw.length r == I32.v (count a))
 }
 
-let length (#t: Type0) (a: array t) : nat = I32.v a.count
-let null (#t: Type0) : array t = { count = 0l; storage = Raw.null }
-let is_null (#t: Type0) (a: array t) : bool = Raw.is_null a.storage
+let length (#t: Type0) (a: array t) : nat = I32.v (count a)
+val null (#t: Type0) : a: array t { Raw.is_null (storage a) }
+let is_null (#t: Type0) (a: array t) : bool = Raw.is_null (storage a)
 
 val pts_to (#t: Type0) ([@@@mkey] a: array t)
   (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop
@@ -31,11 +30,11 @@ instance has_pts_to_array (t: Type0) : Pulse.Class.PtsTo.has_pts_to (array t) (S
 ghost
 fn to_raw (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
   requires pts_to a #p s
-  ensures Raw.pts_to a.storage #p s
+  ensures Raw.pts_to (storage a) #p s
 
 ghost
 fn of_raw (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
-  requires Raw.pts_to a.storage #p s
+  requires Raw.pts_to (storage a) #p s
   ensures pts_to a #p s
 
 ghost
