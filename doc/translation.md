@@ -425,8 +425,9 @@ macros for. No attribute is required for any of these:
 | `ref T x` | `var_x: ref ⟦T⟧` | `pts_to var_x v` | `pts_to var_x v'` |
 | `out T x` | `var_x: ref ⟦T⟧` | `pts_to_uninit var_x` | `pts_to var_x v'` |
 | `in T x` | `var_x: ref ⟦T⟧` | `pts_to var_x #p v` | `pts_to var_x #p v` |
-| `T[] a`, `Span<T> a` | `var_a: array ⟦T⟧` | `array_pts_to_full var_a 1.0R s` | `array_pts_to_full var_a 1.0R s'` |
-| `ReadOnlySpan<T> a` | `var_a: array ⟦T⟧` | `array_pts_to var_a #p s` | `array_pts_to var_a #p s` |
+| `T[] a` | `var_a: A.array ⟦T⟧` | `A.pts_to var_a s` | `A.pts_to var_a s'` |
+| `Span<T> a` | `var_a: Span.span ⟦T⟧` | `S.pts_to var_a s` | `S.pts_to var_a s'` |
+| `ReadOnlySpan<T> a` | `var_a: Span.span ⟦T⟧` | `S.pts_to var_a #p s` | `S.pts_to var_a #p s` |
 
 Attributes are needed only for the residue: `[Consumes]`, `[Plain]`, `[Frac]`, `[NonNull]`,
 `[CoreRef]`.
@@ -440,8 +441,10 @@ per-example:
   optimisation: a CLR array's length is fixed at allocation, so `a.Length` genuinely is a
   function of `a`, and modelling it that way is what makes a counted `for` over an array
   — where `a.Length` appears in the *guard* — translatable at all. `arr_length` returning
-  `Int32.t` is also where the bound `length a < 2^31` enters, since
-  `System.Array.Length` has type `int`.
+  `Int32.t` is also where the bound `length a < 2^31` enters. `A.array` is
+  `Pulse.Lib.CSharp.Array.Base.array`: a raw array paired with its nonnegative
+  runtime count, whose refinement relates that count to the storage. The length
+  bound is no longer an axiom over arbitrary raw Pulse arrays.
 * an index expression `e` in a subscript ⟶ `Pal.Idx ⟦e⟧`, where
   `Idx : (i:Int32.t{Int32.v i >= 0}) -> SZ.t` with `SZ.v (Idx i) == Int32.v i`.
   The side condition `Int32.v i >= 0` is discharged by the bounds obligation of R6.4.
@@ -930,11 +933,12 @@ conjunct that `pts_to_not_null` supplies for free.
 **R3.12 (allocation and the garbage collector).** `new C(…)` emits `Box.alloc`, and the
 emitter **never** emits `Box.free`.
 
-This needs no MODELING AXIOM, unlike the array case. Pulse slprops are affine: `Box.free`
+This needs no MODELING AXIOM. Pulse slprops are affine: `Box.free`
 exists but nothing compels a caller to reach it, and a leftover resource is discharged by
 `drop_` (F15). An object whose invariant is simply dropped *is* a garbage-collected object.
-Contrast `Pulse.Lib.CSharp.Array.alloc`, which did need an axiom, because the underlying
-`Pulse.Lib.Array.alloc` is a stack allocation that must not outlive its frame. The CLR
+`Pulse.Lib.CSharp.Array.alloc` likewise uses verified `Vec.alloc` and transfers its
+ownership to the length-carrying wrapper. Generic empty allocation remains a separate
+trusted operation; see [the soundness campaign](soundness-campaign.md). The CLR
 being garbage collected is thus a genuine simplification over PAL's C, not merely a
 different set of obligations.
 
@@ -5253,8 +5257,9 @@ an element write is frontend work that arrays did not need.
 
 ### 17.2 The rules
 
-**R17.1 — `Span<T>` and `ReadOnlySpan<T>` are `Pulse.Lib.Slice.slice`.** `MapType` sends
-both, at a mappable element type, to `IrSpanType`, which `Names` renders `S.slice ⟦T⟧`.
+**R17.1 — `Span<T>` and `ReadOnlySpan<T>` are length-bounded slices.** `MapType` sends
+both, at a mappable element type, to `IrSpanType`, which `Names` renders `Span.span ⟦T⟧`.
+This refines `S.slice ⟦T⟧` with `SizeT.v (S.len s) < 2^31`.
 `T[]` is unaffected and stays `array ⟦T⟧`. A span is therefore its own slot kind
 (`SlotKind.Span`), whose resource is `S.pts_to` rather than `A.pts_to` — which satisfies
 F79's requirement that a span be primitive rather than a translated struct by making it
@@ -5265,8 +5270,8 @@ else allocated. A window has a length of its own (R17.3), a base of its own (R17
 owner who is owed it back (R17.6), and `slice` has all three where `array` has none of
 them.
 
-The C#-facing operations live in `Pulse.Lib.CSharp.Span`, an `.fsti` of modeling axioms and
-derived operations over the Pulse library, in the style `Pulse.Lib.CSharp.Array`
+The C#-facing operations live in `Pulse.Lib.CSharp.Span`, with verified implementations
+over the Pulse library and no span-length axiom, in the style `Pulse.Lib.CSharp.Array`
 established — not a new theory. §3.4's struct rules are never reached, because `MapType`
 never produces a struct for a span.
 
@@ -6163,8 +6168,12 @@ is the literal `0x7FFFFFC7`. It is a property only so that the runtime may chang
 
 ### R22.19 `Debug.Assert(c)`
 
-fails fast when `c` is false in the builds that keep it, so it is a proof obligation:
-`let b = ⟦c⟧; assert (pure (b == true))`. A message argument must be a constant.
+The translation models **Release C# without `DEBUG`**. Both `Debug.Assert` and
+`Debug.Fail` are erased completely, including evaluation of conditions and messages.
+Use `Pal.Assert` for a checked proof assertion. The earlier translation evaluated
+`c` and asserted its result; this incorrectly executed mutations and calls absent
+from the Release program. Earlier explanatory references to checked `Debug.Assert`
+statements in this document describe that superseded behavior.
 
 ### R22.20 `Array.Copy(src, dst, len)`
 
@@ -6305,7 +6314,7 @@ finds something exactly when the other does, so `Contains` may be specified by
 
 ### R23.6 Array distinctness in `Debug.Assert`
 
-`Debug.Assert(a != b)` for two arrays is the ghost step `distinct a b`, which proves
+`Debug.Assert(a != b)` is erased under R22.19. The library's explicit `distinct a b` proves
 `a =!= b` from both being owned, when one of them has a cell (the gathered permission
 would exceed 1). Two empty arrays may be the same object — `Array.Empty<T>()` is shared —
 so the step needs `length a > 0 \/ length b > 0` of its context.
@@ -7408,9 +7417,8 @@ boxes in a specification. Write it as two `Pal.Implies` instead.
 
 ### R27.19 `Debug.Fail`
 
-`Debug.Fail(m)` is `Debug.Assert(false, m)` (R22.19): reaching it is a proof obligation that
-fails. The message may interpolate constants (including `nameof`), and locals or parameters
-of primitive or enum type. Formatting those has no effect the proof could observe.
+`Debug.Fail(m)` is erased along with its message under R22.19. It contributes no
+unreachability fact. Use `Pal.Assert(false)` for a proof obligation at an unreachable point.
 
 `Node.Rotate`'s `default:` arm is such a point. `TreeRotation` is closed (R27.17), so the
 arm is unreachable.
