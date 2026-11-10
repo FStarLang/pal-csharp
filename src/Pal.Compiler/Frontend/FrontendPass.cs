@@ -2730,19 +2730,34 @@ public static partial class FrontendPass
         // something the translation does not depend on. That is what lets a trusted method
         // call code that is not translated at all -- the reason to admit it.
         var admitted = Declarations.Has(symbol, known.AdmitAttribute);
+        // R20.14. An `[Implements]` method's translation is the verified Pulse it names; its
+        // C# body is the trusted run-time counterpart, so it is not read either.
+        var implementsAttr = Declarations.Find(symbol, known.ImplementsAttribute);
+        if (implementsAttr is not null &&
+            (admitted || Declarations.Has(symbol, known.PulseBodyAttribute) ||
+             Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute)))
+        {
+            diagnostics.Error("PALCS0503", loc,
+                $"`{symbol.Name}` is `[Implements]` and also `[Admit]`, `[PulseBody]`, `[Spec]` or " +
+                "`[Lemma]`. `[Implements]` is for a code method whose translation is a verified " +
+                "Pulse function; it cannot be combined with another account of the body.");
+            return null;
+        }
+        var implemented = implementsAttr is not null;
         // R24.17. A `[Spec]` (or `[Lemma]`) function's `[PulseBody]` replaces its C# body,
         // which is then never looked at: it has `=> throw …` or `{ }` for C# to compile.
         // On any other method both are kept, and the pair is refused (PALCS0503).
         var verbatim = Declarations.Has(symbol, known.PulseBodyAttribute) &&
                        (Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute));
-        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer);
+        var body = admitted || verbatim || implemented ? null : LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
         var (bodyRequires, bodyEnsures, trimmed) =
-            ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
+            ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted && !implemented);
 
-        var pulseBody = Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
+        var pulseBody = implementsAttr is not null ? Declarations.StringArgument(implementsAttr)
+            : Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
             ? Declarations.StringArgument(pb) : null;
 
         // R14.1. A constraint is a typeclass obligation the scheme does not carry, so a
@@ -2767,7 +2782,7 @@ public static partial class FrontendPass
             [.. specs.Requires, .. bodyRequires],
             [.. specs.Ensures, .. bodyEnsures, .. ViewOwnerEnsures(symbol, returnType, known, loc)],
             specs.Decreases,
-            admitted || verbatim ? null
+            admitted || verbatim || implemented ? null
             : iterated is not null && (trimmed ?? body) is { } iteratorBody ? lowerer.WrapIterator(iteratorBody)
             : trimmed ?? body)
         {
@@ -2775,6 +2790,7 @@ public static partial class FrontendPass
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
             Admit = admitted,
+            Implements = implemented,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
             Open = Declarations.Has(symbol, known.OpenAttribute),

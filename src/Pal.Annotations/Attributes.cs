@@ -340,6 +340,24 @@ public sealed class RlimitAttribute(int factor) : Attribute
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AdmitAttribute : Attribute;
 
+/// <summary>
+/// R20.14. This method is the run-time implementation of a verified Pulse function: its
+/// translation is the given Pulse body (typically one call, <c>$(x)</c> naming the
+/// parameter <c>x</c>), and its contract is checked against it. The C# body is not
+/// translated; it is trusted to behave as the Pulse body does. Reported as a diagnostic.
+/// </summary>
+/// <remarks>
+/// This is how a binder to an external system (a SQL statement, a system call) is tied to
+/// a model of that system: the model function is verified in F*/Pulse, the binder's C#
+/// contract is checked to follow from the model function's, and what remains trusted is
+/// only that the C# body does what the model function does.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class ImplementsAttribute(string body) : Attribute
+{
+    public string Body { get; } = body;
+}
+
 /// <summary>Declare an extra erased parameter, for ghost types with no C# surface.</summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
 public sealed class GhostArgAttribute(string declaration) : Attribute

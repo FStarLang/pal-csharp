@@ -207,6 +207,11 @@ public static class Check
             diagnostics.Warning("PALCS0900", m.Loc,
                 $"`{m.Name}` is `[Admit]`ed: its contract is assumed, not proved.");
 
+        if (m.Implements)
+            diagnostics.Warning("PALCS0904", m.Loc,
+                $"`{m.Name}`'s contract is proved of its `[Implements]` Pulse; its C# body is " +
+                "trusted to behave the same way.");
+
         // R10.7's counterpart to R5.9. A self-recursive method becomes `fn rec`, and F2
         // applies to it just as it applies to a loop: without a `decreases` the definition
         // is divergent and cannot compose with its callers. There is no counted-`for`
