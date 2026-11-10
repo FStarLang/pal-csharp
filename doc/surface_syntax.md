@@ -934,6 +934,7 @@ Escape hatches, in increasing order of bluntness.
 | `Pal.InlinePulse("…")` | a verbatim Pulse expression, in specification position |
 | `Pal.GhostStmt("…")` | a verbatim Pulse statement |
 | `[PulseBody("…")]` | a verbatim body for a `[Lemma]` or `[Spec]` |
+| `[Implements("…")]` on a code method | proves its contract of the Pulse term instead of its C# body, which is trusted to agree (PALCS0904) |
 | `[PulseType("…")]` on a struct | maps the C# type onto a Pulse type |
 | `[assembly: IncludePulse("M", "…")]` | a whole verbatim module `M.fst` |
 | `[assembly: IncludePulseFile("M.fst")]` | the same, read from a file beside the source |

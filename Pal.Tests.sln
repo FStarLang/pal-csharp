@@ -60,6 +60,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "generic_tree", "test/generi
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "ghost_arg", "test/ghost_arg/ghost_arg.csproj", "{4EFA50D0-61BA-1196-FF6A-2386EC34A76E}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "implements_binder", "test/implements_binder/implements_binder.csproj", "{6AC4AB02-B66A-7D80-15C1-B73660FB1001}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "insertion_sort", "test/insertion_sort/insertion_sort.csproj", "{ABB5CD08-9CEB-A5A5-4DF3-1DC0FBB83D02}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "insertion_sort_sorted", "test/insertion_sort_sorted/insertion_sort_sorted.csproj", "{AB0BD128-DB6E-8C8C-62E0-E785183FD5E0}"
@@ -264,6 +266,10 @@ Global
 		{4EFA50D0-61BA-1196-FF6A-2386EC34A76E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4EFA50D0-61BA-1196-FF6A-2386EC34A76E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4EFA50D0-61BA-1196-FF6A-2386EC34A76E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6AC4AB02-B66A-7D80-15C1-B73660FB1001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6AC4AB02-B66A-7D80-15C1-B73660FB1001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6AC4AB02-B66A-7D80-15C1-B73660FB1001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6AC4AB02-B66A-7D80-15C1-B73660FB1001}.Release|Any CPU.Build.0 = Release|Any CPU
 		{ABB5CD08-9CEB-A5A5-4DF3-1DC0FBB83D02}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{ABB5CD08-9CEB-A5A5-4DF3-1DC0FBB83D02}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{ABB5CD08-9CEB-A5A5-4DF3-1DC0FBB83D02}.Release|Any CPU.ActiveCfg = Release|Any CPU

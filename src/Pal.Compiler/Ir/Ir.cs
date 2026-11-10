@@ -851,6 +851,11 @@ public sealed record IrMethod(
     /// <summary>R27.39. Set on a lambda lifted from a <c>[Callback]</c> argument.</summary>
     public IrLambdaInfo? Lambda { get; init; }
     public string? PulseBody { get; init; }
+    /// <summary>
+    /// R20.14. <see cref="PulseBody"/> came from <c>[Implements]</c>: it is the method's
+    /// translation, and the C# body (not lowered) is trusted to behave as it does.
+    /// </summary>
+    public bool Implements { get; init; }
 
     /// <summary>
     /// R19.2. The method's <c>[Throws]</c> clauses. Empty means it must not throw: no

@@ -429,7 +429,7 @@ public static class Declarations
         var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var m in owner.GetMembers().OfType<IMethodSymbol>())
         {
-            if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || Has(m, known.AdmitAttribute))
+            if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || BodyUntranslated(m, known))
                 continue;
             foreach (var reference in m.DeclaringSyntaxReferences)
             {
@@ -493,7 +493,7 @@ public static class Declarations
     {
         if (p.RefKind != RefKind.None || known.SpecTypeName(p.Type) is null ||
             p.ContainingSymbol is not IMethodSymbol method ||
-            !IsAnnotated(method, known) || Has(method, known.AdmitAttribute))
+            !IsAnnotated(method, known) || BodyUntranslated(method, known))
             return false;
         if (written.TryGetValue(p, out var box)) return box.Value;
 
@@ -547,6 +547,13 @@ public static class Declarations
         IsWritten(target, model.Compilation, known)
             ? target
             : null;
+
+    /// <summary>
+    /// R20.2, R20.14. Whether a method's C# body is never translated: an <c>[Admit]</c>ted
+    /// method's, and an <c>[Implements]</c> method's, whose translation is its Pulse body.
+    /// </summary>
+    public static bool BodyUntranslated(ISymbol method, WellKnown known) =>
+        Has(method, known.AdmitAttribute) || Has(method, known.ImplementsAttribute);
 
     public static bool IsAnnotated(ISymbol symbol, WellKnown known) =>
         symbol.GetAttributes().Any(a =>

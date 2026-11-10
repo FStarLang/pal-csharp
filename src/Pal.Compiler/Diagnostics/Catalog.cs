@@ -147,5 +147,6 @@ public static class Catalog
         ("PALCS0900", Severity.Warning),
         ("PALCS0901", Severity.Warning),
         ("PALCS0902", Severity.Warning),
+        ("PALCS0904", Severity.Warning),
     ];
 }
