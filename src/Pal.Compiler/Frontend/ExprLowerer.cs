@@ -627,7 +627,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // A sequence -- an array or a collection interface -- seen at one is not an object the
         // model boxes: `lines.OrderBy(...)` on an `IList<T>` stays a LINQ operand (R20.6).
         if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) && !atExact && !ExactOperand(node) &&
-            !(WellKnown.IsCollectionInterface(info.ConvertedType) && info.Type is { TypeKind: TypeKind.Array or TypeKind.Interface }) &&
+            !(WellKnown.IsBoxedCollectionInterface(info.ConvertedType) && info.Type is { TypeKind: TypeKind.Array or TypeKind.Interface }) &&
             node.Parent is not (ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression }) &&
             WellKnown.IsObj(known.MapType(info.ConvertedType)))
             result = Box(loc, result);

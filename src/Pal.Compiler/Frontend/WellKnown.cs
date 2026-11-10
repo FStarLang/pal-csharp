@@ -587,7 +587,7 @@ public sealed class WellKnown
             or "System.Collections.Generic.IEnumerable<T>";
 
     /// <summary>R35.6. The collection interfaces <see cref="IsObjectLike"/> admits.</summary>
-    public static bool IsCollectionInterface(ITypeSymbol? type) =>
+    public static bool IsBoxedCollectionInterface(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
         i.OriginalDefinition.ToDisplayString() is "System.Collections.ICollection"
             or "System.Collections.Generic.ICollection<T>" or "System.Collections.Generic.IEnumerable<T>";
