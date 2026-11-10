@@ -29,10 +29,14 @@ namespace PalCSharp.Tests;
 /// </summary>
 public static class Counter
 {
+    // PALCS0904 is the trust notice every `[Implements]` method carries; acknowledging it
+    // here keeps the editor build clean (test/ide-build.sh) without hiding it elsewhere.
+#pragma warning disable PALCS0904
     [Implements("CounterModel.bump $(x)")]
     [Requires("0 <= x && x < 1000")]
     [Ensures("Result == x + 1")]
     public static int Bump(int x) => External.Increment(x);
+#pragma warning restore PALCS0904
 
     /// <summary>A verified client, relying only on the binder's (checked) contract.</summary>
     [Requires("0 <= x && x < 500")]
