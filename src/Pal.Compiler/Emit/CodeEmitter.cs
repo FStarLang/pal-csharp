@@ -1279,9 +1279,12 @@ public sealed class CodeEmitter(
             {
                 var second = new IrIf(c.Right.Loc, c.Right, branch.Then, els);
                 var rest = SplitCondition(second) ?? second;
-                return c.Op == BinOp.And
-                    ? SplitCondition(new IrIf(branch.Loc, c.Left, rest, els)) ?? new IrIf(branch.Loc, c.Left, rest, els)
-                    : SplitCondition(new IrIf(branch.Loc, c.Left, branch.Then, rest)) ?? new IrIf(branch.Loc, c.Left, branch.Then, rest);
+                // R30.42. The outermost `if` of the nest is the original statement: it keeps
+                // its join facts (and frame), and the inner `if`s are plain, inside its arms.
+                var outer = c.Op == BinOp.And
+                    ? branch with { Cond = c.Left, Then = rest, Else = els }
+                    : branch with { Cond = c.Left, Then = branch.Then, Else = rest };
+                return SplitCondition(outer) ?? outer;
             }
         }
         return ReferenceEquals(els, branch.Else) ? null : branch with { Else = els };
@@ -3650,12 +3653,18 @@ public sealed class CodeEmitter(
 
     private void JoinedIf(IrIf i, MethodPlan plan)
     {
-        if (NullTest(i.Cond) is not null || i.Cond is IrBinary pnb && PlainNullTest(pnb) is not null)
+        // R30.43. Only a test of a local narrows it (R10.7, R12.3); a field's null test is a
+        // plain `bool`, and the arms hold everything alike.
+        if (NullTest(i.Cond) is not null || i.Cond is IrBinary pnb && PlainNullTest(pnb) is { Tested: IrVar })
         {
             diagnostics.Error("PALCS0754", i.Loc,
-                "A null test cannot be joined (R30.36): each arm holds the tested reference differently.");
+                "A null test of a local cannot be joined (R30.36, R30.43): each arm holds the tested " +
+                "reference differently. A null test of a field can.");
             return;
         }
+        // R30.42. The condition first: a call in it (`IsWithinRange(x)`) runs before either
+        // arm, so the frame names what it leaves, and only the arms make values existential.
+        var cond = Expr(i.Cond);
         var arms = new IrBlock(i.Loc, i.Else is null ? [i.Then] : [i.Then, i.Else]);
         var framed = _lines.Count;
         var frame = Frame(new IrWhile(i.Loc, i.Cond, i.JoinFacts, null, arms)
@@ -3682,7 +3691,6 @@ public sealed class CodeEmitter(
                     "of the method's body, not of a loop or of an arm, and not inside a `try`.");
             _splitJoin = frame;
         }
-        var cond = Expr(i.Cond);
         Line($"if ({cond})");
         Line("ensures " + MethodPlan.Clause(
             frame.Resources.ToImmutable(), frame.Pure.ToImmutable(), frame.Existentials.ToImmutable()));

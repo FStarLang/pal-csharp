@@ -9728,8 +9728,10 @@ code after it is checked once, against `J` alone.
   what holds on each path with `Pal.Returned()` and `Pal.Result<T>()`. An arm that still
   returns, breaks or continues is refused (PALCS0753).
 * **Restrictions.** A `Pal.Join` that does not follow an `if` is refused (PALCS0752). So is
-  a joined `if` whose condition is a null test, because R22.12 narrows a null test by
-  splitting (PALCS0754). Joined `if`s are not split, not sunk into, and not split at.
+  a joined `if` whose condition is a null test of a local, because R22.12 narrows a null
+  test by splitting (PALCS0754); a null test of a field can be joined (R30.43). Joined `if`s
+  are not sunk into and not split at. A short-circuit condition that R35.15 nests keeps its
+  join on the outer `if` (R30.42).
 
 ### R30.37 `Pal.Index` of a rebindable `ref` local
 
@@ -9832,6 +9834,53 @@ removing one matched item at a time.
   of `Remove`, is what keeps the alias valid. `RemoveWhere` ensures that its result is the
   number of items removed and, at an equivalence and distinct items, that the items stay
   distinct and are all among the old ones (`AllIn`).
+
+### R30.42 A joined `if` whose condition R35.15 nests
+
+R35.15 turns `if (a && f(x)) S` (or `a || f(x)`) into nested `if`s when `f` is a method or a
+callback, so that the call's postcondition is in scope in the arm. A `Pal.Join` after such an
+`if` used to be lost there: the nested `if`s were built afresh, without the join.
+`SortedSet<T>.TreeSubSet.BreadthFirstTreeWalk`'s
+`if (IsWithinRange(current.Item) && !action(current)) return false;` is one.
+
+The join now goes on the outer `if`, the one testing `a`. Its two arms are the whole of the
+original `if`: the `then` arm is the inner `if` on `f(x)` (with the original `else` copied
+into the inner one's `else`, as R35.15 already does), and the `else` arm is the original
+`else`. For `||` the roles are exchanged. The facts hold after either arm, so they hold
+after the original `if`. Inner `if`s stay plain and Pulse joins them itself, as before.
+
+What R30.36 frames changes in two ways:
+
+* **The leading test is evaluated before the frame is named.** `a` is computed into a
+  temporary, and the slots it reads are named after that. A method call in `a` (here
+  `IsWithinRange`) can then change only what its own contract says, and the frame records
+  the state after it.
+* **The moved operands are framed with the arms.** `f(x)` now runs inside the `then` arm, so
+  its effects belong to the arms: a callback's trace, and any object passed to it, become
+  existential at the join, as an arm's assignments do (R30.36). The facts have to restate
+  them, typically with `Pal.Trace`, `Pal.Returned()` and `Pal.Result<T>()`.
+
+`test/join_cond` (`VisitRoot`) pins the shape with a callback. In `BreadthFirstTreeWalk` the
+join, with two more after its `Enqueue`s, takes the generated function from 557 to 277
+lines and its check from 196 s and 3.1 GB to 78 s and 0.9 GB.
+
+### R30.43 A joined `if` on a null test of a field
+
+PALCS0754 refuses to join an `if` on a null test of a local (R30.36): R10.7, R12.3 and R22.12
+narrow the local's slot differently in each arm (an `elim_cons` in one, `is_null` in the
+other), and a join would have to state both. A null test whose operand is a field
+(`current.Left != null`, `root.Right == null`) narrows nothing. Those rules apply only to
+locals and parameters, and a field read in a condition is a value, `not (B.is_null t)`, like
+any other boolean. Joining it is therefore the same as joining any other condition.
+
+So PALCS0754 now refuses only a null test of a local. That includes a condition that starts
+with one (`n != null && …`), because R35.15 makes that test the outer, joined `if`. A field
+test leading a short-circuit condition (`current.Left != null && f(…)`) is joined by R30.42.
+Nothing is assumed. Pulse checks each arm against the join's facts, so a fact the field test
+does not establish fails as an ordinary proof failure.
+
+`test/join_cond` (`Children`) joins `r.Left != null` and `r.Right != null && IsRedNode(r.Right)`.
+`test/diagnostics/cases/JoinNullLocal.cs` pins the refusal of a local's null test.
 
 ### Trusted assumptions
 

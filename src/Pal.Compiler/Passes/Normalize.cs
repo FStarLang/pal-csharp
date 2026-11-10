@@ -426,9 +426,12 @@ public static class Normalize
                 // R30.36. A Pulse `if` with an `ensures` is not framed, as a `try` is not
                 // (F86): its postcondition owns every slot in scope, and keeps the value of
                 // what the arms leave alone, found as a loop's is (R5.8b).
+                // R30.42. The condition's leading test is evaluated once, before the `if`, and
+                // the frame is named after it; what R35.15 moves into the arms is framed with them.
+                var (_, moved) = LeadingTest(r.Cond);
                 var frame = (IrWhile)Loop(
-                    new IrWhile(r.Loc, r.Cond, r.JoinFacts, new IrLiteral(r.Loc, 0),
-                        new IrBlock(r.Loc, r.Else is null ? [r.Then] : [r.Then, r.Else])),
+                    new IrWhile(r.Loc, new IrLiteral(r.Loc, true) { Type = r.Cond.Type }, r.JoinFacts, new IrLiteral(r.Loc, 0),
+                        new IrBlock(r.Loc, [.. moved.Select(m => (IrStmt)new IrExprStmt(m.Loc, m)), r.Then, .. r.Else is null ? [] : new[] { r.Else }])),
                     outer, diagnostics);
                 var live = outer.OrderBy(n => n, StringComparer.Ordinal).ToImmutableArray();
                 var mentioned = new HashSet<string>(frame.Live);
@@ -569,6 +572,23 @@ public static class Normalize
         if (step.Right is not IrLiteral { Value: int k } || k <= 0) return null;
 
         return new CountedFor(decl.Name, step.Op == BinOp.Add);
+    }
+
+    /// <summary>
+    /// R30.42. The test of <paramref name="cond"/> that R35.15 leaves before the <c>if</c>,
+    /// and the operands it moves into the arms: the right operand of a <c>&amp;&amp;</c> or
+    /// <c>||</c> that calls a method, recursively on the left.
+    /// </summary>
+    internal static (IrExpr Lead, ImmutableArray<IrExpr> Moved) LeadingTest(IrExpr cond)
+    {
+        var moved = ImmutableArray.CreateBuilder<IrExpr>();
+        while (cond is IrBinary { Op: BinOp.And or BinOp.Or } c &&
+               Check.Subexpressions(c.Right).OfType<IrCall>().Any(call => call.Kind is CalleeKind.Method or CalleeKind.Callback))
+        {
+            moved.Add(c.Right);
+            cond = c.Left;
+        }
+        return (cond, moved.ToImmutable());
     }
 
     private static IrStmt Loop(IrWhile loop, ImmutableHashSet<string> outer, DiagnosticBag diagnostics)
