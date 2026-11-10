@@ -42,6 +42,9 @@ public static partial class FrontendPass
 
         foreach (var candidate in candidates)
         {
+            // R35.18. A method with a `[Specialize]` parameter is translated only at the
+            // constants its callers pass.
+            if (known.IsSpecialized(candidate.Symbol)) continue;
             // The semantic model must be re-fetched: adding the shim trees produced a
             // new compilation, and models are not portable across compilations.
             var model = compilation.GetSemanticModel(candidate.Syntax.SyntaxTree);
@@ -55,8 +58,13 @@ public static partial class FrontendPass
         // R27.57. The replicas the bodies asked for, each a base body verified again at a
         // representation-sharing subclass; a replica's own calls may ask for more.
         Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
-        while (known.ReplicaDemand.Count > 0)
+        while (known.ReplicaDemand.Count > 0 || known.SpecializationDemand.Count > 0)
         {
+            if (known.SpecializationDemand.Count > 0)
+            {
+                LowerSpecialization(known.SpecializationDemand.Dequeue(), candidates, compilation, known, bound, diagnostics, declarations);
+                continue;
+            }
             var request = known.ReplicaDemand.Dequeue();
             var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
             if (source is null)
@@ -94,6 +102,32 @@ public static partial class FrontendPass
     }
 
     /// <summary>
+    /// R35.18. A method lowered at constant values of its <c>[Specialize]</c> parameters: its
+    /// body with each <c>if</c> those decide folded to the branch taken, under the name the
+    /// callers were redirected to, requiring that each parameter is its constant.
+    /// </summary>
+    private static void LowerSpecialization(WellKnown.SpecializationRequest request, ImmutableArray<Candidate> candidates,
+        CSharpCompilation compilation, WellKnown known, ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
+        ImmutableArray<IrDecl>.Builder declarations)
+    {
+        var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
+        if (source is null) return;
+        var model = compilation.GetSemanticModel(source.Syntax.SyntaxTree);
+        var lifted = new List<IrMethod>();
+        var outer = known.Specialization;
+        known.Specialization = request;
+        var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
+        known.Specialization = outer;
+        if (decl is not IrMethod m) return;
+        var loc = m.Loc;
+        var pins = request.Values.Select(kv => (IrExpr)new IrBinary(loc, BinOp.Eq,
+            new IrVar(loc, kv.Key) { Type = IrPrim.Bool }, new IrLiteral(loc, kv.Value) { Type = IrPrim.Bool })
+            { Type = IrPrim.Bool });
+        declarations.Add(m with { Name = request.Name, Requires = [.. pins, .. m.Requires] });
+        declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor }));
+    }
+
+    /// <summary>
     /// R22.22. A method that calls one needing <c>has_default</c> at a type parameter
     /// needs it too, at whatever of its own type parameters it passes there: the
     /// instance is resolved at the call, from the caller's binders. Iterated to a fixed
@@ -111,8 +145,7 @@ public static partial class FrontendPass
             {
                 if (declarations[i] is not IrMethod { Body: { } body } m) continue;
                 var needed = new HashSet<string>(m.DefaultedTypeParameters);
-                foreach (var call in Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
-                             .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>())
+                foreach (var call in CallsIn(body))
                 {
                     if (!byName.TryGetValue(call.Callee, out var callee)) continue;
                     foreach (var tp in callee.DefaultedTypeParameters)
@@ -133,6 +166,14 @@ public static partial class FrontendPass
             }
         } while (changed);
     }
+
+    // The calls of a body, with those in a statement expression's prelude (R32.12's write-back).
+    private static IEnumerable<IrCall> CallsIn(IrStmt body) =>
+        Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions)
+            .SelectMany(e => e is IrStmtExpr se
+                ? se.Prelude.SelectMany(CallsIn)
+                : e is IrCall c ? [c] : Enumerable.Empty<IrCall>());
 
     // R22.22. The type parameters a `has_default` instance at `t` is resolved from: `t`
     // itself, or those of a tuple's or a struct's arguments (their instances are built
@@ -606,7 +647,7 @@ public static partial class FrontendPass
 
                     // R29.4. Nor does a static one producing an `object`: it reads no
                     // specification type, and an `obj` is no type's to own.
-                    var producesObject = member.IsStatic && WellKnown.IsObjectLike(member switch
+                    var producesObject = member.IsStatic && WellKnown.IsObjectLikeReturn(member switch
                     {
                         IMethodSymbol om => om.ReturnType,
                         IPropertySymbol op => op.Type,
@@ -1946,6 +1987,7 @@ public static partial class FrontendPass
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); if (na.Source is { } nas) Walk(nas); return;
                 case IrContents ct: Walk(ct.Array); return;
+                case IrEnumOp eo: Walk(eo.Source); foreach (var a in eo.Args) Walk(a); return;
                 case IrQuantifier q: Walk(q.Body); return;
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;
                 case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
@@ -2330,8 +2372,10 @@ public static partial class FrontendPass
                               atView is not null ||
                               Borrowing.IsMember(candidate.Symbol, known) ||
                               Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known) ||
+                              // R35.3. So does one about a wrapping struct it creates.
+                              Borrowing.IsWrapping(candidate.Symbol.ReturnType, known) ||
                               // R29.4. A boxed result is described by the state of what it boxes.
-                              WellKnown.IsObjectLike(candidate.Symbol.ReturnType),
+                              WellKnown.IsObjectLikeReturn(candidate.Symbol.ReturnType),
                 });
             }
 
@@ -2722,7 +2766,7 @@ public static partial class FrontendPass
             : RefSnapshots.IsSnapshot(symbol, model.Compilation) && known.MapType(symbol.ReturnType) is { } snapshotOf
                 ? new IrOptionType(snapshotOf)
             // R32.13. A method returning a view exactly returns its record.
-            : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+            : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -2750,7 +2794,7 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        lowerer.Expressions.LiftPrefix = known.Replica?.Name ?? Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ?? known.Replica?.Name ?? Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
         if (iterated is not null) lowerer.Iterate(iterated);
 
@@ -2863,7 +2907,7 @@ public static partial class FrontendPass
         Candidate candidate, SemanticModel model, WellKnown known, DiagnosticBag diagnostics,
         IrLoc loc, ImmutableArray<IrParam> parameters, Specs specs)
     {
-        var returnType = known.MapType(candidate.Symbol.ReturnType);
+        var returnType = known.MapReturnType(candidate.Symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The [Spec] return type `{candidate.Symbol.ReturnType}`");
@@ -3039,7 +3083,7 @@ public static partial class FrontendPass
                   OpenFields = OpenFields(symbol, known),
                   SnapshotResult = RefSnapshots.IsSnapshot(symbol, spec.Model.Compilation) &&
                                    known.MapType(symbol.ReturnType) is { } resultOf ? new IrOptionType(resultOf) : null,
-                  DeclaredResult = symbol.ReturnsVoid ? null : known.MapType(symbol.ReturnType) };
+                  DeclaredResult = symbol.ReturnsVoid ? null : known.MapReturnType(symbol.ReturnType) };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;

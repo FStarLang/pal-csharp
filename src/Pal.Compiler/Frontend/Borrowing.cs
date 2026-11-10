@@ -181,6 +181,14 @@ public static class Borrowing
     public static bool IsWrapping(ITypeSymbol? type, WellKnown known) => InnerField(type, known) is not null;
 
     /// <summary>
+    /// R35.3. A wrapping struct that may be created: it wraps its core directly, and the core
+    /// owns no objects, so the core a method of the owner's class returns is all it holds.
+    /// </summary>
+    public static bool CreatableWrapping(ITypeSymbol? type, WellKnown known) =>
+        type is not null && IsWrapping(type, known) && Innermost(type, known) is { Path.Length: 1, Core: var core } &&
+        OwnedFields(core, known).IsEmpty;
+
+    /// <summary>
     /// R32.12. The wrapped fields from a wrapping struct down to the borrowing struct at its
     /// core, and that struct: each field is of the struct the next is a field of.
     /// </summary>
@@ -261,6 +269,8 @@ public static class Borrowing
                 AssignmentExpressionSyntax a => a.Left,
                 PrefixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
                 PostfixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                // R35.4. A field passed by reference may be written.
+                ArgumentSyntax { RefKindKeyword.RawKind: (int)SyntaxKind.RefKeyword or (int)SyntaxKind.OutKeyword } ra => ra.Expression,
                 _ => null,
             };
             if (target is null) continue;
@@ -429,6 +439,41 @@ public static class Borrowing
             };
             if (name != owner.Name) continue;
             return ctor.Parameters.FirstOrDefault(p => p.Name == right.Identifier.ValueText);
+        }
+        return compilation is null ? null : WrappingOwnerParameter(ctor, decl, owner, compilation);
+    }
+
+    /// <summary>
+    /// R35.3. The parameter a wrapping struct's constructor takes the object its core borrows
+    /// in: the receiver of the call that creates the wrapped struct
+    /// (<c>_enumerator = dictionary.GetEnumerator()</c>), a method of the owner's class.
+    /// </summary>
+    private static IParameterSymbol? WrappingOwnerParameter(
+        IMethodSymbol ctor, ConstructorDeclarationSyntax decl, IFieldSymbol owner, Compilation compilation)
+    {
+        if (ctor.ContainingType is not { TypeKind: TypeKind.Struct } self || decl.Initializer is not null) return null;
+        var model = compilation.GetSemanticModel(decl.SyntaxTree);
+        IEnumerable<ExpressionSyntax> exprs = decl.Body?.Statements.OfType<ExpressionStatementSyntax>()
+            .Select(s => s.Expression) ?? [];
+        if (decl.ExpressionBody is { } eb) exprs = [eb.Expression];
+        foreach (var e in exprs)
+        {
+            if (e is not AssignmentExpressionSyntax { Left: var left, Right: var right } ||
+                model.GetSymbolInfo(left).Symbol is not IFieldSymbol
+                {
+                    IsStatic: false, Type: INamedTypeSymbol { TypeKind: TypeKind.Struct },
+                } wf ||
+                wf.ContainingType.OriginalDefinition.ToDisplayString() != self.OriginalDefinition.ToDisplayString())
+                continue;
+            ExpressionSyntax? source = right switch
+            {
+                InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv } } => recv,
+                _ => null,
+            };
+            if (source is IdentifierNameSyntax id && model.GetSymbolInfo(id).Symbol is IParameterSymbol p &&
+                p.ContainingSymbol is IMethodSymbol { MethodKind: MethodKind.Constructor } &&
+                p.Type.OriginalDefinition.ToDisplayString() == owner.Type.OriginalDefinition.ToDisplayString())
+                return ctor.Parameters.FirstOrDefault(cp => cp.Name == p.Name);
         }
         return null;
     }

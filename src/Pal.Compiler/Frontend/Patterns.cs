@@ -89,6 +89,7 @@ public sealed partial class ExprLowerer
     /// <summary>R21.3. <c>e is P</c>.</summary>
     private IrExpr LowerIsPattern(IsPatternExpressionSyntax node, IrLoc loc)
     {
+        if (CollectionAliasPattern(node, loc) is { } aliasTest) return aliasTest;
         var prelude = ImmutableArray.CreateBuilder<IrStmt>();
         var subject = PatternSubject(node.Expression, prelude);
         var cond = Pattern(node.Pattern, subject);
@@ -350,6 +351,14 @@ public sealed partial class ExprLowerer
                 target.WithNullableAnnotation(NullableAnnotation.NotAnnotated)))
             return cond;
 
+        // R34.4. Whether an enumerable argument is an `ICollection<T>` is the abstract
+        // `is_collection`, which the fast path's `Count` and `CopyTo` require.
+        if (value is IrVar { Type: IrEnumerableType } && WellKnown.IsCollectionInterface(target))
+        {
+            narrowed = value;
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Enumerable.is_collection", [value]) { Type = Bool };
+        }
+
         if (known.CaseConstructor(target) is { } ctor)
             return Conj(loc, cond, new IrSpecOp(loc, ctor + "?", [narrowed]) { Type = Bool });
 
@@ -363,6 +372,12 @@ public sealed partial class ExprLowerer
         // R30.6. A library class whose test is bound: the predicate, of the non-null value.
         if (known.TypeTestBinding(target) is { } test)
             return Conj(loc, cond, new IrSpecOp(loc, test, [narrowed]) { Type = Bool });
+        // R35.7. An `object` is a `T` when it is a non-null box of one; the value is unboxed.
+        if (WellKnown.IsObj(value.Type) && TypeTests.Target(known, target) is { } boxed)
+        {
+            narrowed = TypeTests.Unbox(loc, boxed, value);
+            return TypeTests.IsA(loc, boxed, value);
+        }
 
         diagnostics.Error("PALCS0627", loc,
             $"A test that a `{subject.Type}` is a `{target}`. A type pattern translates when " +

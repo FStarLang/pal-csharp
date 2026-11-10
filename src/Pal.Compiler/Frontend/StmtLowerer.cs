@@ -44,8 +44,15 @@ public sealed class StmtLowerer(
         return node switch
         {
             BlockSyntax b => LowerBlock(b),
+            LocalDeclarationStatementSyntax d when EnumeratorDeclaration(d.UsingKeyword.IsKind(SyntaxKind.UsingKeyword)
+                ? d.Declaration : null, loc) is { } enumerator => enumerator,
+            UsingStatementSyntax u when EnumeratorDeclaration(u.Declaration, loc) is { } enumerator =>
+                new IrBlock(loc, [enumerator, Lower(u.Statement)]),
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
+            // R35.18. In a specialization, an `if` its constants decide is the branch taken.
+            IfStatementSyntax i when Decided(i.Condition) is { } taken =>
+                taken ? Lower(i.Statement) : i.Else is null ? new IrBlock(loc, []) : Lower(i.Else.Statement),
             IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
             // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
             IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
@@ -59,7 +66,12 @@ public sealed class StmtLowerer(
             DoStatementSyntax d => LowerDo(d, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
+            ForEachVariableStatementSyntax f => LowerForEachVariable(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
+            // R35.2. `out var x` in a returned expression: declared ahead, as R33.9's `if`.
+            ReturnStatementSyntax { Expression: { } re } r when OutDeclarations(re, loc) is { IsEmpty: false } outs =>
+                new IrBlock(loc, [.. outs, new IrReturn(loc,
+                    _code.ToDeclared(_code.Lower(re), known.MapReturnType(ReturnType(r))))]) { Splice = true },
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : Returned(r, ReturnedType(r))),
             BreakStatementSyntax => new IrBreak(loc),
@@ -327,6 +339,7 @@ public sealed class StmtLowerer(
     // -----------------------------------------------------------------------
 
     public const string ReturnedFlag = "__pal_returned";
+    public const string RaisedFlag = "__pal_raised";
     public const string ReturnedValue = "__pal_result";
     /// <summary>R26.10. What <c>Pal.Broke()</c> names: the innermost loop's break flag.</summary>
     public const string BrokeFlag = "__pal_broke";
@@ -393,6 +406,30 @@ public sealed class StmtLowerer(
     /// null. (A pattern otherwise substitutes the subject for <c>x</c>, re-reading the heap at
     /// each use.)
     /// </summary>
+    /// <summary>
+    /// R35.18. The value of a condition built by <c>!</c>, <c>&amp;&amp;</c>, <c>||</c> and
+    /// parentheses from <c>bool</c> literals and the parameters a specialization fixes, when
+    /// those decide it (<c>false &amp;&amp; e</c> is false, and <c>e</c> never evaluated); else null.
+    /// </summary>
+    private bool? Decided(ExpressionSyntax e)
+    {
+        if (known.Specialization is not { } sp) return null;
+        return e switch
+        {
+            ParenthesizedExpressionSyntax p => Decided(p.Expression),
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.TrueLiteralExpression) => true,
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.FalseLiteralExpression) => false,
+            IdentifierNameSyntax id when model.GetSymbolInfo(id).Symbol is IParameterSymbol p &&
+                Declarations.Has(p, known.SpecializeAttribute) && sp.Values.TryGetValue(p.Name, out var v) => v,
+            PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.LogicalNotExpression) => !Decided(u.Operand),
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalAndExpression) =>
+                Decided(b.Left) is { } l ? (l ? Decided(b.Right) : false) : null,
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalOrExpression) =>
+                Decided(b.Left) is { } l ? (l ? true : Decided(b.Right)) : null,
+            _ => null,
+        };
+    }
+
     private IrStmt? RegionPatternIf(IfStatementSyntax i, IrLoc loc)
     {
         if (i.Condition is not IsPatternExpressionSyntax
@@ -440,7 +477,7 @@ public sealed class StmtLowerer(
 
     /// <summary>R30.29. The type a <c>return</c> stores: for a snapshot method, its <c>option</c>.</summary>
     private IrType? ReturnedType(ReturnStatementSyntax r) =>
-        RefSnapshots.Enclosing(r, model) is { } m ? _code.SnapshotType(m) : known.MapType(ReturnType(r));
+        RefSnapshots.Enclosing(r, model) is { } m ? _code.SnapshotType(m) : known.MapReturnType(ReturnType(r));
 
     private IrExpr Returned(ReturnStatementSyntax r, IrType? mapped) =>
         mapped is IrOptionType snapshot && RefSnapshots.Enclosing(r, model) is not null &&
@@ -674,6 +711,19 @@ public sealed class StmtLowerer(
             {
                 _code.Alias(symbol, arrayField);
                 _spec.Alias(symbol, arrayField);
+                continue;
+            }
+            // R34.20. `var c = e as ICollection<T>;`, never written, on an enumerable argument
+            // `e`: `c` is another name for `e`, and null exactly when `e` is no collection.
+            if (symbol is not null && v.Initializer?.Value is BinaryExpressionSyntax collInit &&
+                collInit.IsKind(SyntaxKind.AsExpression) &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                _code.IsEnumerableArgument(collInit.Left) &&
+                model.GetTypeInfo(collInit.Right).Type is INamedTypeSymbol collTarget &&
+                WellKnown.IsCollectionInterface(collTarget))
+            {
+                _code.CollectionAlias(symbol, _code.Lower(collInit.Left));
+                _spec.CollectionAlias(symbol, _spec.Lower(collInit.Left));
                 continue;
             }
             // R32.14. `V? x = this as V;` in a member of a view's base: `x` is null.
@@ -1473,7 +1523,8 @@ public sealed class StmtLowerer(
         // R33.18. A call of a method that does nothing.
         if (node.Expression is InvocationExpressionSyntax call && DoesNothing(call))
             return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
-        return LowerSideEffect(node.Expression, loc);
+        var (stmt, writes) = _code.OutFieldWrites(node, () => LowerSideEffect(node.Expression, loc));
+        return writes.IsEmpty ? stmt : new IrBlock(loc, [stmt, .. writes]);
     }
 
     /// <summary>R33.17. The statements <c>a = _field;</c> that re-read a field alias.</summary>
@@ -1928,6 +1979,27 @@ public sealed class StmtLowerer(
         if (ArgumentGuard(method, args, loc) is { } guard)
             return guard;
 
+        // R34.22. `d.Keys.CopyTo(a, i)` and `d.Values.CopyTo(a, i)` on an `IDictionary<K, V>`
+        // argument write its keys, or its values, into `a` from `i`, in the pairs' order.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax { Expression: MemberAccessExpressionSyntax part } &&
+            part.Name.Identifier.ValueText is "Keys" or "Values" &&
+            model.GetSymbolInfo(part).Symbol is IPropertySymbol { IsStatic: false } partProperty &&
+            WellKnown.IsDictionaryInterface(partProperty.ContainingType) &&
+            _code.IsEnumerableArgument(part.Expression) &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc,
+                part.Name.Identifier.ValueText == "Keys" ? ArrayOpKind.CopyKeys : ArrayOpKind.CopyValues,
+                [_code.Lower(part.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
+        // R34.5. `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into `a` from `i`.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax copied &&
+            known.MapType(model.GetTypeInfo(copied.Expression).Type) is IrEnumerableType { Collection: true } &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc, ArrayOpKind.CopyFrom,
+                [_code.Lower(copied.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -1935,6 +2007,20 @@ public sealed class StmtLowerer(
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
             ArrayBulkOp(method, args, loc) is { } bulk)
             return bulk;
+
+        // R34.16. CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)`, which
+        // `List<T>.Sort(Comparison<T>)` calls, is R26.7's `Array.Sort(a, i, n, comparer)`.
+        if (method is { IsStatic: true, Name: "Sort" } &&
+            method.ContainingType is { Name: "ArraySortHelper", Arity: 1 } && args.Count == 2 &&
+            args.All(a => a.NameColon is null) &&
+            args[0].Expression is ObjectCreationExpressionSyntax { ArgumentList.Arguments: [var sa, var si, var sn] } span &&
+            model.GetTypeInfo(span).Type is INamedTypeSymbol { Name: "Span", Arity: 1 } &&
+            model.GetTypeInfo(sa.Expression).Type is IArrayTypeSymbol { Rank: 1 } &&
+            model.GetTypeInfo(si.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            model.GetTypeInfo(sn.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            known.MapType(model.GetTypeInfo(args[1].Expression).Type) is IrUserSpecType { FStar: Sorted.ComparerType })
+            return new IrArrayOp(loc, ArrayOpKind.Sort,
+                [_code.Lower(sa.Expression), _code.Lower(si.Expression), _code.Lower(sn.Expression), _code.Lower(args[1].Expression)]);
 
         // R23.4. `Array.Resize(ref a, n)` replaces `a` by a fresh array of length `n`.
         if (method is { IsStatic: true, Name: "Resize", IsGenericMethod: true } &&
@@ -1963,7 +2049,7 @@ public sealed class StmtLowerer(
         if ((known.RegionOpName(method) is not null || known.SpecOpName(method) is not null) && method.ReturnsVoid)
             return new IrGhostStmt(loc, GhostKind.LemmaCall, _spec.Lower(node), null);
 
-        var kind = Declarations.KindOf(method, known);
+        var kind = Declarations.KindOf(_code.ThisInterfaceImpl(node, method) ?? method, known);
         if (kind == CalleeKind.Lemma)
         {
             var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
@@ -1979,15 +2065,137 @@ public sealed class StmtLowerer(
         // position, so it is lowered by the same code: the receiver threading of §4.5 and
         // the `MutatesReceiver` flag of R4.11 are decided in exactly one place.
         if (kind == CalleeKind.Method) return new IrExprStmt(loc, _code.Lower(node));
+        // R35.4. A helper forwarding to a held struct's member is that member's call.
+        if (_code.ForwardedToHeld(node, method, loc) is { } forwarded)
+            return new IrExprStmt(loc, forwarded);
 
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");
         return new IrBlock(loc, []);
     }
 
+    /// <summary>
+    /// R34.6. <c>using (IEnumerator&lt;T&gt; en = e.GetEnumerator())</c>, or the declaration
+    /// <c>using IEnumerator&lt;T&gt; en = e.GetEnumerator();</c>, on an enumerable argument
+    /// <c>e</c>: <c>en</c> is a cursor, the number of items it has moved past, which starts
+    /// at 0. Disposing it does nothing. Null when the declaration is not one.
+    /// </summary>
+    private IrStmt? EnumeratorDeclaration(VariableDeclarationSyntax? declaration, IrLoc loc)
+    {
+        if (declaration is not { Variables: [{ Initializer.Value: var init } v] } ||
+            ExprLowerer.Unparenthesized(init) is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetEnumerator" } access,
+                ArgumentList.Arguments.Count: 0,
+            } ||
+            !_code.IsEnumerableArgument(access.Expression))
+            return null;
+        var source = _code.Lower(access.Expression);
+        var name = v.Identifier.ValueText;
+        _code.HoldCursor(name, source);
+        _spec.HoldCursor(name, _spec.Lower(access.Expression));
+        return new IrLocalDecl(Locations.From(v), name, IrPrim.Int,
+            new IrEnumOp(Locations.From(init), EnumOpKind.Start, source, []) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.7. A loop that moves an enumerator on keeps it within the items, and ends
+    /// because the items it has not yet moved past are fewer each time round.
+    /// </summary>
+    private static (ImmutableArray<IrExpr>, IrExpr?) EnumeratorLoopSpecs(
+        IrEnumOp moved, ImmutableArray<IrExpr> invariants, IrExpr? decreases)
+    {
+        var loc = moved.Loc;
+        var cursor = moved.Args[0];
+        IrExpr Length() => new IrSeqOp(loc, SeqOpKind.Length,
+            [new IrContents(loc, moved.Source) { Type = new IrSeqType(((IrEnumerableType)moved.Source.Type!).Element) }])
+            { Type = IrPrim.Int };
+        var bounds = new IrBinary(loc, BinOp.And,
+            new IrBinary(loc, BinOp.Le, new IrLiteral(loc, 0) { Type = IrPrim.Int }, cursor) { Type = IrPrim.Bool },
+            new IrBinary(loc, BinOp.Le, cursor, Length()) { Type = IrPrim.Bool }) { Type = IrPrim.Bool };
+        return (invariants.Insert(0, bounds),
+                decreases ?? new IrBinary(loc, BinOp.Sub, Length(), cursor) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.8. <c>foreach (T x in e) body</c> over an enumerable argument <c>e</c> is
+    /// <c>using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }</c>,
+    /// whose cursor <c>Pal.Index(x)</c> names.
+    /// </summary>
+    private IrStmt ForEachEnumerable(ForEachStatementSyntax node, IrEnumerableType enumerable, IrLoc loc) =>
+        ForEachEnumerable(node.Identifier.ValueText, Locations.From(node.Identifier), node.Expression,
+            node.Statement, enumerable, loc,
+            (vloc, current) => [new IrLocalDecl(vloc, node.Identifier.ValueText, enumerable.Element, current) { Immutable = true }]);
+
+    private IrStmt ForEachEnumerable(string name, IrLoc vloc, ExpressionSyntax expression, StatementSyntax statement,
+        IrEnumerableType enumerable, IrLoc loc, Func<IrLoc, IrExpr, IrStmt[]> bind)
+    {
+        var cursorName = ExprLowerer.ForEachIndex(name);
+        var source = _code.Lower(expression);
+        var (invariants, decreases, body) = ExtractLoopSpecs(statement);
+        IrExpr Cursor() => new IrVar(vloc, cursorName) { Type = IrPrim.Int };
+        var moved = new IrEnumOp(vloc, EnumOpKind.MoveNext, source, [Cursor()]) { Type = IrPrim.Bool };
+        (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
+        var items = bind(vloc, new IrEnumOp(vloc, EnumOpKind.Current, source, [Cursor()]) { Type = enumerable.Element });
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(vloc, cursorName, IrPrim.Int,
+                new IrEnumOp(vloc, EnumOpKind.Start, source, []) { Type = IrPrim.Int }),
+            new IrWhile(loc, moved, invariants, decreases,
+                new IrBlock(body.Loc, [.. items, .. ((IrBlock)body).Statements])),
+        ]);
+    }
+
+    /// <summary>
+    /// R34.19. <c>foreach ((A a, B b) in e)</c> (or <c>foreach (var (a, b) in e)</c>) over an
+    /// enumerable argument of pairs is R34.8's loop whose item is bound to a fresh local
+    /// <c>p</c>, followed by <c>A a = p.Item1; B b = p.Item2;</c>. <c>Pal.Index</c> of either
+    /// variable names the loop's cursor.
+    /// </summary>
+    private IrStmt LowerForEachVariable(ForEachVariableStatementSyntax node, IrLoc loc) => AfterLoop(() =>
+    {
+        if (known.MapType(model.GetTypeInfo(node.Expression).Type) is not IrEnumerableType enumerable ||
+            !_code.IsEnumerableArgument(node.Expression) ||
+            ExprLowerer.DeconstructedPair(node) is not ({ } first, { } second))
+        {
+            diagnostics.Unsupported(loc, "The statement `ForEachVariableStatement`",
+                "A deconstructing `foreach` is translated over an enumerable argument of pairs, with two " +
+                "variables (doc/translation.md R34.19).");
+            return new IrBlock(loc, []);
+        }
+        var name = first.Identifier.ValueText;
+        var pair = name + "__pair";
+        IrType ComponentType(SingleVariableDesignationSyntax v) =>
+            known.MapType((model.GetDeclaredSymbol(v) as ILocalSymbol)?.Type) ?? IrPrim.Int;
+        IrStmt Component(IrLoc vloc, SingleVariableDesignationSyntax v, string proj)
+        {
+            var type = ComponentType(v);
+            return new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
+                new IrSpecOp(vloc, proj, [new IrVar(vloc, pair) { Type = enumerable.Element }])
+                    { MachineArgs = true, Type = type }) { Immutable = true };
+        }
+        return ForEachEnumerable(name, Locations.From(first), node.Expression, node.Statement, enumerable, loc,
+            (vloc, current) =>
+            [
+                new IrLocalDecl(vloc, pair, enumerable.Element, current) { Immutable = true },
+                Component(vloc, first, "fst"),
+                Component(vloc, second, "snd"),
+                // The pair is its components put back together (F*'s eta for pairs).
+                new IrGhostStmt(vloc, GhostKind.Assert, new IrBinary(vloc, BinOp.Eq,
+                    new IrVar(vloc, pair) { Type = enumerable.Element },
+                    new IrSpecOp(vloc, "Mktuple2",
+                    [
+                        new IrVar(vloc, first.Identifier.ValueText) { Type = ComponentType(first) },
+                        new IrVar(vloc, second.Identifier.ValueText) { Type = ComponentType(second) },
+                    ]) { MachineArgs = true, Type = enumerable.Element }) { Type = IrPrim.Bool }, null),
+            ]);
+    }, loc);
+
     private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc) => AfterLoop(() =>
     {
         var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
         var cond = _code.Lower(node.Condition);
+        if (cond is IrEnumOp { Op: EnumOpKind.MoveNext } moved)
+            (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
         // R26.11. A guard that writes -- `(i = f(n)) < size`, `++i < bound` -- is a `for`
         // whose init and step are the write: the guard's effect runs before each test, the
         // loop specification describes the state just after it, and a `continue` still
@@ -2006,7 +2214,7 @@ public sealed class StmtLowerer(
     private IrStmt LowerDo(DoStatementSyntax node, IrLoc loc)
     {
         if (node.Statement.DescendantNodesAndSelf(n => n == node.Statement ||
-                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or
+                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax or
                           AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
                 .OfType<ContinueStatementSyntax>().FirstOrDefault() is { } cont)
         {
@@ -2112,6 +2320,8 @@ public sealed class StmtLowerer(
     {
         var collectionType = model.GetTypeInfo(node.Expression).Type;
         var symbol = model.GetSymbolInfo(node.Expression).Symbol;
+        if (known.MapType(collectionType) is IrEnumerableType enumerable && _code.IsEnumerableArgument(node.Expression))
+            return ForEachEnumerable(node, enumerable, loc);
         if (known.MapType(collectionType) is not IrArrayType && ForEachOwner(node, loc) is { } overOwner)
             return overOwner;
         if (known.MapType(collectionType) is not IrArrayType { Element: var element } arrayType ||
@@ -2299,7 +2509,12 @@ public sealed class StmtLowerer(
     {
         var loc = Locations.From(arrow);
         if (model.GetEnclosingSymbol(arrow.Expression.SpanStart) is IMethodSymbol { ReturnsVoid: false } m)
-            return new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+        {
+            // R35.2. As in a `return`, an `out var x` in it is declared ahead.
+            var outs = OutDeclarations(arrow.Expression, loc);
+            IrStmt ret = new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapReturnType(m.ReturnType)));
+            return outs.IsEmpty ? ret : new IrBlock(loc, [.. outs, ret]) { Splice = true };
+        }
         if (arrow.Expression is ThrowExpressionSyntax th)
             return new IrThrow(loc, _code.Lower(th.Expression));
         return LowerSideEffect(arrow.Expression, loc);
@@ -2326,6 +2541,11 @@ public sealed class StmtLowerer(
     private IrStmt? IntegerGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         var owner = method.ContainingType?.ToDisplayString();
+        // R34.2. So is one at an enumerable argument: the caller lends a resource, not null.
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
+            _code.IsEnumerableArgument(args[0].Expression) && !_code.IsCollectionAlias(args[0].Expression))
+            return new IrBlock(loc, []);
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
             // R27.40. So is one at a non-nullable delegate type (R26.1).
@@ -2335,7 +2555,9 @@ public sealed class StmtLowerer(
              model.GetSymbolInfo(args[0].Expression).Symbol is IParameterSymbol xp &&
              FrontendPass.ExactParameter(xp, model.Compilation, known) is not null) &&
             nt.Nullability.FlowState == NullableFlowState.NotNull &&
-            nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
+            nt.Type.NullableAnnotation != NullableAnnotation.Annotated &&
+            // R35.11. Not one at `object`, which may be null (R35.7) and is tested (R25.7).
+            ntType.SpecialType != SpecialType.System_Object)
             return new IrBlock(loc, []);
 
         // R33.1. System.Collections' own polyfills of the same guards (its `ThrowHelper`,
@@ -2386,7 +2608,9 @@ public sealed class StmtLowerer(
     /// </summary>
     private IrStmt? OpaqueNullGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
-        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        // R35.1. A trailing parameter-name argument (`nameof(item)`) is a constant, not evaluated.
+        if (!method.IsStatic || args.Count < 1 || args[0].NameColon is not null ||
+            args.Skip(1).Any(a => !model.GetConstantValue(a.Expression).HasValue)) return null;
         var owner = method.ContainingType?.ToDisplayString();
         IrExpr test;
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
@@ -2462,6 +2686,13 @@ public sealed class StmtLowerer(
 
             case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
                 return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);
+
+            // R34.22. `Array.Sort<K, V>(keys, values, comparer)`: the keys sorted, each value
+            // moved with its key.
+            case ("Sort", 3) when method.IsGenericMethod && method.TypeArguments.Length == 2 &&
+                ArrayOf(byParam[0]) is { } && ArrayOf(byParam[1]) is { } &&
+                known.MapType(method.Parameters[2].Type) is IrUserSpecType { FStar: Sorted.ComparerType }:
+                return new IrArrayOp(loc, ArrayOpKind.SortPairs, [L(0), L(1), L(2)]);
 
             // R26.7. `Array.Sort<T>(a, index, length, comparer)`.
             case ("Sort", 4) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } &&

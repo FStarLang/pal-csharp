@@ -655,9 +655,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         // R23.14. A conditional is built when an arm is; and an abstraction of one state
         // compared with the other state's is not a name compared with itself: what the
         // method did to the representation is between them, so they are compared pointwise too.
+        // R34.1. So are an enumerable's items, which no array the method owns is at: a
+        // collection built from them is equal to them pointwise.
         static bool Built(IrExpr e) => e switch
         {
             IrSeqOp or IrSpecOp { Built: true } or IrContents { Array: IrResult } or IrResult { Type: IrArrayType } => true,
+            IrContents { Array.Type: IrEnumerableType } => true,
             IrConditional c => Built(c.Then) || Built(c.Else) || c.Then is IrOld || c.Else is IrOld,
             _ => false,
         };

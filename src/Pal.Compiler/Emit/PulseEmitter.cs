@@ -175,6 +175,15 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public SpanOrigin? Origin { get; init; }
 
+    /// <summary>
+    /// R34.6. For an enumerator's cursor (a <see cref="SlotKind.Cell"/> of type <c>int</c>):
+    /// the enumerable parameter it enumerates.
+    /// </summary>
+    public string? Cursor { get; init; }
+
+    /// <summary>R34.1. For an enumerable parameter: the ghost binder of the items it yields.</summary>
+    public string? Items { get; init; }
+
     /// <summary>R33.27. The receiver's array field a span local borrowed, if that is its source.</summary>
     public string? BorrowedField { get; init; }
 
@@ -185,6 +194,8 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
+        SlotKind.Enumerable => $"Pulse.Lib.CSharp.Enumerable.pts_to {Binder} {Perm}{value}",
+        SlotKind.ArrayCell => $"Pulse.Lib.CSharp.ArrayCell.pts_to {Binder} {value}",
         // R27.23. An `[Open]` receiver is held as its record.
         SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
         // R27.41. A receiver held at its heaps and not opened, carried across a loop at
@@ -202,7 +213,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     };
 
     public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
-        or SlotKind.Span or SlotKind.Object or SlotKind.Trace;
+        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell;
 }
 
 public enum SlotKind
@@ -227,6 +238,16 @@ public enum SlotKind
     /// caller passed with it.
     /// </summary>
     Trace,
+    /// <summary>
+    /// R34.1. An <c>IEnumerable&lt;T&gt;</c> argument, owned read-only through
+    /// <c>Pulse.Lib.CSharp.Enumerable.pts_to</c> at the items it yields.
+    /// </summary>
+    Enumerable,
+    /// <summary>
+    /// R34.10. A local that owns an array and is reassigned: a cell holding the array,
+    /// owned with it through <c>Pulse.Lib.CSharp.ArrayCell.pts_to</c>.
+    /// </summary>
+    ArrayCell,
 }
 
 /// <summary>
@@ -2331,6 +2352,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
                 case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;
+                case IrEnumOp eo: CollectExpr(eo.Source); foreach (var a in eo.Args) CollectExpr(a); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
                 case IrListOp l2: foreach (var a in l2.Args) CollectExpr(a); return;
                 case IrSpecOp so: foreach (var a in so.Args) CollectExpr(a); return;

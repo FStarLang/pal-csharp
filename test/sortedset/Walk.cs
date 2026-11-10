@@ -374,6 +374,37 @@ public sealed class WalkSet<T>
         return true;
     }
 
+    // R35.15, R35.16. A callback called under a short-circuit test, with statements after
+    // it: the test is nested, and what follows goes into both arms.
+    [Requires("2 <= Pal.CallBound(action)")]
+    [Ensures("Pal.Implies(Result != 0, Pal.Trace<(T, bool), bool>(action).Length == (b ? 2 : 0)) && Result <= 2")]
+    [Frac("p")]
+    internal int CallIf(bool b, [Callback(Bounded = true)] WalkPredicate<T> action)
+    {
+        if (root == null)
+        {
+            return 0;
+        }
+        int r = 0;
+        if (b && !action(root))
+        {
+            r = 1;
+        }
+        r = r + 1;
+        int i = 0;
+        while (i < 1)
+        {
+            Pal.Decreases(1 - i);
+            Pal.Invariant(0 <= i && i <= 1 && r <= 2 && Pal.Trace<(T, bool), bool>(action).Length == (b ? 1 + i : 0));
+            if (b && !action(root))
+            {
+                r = 2;
+            }
+            i++;
+        }
+        return r;
+    }
+
     // R27.39. `SortedSet<T>.CopyTo(T[], int, int)`: a lambda that writes a captured index.
     [Requires("0 <= index && 0 <= count")]
     [Throws(typeof(System.ArgumentException), "index > array.Length - count")]

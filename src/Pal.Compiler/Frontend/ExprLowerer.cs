@@ -232,7 +232,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var symbol = model.GetSymbolInfo(node).Symbol;
         // R21.6. A pattern variable is the value it was bound to, at that value's type:
         // `var` declares it nullable whatever it matched.
-        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound.Type;
+        if (symbol is ILocalSymbol or IParameterSymbol or IFieldSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound.Type;
         if (symbol is ILocalSymbol && _lazyAliases.TryGetValue(symbol, out var lazy)) return lazy().Type;
         var declared = symbol switch
         {
@@ -318,16 +318,62 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             BinaryExpressionSyntax b when b.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression
                     or SyntaxKind.CoalesceExpression && (IsObj(b.Left) || IsObj(b.Right))
                 => "compares an `object`",
+            // R35.7. `o is T` against a type parameter or a pair is `is_a`.
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.IsExpression) && IsObj(b.Left) &&
+                                          TypeTests.Target(known, model.GetTypeInfo(b.Right).Type) is not null
+                => null,
             BinaryExpressionSyntax b when b.Kind() is SyntaxKind.AsExpression or SyntaxKind.IsExpression && IsObj(b.Left)
                 => "tests the type of an `object`",
-            IsPatternExpressionSyntax p when IsObj(p.Expression) => "matches an `object`",
+            IsPatternExpressionSyntax p when IsObj(p.Expression) && !ObjectPattern(p.Pattern) => "matches an `object`",
             ConditionalAccessExpressionSyntax c when IsObj(c.Expression) => "tests an `object` for null",
-            CastExpressionSyntax c when IsObj(c.Expression) && !WellKnown.IsObj(known.MapType(info.Type))
+            CastExpressionSyntax c when IsObj(c.Expression) && !WellKnown.IsObj(known.MapType(info.Type)) &&
+                                        (SpecPosition || TypeTests.Target(known, info.Type) is null)
                 => "converts an `object` back",
-            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.NullLiteralExpression) && !ReferenceEqualityOperand(l) &&
-                WellKnown.IsObj(known.MapType(info.ConvertedType)) => "is a null `object`",
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// R35.7. A pattern an <c>object</c> may be matched against: <c>null</c>, a type
+    /// parameter or a pair (with or without a variable), and <c>not</c> of one.
+    /// </summary>
+    private bool ObjectPattern(PatternSyntax pattern) => pattern switch
+    {
+        ParenthesizedPatternSyntax pp => ObjectPattern(pp.Pattern),
+        UnaryPatternSyntax u when u.OperatorToken.IsKind(SyntaxKind.NotKeyword) => ObjectPattern(u.Pattern),
+        ConstantPatternSyntax c when c.Expression.IsKind(SyntaxKind.NullLiteralExpression) => true,
+        ConstantPatternSyntax c => model.GetSymbolInfo(c.Expression).Symbol is ITypeSymbol ct &&
+                                   TypeTests.Target(known, ct) is not null,
+        TypePatternSyntax t => TypeTests.Target(known, model.GetTypeInfo(t.Type).Type) is not null,
+        DeclarationPatternSyntax { Designation: SingleVariableDesignationSyntax or DiscardDesignationSyntax } d =>
+            TypeTests.Target(known, model.GetTypeInfo(d.Type).Type) is not null,
+        _ => false,
+    };
+
+    /// <summary>
+    /// R35.7. <c>(T)o</c> on an <c>object</c>, at a type parameter or a pair: the value
+    /// <c>o</c> boxes when <c>o is T</c>. A null <c>o</c> is <c>default(T)</c> when that is
+    /// null (a reference or nullable <c>T</c>) and throws <c>NullReferenceException</c>
+    /// otherwise; any other <c>o</c> throws <c>InvalidCastException</c>.
+    /// </summary>
+    private IrExpr Unboxing(CastExpressionSyntax c, IrType target, IrLoc loc)
+    {
+        var type = model.GetTypeInfo(c.Type).Type!;
+        IrStmt Throw(string exn) => new IrThrow(loc, LibraryException(loc, exn));
+        if (DefaultValue(type, loc) is not { } dflt || !type.IsValueType && type is not ITypeParameterSymbol)
+            return Unsupported(c, loc);
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        var o = PatternSubject(c.Expression, prelude).Value!;
+        // R35.12. The cast's failures are a guard before it, and its value a pure
+        // conditional, so what a caller knows of the value survives the `let` that binds it.
+        IrStmt onNull = type.IsValueType
+            ? Throw("System.NullReferenceException")
+            : new IrIf(loc, new IrUnary(loc, UnOp.Not, Sorted.IsNull(loc, dflt)) { Type = IrPrim.Bool },
+                Throw("System.NullReferenceException"), null);
+        prelude.Add(new IrIf(loc, new IrUnary(loc, UnOp.Not, TypeTests.IsA(loc, target, o)) { Type = IrPrim.Bool },
+            new IrIf(loc, Sorted.IsNull(loc, o), onNull, Throw("System.InvalidCastException")), null));
+        var result = TypeTests.UnboxOr(loc, target, o, dflt);
+        return WithPrelude(loc, prelude, result);
     }
 
     /// <summary>
@@ -370,7 +416,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var atExact = ExactArgument(node, info, loc);
         // R10.2. `null` has no type of its own; what it denotes is fixed by the context,
         // and that is the only thing that says *which* class's `None` this is.
-        var type = Declared(node) ?? known.MapType(info.Type)
+        var type = (MemberResult(node, info) ? WellKnown.Obj : Declared(node) ?? known.MapType(info.Type))
             ?? (node.IsKind(SyntaxKind.NullLiteralExpression) ? known.MapType(info.ConvertedType) : null);
 
         // R20.3. A method group converted to a delegate is a value of an opaque type. The
@@ -417,6 +463,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return Refused("PALCS0737", loc,
                 $"`{node}` {what}. An `object` (or enumerator interface) value is translated as " +
                 "an abstract box: it may be returned and passed on, and nothing else (doc/translation.md R29.4).");
+
+        // R35.7. The null `object`.
+        if (node is LiteralExpressionSyntax nl && nl.IsKind(SyntaxKind.NullLiteralExpression) && !ReferenceEqualityOperand(nl) &&
+            known.MapType(info.ConvertedType) is { } nullObj && WellKnown.IsObj(nullObj))
+            return TypeTests.Null(loc, nullObj);
 
         IrExpr result = node switch
         {
@@ -546,6 +597,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 Refused("PALCS0001", loc,
                     "A checked numeric conversion that can overflow is not translated. " +
                     "Its OverflowException must not be replaced by an unchecked truncation."),
+            CastExpressionSyntax c when !SpecPosition &&
+                                        WellKnown.IsObj(Declared(c.Expression) ?? known.MapType(model.GetTypeInfo(c.Expression).Type)) &&
+                                        TypeTests.Target(known, model.GetTypeInfo(c.Type).Type) is { } unboxTo =>
+                Unboxing(c, unboxTo, loc),
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
@@ -614,9 +669,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // reference seen at an interface type -- is `box`, at exactly the positions C#
         // inserts it.
         // `(x)` and `x!` are transparent, and C# reports the conversion on the operand too.
-        if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) && !atExact &&
+        // R35.6. An `[Exactly]` operand seen at a collection interface is the object itself (R27.46).
+        // A sequence -- an array or a collection interface -- seen at one is not an object the
+        // model boxes: `lines.OrderBy(...)` on an `IList<T>` stays a LINQ operand (R20.6).
+        if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) && !atExact && !ExactOperand(node) &&
+            !(WellKnown.IsBoxedCollectionInterface(info.ConvertedType) && info.Type is { TypeKind: TypeKind.Array or TypeKind.Interface }) &&
             node.Parent is not (ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression }) &&
-            WellKnown.IsObj(known.MapType(info.ConvertedType)))
+            (WellKnown.IsObj(known.MapType(info.ConvertedType)) ||
+             // R35.6. An object seen at a collection interface is boxed except at an argument,
+             // where R34.1 lends it (R34.26) and the interface is the parameter's enumerable.
+             WellKnown.IsBoxedCollectionInterface(info.ConvertedType) && !AtArgument(node)))
             result = Box(loc, result);
 
         // R9.15. C# inserts a reference conversion silently wherever a derived reference
@@ -753,7 +815,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// <summary>
     /// R25.9. An argument of a BCL exception's constructor that only builds its message: a
     /// constant, a `nameof`, a parameter or local read, a resource string `SR.X`, and
-    /// `SR.Format` or `ToString()` over such. Messages are not modelled (R21.7), so these
+    /// `SR.Format` or `ToString()` over such, and a `typeof` (R35.8). Messages are not modelled (R21.7), so these
     /// are not evaluated; that evaluating one has no effect and does not throw is trusted.
     /// </summary>
     private bool IsMessageArgument(ExpressionSyntax e)
@@ -763,6 +825,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             case ParenthesizedExpressionSyntax p: return IsMessageArgument(p.Expression);
             case CastExpressionSyntax c: return IsMessageArgument(c.Expression);
+            // R35.8. A type named in a message (`SR.Format(SR.Arg_WrongType, key, typeof(TKey))`).
+            case TypeOfExpressionSyntax: return true;
+            // R34.23. An element of an array local, at a local: read, then discarded.
+            case ElementAccessExpressionSyntax { ArgumentList.Arguments: [var index] } ea:
+                return model.GetTypeInfo(ea.Expression).Type is IArrayTypeSymbol { Rank: 1 } &&
+                       ea.Expression is IdentifierNameSyntax && index.Expression is IdentifierNameSyntax &&
+                       IsMessageArgument(ea.Expression) && IsMessageArgument(index.Expression);
             case IdentifierNameSyntax:
                 return model.GetSymbolInfo(e).Symbol is IParameterSymbol or ILocalSymbol;
             case MemberAccessExpressionSyntax ma:
@@ -825,7 +894,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     "from constants: its message is not modelled (doc/translation.md R21.7).");
                 return new IrLiteral(loc, null);
             }
-            return LibraryException(loc, libExn.ToDisplayString());
+            // R34.23. An array element the message shows is still read, so an index out of
+            // range raises as it does in the CLR.
+            var reads = args.SelectMany(a => a.Expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>())
+                .Select(ea => (IrStmt)new IrExprStmt(Locations.From(ea), Lower(ea))).ToImmutableArray();
+            var thrown = LibraryException(loc, libExn.ToDisplayString());
+            return reads.IsEmpty ? thrown : new IrStmtExpr(loc, reads, thrown) { Type = thrown.Type };
         }
 
         // R20.7. A `[SpecOp]` constructor of a specification type is an application of its
@@ -956,7 +1030,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol bnamed &&
             model.GetSymbolInfo(node).Symbol is IMethodSymbol bctor && Borrowing.IsMember(bctor, known))
         {
-            if (Borrowing.IsWrapping(bnamed, known)) return WrappingRefused(node, bnamed, loc);
+            if (Borrowing.IsWrapping(bnamed, known) && !Borrowing.CreatableWrapping(bnamed, known))
+                return WrappingRefused(node, bnamed, loc);
             return BorrowingConstruction(node, bctor, bnamed, loc);
         }
 
@@ -1435,7 +1510,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         // R21.3. A pattern variable is the expression it was bound to.
         // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
-        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
+        if (symbol is ILocalSymbol or IParameterSymbol or IFieldSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
         if (symbol is ILocalSymbol && _lazyAliases.TryGetValue(symbol, out var lazy)) return lazy();
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []) { EnumCase = true };
@@ -1453,6 +1528,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                      model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol { MethodKind: not MethodKind.Constructor } &&
                      Declarations.ContextFields(powner, model.Compilation, known)
                          .Contains(pp, SymbolEqualityComparer.Default) => ContextRead(pp),
+            // R34.13. A `const` local is its value, as a `const` field is: read through a cell,
+            // an arm reading it would leave Pulse's join generalising the cell afresh.
+            ILocalSymbol { IsConst: true, HasConstantValue: true } lc => new IrLiteral(loc, lc.ConstantValue),
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
             IFieldSymbol { IsStatic: true, IsReadOnly: true } shared
@@ -1476,10 +1554,44 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                                      ComputedRead(rcp, loc, RegionThis(loc, rcp.ContainingType)) is { } rcall => rcall,
             IPropertySymbol { GetMethod: { } selfGetter } when BorrowingSelfCall(selfGetter, [], loc) is { } selfRead
                 => selfRead,
+            // R34.24. In a constructor, a getter that returns a field is that field's read.
+            IPropertySymbol fp when !SpecPosition && FieldGetter(fp, node) is { } gotten
+                => new IrField(loc, new IrVar(loc, Names.This), gotten),
             IPropertySymbol prop when ComputedRead(prop, loc, new IrVar(loc, Names.This)) is { } call
                 => call,
             _ => Unsupported(node, loc),
         };
+    }
+
+    /// <summary>
+    /// R34.24. The field a property of the constructor's own class reads, when its getter is
+    /// exactly <c>return f;</c> or <c>=&gt; f</c> for an instance field <c>f</c> of the
+    /// representation, and the property is neither virtual nor a specification member.
+    /// </summary>
+    private string? FieldGetter(IPropertySymbol prop, SyntaxNode at)
+    {
+        if (prop is not { IsStatic: false, IsVirtual: false, IsOverride: false, IsAbstract: false, GetMethod: { } getter } ||
+            model.GetEnclosingSymbol(at.SpanStart) is not IMethodSymbol { MethodKind: MethodKind.Constructor } ctor ||
+            !SymbolEqualityComparer.Default.Equals(prop.ContainingType, ctor.ContainingType) ||
+            Declarations.Has(prop, known.SpecAttribute) || Declarations.Has(prop, known.ModelAttribute))
+            return null;
+        if (getter.DeclaringSyntaxReferences is not [var reference]) return null;
+        var returned = reference.GetSyntax() switch
+        {
+            AccessorDeclarationSyntax { ExpressionBody.Expression: var e } => e,
+            AccessorDeclarationSyntax { Body.Statements: [ReturnStatementSyntax { Expression: { } e }] } => e,
+            ArrowExpressionClauseSyntax { Expression: var e } => e,
+            _ => null,
+        };
+        if (returned is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } thisAccess)
+            returned = thisAccess.Name;
+        if (returned is not IdentifierNameSyntax id) return null;
+        var getterModel = model.Compilation.GetSemanticModel(returned.SyntaxTree);
+        return getterModel.GetSymbolInfo(id).Symbol is IFieldSymbol { IsStatic: false } f &&
+               SymbolEqualityComparer.Default.Equals(f.ContainingType, prop.ContainingType) &&
+               ObjectFields.Contains(f.Name)
+            ? f.Name
+            : null;
     }
 
     /// <summary>
@@ -1501,7 +1613,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrCall(loc, Naming.Of(getter), [receiver])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(prop.Type),
+            ResultType = known.MapReturnType(prop.Type),
             HasReceiver = true,
             ParamTypes = Declarations.ParamTypes(getter, known, true),
             TypeArguments = known.TypeArguments(getter),
@@ -1516,6 +1628,29 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     public IrCall? ComputedWrite(AssignmentExpressionSyntax node, IrLoc loc)
     {
         if (SpecPosition || !node.IsKind(SyntaxKind.SimpleAssignmentExpression)) return null;
+        // R35.10. `x[k] = v` through a translated class indexer is the call its setter is,
+        // as R27.40's read is the getter's.
+        if (node.Left is ElementAccessExpressionSyntax { ArgumentList.Arguments: [var ixArg] } ea &&
+            model.GetTypeInfo(ea.Expression).Type is { TypeKind: TypeKind.Class } &&
+            model.GetSymbolInfo(ea).Symbol is IPropertySymbol { IsIndexer: true, SetMethod: { } itemSetter } &&
+            known.SpecOpName((IPropertySymbol)model.GetSymbolInfo(ea).Symbol!) is null &&
+            Declarations.KindOf(itemSetter, known) is not null && !Borrowing.IsMember(itemSetter, known))
+        {
+            IrExpr ixReceiver = ea.Expression is ThisExpressionSyntax
+                ? new IrVar(loc, Names.This) { Type = Enclosing(node) }
+                : Lower(ea.Expression);
+            return new IrCall(loc, Naming.Of(itemSetter),
+                [ixReceiver, ToDeclared(Lower(ixArg.Expression), known.MapType(itemSetter.Parameters[0].Type)),
+                 ToDeclared(Lower(node.Right), known.MapType(itemSetter.Parameters[1].Type))])
+            {
+                Kind = CalleeKind.Method,
+                ResultType = known.MapReturnType(itemSetter.ReturnType),
+                HasReceiver = true,
+                ParamTypes = Declarations.ParamTypes(itemSetter, known, true),
+                TypeArguments = known.TypeArguments(itemSetter),
+                MutatesReceiver = !Declarations.IsReadOnly(itemSetter, model.Compilation, known),
+            };
+        }
         if (model.GetSymbolInfo(node.Left).Symbol is not IPropertySymbol { IsIndexer: false } prop) return null;
         if (prop.SetMethod is not { } setter) return null;
         // An auto-property's setter has no body to translate: R3.4 reads the property as
@@ -1536,7 +1671,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrCall(loc, Naming.Of(setter), [receiver, ToDeclared(Lower(node.Right), known.MapType(setter.Parameters[0].Type))])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(setter.ReturnType),
+            ResultType = known.MapReturnType(setter.ReturnType),
             HasReceiver = true,
             ParamTypes = Declarations.ParamTypes(setter, known, true),
             TypeArguments = known.TypeArguments(setter),
@@ -1559,6 +1694,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        if (EnumerableMember(node, symbol, loc) is { } enumerableMember) return enumerableMember;
         // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
         if (HeldMember(node, symbol, loc) is { } heldMember) return heldMember;
         if (BorrowedMember(node, symbol, loc) is { } borrowedMember) return borrowedMember;
@@ -1865,7 +2001,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrCall(loc, Naming.Of(itemGetter), [receiver, index])
             {
                 Kind = CalleeKind.Method,
-                ResultType = known.MapType(itemGetter.ReturnType),
+                ResultType = known.MapReturnType(itemGetter.ReturnType),
                 HasReceiver = true,
                 ParamTypes = Declarations.ParamTypes(itemGetter, known, true),
                 TypeArguments = known.TypeArguments(itemGetter),
@@ -1882,6 +2018,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerBinary(BinaryExpressionSyntax node, IrLoc loc)
     {
+        if (EnumerableEquality(node, loc) is { } enumerableEquality) return enumerableEquality;
+        // R34.16. `c == null` / `c != null` on a `Comparison<T>`, which C# compares by the
+        // delegate operator (its `null` converted to the comparer, R26.7), is R25.4's `is_null`.
+        if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
+            (node.Right.IsKind(SyntaxKind.NullLiteralExpression) ? node.Left
+             : node.Left.IsKind(SyntaxKind.NullLiteralExpression) ? node.Right : null) is { } cmpTested &&
+            Sorted.IsComparisonSymbol(model.GetTypeInfo(cmpTested).Type))
+        {
+            var test = Sorted.IsNull(loc, Lower(cmpTested));
+            return node.IsKind(SyntaxKind.EqualsExpression) ? test : new IrUnary(loc, UnOp.Not, test) { Type = IrPrim.Bool };
+        }
         // R26.1. `d == null` / `d != null` on a callable delegate asks the model whether the
         // reference is null.
         if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
@@ -1978,7 +2125,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
         return new IrBinary(loc, op.Value, left, right)
         {
-            Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul && InWrappingMethod(node),
+            Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Shl && InWrappingMethod(node),
         };
     }
 
@@ -2041,6 +2188,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private IrExpr LowerCoalesce(BinaryExpressionSyntax node, IrLoc loc)
     {
+        // R34.22. `e?.Count ?? b` on an enumerable argument, which is never null (R34.2):
+        // `e.Count`, and `b` is not evaluated.
+        if (node.Left is ConditionalAccessExpressionSyntax
+            {
+                WhenNotNull: MemberBindingExpressionSyntax { Name.Identifier.ValueText: "Count" }
+            } countAccess &&
+            IsEnumerableArgument(countAccess.Expression) &&
+            known.MapType(model.GetTypeInfo(countAccess.Expression).Type) is IrEnumerableType { Collection: true })
+            return new IrEnumOp(loc, EnumOpKind.Count, Lower(countAccess.Expression), []) { Type = IrPrim.Int };
         // R30.14 (subsumes R33.8). `a?.M ?? d` at a nullable array `a` with no effect is `a != null ? a.M : d`:
         // the array's null is a property of the reference (R24.7), not an option.
         if (Unparenthesized(node.Left) is ConditionalAccessExpressionSyntax { Expression: var arraySyntax } access &&
@@ -2390,7 +2546,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public static bool HasEffect(IrExpr expr) =>
         Subexpressions(expr).Any(e => e is IrCall { Kind: CalleeKind.Method }
-                                       or IrStmtExpr or IrNew or IrNewArray or IrRaise);
+                                       or IrStmtExpr or IrNew or IrNewArray or IrRaise
+                                       or IrEnumOp { Op: EnumOpKind.MoveNext });
 
     private static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
@@ -2416,6 +2573,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrQuantifier q => [q.Body],
             IrNewArray n => n.Source is { } src ? [n.Length, src] : [n.Length],
             IrContents c => [c.Array],
+            IrEnumOp e => [e.Source, .. e.Args],
             IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
@@ -2433,7 +2591,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     /// <summary>R27.39. An argument at a <c>[Callback]</c> parameter is a lifted lambda.</summary>
     private IrExpr LowerCallArgument(ArgumentSyntax arg, int i, IMethodSymbol method) =>
-        !SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
+        SnapshotArgument(arg, i, method) ??
+        (!SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
         CallbackOf(method.Parameters[i], known, diagnostics) is { } cb
             ? LowerCallbackArgument(arg, cb, Locations.From(arg))
             // R30.30. In a specification, a non-null reference passed for a nullable parameter
@@ -2442,7 +2601,132 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
               arg.RefKindKeyword.IsKind(SyntaxKind.None) &&
               method.Parameters[i].Type is { IsReferenceType: true, NullableAnnotation: NullableAnnotation.Annotated } pt
             ? SpecArgument(arg, known.MapType(pt))
-            : LowerArgument(arg);
+            : LowerArgument(arg));
+
+    /// <summary>
+    /// R35.6. Whether <paramref name="node"/> is a member's result at a collection interface
+    /// -- a call, a property read, or a postcondition's <c>Result</c> -- which is a box.
+    /// </summary>
+    private bool MemberResult(ExpressionSyntax node, TypeInfo info) =>
+        WellKnown.IsBoxedCollectionInterface(info.Type) &&
+        model.GetSymbolInfo(node).Symbol switch
+        {
+            IMethodSymbol { MethodKind: not MethodKind.Constructor } or IPropertySymbol => true,
+            IParameterSymbol { Name: SpecBinder.ResultParameter } p =>
+                p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal),
+            _ => false,
+        };
+
+    /// <summary>R35.6. Whether <paramref name="node"/> is, up to parentheses and <c>!</c>, a call's argument.</summary>
+    private static bool AtArgument(SyntaxNode node)
+    {
+        var p = node.Parent;
+        while (p is ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression })
+            p = p.Parent;
+        return p is ArgumentSyntax;
+    }
+
+    /// <summary>
+    /// R34.26. An object of a translated class <c>C</c> passed at an enumerable parameter:
+    /// an <c>[Exactly(typeof(C))]</c> parameter, or an expression of static type <c>C</c>
+    /// where every translated object of <c>C</c> has dynamic type <c>C</c> (R27.1). It is
+    /// passed as a snapshot of its items, <c>var s = new T[o.Count]; o.CopyTo(s, 0);</c>,
+    /// lent as the enumerable for the call (<see cref="EnumOpKind.Lend"/>), which is what
+    /// enumerating the object yields under the verified contracts of <c>C</c>'s
+    /// <c>Count</c>, <c>CopyTo</c> and enumerator, trusting the runtime's dispatch of the
+    /// interface's members to them.
+    /// </summary>
+    private IrExpr? SnapshotArgument(ArgumentSyntax arg, int i, IMethodSymbol method)
+    {
+        if (SpecPosition || arg.NameColon is not null || i >= method.Parameters.Length ||
+            !arg.RefKindKeyword.IsKind(SyntaxKind.None) ||
+            Declarations.Has(method.Parameters[i], known.ExactlyAttribute) ||
+            known.MapType(method.Parameters[i].Type) is not IrEnumerableType enumerable)
+            return null;
+        var cls = ExactClassOf(arg.Expression) ??
+            (model.GetTypeInfo(arg.Expression).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, IsAbstract: false } st &&
+             known.HasModel(st) && (st.IsSealed || FrontendPass.EffectivelySealed(st.OriginalDefinition, known))
+                ? st : null);
+        if (cls is null || method.Parameters[i].Type is not INamedTypeSymbol { TypeArguments: [var elementSymbol] })
+            return null;
+        var loc = Locations.From(arg);
+        var count = cls.GetMembers("Count").OfType<IPropertySymbol>()
+            .FirstOrDefault(p => !p.IsStatic && p.Parameters.IsEmpty && p.Type.SpecialType == SpecialType.System_Int32);
+        var copyTo = cls.GetMembers("CopyTo").OfType<IMethodSymbol>().FirstOrDefault(m =>
+            !m.IsStatic && m.Parameters.Length == 2 &&
+            m.Parameters[0].Type is IArrayTypeSymbol { Rank: 1 } at &&
+            SymbolEqualityComparer.Default.Equals(at.ElementType, elementSymbol) &&
+            m.Parameters[1].Type.SpecialType == SpecialType.System_Int32);
+        var collection = cls.AllInterfaces.Any(t =>
+            t.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_ICollection_T);
+        var enumerator = cls.GetMembers("GetEnumerator").OfType<IMethodSymbol>()
+            .FirstOrDefault(m => !m.IsStatic && m.Parameters.IsEmpty && m.DeclaredAccessibility == Accessibility.Public);
+        if (count?.GetMethod is not { } getter || copyTo is null ||
+            Declarations.KindOf(getter, known) is not { } countKind ||
+            Declarations.KindOf(copyTo, known) is not { } copyKind ||
+            enumerator is null || Declarations.KindOf(enumerator, known) is null ||
+            (enumerable.Collection && !collection))
+        {
+            diagnostics.Error("PALCS0864", loc,
+                $"`{arg}` is an object of `{cls.Name}` passed at enumerable parameter " +
+                $"`{method.Parameters[i].Name}`. It is passed as a snapshot of its items, which " +
+                "needs `Count`, `CopyTo(T[], int)` and `GetEnumerator()` members translated on the class, and the " +
+                "class to implement `ICollection<T>` when the parameter is one " +
+                "(doc/translation.md R34.26).");
+            return null;
+        }
+        var receiver = Lower(arg.Expression);
+        var arrayType = new IrArrayType(enumerable.Element);
+        var name = Fresh("snapshot");
+        var snapshot = new IrVar(loc, name) { Type = arrayType };
+        var length = new IrCall(loc, Naming.Of(getter), [receiver])
+        {
+            Kind = countKind,
+            ResultType = IrPrim.Int,
+            HasReceiver = true,
+            ParamTypes = Declarations.ParamTypes(getter, known, true),
+            TypeArguments = known.TypeArguments(getter),
+            MutatesReceiver = false,
+        };
+        var copy = new IrCall(loc, Naming.Of(copyTo), [receiver, snapshot, new IrLiteral(loc, 0) { Type = IrPrim.Int }])
+        {
+            Kind = copyKind,
+            ResultType = known.MapReturnType(copyTo.ReturnType),
+            HasReceiver = true,
+            KeepsArguments = true,
+            ParamTypes = Declarations.ParamTypes(copyTo, known, true),
+            TypeArguments = known.TypeArguments(copyTo),
+            MutatesReceiver = !Declarations.IsReadOnly(copyTo, model.Compilation, known),
+        };
+        var lentType = new IrEnumerableType(enumerable.Element, collection);
+        return new IrStmtExpr(loc,
+            [new IrLocalDecl(loc, name, arrayType, new IrNewArray(loc, enumerable.Element, length) { Type = arrayType }),
+             new IrExprStmt(loc, copy)],
+            new IrEnumOp(loc, EnumOpKind.Lend, snapshot, []) { Type = lentType }) { Type = lentType };
+    }
+
+    private List<IrStmt>? _outFieldWrites;
+    private SyntaxNode? _outFieldStatement;
+
+    /// <summary>
+    /// R34.14. Lowers the expression of statement <paramref name="statement"/>, returning the
+    /// field writes its <c>out</c> field arguments leave to follow it.
+    /// </summary>
+    public (T Value, ImmutableArray<IrStmt> Writes) OutFieldWrites<T>(SyntaxNode statement, Func<T> lower)
+    {
+        var (saved, savedStmt) = (_outFieldWrites, _outFieldStatement);
+        _outFieldWrites = [];
+        _outFieldStatement = statement;
+        try
+        {
+            var value = lower();
+            return (value, [.. _outFieldWrites]);
+        }
+        finally
+        {
+            (_outFieldWrites, _outFieldStatement) = (saved, savedStmt);
+        }
+    }
 
     private IrExpr SpecArgument(ArgumentSyntax arg, IrType? declared)
     {
@@ -2472,6 +2756,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             var name = Fresh("discard");
             return new IrStmtExpr(dloc, [new IrLocalDecl(dloc, name, discardIr, discardInit)],
                 new IrRefArg(dloc, new IrVar(dloc, name) { Type = discardIr })) { Type = discardIr };
+        }
+        // R34.14. `out _f`, for a field `_f` the statement mentions nowhere else, passes a
+        // fresh local, copied into the field once the call returns (OutFieldWrites).
+        if (!SpecPosition && _outFieldWrites is { } outWrites &&
+            arg.RefKindKeyword.IsKind(SyntaxKind.OutKeyword) &&
+            model.GetSymbolInfo(arg.Expression).Symbol is IFieldSymbol { IsStatic: false } outField &&
+            _outFieldStatement is { } outStmt &&
+            outStmt.DescendantNodes().OfType<SimpleNameSyntax>().Count(n =>
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(n).Symbol, outField)) == 1 &&
+            known.MapType(outField.Type) is { } outIr &&
+            DefaultValue(outField.Type, Locations.From(arg)) is { } outInit)
+        {
+            var oloc = Locations.From(arg);
+            var name = Fresh("out");
+            outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
+            return new IrStmtExpr(oloc, [new IrLocalDecl(oloc, name, outIr, outInit)],
+                new IrRefArg(oloc, new IrVar(oloc, name) { Type = outIr })) { Type = outIr };
         }
         var inner = Lower(arg.Expression);
         if (!arg.RefKindKeyword.IsKind(SyntaxKind.None))
@@ -2616,6 +2917,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return true;
     }
 
+    /// <summary>
+    /// R35.9. The implementation <c>((I)this).M(…)</c> calls, in a sealed class: its own,
+    /// since no subclass can re-implement the interface. Null for any other call.
+    /// </summary>
+    public IMethodSymbol? ThisInterfaceImpl(InvocationExpressionSyntax node, IMethodSymbol method) =>
+        Borrow is null && !SpecPosition &&
+        node.Expression is MemberAccessExpressionSyntax { Expression: var castee } &&
+        Unparenthesized(castee) is CastExpressionSyntax { Expression: var casted } &&
+        Unparenthesized(casted) is ThisExpressionSyntax &&
+        method.ContainingType?.TypeKind == TypeKind.Interface &&
+        model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { IsSealed: true, TypeKind: TypeKind.Class } self &&
+        self.FindImplementationForInterfaceMember(method) is IMethodSymbol { IsStatic: false } impl &&
+        !impl.DeclaringSyntaxReferences.IsEmpty
+            ? impl
+            : null;
+
     private IrExpr LowerInvocation(InvocationExpressionSyntax node, IrLoc loc)
     {
         if (!ArgumentsInOrder(node.ArgumentList)) return new IrLiteral(loc, null);
@@ -2623,10 +2940,19 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         var args = node.ArgumentList.Arguments;
 
+        // R35.9. `((I)this).M(…)` in a sealed class is the call of its own implementation of
+        // `I.M` on `this`: no subclass can re-implement the interface.
+        var viaThis = false;
+        if (ThisInterfaceImpl(node, method) is { } thisImpl)
+        {
+            method = thisImpl;
+            viaThis = true;
+        }
+
         // R29.1. `KeyValuePair.Create(k, v)`.
         if (method is { IsStatic: true, Name: "Create", Parameters.Length: 2 } &&
             method.ContainingType?.ToDisplayString() == "System.Collections.Generic.KeyValuePair" &&
-            known.MapType(method.ReturnType) is IrUserSpecType created)
+            known.MapReturnType(method.ReturnType) is IrUserSpecType created)
             return Pair(loc, created, args[0].Expression, args[1].Expression);
 
         // R30.29. `Unsafe.IsNullRef(ref r)`; and `Pal.Result`, `Pal.ResultRef` read in a
@@ -2640,6 +2966,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+        if (EnumerableCall(node, method, loc) is { } enumerableCall) return enumerableCall;
 
         // R28.3. Reference identity, in a contract.
         if (SpecPosition && method is { IsStatic: true, Name: "ReferenceEquals", Parameters.Length: 2 } &&
@@ -2670,6 +2997,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             BorrowingSelfCall(method, [.. node.ArgumentList.Arguments.Select(a => a.Expression)], loc) is { } selfCall)
             return selfCall;
         if (HeldInvocation(node, method, loc) is { } held) return held;
+        if (ForwardedToHeld(node, method, loc) is { } forwarded) return forwarded;
         // R27.42. An iterator method is verified as one whole enumeration; what a caller
         // holds is the enumerable it returns, which is not designed.
         if (!SpecPosition && Iterators.Element(method) is not null)
@@ -2734,7 +3062,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (!SpecPosition &&
             method is { IsStatic: true, Name: "Empty", IsGenericMethod: true, Parameters.Length: 0 } &&
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
-            known.MapType(method.ReturnType) is IrArrayType emptyType)
+            known.MapReturnType(method.ReturnType) is IrArrayType emptyType)
             return new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType };
 
         // R23.12. `Math.Min(a, b)` and `Math.Max(a, b)` at `int`, with effect-free arguments,
@@ -2853,7 +3181,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             var lowered = args.Select(a => Lower(a.Expression)).ToImmutableArray();
             return new IrSpecOp(loc, fn, lowered)
             {
-                Type = method.ReturnsVoid ? null : known.MapType(method.ReturnType),
+                Type = method.ReturnsVoid ? null : known.MapReturnType(method.ReturnType),
                 ParamTypes = SpecParamTypes(method, lowered),
                 Region = true,
             };
@@ -2925,7 +3253,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // untyped `this` falls back to the declaring class, and a call one level up then
         // hands a derived reference to a wrapper expecting a base one. C# writes the same
         // bare `GetArea()` either way, so nothing in the source marks the difference.
-        var receiver = method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+        var receiver = viaThis
+            ? new IrVar(loc, Names.This) { Type = Enclosing(node) }
+            : method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
                        known.HasModel(method.ContainingType!)
             ? node.Expression is MemberAccessExpressionSyntax m && m.Expression is not ThisExpressionSyntax
                 ? Lower(m.Expression)
@@ -2963,6 +3293,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             context = fields;
         }
 
+        // R35.18. A method translated only at constants is reached only through a view's call.
+        if (!SpecPosition && known.IsSpecialized(method))
+        {
+            diagnostics.Error("PALCS0881", loc,
+                $"`{method.Name}` has a `[Specialize]` parameter and is called here other than as a member of a " +
+                "view on the view itself (doc/translation.md R35.18).");
+            return new IrLiteral(loc, null);
+        }
+
         // R27.38. An omitted optional argument is the parameter's constant default.
         var omitted = new List<IrExpr>();
         if (args.All(a => a.NameColon is null))
@@ -2974,7 +3313,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R27.57. On an object of a representation-sharing subclass, the module is the one
         // the subclass's dispatch reaches.
         var calleeName = Naming.Of(method);
-        if (receiver is not null && !SpecPosition &&
+        if (receiver is not null && !SpecPosition && !viaThis &&
             Subclasses.ReceiverClass(node.Expression is MemberAccessExpressionSyntax rma ? rma.Expression : null, node, model, known) is { } aliasAt)
             calleeName = Subclasses.Bind(method, aliasAt,
                 node.Expression is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax }, known, model.Compilation);
@@ -2985,7 +3324,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 : [receiver, .. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted])
         {
             Kind = kind.Value,
-            ResultType = snapshot ?? known.MapType(method.ReturnType),
+            ResultType = snapshot ?? known.MapReturnType(method.ReturnType),
             Type = snapshot,
             HasReceiver = receiver is not null,
             KeepsArguments = method.MethodKind != MethodKind.Constructor &&
@@ -3007,7 +3346,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         new(loc, Naming.Of(method), [receiver])
         {
             Kind = Declarations.KindOf(method, known)!.Value,
-            ResultType = known.MapType(method.ReturnType),
+            ResultType = known.MapReturnType(method.ReturnType),
             HasReceiver = true,
             KeepsArguments = true,
             ParamTypes = [.. Declarations.ParamTypes(method, known, true)],
@@ -3034,6 +3373,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     /// <summary>R20.5. The hidden counter of the <c>foreach</c> over <paramref name="variable"/>.</summary>
     public static string ForEachIndex(string variable) => variable + "__index";
+
+    /// <summary>R34.19. The two variables of <c>foreach ((A a, B b) in e)</c> or <c>foreach (var (a, b) in e)</c>.</summary>
+    public static (SingleVariableDesignationSyntax, SingleVariableDesignationSyntax)? DeconstructedPair(
+        ForEachVariableStatementSyntax node)
+    {
+        static SingleVariableDesignationSyntax? One(ExpressionSyntax e) =>
+            e is DeclarationExpressionSyntax { Designation: SingleVariableDesignationSyntax v } ? v : null;
+        return node.Variable switch
+        {
+            TupleExpressionSyntax { Arguments: [var a, var b] } when One(a.Expression) is { } x && One(b.Expression) is { } y => (x, y),
+            DeclarationExpressionSyntax { Designation: ParenthesizedVariableDesignationSyntax
+                { Variables: [SingleVariableDesignationSyntax x, SingleVariableDesignationSyntax y] } } => (x, y),
+            _ => null,
+        };
+    }
 
     /// <summary>R27.51. The hidden enumerator of the <c>foreach</c> over an owner with variable <paramref name="variable"/>.</summary>
     public static string ForEachEnumerator(string variable) => variable + "__enumerator";
@@ -3081,7 +3435,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private static bool InLoop(SyntaxNode node) =>
         node.Ancestors()
             .TakeWhile(a => a is not (MemberDeclarationSyntax or AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
-            .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax
+            .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax
                 // R30.36. A join's facts may say what a loop in its arms returned.
                 || a is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.Text: nameof(PalLang.Pal.Join) } });
 
@@ -3097,13 +3451,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R24.14. Inside a loop, the method's result is the cell its `return` stored to.
             case nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedValue)
-                    { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapType(rm.ReturnType) : null };
+                    { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapReturnType(rm.ReturnType) : null };
             case nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef): return new IrResult(loc);
             case nameof(PalLang.Pal.Returned) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.Returned):
                 diagnostics.Error("PALCS0645", loc,
                     "`Pal.Returned()` names whether a loop's `return` has run, so it may appear only inside a loop.");
+                return new IrLiteral(loc, false) { Type = IrPrim.Bool };
+            // R35.13. In a try's invariant, whether the body is being left by a raise.
+            case nameof(PalLang.Pal.Raised) when node.Ancestors().Any(a => a is TryStatementSyntax):
+                return new IrVar(loc, StmtLowerer.RaisedFlag) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.Raised):
+                diagnostics.Error("PALCS0880", loc,
+                    "`Pal.Raised()` names whether a `try`'s body is left by a raise, so it may appear only in a `try`'s invariant (doc/translation.md R35.13).");
                 return new IrLiteral(loc, false) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.Live): return new IrLive(loc, Arg(0));
             case nameof(PalLang.Pal.Implies): return new IrBinary(loc, BinOp.Implies, Arg(0), Arg(1));
@@ -3116,9 +3477,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 var boxed = Arg(1);
                 return new IrBinary(loc, BinOp.Eq, Arg(0), WellKnown.IsObj(boxed.Type) ? boxed : Box(loc, boxed));
             }
+            // R35.7. `o is T` and the value a cast of `o` to `T` yields.
+            case nameof(PalLang.Pal.IsA) when TypeTests.Target(known, method.TypeArguments[0]) is { } isTarget:
+                return TypeTests.IsA(loc, isTarget, Arg(0));
+            case nameof(PalLang.Pal.Unbox) when TypeTests.Target(known, method.TypeArguments[0]) is { } unboxTarget:
+                return TypeTests.Unbox(loc, unboxTarget, Arg(0));
             case nameof(PalLang.Pal.Contents): return new IrContents(loc, Arg(0));
             // R20.5. The position of a `foreach` iteration variable: the loop's counter.
             case nameof(PalLang.Pal.Index):
+                // R34.6. How many items an enumerator in scope has moved past.
+                if (CursorOf(args[0].Expression) is ({ } cursor, _))
+                    return Cursor(loc, cursor);
                 if (args[0].Expression is IdentifierNameSyntax iter &&
                     model.GetSymbolInfo(iter).Symbol is ILocalSymbol local &&
                     local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ForEachStatementSyntax)
@@ -3128,6 +3497,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     model.GetSymbolInfo(rl).Symbol is ILocalSymbol { IsRef: true } rs &&
                     _patternBindings.TryGetValue(rs, out var bound) && bound is IrElement { Index: var at })
                     return at;
+                // R34.19. Either variable of a deconstructing `foreach`: the cursor, named after the first.
+                if (args[0].Expression is IdentifierNameSyntax dIter &&
+                    model.GetSymbolInfo(dIter).Symbol is ILocalSymbol dLocal &&
+                    dLocal.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is SingleVariableDesignationSyntax dv &&
+                    dv.FirstAncestorOrSelf<ForEachVariableStatementSyntax>() is { } dLoop &&
+                    dLoop.Variable.Span.Contains(dv.Span) &&
+                    DeconstructedPair(dLoop) is ({ } dFirst, _))
+                    return new IrVar(loc, ForEachIndex(dFirst.Identifier.ValueText)) { Type = IrPrim.Int };
                 diagnostics.Error("PALCS0621", loc,
                     "`Pal.Index` names the iteration variable of an enclosing `foreach` " +
                     "(doc/translation.md R20.5).");
@@ -3145,8 +3522,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R27.42. The values an iterator has yielded: so far, in its body; all, in its contract.
             case nameof(PalLang.Pal.Yielded):
                 return IteratorTrace is { } trace
-                    ? new IrVar(loc, trace) { Type = known.MapType(method.ReturnType) }
-                    : new IrResult(loc) { Type = known.MapType(method.ReturnType) };
+                    ? new IrVar(loc, trace) { Type = known.MapReturnType(method.ReturnType) }
+                    : new IrResult(loc) { Type = known.MapReturnType(method.ReturnType) };
             case nameof(PalLang.Pal.EmptySeq):
                 return new IrSeqOp(loc, SeqOpKind.Empty, []);
             case nameof(PalLang.Pal.Reverse):
@@ -3180,11 +3557,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         nameof(PalLang.Pal.FindAll) => "Pulse.Lib.CSharp.Find.find_all",
                         nameof(PalLang.Pal.RemoveAll) => "Pulse.Lib.CSharp.Find.remove_all",
                         _ => "Pulse.Lib.CSharp.Find.map",
-                    }, [Arg(0), Arg(1)]) { Type = known.MapType(method.ReturnType), Built = true };
+                    }, [Arg(0), Arg(1)]) { Type = known.MapReturnType(method.ReturnType), Built = true };
             // R26.7. Permutation, and what a sort guarantees.
             case nameof(PalLang.Pal.Permutation):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.permutation", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
-            case nameof(PalLang.Pal.SortedRange):
+            case nameof(PalLang.Pal.SortedRange) or nameof(PalLang.Pal.SortedRangeBy):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.sorted_range",
                     [Arg(0), Arg(1), Arg(2), Arg(3), Arg(4)]) { Type = IrPrim.Bool };
             // R26.10. A 4-ary min-heap of (element, priority) nodes.
@@ -3210,7 +3587,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R23.10. A circular buffer's live elements.
             case nameof(PalLang.Pal.Ring):
                 return new IrSpecOp(loc, "CS.ring", [Arg(0), Arg(1), Arg(2)])
-                    { Type = known.MapType(method.ReturnType) };
+                    { Type = known.MapReturnType(method.ReturnType) };
             // §25. Comparers and sorted sequences.
             case nameof(PalLang.Pal.Compare):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Order.compare", [Arg(0), Arg(1), Arg(2)])
@@ -3244,7 +3621,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         "(doc/translation.md R27.21).");
                     return new IrLiteral(loc, null);
                 }
-                return new IrVar(loc, HeapVarName(hc.Name)) { Type = known.MapType(method.ReturnType) };
+                return new IrVar(loc, HeapVarName(hc.Name)) { Type = known.MapReturnType(method.ReturnType) };
             }
             case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
                 or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped)
@@ -3282,7 +3659,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         $"{Region.Module}.link_at {Names.ClassModule(rc.Name)}." +
                         (method.Name == nameof(PalLang.Pal.LeftOf) ? Region.LeftOf(rc.Name) : Region.RightOf(rc.Name)),
                         [heap, Arg(0)])
-                        { Type = known.MapType(method.ReturnType), MachineArgs = true };
+                        { Type = known.MapReturnType(method.ReturnType), MachineArgs = true };
                 if (method.Name == nameof(PalLang.Pal.Unshared))
                     return new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.UnsharedOf(rc.Name)}", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };
@@ -3292,7 +3669,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         { Type = IrPrim.Bool, MachineArgs = true };
                 return method.Name == nameof(PalLang.Pal.Tree)
                     ? new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.TreeOf(rc.Name)}", [heap, Arg(0)])
-                        { Type = known.MapType(method.ReturnType), MachineArgs = true }
+                        { Type = known.MapReturnType(method.ReturnType), MachineArgs = true }
                     : new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.WfOf(rc.Name)}", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };
             }

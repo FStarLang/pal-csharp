@@ -538,3 +538,13 @@ public sealed class CallbackAttribute : Attribute
 {
     public bool Bounded { get; set; }
 }
+
+/// <summary>
+/// R35.18. A <c>bool</c> parameter the method is translated at each constant value of,
+/// instead of once: every call passes a literal (or omits the argument, passing the
+/// default), and calls the translation at that value, in which an <c>if</c> the value
+/// decides is the branch it takes. A method calling itself through the other value then
+/// calls a different translation.
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter)]
+public sealed class SpecializeAttribute : Attribute;

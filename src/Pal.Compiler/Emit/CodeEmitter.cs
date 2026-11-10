@@ -476,6 +476,7 @@ public sealed class CodeEmitter(
 
     private void TailCore(IrStmt stmt, IrMethod method, MethodPlan plan)
     {
+        if (stmt is IrIf branch && SplitCondition(branch) is { } nested) stmt = nested;
         switch (stmt)
         {
             case IrReturn { Value: null }:
@@ -489,6 +490,17 @@ public sealed class CodeEmitter(
                 // may read a field and so needs the representation still open; it is
                 // let-bound so that the `fold` can be interposed between the read and the
                 // block's value.
+                // R34.10. A reassigned array local is taken out of its cell.
+                if (ret.Value is IrVar rv && ArrayCellOf(rv) is { } taken)
+                {
+                    var a = Fresh();
+                    Line($"let {a} = Pulse.Lib.CSharp.ArrayCell.take {taken.Binder};");
+                    _objectLocals.Remove(taken);
+                    _slots[rv.Name] = taken with { Kind = SlotKind.Array, Binder = a };
+                    CloseObjects(method, plan, a);
+                    Line(a);
+                    return;
+                }
                 var text = Inject(method.ReturnType, ret.Value!, Expr(ret.Value!));
                 if (!NeedsEpilogue) { Line(text); return; }
 
@@ -565,7 +577,7 @@ public sealed class CodeEmitter(
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
                 var moved = _movedArrays.ToList();
-                var arrays = _slots.Where(p => p.Value.Kind == SlotKind.Array).ToList();
+                var arrays = _slots.Where(p => p.Value.Kind is SlotKind.Array or SlotKind.ArrayCell).ToList();
                 // R27.50. Likewise the receiver is as dirty in the other arm as before both.
                 var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
@@ -823,6 +835,11 @@ public sealed class CodeEmitter(
         var obj = Expr(chained);
         var m = FreshValue(built.Name);
         Line($"with {m}. assert ({Inv(built)} {obj} {m});");
+        if (RaisingTailCall(rest) is { } tail)
+        {
+            ChainedRaisingCall(built, obj, m, tail);
+            return;
+        }
         var slot = new Slot(Names.This, built, SlotKind.Object, obj)
         {
             PreModel = m,
@@ -833,6 +850,108 @@ public sealed class CodeEmitter(
         _objects = [slot];
         _objectResults.Remove(obj);
         EmitSequence(CloseWith(rest, self), method, _plan!);
+    }
+
+    /// <summary>
+    /// R34.15. The rest of a chained constructor's body when it is one call on the object
+    /// that may raise, with plain arguments.
+    /// </summary>
+    private IrCall? RaisingTailCall(ImmutableArray<IrStmt> rest) =>
+        rest is [IrExprStmt { Expr: IrCall { HasReceiver: true, DoesNotReturn: false } c }] &&
+        c.Args is [IrVar { Name: Names.This }, ..] &&
+        raising?.Contains(c.Callee) == true && openMethods?.Contains(c.Callee) != true &&
+        (heapIndexed is null || !heapIndexed.ContainsKey(c.Callee)) &&
+        (Methods ?? methods)?.TryGetValue(c.Callee, out var callee) == true &&
+        callee!.Parameters.Length == c.Args.Length &&
+        c.Args.Skip(1).All(a => a is IrLiteral || a is IrVar v && _slots.TryGetValue(v.Name, out var vs) &&
+                                 vs.Kind is SlotKind.Value or SlotKind.Cell)
+            ? c : null;
+
+    /// <summary>
+    /// R34.15. <c>C(…) : this(…) { M(…); }</c> with <c>M</c> raising: an exception leaves the
+    /// object built so far, which the caller never receives, to be discarded. The call is
+    /// caught in a local function, as R31.14's is, whose contract restates the callee's
+    /// (read at the arguments and at the model the chained constructor left); the object
+    /// is then dropped and the exception raised again, or returned.
+    /// </summary>
+    private void ChainedRaisingCall(IrClassType built, string obj, string m, IrCall call)
+    {
+        var callee = (Methods ?? methods)![call.Callee];
+        var inv = Inv(built);
+        var pre = new SpecScope();
+        var args = new List<IrExpr> { call.Args[0] };
+        for (var i = 1; i < call.Args.Length; i++)
+        {
+            var t = Fresh();
+            Line($"let {t} = {Expr(call.Args[i])};");
+            var name = "$arg" + t;
+            _slots[name] = new Slot(name, callee.Parameters[i].Type, SlotKind.Value, t);
+            args.Add(new IrVar(call.Args[i].Loc, name) { Type = call.Args[i].Type });
+            pre.Bind(callee.Parameters[i].Name, new Term(t, MethodPlan.KindOf(callee.Parameters[i].Type), callee.Parameters[i].Type));
+        }
+        _slots[Names.This] = new Slot(Names.This, built, SlotKind.Object, obj) { PreModel = m, PostModel = m };
+        _objects = [];
+        pre.Bind(Names.This, new Term(m, TermKind.Math, built));
+        var m1 = FreshValue(built.Name);
+        var post = new SpecScope(pre) { Pre = pre };
+        post.Bind(Names.This, new Term(m1, TermKind.Math, built));
+        var normal = callee.Ensures.Select(e => spec.AsProp(spec.Emit(e, post))).DefaultIfEmpty("True");
+        var ex = $"ex_{_try++}";
+        var thrown = callee.Throws.Select(t =>
+        {
+            pre.Bind(Frontend.FrontendPass.ThrownParameter, new Term(ex, TermKind.Other, t.Type));
+            var parts = new List<string>();
+            if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {ex}");
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, pre)));
+            return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
+        }).DefaultIfEmpty("False").ToList();
+        var res = FreshValue("caught");
+        var settled = $"exists* {m1}. {inv} {obj} {m1} ** " +
+            $"pure (None? {res} ==> ({string.Join(" /\\ ", normal)})) ** " +
+            $"pure (Some? {res} ==> (let {ex} = Some?.v {res} in {string.Join(" \\/ ", thrown)}))";
+        var helper = $"catch_{_try++}";
+        Line($"fn {helper} ()");
+        _indent++;
+        Line($"requires {inv} {obj} {m}");
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        _indent--;
+        Line("{");
+        _indent++;
+        Line("try");
+        _indent++;
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        Line($"raises (fun ({ex}: exn) -> exists* {m1}. {inv} {obj} {m1} ** pure ({string.Join(" \\/ ", thrown)}))");
+        _indent--;
+        Line("{");
+        _indent++;
+        _catching = true;
+        try { Line(Expr(call with { Args = [.. args] }) + ";"); }
+        finally { _catching = false; }
+        Line("None #exn");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{ex} -> {{ Some {ex} }}");
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+        var outcome = Fresh();
+        Line($"let {outcome} = {helper} ();");
+        Line($"if (Some? {outcome}) {{");
+        _indent++;
+        var dead = FreshValue(built.Name);
+        Line($"with {dead}. assert ({inv} {obj} {dead});");
+        Line($"drop_ ({inv} {obj} {dead});");
+        Line($"raise (Some?.v {outcome})");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        Line(obj);
+        _indent--;
+        Line("}");
     }
 
     private static bool LoopOrTryReturn(IrStmt s) => s switch
@@ -917,6 +1036,10 @@ public sealed class CodeEmitter(
                     when Frontend.Sorted.IsComparer(cmp) && (assigned is null || assigned.Contains(field.Name)):
                     value = $"({Frontend.Sorted.Order}.default_comparer {Types.Atom(cmpElement)})";
                     break;
+                // R27.6, R34.21. A pointer into a region starts null, in a region that starts empty.
+                case IrClassType rk when IsRegionType(rk):
+                    value = $"(B.null #{PulseEmitter.RegionRaw(rk)})";
+                    break;
                 default:
                     diagnostics.Unsupported(method.Loc,
                         $"A constructor that does not assign `{field.Name}` on every path",
@@ -929,12 +1052,32 @@ public sealed class CodeEmitter(
         }
         Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
         Line($"B.pts_to_not_null {Names.Result};");
+        foreach (var k in RegionsOf(decl))
+            Line($"{Frontend.Region.Module}.empty #{PulseEmitter.RegionRaw(k)} ();");
 
         var slot = new Slot(Names.This, alloc, SlotKind.Object, Names.Result)
         {
             PreModel = null,
             PostModel = "post_" + Names.This,
         };
+        // R34.21. A body that names no field of the object, only calls its methods (R4.10c),
+        // runs over the object closed: its invariant is folded at the defaults first, which
+        // must hold of them, and the body is then an instance method's that only delegates.
+        // `this` in a loop invariant names the object's model as the loop holds it.
+        if (decl.Fields.All(f => f.Type is not IrArrayType) && assigned is { Count: 0 } &&
+            !TouchesFields(method) && Check.Statements(new IrBlock(method.Loc, statements))
+                .SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+                .Any(e => e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] }))
+        {
+            Line($"fold {Inv(alloc)} {Names.Result} {ModelWitness(decl, slot)};");
+            var m = FreshValue(alloc.Name);
+            Line($"with {m}. assert ({Inv(alloc)} {Names.Result} {m});");
+            _slots[Names.This] = slot with { PreModel = m };
+            _objects = [];
+            var closed = new IrVar(method.Loc, Names.This) { Type = alloc };
+            EmitSequence([.. statements, new IrReturn(method.Loc, closed)], method, _plan!);
+            return;
+        }
         _slots[Names.This] = slot;
         _objects = [slot];
         _constructsArrays = decl.Fields.Any(f => f.Type is IrArrayType);
@@ -955,7 +1098,19 @@ public sealed class CodeEmitter(
         MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i) ||
         // R32.14. A view's member called with the record by reference rebinds the record.
         Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf) ||
-        WritesOpenRecord(i);
+        WritesOpenRecord(i) || CallsCallbackInArm(i);
+
+    /// <summary>
+    /// R35.16. An arm that calls a <c>[Callback]</c> parameter: the trace it leaves names the
+    /// callback's result, bound in the arm, and Pulse's join keeps the trace under the
+    /// branch condition as a <c>match</c>, from which nothing later can read it.
+    /// </summary>
+    private bool CallsCallbackInArm(IrIf i) =>
+        (SplitCondition(i) ?? i) is var nest && (CallsCallback(nest.Then) || nest.Else is { } e && CallsCallback(e));
+
+    private static bool CallsCallback(IrStmt s) =>
+        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .OfType<IrCall>().Any(c => c.Kind is CalleeKind.Callback);
 
     /// <summary>
     /// R32.6. An arm that passes a lambda to a <c>[Callback]</c> parameter (R27.39): what the
@@ -963,8 +1118,7 @@ public sealed class CodeEmitter(
     /// existential trace, and Pulse's join keeps it of one arm only.
     /// </summary>
     private static bool PassesLambda(IrStmt s) =>
-        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
-            .Any(e => e is IrLambdaRef);
+        Check.DeepExpressions(s).Any(e => e is IrLambdaRef);
 
     /// <summary>
     /// R33.16. An arm that replaces the record of an `[Open]` receiver owning arrays: their
@@ -1068,6 +1222,8 @@ public sealed class CodeEmitter(
     {
         if (s is IrIf { Else: null, Cond: IrBinary { Op: BinOp.Or } or } guard && IsThrowBlock(guard.Then))
             return SplitGuard(guard, or);
+        if (s is IrIf branch && SplitCondition(branch) is { } nested)
+            return nested;
         var value = s switch
         {
             IrReturn r => r.Value, IrLocalDecl d => d.Init,
@@ -1100,6 +1256,39 @@ public sealed class CodeEmitter(
             _ => s,
         };
         return new IrIf(s.Loc, a.Cond, With(a.Then), With(a.Else));
+    }
+
+    /// <summary>
+    /// R35.15. An <c>if</c> whose condition is <c>a &amp;&amp; b</c> or <c>a || b</c>, where
+    /// <c>b</c> calls a method, is the nest of <c>if</c>s it abbreviates:
+    /// <c>if (a) { if (b) T else E } else E</c>, and <c>if (a) T else { if (b) T else E }</c>.
+    /// Emitted as one <c>if</c>, the call's statements make the condition a bound <c>bool</c>
+    /// (<c>let t = if a { ...; b } else { false }</c>), and Pulse forgets at that join what
+    /// <c>t</c> means, so neither arm would know its condition. Nested, each arm is entered
+    /// under the tests that lead to it. The duplicated arm must not hold a loop, so that the
+    /// copy costs no more than its straight-line proof. An <c>else if</c> chain is split
+    /// link by link.
+    /// </summary>
+    private IrIf? SplitCondition(IrIf branch)
+    {
+        var els = branch.Else is IrIf chained && SplitCondition(chained) is { } inner ? inner : branch.Else;
+        if (branch.Cond is IrBinary { Op: BinOp.And or BinOp.Or } c && CallsMethod(c.Right))
+        {
+            var copied = c.Op == BinOp.And ? els : branch.Then;
+            if (copied is null || !HasLoop(copied))
+            {
+                var second = new IrIf(c.Right.Loc, c.Right, branch.Then, els);
+                var rest = SplitCondition(second) ?? second;
+                return c.Op == BinOp.And
+                    ? SplitCondition(new IrIf(branch.Loc, c.Left, rest, els)) ?? new IrIf(branch.Loc, c.Left, rest, els)
+                    : SplitCondition(new IrIf(branch.Loc, c.Left, branch.Then, rest)) ?? new IrIf(branch.Loc, c.Left, branch.Then, rest);
+            }
+        }
+        return ReferenceEquals(els, branch.Else) ? null : branch with { Else = els };
+
+        static bool CallsMethod(IrExpr e) =>
+            Passes.Check.Subexpressions(e).OfType<IrCall>().Any(call => call.Kind is CalleeKind.Method or CalleeKind.Callback);
+        static bool HasLoop(IrStmt st) => Passes.Check.Statements(st).Any(x => x is IrWhile or IrFor);
     }
 
     /// <summary>
@@ -2284,6 +2473,12 @@ public sealed class CodeEmitter(
                 Line($"rewrite ({local.Resource(m)}) as ({(local with { Binder = $"({ownedBy}.{proj})" }).Resource(m)});");
                 continue;
             }
+            // R34.10. The cell itself is reclaimed with its scope; the array is dropped.
+            if (local.Kind == SlotKind.ArrayCell)
+            {
+                Line($"Pulse.Lib.CSharp.ArrayCell.release {local.Binder};");
+                continue;
+            }
             Line($"with {m}. assert ({local.Resource(m)});");
             Line($"drop_ ({local.Resource(m)});");
         }
@@ -2523,6 +2718,10 @@ public sealed class CodeEmitter(
     // Statements
     // =======================================================================
 
+    /// <summary>R34.26. The ghost unlends owed at the end of the statement at each depth.</summary>
+    private readonly List<(int Depth, string Text)> _unlends = [];
+    private int _statementDepth;
+
     private void Statement(IrStmt stmt, MethodPlan plan)
     {
         // Every line emitted from here down belongs to this statement, unless a nested
@@ -2531,12 +2730,20 @@ public sealed class CodeEmitter(
         // it happened to contain last.
         var outer = _loc;
         _loc = stmt.Loc;
+        _statementDepth++;
         try
         {
             if (PeerWritten(stmt) is { } peer) PeerWrite(peer.Slot, peer.Class, () => StatementCore(stmt, plan));
             else StatementCore(stmt, plan);
+            // R34.26. The arrays this statement's calls borrowed as enumerables are taken back.
+            for (var k = _unlends.Count - 1; k >= 0; k--)
+            {
+                if (_unlends[k].Depth != _statementDepth) continue;
+                Line(_unlends[k].Text);
+                _unlends.RemoveAt(k);
+            }
         }
-        finally { _loc = outer; }
+        finally { _loc = outer; _statementDepth--; }
         if (!_receiverDirty && DirtiesReceiver(stmt)) _receiverDirty = true;
     }
 
@@ -2721,6 +2928,13 @@ public sealed class CodeEmitter(
                 KeptLocal(d);
                 return;
 
+            // R34.26. A local initialised with an array a call returns owns it, as one
+            // initialised with `new T[n]` does (R6.11a), unless it is reassigned.
+            case IrLocalDecl { Type: IrArrayType, Init: IrCall { ResultType: IrArrayType } or IrStmtExpr { Value: IrCall { ResultType: IrArrayType } } } d
+                when !Reassigned(d) && !IsNullableArray(d.Init!):
+                ArrayLocal(d);
+                return;
+
             // R32.14. So is a view of another object of the class, which owns nothing.
             case IrLocalDecl { Owned.IsDefaultOrEmpty: false } or IrLocalDecl { HeldOwner: not null }:
                 HeldStruct((IrLocalDecl)stmt);
@@ -2735,7 +2949,7 @@ public sealed class CodeEmitter(
                 return;
 
             case IrIf i:
-                If(i, plan);
+                If(SplitCondition(i) ?? i, plan);
                 return;
 
             case IrWhile w:
@@ -2776,9 +2990,19 @@ public sealed class CodeEmitter(
                     ArrayOpKind.Move => "move",
                     ArrayOpKind.Clear => "clear",
                     ArrayOpKind.Sort => "sort",
+                    ArrayOpKind.CopyFrom => "copy_to",
+                    ArrayOpKind.CopyKeys => "copy_keys",
+                    ArrayOpKind.CopyValues => "copy_values",
+                    ArrayOpKind.SortPairs => "sort_pairs",
                     _ => "reverse",
                 };
-                var module = c.Op == ArrayOpKind.Sort ? "Pulse.Lib.CSharp.Sort" : "Pulse.Lib.CSharp.Array";
+                var module = c.Op switch
+                {
+                    ArrayOpKind.Sort => "Pulse.Lib.CSharp.Sort",
+                    ArrayOpKind.SortPairs => "Pulse.Lib.CSharp.SortPairs",
+                    ArrayOpKind.CopyFrom or ArrayOpKind.CopyKeys or ArrayOpKind.CopyValues => "Pulse.Lib.CSharp.Enumerable",
+                    _ => "Pulse.Lib.CSharp.Array",
+                };
                 WithArrays(c.Args.Zip(args, (e, t) => (e, t)).Where(p => p.e.Type is IrArrayType),
                     () => Line($"{module}.{fn} {string.Join(" ", args)};"));
                 return;
@@ -2890,6 +3114,19 @@ public sealed class CodeEmitter(
     private void ArrayLocal(IrLocalDecl d)
     {
         var binder = Names.Local(d.Name);
+        if (d.Init is IrNewArray first && Reassigned(d))
+        {
+            // R34.10. A cell holding the array, owned with it.
+            var t = Fresh();
+            Line($"let {t} = {NewArray(first)};");
+            Line($"let mut {binder} = {t};");
+            Line($"Pulse.Lib.CSharp.ArrayCell.intro {binder};");
+            var cell = new Slot(d.Name, d.Type, SlotKind.ArrayCell, binder);
+            _slots[d.Name] = cell;
+            _objectLocals.Add(cell);
+            if (_closingBlocks > 0) _nestedArrays[cell] = d.Loc;
+            return;
+        }
         switch (d.Init)
         {
             case IrNewArray na:
@@ -2898,6 +3135,15 @@ public sealed class CodeEmitter(
             case IrOrderBy ob:
                 Line($"let {binder} = Linq.order_by_to_list {Expr(ob.Source)} {ob.Key} {OrderOf(ob.KeyType)};");
                 break;
+            default:
+            {
+                // R34.26. The array the call returned is named by the call's binder, which
+                // its `pts_to` is stated at; a second binder would not carry it over.
+                var value = Expr(d.Init!);
+                if (value.All(ch => char.IsLetterOrDigit(ch) || ch == '_')) binder = value;
+                else Line($"let {binder} = {value};");
+                break;
+            }
         }
         var local = new Slot(d.Name, d.Type, SlotKind.Array, binder);
         _slots[d.Name] = local;
@@ -2920,6 +3166,24 @@ public sealed class CodeEmitter(
 
     /// <summary>R30.33. The field whose next replacement hands its array to a local, and that local.</summary>
     private (string Field, Slot Local)? _keeping;
+
+    /// <summary>R34.10. The slot of a reassigned array local, when <paramref name="v"/> is one.</summary>
+    private Slot? ArrayCellOf(IrVar v) =>
+        _slots.TryGetValue(v.Name, out var s) && s.Kind == SlotKind.ArrayCell ? s : null;
+
+    /// <summary>R34.10. Whether the method assigns the local <paramref name="name"/> after declaring it.</summary>
+    private bool Reassigned(IrLocalDecl d)
+    {
+        if (_method?.Body is not { } body) return false;
+        // What follows the declaration in its block is its scope; another local of the
+        // same name in a sibling block is another local.
+        var scope = Passes.Check.Statements(body).OfType<IrBlock>()
+            .FirstOrDefault(b => b.Statements.Any(st => ReferenceEquals(st, d))) is { } home
+            ? home.Statements.SkipWhile(st => !ReferenceEquals(st, d)).Skip(1)
+                .SelectMany(Passes.Check.Statements)
+            : Passes.Check.Statements(body);
+        return scope.Any(st => st is IrAssign { Target: IrVar v } && v.Name == d.Name);
+    }
 
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
     private void LocalDeclaration(IrLocalDecl d)
@@ -3066,6 +3330,32 @@ public sealed class CodeEmitter(
         Adopt(a);
         switch (a.Target)
         {
+            // R34.10. `Array.Resize(ref arr, n)` on a reassigned array local.
+            case IrVar v when ArrayCellOf(v) is { } resized:
+                if (a.Value is IrNewArray { Source: IrVar src } grown && src.Name == v.Name)
+                    Line($"Pulse.Lib.CSharp.ArrayCell.resize {resized.Binder} {Expr(grown.Length)};");
+                else if (a.Value is IrNewArray fresh && fresh.Source is null)
+                {
+                    var t = Fresh();
+                    Line($"let {t} = {NewArray(fresh)};");
+                    Line($"Pulse.Lib.CSharp.ArrayCell.release {resized.Binder};");
+                    Line($"{resized.Binder} := {t};");
+                    Line($"Pulse.Lib.CSharp.ArrayCell.intro {resized.Binder};");
+                }
+                else
+                    diagnostics.Error("PALCS0863", a.Loc,
+                        $"`{v.Name}` is an array local that is reassigned (doc/translation.md R34.10). " +
+                        "It may be assigned only a fresh array, `new T[n]` or `Array.Resize(ref " + v.Name + ", n)`.");
+                return;
+
+            case IrElement { Array: IrVar wv } wel when ArrayCellOf(wv) is { } wcell:
+            {
+                var index = Expr(wel.Index);
+                var value = Expr(a.Value);
+                Line($"Pulse.Lib.CSharp.ArrayCell.write {wcell.Binder} {index} {value};");
+                return;
+            }
+
             case IrVar v when _objectLocals.Any(l => l.Name == v.Name && l.Kind == SlotKind.Array):
                 diagnostics.Error("PALCS0623", a.Loc,
                     $"`{v.Name}` owns the array it was initialised with, and assigning it " +
@@ -4075,7 +4365,7 @@ public sealed class CodeEmitter(
         if (_method is { IsConstructor: true } &&
             // R30.24. The object a chained constructor got back (R27.45) is the one being
             // built too, under the chained call's binder.
-            _objects.FirstOrDefault(o => o.Binder == Names.Result || o.Name == Names.This) is { } built)
+            _objects.FirstOrDefault(o => o.Binder == Names.Result || o.Name == Names.This && o.Kind == SlotKind.Object) is { } built)
         {
             var saved = _objects;
             _objects = [.. _objects.Where(o => o != built)];
@@ -4281,7 +4571,15 @@ public sealed class CodeEmitter(
         }
         // R19.5. The invariant is stated over the same names, so that what is assigned is
         // spoken of at whatever value it has when control leaves.
-        var invariant = tr.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))).ToImmutableArray();
+        // R35.13. `Pal.Raised()` is false in the `ensures` and true in the `raises`.
+        ImmutableArray<string> Invariant(bool raised)
+        {
+            var at = new SpecScope(scope) { Pre = plan.PreScope };
+            at.Bind(Frontend.StmtLowerer.RaisedFlag, new Term(raised ? "true" : "false", MethodPlan.KindOf(IrPrim.Bool), IrPrim.Bool));
+            return tr.Invariants.Select(i => spec.AsProp(spec.Emit(i, at))).ToImmutableArray();
+        }
+        var invariant = Invariant(false);
+        var raisedInvariant = Invariant(true);
         // R5.10's flags of an enclosing loop are live too, though no C# names them.
         foreach (var cell in new[] { _escape?.Break, _escape?.Continue })
         {
@@ -4311,7 +4609,7 @@ public sealed class CodeEmitter(
         Line("try");
         _indent++;
         Line("ensures " + MethodPlan.Clause(owned, invariant, bound));
-        Line($"raises (fun ({ex}: exn) -> " + MethodPlan.Clause(owned, [.. invariant, Raised(ex)], bound) + ")");
+        Line($"raises (fun ({ex}: exn) -> " + MethodPlan.Clause(owned, [.. raisedInvariant, Raised(ex)], bound) + ")");
         _indent--;
         Line("{");
         _indent++;
@@ -4410,6 +4708,19 @@ public sealed class CodeEmitter(
             // is a fresh existential at the join, and what the arm proved about it is lost.
             // R27.40. And so, in a loop that may escape, does one that calls a method on a local
             // object without escaping (R26.5's split, which only a non-escaping loop gets).
+            // R35.16. And so does one an arm of which calls a callback, once its condition
+            // is taken apart (R35.15): a call in the condition is bound before the `if`.
+            if (statements[k] is IrIf { Joined: false } cb && CallsCallbackInArm(cb) && NullTest(cb.Cond) is null)
+            {
+                var nest = SplitCondition(cb) ?? cb;
+                IrBlock Arm(IrStmt? arm, IrLoc loc)
+                {
+                    ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
+                    return new(loc, own is [.., IrBreak or IrContinue or IrThrow or IrReturn] ? own : [.. own, .. rest]);
+                }
+                UnitTail(nest with { Then = Arm(nest.Then, nest.Then.Loc), Else = Arm(nest.Else, nest.Else?.Loc ?? nest.Loc) }, plan);
+                return;
+            }
             if (statements[k] is IrIf { Joined: false } i &&
                 (WritesRecordInArm(i) || _escape is null && (MovesRegion(i) || ArmDeclaresCell(i) || WritesElementBeforeLemma(i, rest)) ||
                  _escape is not null && !MayEscape(i) && CallsLocalObject(i)) &&
@@ -4484,6 +4795,7 @@ public sealed class CodeEmitter(
 
     private void UnitTail(IrStmt stmt, MethodPlan plan)
     {
+        if (stmt is IrIf branch && SplitCondition(branch) is { } nested) stmt = nested;
         switch (stmt)
         {
             case IrBlock { Statements.IsEmpty: true }:
@@ -4569,9 +4881,45 @@ public sealed class CodeEmitter(
         if (_escape is not null) return null;
         for (var k = 0; k < statements.Length - 1; k++)
             if (statements[k] is IrIf { Joined: false } i && NullTest(i.Cond) is null && !MayEscape(i) &&
-                CallsLocalObject(i))
+                (CallsLocalObject(i) ||
+                 (DeclaresCell(i) || AssignsConditional(i) || ChangesReceiver(i)) && Straight(statements.Skip(k + 1))))
                 return k;
         return null;
+    }
+
+    /// <summary>
+    /// R34.11. Whether an arm of <paramref name="i"/> declares a local, which is a Pulse
+    /// <c>let mut</c>: Pulse allocates one only where its scope ends at an annotated
+    /// postcondition, which an arm joined with its sibling does not have, and an arm that
+    /// is a tail does.
+    /// </summary>
+    private static bool DeclaresCell(IrIf i) =>
+        Passes.Check.Statements(i).Skip(1).Any(st => st is IrLocalDecl { Immutable: false });
+
+    /// <summary>
+    /// R34.11. Whether an arm of <paramref name="i"/> assigns a local a conditional value
+    /// (<c>n = c ? a : b</c>): the value's own join sits inside the arm, and Pulse's join of
+    /// the arms then keeps the local's value of the assigning arm only.
+    /// </summary>
+    private static bool AssignsConditional(IrIf i) =>
+        Passes.Check.Statements(i).Skip(1).Any(st => st is IrAssign { Target: IrVar, Value: IrConditional });
+
+    /// <summary>
+    /// R34.17. Whether an arm of <paramref name="i"/> calls a method that changes its receiver
+    /// (R27.54's case, before more of the body): the join keeps neither arm's facts about it.
+    /// </summary>
+    private bool ChangesReceiver(IrIf i) =>
+        Passes.Check.Statements(i).SelectMany(Passes.Check.Expressions).Any(MovesReceiver);
+
+    /// <summary>
+    /// R34.11. Whether <paramref name="rest"/>, which a split copies into both arms, has no
+    /// branch or loop of its own, so the copy stays linear.
+    /// </summary>
+    private static bool Straight(IEnumerable<IrStmt> rest)
+    {
+        foreach (var st in rest)
+            if (Passes.Check.Statements(st).Any(x => x is IrIf or IrWhile or IrFor)) return false;
+        return true;
     }
 
     private bool CallsLocalObject(IrStmt s) =>
@@ -4610,6 +4958,16 @@ public sealed class CodeEmitter(
     /// mutable locals but may not mention the invariant's existentials, so every cell
     /// denotes <c>!var_x</c> here rather than a value binder.
     /// </summary>
+    /// <summary>R34.6. The cell holding an enumerator's cursor, which its members are passed.</summary>
+    private string CursorCell(IrExpr cursor)
+    {
+        if (cursor is IrVar v && _slots.TryGetValue(v.Name, out var slot) && slot.Kind == SlotKind.Cell)
+            return slot.Binder;
+        diagnostics.Error("PALCS0862", cursor.Loc,
+            "An enumerator is used where its cursor is not a local of this method (doc/translation.md R34.6).");
+        return "()";
+    }
+
     private SpecScope DerefScope()
     {
         var scope = new SpecScope();
@@ -4618,6 +4976,8 @@ public sealed class CodeEmitter(
             var text = slot.Kind is SlotKind.Cell or SlotKind.RefParam ? $"!{slot.Binder}"
                 // R27.39. A trace is read from its protocol, as a heap is from its region.
                 : slot.Kind is SlotKind.Trace ? $"(Pulse.Lib.CSharp.Callback.trace_now {slot.Binder} ())"
+                // R34.1. An enumerable is the items it yields, which never change.
+                : slot.Kind is SlotKind.Enumerable && slot.Items is { } items ? items
                 : slot.Binder;
             // Here an array denotes the live array, not its contents: a measure may
             // dereference a mutable local (F3) but may not mention the invariant's
@@ -4923,6 +5283,15 @@ public sealed class CodeEmitter(
                     "same object: use that name instead.");
                 return "()";
 
+            // R34.10. A reassigned array local is read, written, measured, resized and
+            // returned through its cell; it is not a value to pass elsewhere.
+            case IrVar v when _slots.TryGetValue(v.Name, out var cellArray) && cellArray.Kind == SlotKind.ArrayCell:
+                diagnostics.Error("PALCS0863", v.Loc,
+                    $"`{v.Name}` is an array local that is reassigned, so it is held in a cell " +
+                    "(doc/translation.md R34.10). Such a local may be indexed, written, measured " +
+                    "with `.Length`, resized with `Array.Resize` and returned, but not otherwise used.");
+                return "()";
+
             case IrVar v when _slots.TryGetValue(v.Name, out var slot):
                 if (slot.Kind is SlotKind.Cell or SlotKind.RefParam)
                 {
@@ -4949,6 +5318,21 @@ public sealed class CodeEmitter(
             // R3.3/R17.3. `a.Length` and `s.Length`. One node, two libraries: a span's
             // length is `Slice.len`, which is pure and non-ghost exactly as an array's
             // header field is, so nothing but the qualifier differs.
+            case IrLength { Array: IrVar lv } when ArrayCellOf(lv) is { } lcell:
+            {
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.ArrayCell.length {lcell.Binder};");
+                return t;
+            }
+
+            case IrElement { Array: IrVar rv } rel when ArrayCellOf(rv) is { } rcell:
+            {
+                var index = Expr(rel.Index);
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.ArrayCell.read {rcell.Binder} {index};");
+                return t;
+            }
+
             case IrLength len:
             {
                 var array = Expr(len.Array);
@@ -5015,6 +5399,33 @@ public sealed class CodeEmitter(
                 return operands.Count == 0
                     ? so.Function
                     : $"({so.Function} {string.Join(" ", operands)})";
+            }
+
+            // R34.3, R34.6. An enumerable's count; an enumerator's start, step and item.
+            case IrEnumOp eo:
+            {
+                if (eo.Op == EnumOpKind.Start) return "0l";
+                var source = Expr(eo.Source);
+                var t = Fresh();
+                // R34.26. The array is lent for the call, and taken back once the call is
+                // done (Call), or else the statement holding it (Statement).
+                if (eo.Op == EnumOpKind.Lend)
+                {
+                    var coll = eo.Type is IrEnumerableType { Collection: true } ? "true" : "false";
+                    if (source.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.' or '\'')) t = source;
+                    else Line($"let {t} = {source};");
+                    Line($"Pulse.Lib.CSharp.Enumerable.lend {t} {coll};");
+                    _unlends.Add((_statementDepth, $"Pulse.Lib.CSharp.Enumerable.unlend {t} {coll};"));
+                    return $"(Pulse.Lib.CSharp.Enumerable.view {t} {coll})";
+                }
+                var call = eo.Op switch
+                {
+                    EnumOpKind.Count => $"count {source}",
+                    EnumOpKind.MoveNext => $"move_next {source} {CursorCell(eo.Args[0])}",
+                    _ => $"current {source} {CursorCell(eo.Args[0])}",
+                };
+                Line($"let {t} = Pulse.Lib.CSharp.Enumerable.{call};");
+                return t;
             }
 
             // R20.6. A stable sort into a fresh array, at the order the key's type has.
@@ -5320,6 +5731,19 @@ public sealed class CodeEmitter(
     private readonly List<string> _lambdaProtocols = [];
 
     private string Call(IrCall call, string binder)
+    {
+        // R34.26. An array lent as an enumerable argument is taken back once the call is done.
+        var mark = _unlends.Count;
+        var result = CallCore(call, binder);
+        for (var k = _unlends.Count - 1; k >= mark; k--)
+        {
+            Line(_unlends[k].Text);
+            _unlends.RemoveAt(k);
+        }
+        return result;
+    }
+
+    private string CallCore(IrCall call, string binder)
     {
         if (PeerRegionCall(call) is { } peer) return PeerCall(call, binder, peer.Slot, peer.Region);
         var declared = PulseEmitter.DispatchOwner(classes, slots, call.Callee);
@@ -5721,6 +6145,11 @@ public sealed class CodeEmitter(
             return "()";
         }
 
+        // R34.12. A wrapping `<<` on `int`: C# masks the distance to five bits and keeps
+        // the low 32 bits of the product. An unsigned `shift_left` already wraps.
+        if (b.Wraps && b.Op is BinOp.Shl && b.Left.Type is IrPrim { Kind: PrimKind.Int })
+            return $"(Pulse.Lib.CSharp.Int32.shift_left_wrap {l} {r})";
+
         // R22.14. A wrapping add/sub/mul: `_mod` for an unsigned width, which F* provides,
         // and the library's `_wrap` for `int`, which F* does not.
         if (b.Wraps && b.Op is BinOp.Add or BinOp.Sub or BinOp.Mul &&
@@ -5854,7 +6283,11 @@ public sealed class CodeEmitter(
     private Captured Bound(string term) => Capture(() =>
     {
         var t = Fresh();
-        Line($"let {t} = {term};");
+        // A type parameter's default leaves its dictionary to be resolved, which Pulse's
+        // join of the arms does not wait for; the annotation resolves it first (R35.7).
+        if (System.Text.RegularExpressions.Regex.Match(term, @"^\(Pulse\.Lib\.CSharp\.Inhabited\.default_of (.+)\)$") is { Success: true } dm)
+            Line($"let {t} : {dm.Groups[1].Value} = {term};");
+        else Line($"let {t} = {term};");
         return t;
     });
 

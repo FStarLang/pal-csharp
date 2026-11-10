@@ -32,7 +32,9 @@ public static class Normalize
             // R27.39. A `[Callback]` parameter's trace is in scope as the parameter is.
             Body = Statement(LoopReturns(Joins(m.Body, diagnostics)),
                 [.. m.Parameters.Select(p => p.Name),
-                 .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name))],
+                 .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name)),
+                 // R34.21. The object a constructor builds is in scope throughout its body.
+                 .. m.IsConstructor ? [Emit.Names.This] : Array.Empty<string>()],
                 diagnostics),
         },
         _ => decl,
@@ -177,8 +179,8 @@ public static class Normalize
     /// </summary>
     private static bool NestedReturn(IrStmt? s) => s switch
     {
-        IrIf i => InnerReturn(i.Then) || InnerReturn(i.Else),
-        IrBlock b => b.Statements.Any(NestedReturn),
+        IrIf i => InnerReturn(i.Then) || InnerReturn(i.Else) || NestedReturn(Stmts(i.Then)) || NestedReturn(Stmts(i.Else)),
+        IrBlock b => b.Statements.Any(NestedReturn) || NestedReturn(b.Statements),
         _ => false,
     };
 
@@ -208,6 +210,12 @@ public static class Normalize
                 case IrIf f when !last && ReturnInside(f) && !GuardChain(f):
                     return true;
                 case IrBlock { Splice: false } b when NestedReturn(b.Statements):
+                    return true;
+                // R34.9. A block that may return and that something follows — a `using`
+                // around a guard clause, say.
+                case IrBlock { Splice: false } b when !last && ReturnInside(b):
+                    return true;
+                case IrIf f when NestedReturn(Stmts(f.Then)) || NestedReturn(Stmts(f.Else)):
                     return true;
             }
         }
@@ -258,7 +266,7 @@ public static class Normalize
                 case IrIf { Joined: true }:
                     result.Add(s);
                     break;
-                case IrBlock { Splice: false } b when LoopReturn(b) || rest.Length > 0 && NestedReturn(b) || NestedReturn(b.Statements):
+                case IrBlock { Splice: false } b when LoopReturn(b) || rest.Length > 0 && (NestedReturn(b) || ReturnInside(b)) || NestedReturn(b.Statements):
                     result.AddRange(Sink([.. b.Statements, .. rest]));
                     return [.. result];
                 case IrIf f when LoopReturn(f) || rest.Length > 0 && (NestedReturn(f) || ReturnInside(f) && !GuardChain(f)):
@@ -271,6 +279,14 @@ public static class Normalize
                             Sink([.. Stmts(f.Else), .. (f.Else is not null && EndsInExit(f.Else) ? ImmutableArray<IrStmt>.Empty : rest)])),
                     });
                     return [.. result];
+                // R34.9. An `if` whose arm holds such a block is entered.
+                case IrIf f when NestedReturn(Stmts(f.Then)) || NestedReturn(Stmts(f.Else)):
+                    result.Add(f with
+                    {
+                        Then = new IrBlock(f.Then.Loc, Sink(Stmts(f.Then))),
+                        Else = f.Else is null ? null : new IrBlock(f.Else.Loc, Sink(Stmts(f.Else))),
+                    });
+                    break;
                 default:
                     result.Add(s);
                     break;
@@ -672,6 +688,7 @@ public static class Normalize
             case IrArraySearch se: Free(se.Array, into); Free(se.Item, into); Free(se.Start, into); Free(se.Count, into); return;
             case IrArrayBinarySearch bs: Free(bs.Array, into); Free(bs.Start, into); Free(bs.Count, into); Free(bs.Item, into); Free(bs.Comparer, into); return;
             case IrContents ct: Free(ct.Array, into); return;
+            case IrEnumOp eo: Free(eo.Source, into); foreach (var a in eo.Args) Free(a, into); return;
             case IrSeqOp s: foreach (var a in s.Args) Free(a, into); return;
             case IrListOp lo: foreach (var a in lo.Args) Free(a, into); return;
             case IrSpecOp so: foreach (var a in so.Args) Free(a, into); return;
@@ -803,8 +820,9 @@ public static class Normalize
             case IrReturn r: MutatedIn(r.Value, into); return;
             case IrExprStmt e: MutatedIn(e.Expr, into); return;
             case IrArrayOp c:
-                if (c.Written is IrVar dv) into.Add(dv.Name);
-                else if (c.Written is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
+                foreach (var written in c.AllWritten)
+                    if (written is IrVar dv) into.Add(dv.Name);
+                    else if (written is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
                 foreach (var a in c.Args) MutatedIn(a, into);
                 return;
             case IrThrow th: MutatedIn(th.Value, into); return;
@@ -954,6 +972,8 @@ public static class Normalize
                 }
                 return;
             case IrRefArg r: AssignedByCalls(r.Operand, into); return;
+            // R34.6. Moving an enumerator on writes its cursor.
+            case IrEnumOp { Op: EnumOpKind.MoveNext, Args: [IrVar cursor] }: into.Add(cursor.Name); return;
             case IrLambdaRef l:
                 foreach (var c in l.Captures)
                 {

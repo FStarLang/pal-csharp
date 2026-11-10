@@ -193,6 +193,12 @@ public static class Pal
     /// </summary>
     public static bool Returned() => throw Ghost();
 
+    /// <summary>
+    /// In a <c>try</c>'s invariant (R19.5): whether control is leaving the body by a raise
+    /// rather than at its end (R35.13).
+    /// </summary>
+    public static bool Raised() => throw Ghost();
+
     /// <summary>Logical implication.</summary>
     public static bool Implies(bool antecedent, bool consequent) => throw Ghost();
 
@@ -215,6 +221,20 @@ public static class Pal
     /// <c>object</c>, and nothing can be recovered from it.
     /// </summary>
     public static bool Boxes<T>(object? o, T value) => throw Ghost();
+
+    /// <summary>
+    /// R35.7. <c>o is T</c>: whether <c>o</c> is a non-null box of a <c>T</c>. Of the box of a
+    /// <c>T</c> it holds exactly when the value boxed is not null; otherwise it is left
+    /// uninterpreted (<c>Pulse.Lib.CSharp.TypeTest.is_a</c>).
+    /// </summary>
+    public static bool IsA<T>(object? o) => throw Ghost();
+
+    /// <summary>
+    /// R35.7. <c>(T)o</c> where <c>Pal.IsA&lt;T&gt;(o)</c>: a <c>T</c> that <c>o</c> boxes.
+    /// Boxing is not injective in the model, so which one is not determined by
+    /// <c>Pal.Boxes</c>; it is the one the program's cast yields.
+    /// </summary>
+    public static T Unbox<T>(object? o) => throw Ghost();
 
     public static bool Forall<T1>(Func<T1, bool> body) => throw Ghost();
     public static bool Forall<T1, T2>(Func<T1, T2, bool> body) => throw Ghost();
@@ -239,10 +259,17 @@ public static class Pal
     public static Seq<T> Contents<T>(System.Collections.Generic.IList<T> list) => throw Ghost();
 
     /// <summary>
+    /// R34.1. The items an <c>IEnumerable&lt;T&gt;</c> argument yields, in order. The
+    /// argument is lent to the method, read-only, so they are the same throughout it.
+    /// </summary>
+    public static Seq<T> Contents<T>(System.Collections.Generic.IEnumerable<T> items) => throw Ghost();
+
+    /// <summary>
     /// R20.5. In a loop invariant of a <c>foreach</c>, the position of the element
     /// <paramref name="element"/> -- the loop's iteration variable -- in the collection:
     /// how many elements the loop has already finished with. It is the counter the
     /// translation of the <c>foreach</c> runs on, which C# gives no name.
+    /// R34.6. Of an enumerator of an enumerable argument: how many items it has moved past.
     /// </summary>
     public static int Index<T>(T element) => throw Ghost();
 
@@ -344,6 +371,10 @@ public static class Pal
     /// </summary>
     public static bool SortedRange<T>(Seq<T> before, Seq<T> after, SpecInt index, SpecInt count,
         System.Collections.Generic.IComparer<T>? comparer) => throw Ghost();
+
+    /// <summary>R34.16. <see cref="SortedRange{T}(Seq{T}, Seq{T}, SpecInt, SpecInt, System.Collections.Generic.IComparer{T})"/> by a <c>Comparison&lt;T&gt;</c>.</summary>
+    public static bool SortedRangeBy<T>(Seq<T> before, Seq<T> after, SpecInt index, SpecInt count,
+        Comparison<T> comparison) => throw Ghost();
 
     /// <summary>
     /// R26.10. Whether <paramref name="s"/> is a 4-ary min-heap of <c>(element, priority)</c>
