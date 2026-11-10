@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using PalLang;
 
@@ -362,5 +363,99 @@ public class Pairs
             // R34.23, and the object built so far is discarded.
             throw new ArgumentException(keys[i].ToString());
         }
+    }
+}
+
+[Spec]
+public struct RowModel
+{
+    public Seq<int> Items;
+}
+
+// R34.26. A sealed class whose `Count`, `CopyTo` and `GetEnumerator` are translated: an
+// object of it at an enumerable parameter is passed as a snapshot of its items.
+public sealed class Row : IEnumerable<int>
+{
+    private int[] _items;
+
+    [Model]
+    private RowModel Model => new RowModel { Items = Pal.Contents(_items) };
+
+    [Spec] public Seq<int> Items => Model.Items;
+
+    [Requires("n >= 0")]
+    [Ensures("@this.Items.Length == n")]
+    public Row(int n)
+    {
+        _items = new int[n];
+    }
+
+    [Ensures("Result == @this.Items.Length")]
+    [Ensures("@this.Items == Pal.Old(@this.Items)")]
+    public int Count => _items.Length;
+
+    [Requires("0 <= index && index + @this.Items.Length <= Pal.Contents(array).Length")]
+    [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), index, index + @this.Items.Length, @this.Items)")]
+    [Ensures("@this.Items == Pal.Old(@this.Items)")]
+    public void CopyTo(int[] array, int index)
+    {
+        Array.Copy(_items, 0, array, index, _items.Length);
+    }
+
+    [Ensures("ReferenceEquals(Result._row, @this) && Result._index == 0")]
+    public Enumerator GetEnumerator() => new Enumerator(this);
+
+    IEnumerator<int> IEnumerable<int>.GetEnumerator() => GetEnumerator();
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    public struct Enumerator : IEnumerator<int>
+    {
+        private readonly Row _row;
+        private int _index;
+
+        [Ensures("ReferenceEquals(@this._row, row) && @this._index == 0")]
+        internal Enumerator(Row row)
+        {
+            _row = row;
+            _index = 0;
+        }
+
+        public int Current => _row._items[_index - 1];
+
+        object IEnumerator.Current => Current;
+
+        public bool MoveNext() => ++_index <= _row._items.Length;
+
+        public void Reset() => _index = 0;
+
+        public void Dispose() { }
+    }
+}
+
+public static class Rows
+{
+    // R34.26. `CountAll` walks a snapshot of the row's items.
+    [Requires("n >= 0")]
+    [Ensures("Result == n")]
+    public static int CountRow(int n)
+    {
+        Row r = new Row(n);
+        return Sums.CountAll(r);
+    }
+
+    [Requires("n >= 0")]
+    [Ensures("Pal.Contents(Result).Length == n")]
+    public static int[] Make(int n) => new int[n];
+
+    // R34.26. An array local initialised by a call owns the array the call returns.
+    [Requires("n > 0")]
+    [Ensures("Result == 7")]
+    public static int First(int n)
+    {
+        int[] a = Make(n);
+        a[0] = 7;
+        Pal.Assert(Pal.Contents(a)[0] == 7);
+        return a[0];
     }
 }

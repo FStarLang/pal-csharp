@@ -778,9 +778,11 @@ public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, 
 /// <item><c>Count</c>: <c>((ICollection&lt;T&gt;)e).Count</c>.</item>
 /// <item><c>Start</c>: <c>e.GetEnumerator()</c>, a cursor that has yielded nothing.</item>
 /// <item><c>MoveNext</c>, <c>Current</c>: on the enumerator whose cursor local is <c>Args[0]</c>.</item>
+/// <item><c>Lend</c> (R34.26): the array <c>Source</c>, lent as an enumerable argument for the
+/// statement's call (an <see cref="IrEnumerableType"/> of the node's type), and taken back after it.</item>
 /// </list>
 /// </summary>
-public enum EnumOpKind { Count, Start, MoveNext, Current }
+public enum EnumOpKind { Count, Start, MoveNext, Current, Lend }
 
 public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
 

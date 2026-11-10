@@ -10507,6 +10507,34 @@ object open: a call would close it, and closing it forgets what its model does n
 that chains to another (R22.10) drops the object built so far — its arrays and its box —
 as R22.9's open constructor does, rather than closing it: the caller never receives it.
 
+**R34.26. An object passed as a snapshot of its items.** An argument at a parameter of
+type `IEnumerable<T>` or `ICollection<T>` that is an object of a translated class `C` — a
+parameter `[Exactly(typeof(C))]`, or an expression of static type `C` where `C` is sealed or
+effectively sealed (R27.1), so that the object's dynamic type is `C` — is passed as a
+snapshot of its items: `var s = new T[o.Count]; o.CopyTo(s, 0);`, then `s` lent as the
+enumerable (`Enumerable.lend`/`view`) for the call and taken back (`unlend`) once the call
+returns. The snapshot's contents are `C`'s items by `Count`'s and `CopyTo`'s verified
+contracts (`SortDedupe.splice_whole` collapses a whole-array `CopyTo`). `C` must have
+`Count`, `CopyTo(T[], int)` and `GetEnumerator()` translated, and implement
+`ICollection<T>` when the parameter is one; otherwise PALCS0864. A parameter that is itself
+`[Exactly]` is the object (R27.46), not a snapshot. What is trusted is that the runtime's
+dispatch of the interface's members reaches `C`'s, whose contracts all yield the same items
+(see Trusted). Relatedly, an array local initialised by a call that returns an array (and
+never reassigned) owns that array, named by the call's result, as `new T[n]` would be: so
+`Pal.Contents(a)` of such a local is the call's postcondition's.
+(`EnumerableHelpers.ToArray(collection, out count)` in `SortedSet<T>`'s constructor.)
+
+**R34.27. Sort-then-dedupe (harness proof).** `SortedSet<T>(IEnumerable<T>, IComparer<T>)`
+with a collection whose comparer differs copies the items out (R34.26), sorts them with the
+new comparer and keeps the first of each run of equivalent items. The sort is not stable, so
+which of the equivalent items is kept is unspecified; the result is specified by
+`SpecSortDedupe.SetOf(c, items, src)`: `items` is strictly sorted under `c`, every item of
+`src` is equivalent under `c` to one of `items`, and every one of `items` occurs in `src`.
+`Pulse.Lib.CSharp.SortDedupe` proves the loop's invariant `DedupeInv` (`dedupe_init`,
+`dedupe_step` — both arms stated before the `if`, so that the join keeps them — and
+`dedupe_done`); `DedupeInv`'s and `SetOf`'s quantified parts are opaque to SMT outside those
+lemmas. `SpecSortDedupe.ComparerEquals(c, d)` is `c.Equals(d)`, uninterpreted (R27.47).
+
 ### Verified (§34)
 
 * `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
@@ -10540,6 +10568,11 @@ as R22.9's open constructor does, rather than closing it: the caller never recei
   `ArgumentException` only if two of the dictionary's keys compare equal under
   `comparer ?? Comparer<K>.Default`; otherwise its comparer is that, its count and capacity
   the dictionary's count, and its key/value pairs a permutation of the dictionary's.
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for a `SortedSet<T>` argument, with any
+  comparer (R34.26, R34.27): the set's comparer is `comparer ?? Comparer<T>.Default`, its
+  items are `SetOf` the argument's under it, and equal to the argument's when the comparers
+  are the same. With the same comparer the tree is cloned; otherwise the items are copied,
+  sorted and deduplicated.
 
 ### Findings (§34)
 
@@ -10557,12 +10590,27 @@ as R22.9's open constructor does, rather than closing it: the caller never recei
   finding); the code itself has no such check.
 * `ToArray` returns an array whose length may exceed `length`; callers (`Stack`, `Queue`)
   keep the excess as capacity, which their contracts expose.
+* `SortedSet<T>(collection, comparer)` copies `collection`'s tree as it stands when
+  `comparer.Equals(collection.Comparer)` (`HasEqualComparer`), even if the two comparers are
+  different objects. If they are equal but order differently (a user `Equals` that is
+  wrong), the new set's tree is in the wrong order for its comparer. The contract excludes
+  that case: the comparers are the same, or not `Equals`.
+* **Deviation.** With a different comparer, `SortedSet<T>(collection, comparer)` requires
+  `2 * count + 2 <= 2^30`: `ToArray`'s growth may double the array, and
+  `ConstructRootFromSortedArray` needs the array's length within 2^30. The code has no such
+  check.
 
 ### Not verified (§34)
 
-* `SortedSet<T>(IEnumerable<T>, IComparer<T>)` beyond its `[Exactly(SortedSet)]` contract:
-  the `as SortedSet<T>` test on an enumerable is not modelled, and the sort-then-dedupe path
-  needs a theory of sequences equal modulo the comparer.
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for an argument that is not a
+  `SortedSet<T>`: the constructor's `as SortedSet<T>` on an arbitrary enumerable would hand
+  it a set object it does not own, which a lent enumerable (a ghost sequence) cannot
+  provide. The contract stays `[Exactly(SortedSet)]`; the sort-then-dedupe path itself is
+  verified (R34.27), reached with a different comparer.
+* `SortedDictionary<K,V>(IDictionary<K,V>[, IComparer<K>])`: it tests
+  `dictionary is SortedDictionary<K,V>` and then reads that object's tree, which an
+  `IDictionary` argument modelled as a ghost sequence of pairs (R34.22) does not own, for
+  the same reason.
 
 ### Trusted (§34)
 
@@ -10579,5 +10627,9 @@ as R22.9's open constructor does, rather than closing it: the caller never recei
   enumeration is outside this model. That its keys are distinct is not assumed: the
   constructors that need it check it.
 * A `Comparison<T>` is a lawful total order, as every comparer is (R22.24, R34.16).
+* R34.26's snapshot: enumerating an object of a translated class `C` passed at an
+  `IEnumerable<T>`/`ICollection<T>` parameter reaches `C`'s own `GetEnumerator`, `Count` and
+  `CopyTo` (the class is sealed, or the parameter `[Exactly(C)]`), and these agree on the
+  items: the snapshot `Count` then `CopyTo` make stands for what the callee enumerates.
 * Whether an argument is an `ICollection<T>` is unknown to the method (R34.4); no assumption
   is made about it.

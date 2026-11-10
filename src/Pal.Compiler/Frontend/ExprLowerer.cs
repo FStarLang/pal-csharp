@@ -2431,10 +2431,90 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     /// <summary>R27.39. An argument at a <c>[Callback]</c> parameter is a lifted lambda.</summary>
     private IrExpr LowerCallArgument(ArgumentSyntax arg, int i, IMethodSymbol method) =>
-        !SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
+        SnapshotArgument(arg, i, method) ??
+        (!SpecPosition && arg.NameColon is null && i < method.Parameters.Length &&
         CallbackOf(method.Parameters[i], known, diagnostics) is { } cb
             ? LowerCallbackArgument(arg, cb, Locations.From(arg))
-            : LowerArgument(arg);
+            : LowerArgument(arg));
+
+    /// <summary>
+    /// R34.26. An object of a translated class <c>C</c> passed at an enumerable parameter:
+    /// an <c>[Exactly(typeof(C))]</c> parameter, or an expression of static type <c>C</c>
+    /// where every translated object of <c>C</c> has dynamic type <c>C</c> (R27.1). It is
+    /// passed as a snapshot of its items, <c>var s = new T[o.Count]; o.CopyTo(s, 0);</c>,
+    /// lent as the enumerable for the call (<see cref="EnumOpKind.Lend"/>), which is what
+    /// enumerating the object yields under the verified contracts of <c>C</c>'s
+    /// <c>Count</c>, <c>CopyTo</c> and enumerator, trusting the runtime's dispatch of the
+    /// interface's members to them.
+    /// </summary>
+    private IrExpr? SnapshotArgument(ArgumentSyntax arg, int i, IMethodSymbol method)
+    {
+        if (SpecPosition || arg.NameColon is not null || i >= method.Parameters.Length ||
+            !arg.RefKindKeyword.IsKind(SyntaxKind.None) ||
+            Declarations.Has(method.Parameters[i], known.ExactlyAttribute) ||
+            known.MapType(method.Parameters[i].Type) is not IrEnumerableType enumerable)
+            return null;
+        var cls = ExactClassOf(arg.Expression) ??
+            (model.GetTypeInfo(arg.Expression).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, IsAbstract: false } st &&
+             known.HasModel(st) && (st.IsSealed || FrontendPass.EffectivelySealed(st.OriginalDefinition, known))
+                ? st : null);
+        if (cls is null || method.Parameters[i].Type is not INamedTypeSymbol { TypeArguments: [var elementSymbol] })
+            return null;
+        var loc = Locations.From(arg);
+        var count = cls.GetMembers("Count").OfType<IPropertySymbol>()
+            .FirstOrDefault(p => !p.IsStatic && p.Parameters.IsEmpty && p.Type.SpecialType == SpecialType.System_Int32);
+        var copyTo = cls.GetMembers("CopyTo").OfType<IMethodSymbol>().FirstOrDefault(m =>
+            !m.IsStatic && m.Parameters.Length == 2 &&
+            m.Parameters[0].Type is IArrayTypeSymbol { Rank: 1 } at &&
+            SymbolEqualityComparer.Default.Equals(at.ElementType, elementSymbol) &&
+            m.Parameters[1].Type.SpecialType == SpecialType.System_Int32);
+        var collection = cls.AllInterfaces.Any(t =>
+            t.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_ICollection_T);
+        var enumerator = cls.GetMembers("GetEnumerator").OfType<IMethodSymbol>()
+            .FirstOrDefault(m => !m.IsStatic && m.Parameters.IsEmpty && m.DeclaredAccessibility == Accessibility.Public);
+        if (count?.GetMethod is not { } getter || copyTo is null ||
+            Declarations.KindOf(getter, known) is not { } countKind ||
+            Declarations.KindOf(copyTo, known) is not { } copyKind ||
+            enumerator is null || Declarations.KindOf(enumerator, known) is null ||
+            (enumerable.Collection && !collection))
+        {
+            diagnostics.Error("PALCS0864", loc,
+                $"`{arg}` is an object of `{cls.Name}` passed at enumerable parameter " +
+                $"`{method.Parameters[i].Name}`. It is passed as a snapshot of its items, which " +
+                "needs `Count`, `CopyTo(T[], int)` and `GetEnumerator()` members translated on the class, and the " +
+                "class to implement `ICollection<T>` when the parameter is one " +
+                "(doc/translation.md R34.26).");
+            return null;
+        }
+        var receiver = Lower(arg.Expression);
+        var arrayType = new IrArrayType(enumerable.Element);
+        var name = Fresh("snapshot");
+        var snapshot = new IrVar(loc, name) { Type = arrayType };
+        var length = new IrCall(loc, Naming.Of(getter), [receiver])
+        {
+            Kind = countKind,
+            ResultType = IrPrim.Int,
+            HasReceiver = true,
+            ParamTypes = Declarations.ParamTypes(getter, known, true),
+            TypeArguments = known.TypeArguments(getter),
+            MutatesReceiver = false,
+        };
+        var copy = new IrCall(loc, Naming.Of(copyTo), [receiver, snapshot, new IrLiteral(loc, 0) { Type = IrPrim.Int }])
+        {
+            Kind = copyKind,
+            ResultType = known.MapType(copyTo.ReturnType),
+            HasReceiver = true,
+            KeepsArguments = true,
+            ParamTypes = Declarations.ParamTypes(copyTo, known, true),
+            TypeArguments = known.TypeArguments(copyTo),
+            MutatesReceiver = !Declarations.IsReadOnly(copyTo, model.Compilation, known),
+        };
+        var lentType = new IrEnumerableType(enumerable.Element, collection);
+        return new IrStmtExpr(loc,
+            [new IrLocalDecl(loc, name, arrayType, new IrNewArray(loc, enumerable.Element, length) { Type = arrayType }),
+             new IrExprStmt(loc, copy)],
+            new IrEnumOp(loc, EnumOpKind.Lend, snapshot, []) { Type = lentType }) { Type = lentType };
+    }
 
     private List<IrStmt>? _outFieldWrites;
     private SyntaxNode? _outFieldStatement;

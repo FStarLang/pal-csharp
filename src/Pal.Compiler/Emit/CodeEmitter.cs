@@ -2488,6 +2488,10 @@ public sealed class CodeEmitter(
     // Statements
     // =======================================================================
 
+    /// <summary>R34.26. The ghost unlends owed at the end of the statement at each depth.</summary>
+    private readonly List<(int Depth, string Text)> _unlends = [];
+    private int _statementDepth;
+
     private void Statement(IrStmt stmt, MethodPlan plan)
     {
         // Every line emitted from here down belongs to this statement, unless a nested
@@ -2496,12 +2500,20 @@ public sealed class CodeEmitter(
         // it happened to contain last.
         var outer = _loc;
         _loc = stmt.Loc;
+        _statementDepth++;
         try
         {
             if (PeerWritten(stmt) is { } peer) PeerWrite(peer.Slot, peer.Class, () => StatementCore(stmt, plan));
             else StatementCore(stmt, plan);
+            // R34.26. The arrays this statement's calls borrowed as enumerables are taken back.
+            for (var k = _unlends.Count - 1; k >= 0; k--)
+            {
+                if (_unlends[k].Depth != _statementDepth) continue;
+                Line(_unlends[k].Text);
+                _unlends.RemoveAt(k);
+            }
         }
-        finally { _loc = outer; }
+        finally { _loc = outer; _statementDepth--; }
         if (!_receiverDirty && DirtiesReceiver(stmt)) _receiverDirty = true;
     }
 
@@ -2679,6 +2691,13 @@ public sealed class CodeEmitter(
                 return;
 
             case IrLocalDecl { Type: IrArrayType, Init: IrNewArray or IrOrderBy } d:
+                ArrayLocal(d);
+                return;
+
+            // R34.26. A local initialised with an array a call returns owns it, as one
+            // initialised with `new T[n]` does (R6.11a), unless it is reassigned.
+            case IrLocalDecl { Type: IrArrayType, Init: IrCall { ResultType: IrArrayType } or IrStmtExpr { Value: IrCall { ResultType: IrArrayType } } } d
+                when !Reassigned(d) && !IsNullableArray(d.Init!):
                 ArrayLocal(d);
                 return;
 
@@ -2882,6 +2901,15 @@ public sealed class CodeEmitter(
             case IrOrderBy ob:
                 Line($"let {binder} = Linq.order_by_to_list {Expr(ob.Source)} {ob.Key} {OrderOf(ob.KeyType)};");
                 break;
+            default:
+            {
+                // R34.26. The array the call returned is named by the call's binder, which
+                // its `pts_to` is stated at; a second binder would not carry it over.
+                var value = Expr(d.Init!);
+                if (value.All(ch => char.IsLetterOrDigit(ch) || ch == '_')) binder = value;
+                else Line($"let {binder} = {value};");
+                break;
+            }
         }
         var local = new Slot(d.Name, d.Type, SlotKind.Array, binder);
         _slots[d.Name] = local;
@@ -4967,6 +4995,17 @@ public sealed class CodeEmitter(
                 if (eo.Op == EnumOpKind.Start) return "0l";
                 var source = Expr(eo.Source);
                 var t = Fresh();
+                // R34.26. The array is lent for the call, and taken back once the call is
+                // done (Call), or else the statement holding it (Statement).
+                if (eo.Op == EnumOpKind.Lend)
+                {
+                    var coll = eo.Type is IrEnumerableType { Collection: true } ? "true" : "false";
+                    if (source.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.' or '\'')) t = source;
+                    else Line($"let {t} = {source};");
+                    Line($"Pulse.Lib.CSharp.Enumerable.lend {t} {coll};");
+                    _unlends.Add((_statementDepth, $"Pulse.Lib.CSharp.Enumerable.unlend {t} {coll};"));
+                    return $"(Pulse.Lib.CSharp.Enumerable.view {t} {coll})";
+                }
                 var call = eo.Op switch
                 {
                     EnumOpKind.Count => $"count {source}",
@@ -5280,6 +5319,19 @@ public sealed class CodeEmitter(
     private readonly List<string> _lambdaProtocols = [];
 
     private string Call(IrCall call, string binder)
+    {
+        // R34.26. An array lent as an enumerable argument is taken back once the call is done.
+        var mark = _unlends.Count;
+        var result = CallCore(call, binder);
+        for (var k = _unlends.Count - 1; k >= mark; k--)
+        {
+            Line(_unlends[k].Text);
+            _unlends.RemoveAt(k);
+        }
+        return result;
+    }
+
+    private string CallCore(IrCall call, string binder)
     {
         if (PeerRegionCall(call) is { } peer) return PeerCall(call, binder, peer.Slot, peer.Region);
         var declared = PulseEmitter.DispatchOwner(classes, slots, call.Callee);
