@@ -14,6 +14,9 @@ public sealed record Provenance(string Construct, IrLoc Loc);
 /// <summary>One line of a generated module, and the C# it was emitted for.</summary>
 public readonly record struct EmittedLine(string Text, IrLoc? Loc);
 
+/// <summary>R30.39. A function <c>Pal.Split</c> outlined from a method's tail: its header, through <c>raises</c>, and its body.</summary>
+public sealed record OutlinedFn(string Header, ImmutableArray<EmittedLine> Body, IrLoc Loc);
+
 /// <summary>
 /// A one-based line of a generated module, and the C# it came from. This is the map an
 /// F* error is read through: F* reports a range in a `.fst` nobody wrote, and the only
@@ -536,7 +539,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 ],
                 // R32.12. A wrapping struct's member adds the bridges of its wrapped copies.
                 IrMethod wm => [new Provenance(construct, decl.Loc),
-                    .. RevealBridges(wm).Select(b => new Provenance(b.Name, decl.Loc))],
+                    .. RevealBridges(wm).Select(b => new Provenance(b.Name, decl.Loc)),
+                    // R30.39. And the functions its `Pal.Split`s outline.
+                    .. Enumerable.Range(0, wm.Body is null ? 0 : AllStatements(wm.Body)
+                            .Count(st => st is IrIf { SplitAfter: true }))
+                        .Select(i => new Provenance($"{construct}__split{i}", decl.Loc))],
                 _ => [new Provenance(construct, decl.Loc)],
             };
 
@@ -1980,11 +1987,40 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"#set-options \"--z3rlimit_factor {factor}\"");
             sb.AppendLine();
         }
+        if (!method.OpaqueSpecs.IsEmpty)
+        {
+            sb.AppendLine($"#set-options \"--using_facts_from '* {string.Join(" ", method.OpaqueSpecs.Select(m => "-" + m))}'\"");
+            sb.AppendLine();
+        }
 
         foreach (var (name, type) in RevealBridges(method))
             sb.Append(RevealBridge(name, type, method.TypeParameters));
 
         var origins = ImmutableArray.CreateBuilder<LineOrigin>();
+
+        // R30.39. The body is emitted first, so that what `Pal.Split` outlines of it is
+        // defined before the function that calls it.
+        string? bodyText = null;
+        ImmutableArray<LineOrigin> bodyOrigins = [];
+        if (!method.Admit && method.PulseBody is null && method.Body is not null)
+        {
+            bodyText = body.EmitBody(method, plan);
+            bodyOrigins = body.Origins();
+        }
+        foreach (var outlined in body.Outlined)
+        {
+            origins.Add(new LineOrigin(Lines(sb) + 1, outlined.Loc));
+            sb.Append(outlined.Header);
+            origins.Add(new LineOrigin(Lines(sb) + 1, outlined.Loc));
+            sb.AppendLine("{");
+            foreach (var line in outlined.Body)
+            {
+                if (line.Loc is { } l) origins.Add(new LineOrigin(Lines(sb) + 1, l));
+                sb.Append(line.Text);
+            }
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
 
         origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.Append(_recursiveMethod ? "fn rec " : "fn ").Append(Names.Function(method.Name));
@@ -2034,11 +2070,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 sb.AppendLine("  " + line.TrimEnd());
             }
         }
-        else if (method.Body is not null)
+        else if (bodyText is not null)
         {
             var offset = Lines(sb);
-            sb.Append(body.EmitBody(method, plan));
-            foreach (var o in body.Origins())
+            sb.Append(bodyText);
+            foreach (var o in bodyOrigins)
                 origins.Add(o with { Line = o.Line + offset });
         }
 
@@ -2239,7 +2275,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrBlock b: foreach (var x in b.Statements) Collect(x); return;
                 case IrLocalDecl d: CollectExpr(d.Init); return;
                 case IrAssign a: CollectExpr(a.Target); CollectExpr(a.Value); return;
-                case IrIf i: CollectExpr(i.Cond); Collect(i.Then); Collect(i.Else); return;
+                case IrIf i:
+                    CollectExpr(i.Cond);
+                    if (i.Joined) foreach (var fact in i.JoinFacts) CollectExpr(fact);
+                    Collect(i.Then); Collect(i.Else);
+                    return;
                 case IrWhile w:
                     CollectExpr(w.Cond);
                     foreach (var inv in w.Invariants) CollectExpr(inv);

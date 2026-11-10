@@ -57,6 +57,22 @@ public static class Pal
     [Conditional(Cond)]
     public static void Invariant(SlProp ownership) { }
 
+    /// <summary>
+    /// R30.36. Written directly after an <c>if</c> statement: the two arms meet again here,
+    /// holding what the method holds and the stated facts, instead of each arm continuing
+    /// with its own copy of what follows. Repeatable.
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Join(bool facts) { }
+
+    /// <summary>
+    /// R30.39. Written after the <c>Pal.Join</c>s of an <c>if</c> in a method's tail: what
+    /// follows the join is verified as a function of its own, which assumes the join's
+    /// postcondition (and the method's precondition) and proves the method's postcondition.
+    /// </summary>
+    [Conditional(Cond)]
+    public static void Split() { }
+
     /// <summary>A termination measure. Written as a leading statement of the loop body.</summary>
     [Conditional(Cond)]
     public static void Decreases(int measure) { }

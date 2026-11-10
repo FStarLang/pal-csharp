@@ -30,13 +30,132 @@ public static class Normalize
         IrMethod m when m.Body is not null => m with
         {
             // R27.39. A `[Callback]` parameter's trace is in scope as the parameter is.
-            Body = Statement(LoopReturns(m.Body),
+            Body = Statement(LoopReturns(Joins(m.Body, diagnostics)),
                 [.. m.Parameters.Select(p => p.Name),
                  .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name))],
                 diagnostics),
         },
         _ => decl,
     };
+
+    // -----------------------------------------------------------------------
+    // R30.36 `Pal.Join`
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// R30.36. Attaches each run of <c>Pal.Join</c>s to the <c>if</c> right before it. A
+    /// loop in an arm that a <c>return</c> may leave is followed, in the arm, by R26.2's
+    /// guard <c>if (returned) return value;</c>; the arm's rest moves under
+    /// <c>if (!returned)</c> and the guard, the same in both arms, follows the joined
+    /// <c>if</c> once, so the arms meet and what follows the join is emitted once.
+    /// </summary>
+    private static IrStmt Joins(IrStmt stmt, DiagnosticBag diagnostics) => stmt switch
+    {
+        IrBlock b => b with { Statements = Joins(b.Statements, diagnostics) },
+        IrIf i => i with
+        {
+            Then = Joins(i.Then, diagnostics),
+            Else = i.Else is null ? null : Joins(i.Else, diagnostics),
+        },
+        IrWhile w => w with { Body = Joins(w.Body, diagnostics), Step = Joins(w.Step, diagnostics) },
+        IrFor f => f with { Body = Joins(f.Body, diagnostics), Init = Joins(f.Init, diagnostics), Step = Joins(f.Step, diagnostics) },
+        IrTry t => t with
+        {
+            Body = (IrBlock)Joins(t.Body, diagnostics),
+            Catches = [.. t.Catches.Select(c => c with { Body = (IrBlock)Joins(c.Body, diagnostics) })],
+        },
+        _ => stmt,
+    };
+
+    private static ImmutableArray<IrStmt> Joins(ImmutableArray<IrStmt> stmts, DiagnosticBag diagnostics)
+    {
+        var result = ImmutableArray.CreateBuilder<IrStmt>();
+        for (var k = 0; k < stmts.Length; k++)
+        {
+            var s = Joins(stmts[k], diagnostics);
+            if (s is IrGhostStmt { Kind: GhostKind.Join } stray)
+            {
+                diagnostics.Error("PALCS0752", stray.Loc,
+                    "`Pal.Join` must directly follow an `if` statement (or another `Pal.Join` that does).");
+                continue;
+            }
+            if (s is IrGhostStmt { Kind: GhostKind.Split } straySplit)
+            {
+                diagnostics.Error("PALCS0755", straySplit.Loc,
+                    "`Pal.Split` must directly follow the `Pal.Join`s of an `if` (R30.39).");
+                continue;
+            }
+            var facts = ImmutableArray.CreateBuilder<IrExpr>();
+            while (s is IrIf && k + 1 < stmts.Length && stmts[k + 1] is IrGhostStmt { Kind: GhostKind.Join } j)
+            {
+                facts.Add(j.Prop!);
+                k++;
+            }
+            if (facts.Count == 0) { result.Add(s); continue; }
+            var splitAfter = false;
+            if (k + 1 < stmts.Length && stmts[k + 1] is IrGhostStmt { Kind: GhostKind.Split })
+            {
+                splitAfter = true;
+                k++;
+            }
+
+            var f = (IrIf)s;
+            IrIf? guard = null;
+            var then = Hoist(f.Then, ref guard);
+            var els = f.Else is null ? null : Hoist(f.Else, ref guard);
+            var joined = f with { Then = then, Else = els, JoinFacts = facts.ToImmutable(), SplitAfter = splitAfter };
+            if (ReturnInside(joined.Then) || ReturnInside(joined.Else) || EscapesJoin(joined.Then) || EscapesJoin(joined.Else))
+            {
+                diagnostics.Error("PALCS0753", f.Loc,
+                    "A joined `if` (R30.36) cannot `return`, `break` or `continue` from its arms, except " +
+                    "from a loop directly in an arm, whose `return` is completed after the join.");
+                result.Add(s);
+                continue;
+            }
+            result.Add(joined);
+            if (guard is not null) result.Add(guard);
+        }
+        return result.ToImmutable();
+    }
+
+    /// <summary>
+    /// Whether an arm leaves by a <c>break</c> or <c>continue</c> outside any loop of its own.
+    /// A <c>return</c> from the loop the joined <c>if</c> is in (R26.2's <c>break</c>) only
+    /// sets the returned flag, which the join owns; the body's rest is under
+    /// <c>if (!returned)</c> after the join.
+    /// </summary>
+    private static bool EscapesJoin(IrStmt? s) => s switch
+    {
+        IrBreak { FromReturn: true } => false,
+        IrBreak or IrContinue => true,
+        IrBlock b => b.Statements.Any(EscapesJoin),
+        IrIf i => EscapesJoin(i.Then) || EscapesJoin(i.Else),
+        _ => false,
+    };
+
+    private static bool IsReturnGuard(IrStmt s) =>
+        s is IrIf { Cond: IrVar { Name: Frontend.StmtLowerer.ReturnedFlag }, Else: null, Then: IrReturn or IrBreak { FromReturn: true } };
+
+    /// <summary>R30.36. <c>[S1, guard, S2]</c> becomes <c>[S1, if (!returned) { S2 }]</c>.</summary>
+    private static IrStmt Hoist(IrStmt arm, ref IrIf? guard)
+    {
+        var flat = Flat(Stmts(arm));
+        var at = flat.FindIndex(IsReturnGuard);
+        if (at < 0) return arm;
+        guard ??= (IrIf)flat[at];
+        var g = (IrIf)flat[at];
+        var rest = flat.Skip(at + 1).ToImmutableArray();
+        var kept = flat.Take(at).ToList();
+        if (rest.Length > 0)
+        {
+            var restArm = Hoist(new IrBlock(arm.Loc, rest), ref guard);
+            kept.Add(new IrIf(g.Loc, new IrUnary(g.Loc, UnOp.Not, g.Cond) { Type = IrPrim.Bool }, restArm, null));
+        }
+        return new IrBlock(arm.Loc, [.. kept]);
+    }
+
+    private static List<IrStmt> Flat(ImmutableArray<IrStmt> stmts) =>
+        [.. stmts.SelectMany(s => s is IrBlock { Splice: true } b ? Flat(b.Statements) : [s])];
 
     // -----------------------------------------------------------------------
     // R24.14 `return` inside a loop, nested in an `if`
@@ -135,6 +254,10 @@ public static class Normalize
             var rest = stmts.RemoveRange(0, i + 1);
             switch (s)
             {
+                // R30.36. A joined `if` is where its arms meet: what follows stays after it.
+                case IrIf { Joined: true }:
+                    result.Add(s);
+                    break;
                 case IrBlock { Splice: false } b when LoopReturn(b) || rest.Length > 0 && NestedReturn(b) || NestedReturn(b.Statements):
                     result.AddRange(Sink([.. b.Statements, .. rest]));
                     return [.. result];
@@ -277,11 +400,28 @@ public static class Normalize
             }
 
             case IrIf i:
-                return i with
+            {
+                var r = i with
                 {
                     Then = Statement(i.Then, outer, diagnostics),
                     Else = i.Else is null ? null : Statement(i.Else, outer, diagnostics),
                 };
+                if (!r.Joined) return r;
+                // R30.36. A Pulse `if` with an `ensures` is not framed, as a `try` is not
+                // (F86): its postcondition owns every slot in scope, and keeps the value of
+                // what the arms leave alone, found as a loop's is (R5.8b).
+                var frame = (IrWhile)Loop(
+                    new IrWhile(r.Loc, r.Cond, r.JoinFacts, new IrLiteral(r.Loc, 0),
+                        new IrBlock(r.Loc, r.Else is null ? [r.Then] : [r.Then, r.Else])),
+                    outer, diagnostics);
+                var live = outer.OrderBy(n => n, StringComparer.Ordinal).ToImmutableArray();
+                var mentioned = new HashSet<string>(frame.Live);
+                return r with
+                {
+                    Live = live,
+                    Unassigned = [.. live.Where(n => !mentioned.Contains(n) || frame.Unassigned.Contains(n))],
+                };
+            }
 
             case IrWhile w:
                 return Loop(w with { Body = Statement(w.Body, outer, diagnostics) }, outer, diagnostics);
@@ -557,7 +697,11 @@ public static class Normalize
             case IrBlock b: foreach (var s in b.Statements) Free(s, into); return;
             case IrLocalDecl d: Free(d.Init, into); return;
             case IrAssign a: Free(a.Target, into); Free(a.Value, into); return;
-            case IrIf i: Free(i.Cond, into); Free(i.Then, into); Free(i.Else, into); return;
+            case IrIf i:
+                Free(i.Cond, into);
+                if (i.Joined) foreach (var fact in i.JoinFacts) Free(fact, into);
+                Free(i.Then, into); Free(i.Else, into);
+                return;
             case IrWhile w:
                 Free(w.Cond, into);
                 foreach (var inv in w.Invariants) Free(inv, into);

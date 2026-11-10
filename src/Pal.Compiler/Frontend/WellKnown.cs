@@ -54,6 +54,7 @@ public sealed class WellKnown
         PulseBodyAttribute = Type("PulseBodyAttribute");
         AdmitAttribute = Type("AdmitAttribute");
         RlimitAttribute = Type("RlimitAttribute");
+        OpaqueSpecsAttribute = Type("OpaqueSpecsAttribute");
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
@@ -208,6 +209,7 @@ public sealed class WellKnown
     public INamedTypeSymbol PulseBodyAttribute { get; }
     public INamedTypeSymbol AdmitAttribute { get; }
     public INamedTypeSymbol RlimitAttribute { get; }
+    public INamedTypeSymbol OpaqueSpecsAttribute { get; }
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }

@@ -1881,6 +1881,12 @@ public sealed class StmtLowerer(
                     return new IrGhostStmt(loc, GhostKind.Assert, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Assume):
                     return new IrGhostStmt(loc, GhostKind.Assume, _spec.Lower(args[0].Expression), null);
+                // R30.36. Attached to the `if` before it by Normalize.
+                case nameof(PalLang.Pal.Join):
+                    return new IrGhostStmt(loc, GhostKind.Join, _spec.Lower(args[0].Expression), null);
+                // R30.39. Likewise.
+                case nameof(PalLang.Pal.Split):
+                    return new IrGhostStmt(loc, GhostKind.Split, null, null);
                 // R27.48. The rest of the block is dropped by LowerBlock.
                 case nameof(PalLang.Pal.Unreachable):
                     return new IrGhostStmt(loc, GhostKind.Unreachable, null, null);

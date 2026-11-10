@@ -143,6 +143,24 @@ public sealed class CodeEmitter(
     private readonly Dictionary<Slot, IrLoc> _nestedArrays = [];
 
     private string Fresh() => "t" + _temp++;
+
+    /// <summary>
+    /// R30.38. A cell holds a quotient or remainder under a name. A cell's value is the term
+    /// it was assigned, and every later step that names the cell's value checks that term
+    /// again, including the nonlinear precondition of its division.
+    /// </summary>
+    /// The binding is skipped in an arm of an `if` that Pulse joins by itself (one with no
+    /// `ensures`): there the `let`'s equation is a resource the other arm does not have.
+    private string Quotient(string value)
+    {
+        if (_plainArms > 0 || !QuotientOp.IsMatch(value)) return value;
+        var t = Fresh();
+        Line($"let {t} = {value};");
+        return t;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex QuotientOp =
+        new(@"\b[IU](8|16|32|64)\.(rem|div)\b");
     private string FreshValue(string name) => $"v{name}_{_ghost++}";
 
     private void Line(string text) =>
@@ -285,7 +303,7 @@ public sealed class CodeEmitter(
             // an arm that replaces an open object's array field leaves the join holding the
             // box and the new array under unrelated existentials. The rest of the block is
             // moved into both arms instead, so that no join is needed.
-            if (statements[i] is IrIf split && (JoinLoses(split) || ArmDeclaresCell(split) ||
+            if (statements[i] is IrIf { Joined: false } split && (JoinLoses(split) || ArmDeclaresCell(split) ||
                                                   method.IsConstructor && AssignsOwnField(split)))
             {
                 var rest = statements.RemoveRange(0, i + 1);
@@ -304,6 +322,11 @@ public sealed class CodeEmitter(
                 }, method, plan);
                 return;
             }
+            if (statements[i] is IrIf { SplitAfter: true } splitter)
+            {
+                SplitTail(splitter, statements.RemoveRange(0, i + 1), method, plan);
+                return;
+            }
             if (statements[i] is IrReturn early)
             {
                 diagnostics.Unsupported(early.Loc, "A `return` that is not the last statement",
@@ -314,9 +337,121 @@ public sealed class CodeEmitter(
             Statement(statements[i], plan);
         }
 
-        if (statements.Length > 0) Tail(statements[^1], method, plan);
+        if (statements is [.., IrIf { SplitAfter: true } last])
+            SplitTail(last, [], method, plan);
+        else if (statements.Length > 0) Tail(statements[^1], method, plan);
         else EndOfMethod(method, plan);
     }
+
+    private bool _splitHere;
+    private LoopFrame? _splitJoin;
+
+    /// <summary>R30.39. The functions <c>Pal.Split</c> outlined, in order.</summary>
+    private readonly List<OutlinedFn> _outlined = [];
+    public IReadOnlyList<OutlinedFn> Outlined => _outlined;
+
+    /// <summary>R30.39. Ghost locals by binder, with their type, for an outlined function's parameters.</summary>
+    private readonly Dictionary<string, string> _ghostLets = [];
+
+    /// <summary>
+    /// R30.39. A joined <c>if</c> followed by <c>Pal.Split</c>, and the rest of the method's
+    /// tail. The join is emitted as usual; the rest becomes a function of its own whose
+    /// precondition is the join's postcondition -- existentially quantified throughout,
+    /// together with the method's own pure precondition -- and whose postcondition and
+    /// <c>raises</c> are the method's, giving back the cells it borrows. The method ends by
+    /// calling it. Only what the join states is known there: that is the point.
+    /// </summary>
+    private void SplitTail(IrIf splitter, ImmutableArray<IrStmt> rest, IrMethod method, MethodPlan plan)
+    {
+        if (_tryMarks.Count > 0 || _fieldOpen.Count > 0)
+        {
+            diagnostics.Error("PALCS0755", splitter.Loc,
+                "`Pal.Split` (R30.39) cannot split inside a `try`, nor while a field's region is open.");
+            return;
+        }
+        _splitHere = true;
+        _splitJoin = null;
+        try { Statement(splitter, plan); } finally { _splitHere = false; }
+        if (_splitJoin is not { } join) return;
+        _splitJoin = null;
+
+        // What the rest may name of what the method has bound so far: the immutable locals
+        // and the ghost ones. The cells it borrows; the rest is in the join's frame.
+        var methodNames = new HashSet<string>(plan.Binders.Select(BinderName));
+        var values = _slots.Values
+            .Where(s => s.Kind == SlotKind.Value && Identifier.IsMatch(s.Binder) && !methodNames.Contains(s.Binder) &&
+                        !_ghostLets.ContainsKey(s.Binder))
+            .GroupBy(s => s.Binder).Select(g => g.First()).ToList();
+        var ghosts = _ghostLets.ToList();
+        var cells = join.Live.Where(s => s.Kind == SlotKind.Cell).ToList();
+
+        // A value the join named before the `if` only to relate it to one after (an array's
+        // length, R5.8b) owns nothing in the join's postcondition: the outlined function
+        // cannot name it, and what relates to it is dropped with it.
+        var resourceText = string.Join("\n", join.Resources);
+        bool Mentions(string text, string name) => System.Text.RegularExpressions.Regex.IsMatch(
+            text, $@"(?<![\w']){System.Text.RegularExpressions.Regex.Escape(name)}(?![\w'])");
+        var orphans = new HashSet<string>(join.Fixed.Where(f => !Mentions(resourceText, f)));
+        var existentials = join.Existentials.Concat(join.Fixed).Where(n => !orphans.Contains(n))
+            .Distinct().ToImmutableArray();
+        var requires = MethodPlan.Clause(join.Resources.ToImmutable(),
+            [.. plan.PreConjuncts, .. join.Pure.Where(p => !orphans.Any(o => Mentions(p, o)))], existentials);
+        string Back(string clause) => cells.Count == 0 ? clause
+            : clause + " **\n           " + string.Join(" **\n           ",
+                cells.Select(c => $"(exists* v. R.pts_to {c.Binder} v)"));
+
+        var start = _lines.Count;
+        var indent = _indent;
+        _indent = 1;
+        EmitSequence(rest, method, plan);
+        _indent = indent;
+        var body = _lines.GetRange(start, _lines.Count - start).ToImmutableArray();
+        _lines.RemoveRange(start, _lines.Count - start);
+
+        var text = requires + "\n" + string.Concat(body.Select(l => l.Text));
+        bool Used(string name) => System.Text.RegularExpressions.Regex.IsMatch(
+            text, $@"(?<![\w'.]){System.Text.RegularExpressions.Regex.Escape(name)}(?![\w'])");
+        var parameters = new List<(string Binder, string Arg)>();
+        foreach (var c in cells)
+            parameters.Add(($"({c.Binder}: R.ref {Types.Atom(c.Type)})", c.Binder));
+        foreach (var v in values.Where(v => Used(v.Binder)))
+            parameters.Add(($"({v.Binder}: {Types.Atom(v.Type)})", v.Binder));
+        foreach (var (g, type) in ghosts.Where(g => Used(g.Key)))
+            parameters.Add(($"({g}: erased ({type}))", g));
+
+        var name = $"{Names.Function(method.Name)}__split{_outlined.Count}";
+        var header = new System.Text.StringBuilder();
+        header.Append("fn ").Append(name);
+        foreach (var b in plan.Binders) header.Append(' ').Append(b);
+        foreach (var (b, _) in parameters) header.Append(' ').Append(b);
+        header.Append('\n');
+        header.Append($"  requires {requires}\n");
+        if (!IsVoid(method)) header.Append($"  returns  {Names.Result}: {Types.Render(method.ReturnType)}\n");
+        header.Append($"  ensures  {Back(plan.Ensures)}\n");
+        if (plan.Raises is { } raises)
+            header.Append($"  raises   {Back(raises[..^1])})\n");
+        _outlined.Add(new OutlinedFn(header.ToString(), body, splitter.Loc));
+
+        var args = plan.Binders.Select(CallArgument).Where(a => a is not null)
+            .Concat(parameters.Select(p => p.Arg));
+        Line($"{name} {string.Join(" ", args)}");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex WithLine = new(@"^\s*with ([^.]*)\. assert");
+
+    private static readonly System.Text.RegularExpressions.Regex Identifier = new(@"^[A-Za-z_][\w']*$");
+
+    private static string BinderName(string binder) =>
+        System.Text.RegularExpressions.Regex.Match(binder, @"^[\(\{]\|?\s*#?([^:\s\)]+)").Groups[1].Value;
+
+    /// <summary>R30.39. How the outlined function is handed one of the method's binders.</summary>
+    private static string? CallArgument(string binder) => binder switch
+    {
+        "()" => "()",
+        _ when binder.StartsWith("{|") => null,
+        _ when binder.StartsWith("(#") => "#" + BinderName(binder),
+        _ => BinderName(binder),
+    };
 
     private static bool IsVoid(IrMethod method) => method.ReturnType is IrPrim { Kind: PrimKind.Void };
 
@@ -2790,7 +2925,7 @@ public sealed class CodeEmitter(
     private void LocalDeclaration(IrLocalDecl d)
     {
         var cell = Names.Local(d.Name);
-        var init = d.Init is null ? Default(d.Type) : Expr(d.Init);
+        var init = d.Init is null ? Default(d.Type) : Quotient(Expr(d.Init));
         var nullableArray = d.Type is IrArrayType && d.Init is not null && IsNullableArray(d.Init);
         if (d.Immutable)
         {
@@ -2939,7 +3074,7 @@ public sealed class CodeEmitter(
 
             case IrVar v when _slots.TryGetValue(v.Name, out var slot) && slot.Kind is SlotKind.Cell or SlotKind.RefParam:
                 if (ReadOnly(slot, a.Loc)) return;
-                Line($"{slot.Binder} := {Expr(a.Value)};");
+                Line($"{slot.Binder} := {Quotient(Expr(a.Value))};");
                 return;
 
             case IrElement { Array: IrVar av } when
@@ -3173,8 +3308,18 @@ public sealed class CodeEmitter(
     }
 
     /// <summary>R5.4. Both branches are always emitted.</summary>
+    private int _plainArms;
+
     private void If(IrIf i, MethodPlan plan)
     {
+        if (i.Joined) { JoinedIf(i, plan); return; }
+        _plainArms++;
+        try { PlainIf(i, plan); } finally { _plainArms--; }
+    }
+
+    private void PlainIf(IrIf i, MethodPlan plan)
+    {
+
         if (NullTest(i.Cond) is { } window)
         {
             NullWindow(window, i, branch => { if (branch is not null) Statement(branch, plan); }, tail: false);
@@ -3201,6 +3346,81 @@ public sealed class CodeEmitter(
         Line("()");
         _indent--;
         Line("};");
+    }
+
+    /// <summary>
+    /// R30.36. An <c>if</c> followed by <c>Pal.Join</c>: one Pulse <c>if</c> whose
+    /// <c>ensures</c> is what a loop over its arms would take as its invariant -- the live
+    /// slots, the receiver's representation and the carried regions, each value the arms
+    /// leave alone named before it (R5.8b) -- and the join's facts. Each arm is a tail
+    /// (R5.8d) proving that, so whatever splits inside an arm stays inside it, and what
+    /// follows the join is emitted once.
+    /// </summary>
+    private int _joinDepth;
+
+    private void JoinedIf(IrIf i, MethodPlan plan)
+    {
+        if (NullTest(i.Cond) is not null || i.Cond is IrBinary pnb && PlainNullTest(pnb) is not null)
+        {
+            diagnostics.Error("PALCS0754", i.Loc,
+                "A null test cannot be joined (R30.36): each arm holds the tested reference differently.");
+            return;
+        }
+        var arms = new IrBlock(i.Loc, i.Else is null ? [i.Then] : [i.Then, i.Else]);
+        var framed = _lines.Count;
+        var frame = Frame(new IrWhile(i.Loc, i.Cond, i.JoinFacts, null, arms)
+            { Live = i.Live, Unassigned = i.Unassigned }, plan);
+        // R30.39. Every value the frame named before the `if`, for an outlined function.
+        frame = frame with
+        {
+            Fixed = [.. frame.Fixed.Concat(_lines.Skip(framed)
+                .Select(l => WithLine.Match(l.Text)).Where(m => m.Success)
+                .SelectMany(m => m.Groups[1].Value.Split(' ', StringSplitOptions.RemoveEmptyEntries))).Distinct()],
+        };
+        foreach (var fact in i.JoinFacts)
+        {
+            if (fact.Type is IrPrim { Kind: PrimKind.SlProp })
+                frame.Resources.Add(spec.Emit(fact, frame.Scope).Text);
+            else
+                frame.Pure.Add(spec.AsProp(spec.Emit(fact, frame.Scope)));
+        }
+        if (i.SplitAfter)
+        {
+            if (!_splitHere)
+                diagnostics.Error("PALCS0755", i.Loc,
+                    "`Pal.Split` (R30.39) splits a method's tail: the joined `if` must be a statement " +
+                    "of the method's body, not of a loop or of an arm, and not inside a `try`.");
+            _splitJoin = frame;
+        }
+        var cond = Expr(i.Cond);
+        Line($"if ({cond})");
+        Line("ensures " + MethodPlan.Clause(
+            frame.Resources.ToImmutable(), frame.Pure.ToImmutable(), frame.Existentials.ToImmutable()));
+        Line("{");
+        _indent++;
+        var fieldsOpen = _fieldOpen.ToList();
+        var dirty = _receiverDirty;
+        var renamed = _receiverRenamed;
+        _joinDepth++;
+        var plainArms = _plainArms;
+        _plainArms = 0;
+        UnitTail(i.Then, plan);
+        _indent--;
+        Line("} else {");
+        _indent++;
+        _fieldOpen.Clear();
+        foreach (var (k, v) in fieldsOpen) _fieldOpen[k] = v;
+        _receiverDirty = dirty;
+        _receiverRenamed = renamed;
+        UnitTail(i.Else ?? new IrBlock(i.Loc, []), plan);
+        _plainArms = plainArms;
+        _joinDepth--;
+        _indent--;
+        Line("};");
+        _fieldOpen.Clear();
+        foreach (var (k, v) in fieldsOpen) _fieldOpen[k] = v;
+        _receiverRenamed = renamed;
+        if (dirty || DirtiesReceiver(arms)) _receiverDirty = true;
     }
 
     /// <summary>
@@ -3479,7 +3699,22 @@ public sealed class CodeEmitter(
     }
 
     /// <summary>R5.6, R5.8, R5.8b, R5.9.</summary>
-    private void While(IrWhile w, MethodPlan plan)
+    /// <summary>
+    /// What a loop invariant (R5.8) and a joined <c>if</c>'s postcondition (R30.36) hold
+    /// apart from the user's facts: the live slots, the receiver's representation, the
+    /// regions carried, with each value the construct leaves alone named before it.
+    /// </summary>
+    private sealed record LoopFrame(
+        SpecScope Scope, SpecScope MeasureScope,
+        ImmutableArray<string>.Builder Resources, ImmutableArray<string>.Builder Existentials,
+        ImmutableArray<string>.Builder Pure)
+    {
+        /// <summary>R30.39. The owned slots the frame carries, and the values it names before.</summary>
+        public ImmutableArray<Slot> Live { get; init; } = [];
+        public ImmutableArray<string> Fixed { get; init; } = [];
+    }
+
+    private LoopFrame Frame(IrWhile w, MethodPlan plan)
     {
         // R5.12. The unfolded receiver is not among the ordinary live slots: inside R4.10's
         // window it is a representation, not an object, and its folded invariant is exactly
@@ -3639,6 +3874,21 @@ public sealed class CodeEmitter(
             Line($"with {string.Join(" ", fixedAll.Select(f => f.Name).Concat(stillHeaps))}. " +
                  $"assert ({string.Join(" ** ", fixedAll.Select(f => f.Resource))});");
         }
+        return new LoopFrame(scope, measureScope, resources, existentials, pure)
+        {
+            Live = live,
+            Fixed = [.. fixedAll.Select(f => f.Name), .. stillHeaps],
+        };
+    }
+
+    private void While(IrWhile w, MethodPlan plan)
+    {
+        var frame = Frame(w, plan);
+        var scope = frame.Scope;
+        var measureScope = frame.MeasureScope;
+        var resources = frame.Resources;
+        var existentials = frame.Existentials;
+        var pure = frame.Pure;
 
         // R5.10. Flags are allocated only for the forms the body actually uses, so a
         // loop with neither `break` nor `continue` is emitted unchanged.
@@ -4160,7 +4410,7 @@ public sealed class CodeEmitter(
             // is a fresh existential at the join, and what the arm proved about it is lost.
             // R27.40. And so, in a loop that may escape, does one that calls a method on a local
             // object without escaping (R26.5's split, which only a non-escaping loop gets).
-            if (statements[k] is IrIf i &&
+            if (statements[k] is IrIf { Joined: false } i &&
                 (WritesRecordInArm(i) || _escape is null && (MovesRegion(i) || ArmDeclaresCell(i) || WritesElementBeforeLemma(i, rest)) ||
                  _escape is not null && !MayEscape(i) && CallsLocalObject(i)) &&
                 NullTest(i.Cond) is null)
@@ -4188,7 +4438,7 @@ public sealed class CodeEmitter(
             // goes into the arm that falls through; the escaping arm keeps none of it.
             // R30.29. So does one an arm of which declares a cell (R30.10), as a `return` of a
             // snapshot local from a loop does.
-            if (statements[k] is IrIf ei && _escape is not null && MayEscape(ei) && (MovesRegion(ei) || ArmDeclaresCell(ei)))
+            if (statements[k] is IrIf { Joined: false } ei && _escape is not null && MayEscape(ei) && (MovesRegion(ei) || ArmDeclaresCell(ei)))
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc)
                 {
@@ -4274,8 +4524,12 @@ public sealed class CodeEmitter(
             // R27.54. `if (c) S` last in a loop body, where `S` calls a method that changes its
             // receiver: Pulse's join of `S` with the empty arm keeps neither arm's facts about
             // the receiver, so the arms are tails, each proving the invariant.
+            // R30.36. In a joined `if`'s arm, so is one that writes the receiver's record: the
+            // join of its arms would be a `match` on the record, through which no field's
+            // array can be found.
             case IrIf { Else: null } bare when NullTest(bare.Cond) is null &&
-                                              Check.Statements(bare.Then).SelectMany(Check.Expressions).Any(MovesReceiver):
+                                              (Check.Statements(bare.Then).SelectMany(Check.Expressions).Any(MovesReceiver) ||
+                                               _joinDepth > 0 && WritesRecordInArm(bare)):
                 UnitTail(bare with { Else = new IrBlock(bare.Loc, []) }, plan);
                 return;
 
@@ -4314,7 +4568,7 @@ public sealed class CodeEmitter(
     {
         if (_escape is not null) return null;
         for (var k = 0; k < statements.Length - 1; k++)
-            if (statements[k] is IrIf i && NullTest(i.Cond) is null && !MayEscape(i) &&
+            if (statements[k] is IrIf { Joined: false } i && NullTest(i.Cond) is null && !MayEscape(i) &&
                 CallsLocalObject(i))
                 return k;
         return null;
@@ -4498,6 +4752,7 @@ public sealed class CodeEmitter(
                 if (inner is IrPrim { IsMachineInt: true }) inner = new IrPrim(PrimKind.SpecInt);
                 Line($"let {g.Text} : erased ({Types.Render(inner)}) = " +
                      $"hide ({SpecArgument(g.Prop!, inner, scope)});");
+                _ghostLets[g.Text!] = Types.Render(inner);
                 _slots[g.Text!] = new Slot(g.Text!, inner, SlotKind.Value, g.Text!);
                 return;
             }

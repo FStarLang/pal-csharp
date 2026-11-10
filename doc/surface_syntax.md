@@ -156,6 +156,8 @@ while (lo < hi && !found)
 | `Pal.Decreases(m)` | the termination measure |
 | `Pal.Broke()` | in an invariant: a `break` out of this loop was taken (R26.10) |
 | `Pal.Returned()`, `Pal.ReturnValue<T>()` | in an invariant: a `return` inside this loop was taken, and its value (R26.2) |
+| `Pal.Join(p)` | directly after an `if`: its arms meet here holding `p`, rather than each continuing with its own copy of what follows (R30.36); repeatable, and `Pal.Returned()`/`Pal.Result<T>()` may appear in `p` |
+| `Pal.Split()` | directly after the `Pal.Join`s of an `if` in a method's body: the rest of the method is checked as a function of its own, assuming only the join (R30.39) |
 | `Pal.Assert(p)` | a proof step |
 | `Pal.Assume(p)` | assume without proof — **unsound**, reported as a warning |
 
@@ -863,6 +865,7 @@ admitted lemma is assumed rather than proved.
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
 | `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
+| `[OpaqueSpecs("S", ...)]` | the solver does not unfold the declaring type's `[Spec]`s `S`, ... while checking the method (R30.40) |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 
 Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**

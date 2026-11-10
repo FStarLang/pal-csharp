@@ -336,6 +336,19 @@ public sealed class RlimitAttribute(int factor) : Attribute
     public int Factor { get; } = factor;
 }
 
+/// <summary>
+/// R30.40. The named <c>[Spec]</c> members of the declaring type are opaque to the SMT solver
+/// while this method is checked (F*'s <c>--using_facts_from</c>): their definitions are not
+/// unfolded, so what the proof knows of them comes from lemmas and from facts stated in
+/// their terms. Like <see cref="RlimitAttribute"/> it changes how the proof is found, not
+/// what is proved: hiding a definition can only make a proof fail.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OpaqueSpecsAttribute(params string[] specs) : Attribute
+{
+    public string[] Specs { get; } = specs;
+}
+
 /// <summary>Admit this method's contract without proof. Reported as a diagnostic.</summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AdmitAttribute : Attribute;

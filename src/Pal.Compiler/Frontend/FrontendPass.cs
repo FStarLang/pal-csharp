@@ -2647,6 +2647,26 @@ public static partial class FrontendPass
     // Lower
     // -----------------------------------------------------------------------
 
+    /// <summary>R30.40. The modules of the <c>[Spec]</c> members <c>[OpaqueSpecs]</c> names.</summary>
+    private static ImmutableArray<string> OpaqueSpecs(IMethodSymbol symbol, WellKnown known, IrLoc loc, DiagnosticBag diagnostics)
+    {
+        if (Declarations.Find(symbol, known.OpaqueSpecsAttribute) is not { ConstructorArguments: [{ } names] }) return [];
+        var modules = ImmutableArray.CreateBuilder<string>();
+        foreach (var name in names.Values.Select(v => v.Value as string))
+        {
+            var spec = symbol.ContainingType.GetMembers(name ?? "").OfType<IMethodSymbol>()
+                .FirstOrDefault(m => Declarations.Has(m, known.SpecAttribute));
+            if (spec is null)
+            {
+                diagnostics.Error("PALCS0756", loc,
+                    $"`[OpaqueSpecs]` names `{name}`, which is not a `[Spec]` method of `{symbol.ContainingType.Name}` (R30.40).");
+                continue;
+            }
+            modules.Add(Emit.Names.SpecModule(Naming.Of(spec)));
+        }
+        return modules.ToImmutable();
+    }
+
     private static IrDecl? LowerDeclaration(
         Candidate candidate,
         SemanticModel model,
@@ -2786,6 +2806,7 @@ public static partial class FrontendPass
             Admit = admitted,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
+            OpaqueSpecs = OpaqueSpecs(symbol, known, loc, diagnostics),
             Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
             Throws = specs.Throws,

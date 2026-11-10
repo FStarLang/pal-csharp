@@ -3081,7 +3081,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private static bool InLoop(SyntaxNode node) =>
         node.Ancestors()
             .TakeWhile(a => a is not (MemberDeclarationSyntax or AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
-            .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax);
+            .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax
+                // R30.36. A join's facts may say what a loop in its arms returned.
+                || a is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Name.Identifier.Text: nameof(PalLang.Pal.Join) } });
 
     private IrExpr LowerIntrinsic(
         IMethodSymbol method, InvocationExpressionSyntax node,
@@ -3121,6 +3123,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     model.GetSymbolInfo(iter).Symbol is ILocalSymbol local &&
                     local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ForEachStatementSyntax)
                     return new IrVar(loc, ForEachIndex(local.Name)) { Type = IrPrim.Int };
+                // R30.37. A `ref` local into an array (R24.8, R30.1): the index it is at.
+                if (args[0].Expression is IdentifierNameSyntax rl &&
+                    model.GetSymbolInfo(rl).Symbol is ILocalSymbol { IsRef: true } rs &&
+                    _patternBindings.TryGetValue(rs, out var bound) && bound is IrElement { Index: var at })
+                    return at;
                 diagnostics.Error("PALCS0621", loc,
                     "`Pal.Index` names the iteration variable of an enclosing `foreach` " +
                     "(doc/translation.md R20.5).");

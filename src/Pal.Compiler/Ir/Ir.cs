@@ -649,7 +649,24 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
 
-public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc);
+public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc)
+{
+    /// <summary>
+    /// R30.36. The facts of the <c>Pal.Join</c>s that follow the <c>if</c>; default when
+    /// none does. A joined <c>if</c> is one statement whose arms meet again, holding these
+    /// facts and the frame <see cref="Live"/> and <see cref="Unassigned"/> describe as a
+    /// loop's do (R5.8, R5.8b).
+    /// </summary>
+    public ImmutableArray<IrExpr> JoinFacts { get; init; }
+
+    public bool Joined => !JoinFacts.IsDefault;
+
+    /// <summary>R30.39. What follows this joined <c>if</c> is verified as a function of its own.</summary>
+    public bool SplitAfter { get; init; }
+
+    public ImmutableArray<string> Live { get; init; } = [];
+    public ImmutableArray<string> Unassigned { get; init; } = [];
+}
 
 public sealed record CountedFor(string Counter, bool Increasing);
 
@@ -768,7 +785,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable, Join, Split }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
@@ -886,6 +903,9 @@ public sealed record IrMethod(
     public bool Admit { get; init; }
     /// <summary>R22.31. The method's `[Rlimit]` factor, if any.</summary>
     public int? RlimitFactor { get; init; }
+
+    /// <summary>R30.40. The modules of the <c>[Spec]</c> members hidden from the SMT solver.</summary>
+    public ImmutableArray<string> OpaqueSpecs { get; init; } = [];
     /// <summary>R27.23. <c>[Open]</c>: the receiver is held as its record and heaps, not its invariant.</summary>
     public bool Open { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>

@@ -9703,6 +9703,99 @@ helpers take `IEnumerable<T>`; with `[Exactly(typeof(HashSet<>))]` they would st
 unlike R27.47's comparer identity), and `IsSubsetOf`'s `Count > other.Count` shortcut
 needs a counting argument over two comparers. They are not done.
 
+### R30.36 `Pal.Join`: an `if` whose arms rejoin
+
+Pulse checks the code after an `if` once for each arm whenever an arm ends a scope the
+rest needs: a split (R22.12), the guard after a loop's early exit (R26.2), or the code
+sunk into an arm (R24.14). Several such `if`s in a row multiply. `TryInsert` was 12 copies
+of its insertion tail and 4 of its search loop, and took about 1h35m and 115 GB to check.
+
+`Pal.Join(facts)` placed directly after an `if` (several in a row are conjoined) makes the
+`if` a join point. It is emitted as Pulse's `if (c) ensures J { … } else { … };`, and the
+code after it is checked once, against `J` alone.
+
+* **The postcondition is not framed.** A Pulse `if` with an `ensures` is like a loop body:
+  its postcondition has to own every slot in scope. `J` is a loop frame (R5.8b) over the two
+  arms, with the facts as invariants. Every live slot is owned. A slot or record the arms
+  leave alone keeps its name, so facts already known about it persist. Anything an arm
+  assigns becomes existential, so the facts have to restate everything the rest of the
+  method needs about it. That includes the class-invariant pieces of a receiver record that
+  an arm writes.
+* **Early exits inside the arms.** A loop's `return` inside an arm (R26.2) leaves a guard
+  `if (__pal_returned) return` in that arm. The guard is hoisted: the arm's remainder moves
+  under `if (!__pal_returned)`, and the guard is placed once after the join. Facts can say
+  what holds on each path with `Pal.Returned()` and `Pal.Result<T>()`. An arm that still
+  returns, breaks or continues is refused (PALCS0753).
+* **Restrictions.** A `Pal.Join` that does not follow an `if` is refused (PALCS0752). So is
+  a joined `if` whose condition is a null test, because R22.12 narrows a null test by
+  splitting (PALCS0754). Joined `if`s are not split, not sunk into, and not split at.
+
+### R30.37 `Pal.Index` of a rebindable `ref` local
+
+A `ref int bucket = ref GetBucket(h)` that R30.1 rebinds is an index cell into the array.
+In a specification, `Pal.Index(bucket)` names that index, so a join fact can relate it
+(`Pal.Index(bucket) == hashCode % _buckets.Length`).
+
+### R30.38 A quotient stored in a cell is named first
+
+`let mut c = int64_to_int32 (I64.rem h len)` puts the quotient term in the cell's
+`pts_to`, and Pulse typechecks it again, including its `len <> 0` precondition, at every
+later step that mentions the cell. In `TryInsert` that was 163 queries and 418 s. A value
+containing `rem` or `div` that initializes or is assigned to a cell is bound to a `let`
+first, so the cell holds a name. The exception is an arm of a plain `if` that Pulse
+joins itself (no `Pal.Join`): a `let` there would leave its binding in the arm's
+context, which Pulse cannot join with the other arm's, so the value is stored unnamed.
+
+### R30.39 `Pal.Split`: what follows a join, as a function of its own
+
+A join (R30.36) stops the code after an `if` from being copied, but Pulse still checks the
+rest of the method in the context the whole method has built up: every binder, every
+`with`, every fact before the join. In `TryInsert` that context made each typing query
+of the insertion tail slow.
+
+`Pal.Split()` written directly after the `Pal.Join`s of an `if` that is a statement of the
+method's body (not inside a loop, an arm or a `try`, and with no field region open) moves
+the code after the join into a separate Pulse `fn`, `<method>__split<k>`, emitted before
+the method. The method's body ends by calling it. Each such function is recorded in the
+provenance (R2.2) against the method it was outlined from.
+
+* **Its parameters** are the method's own (including the `pre_` models, passed
+  explicitly), the cells live at the join (as `R.ref`s), the immutable locals the rest
+  mentions, and the ghost locals it mentions (as `erased`).
+* **Its precondition** is the join's postcondition, with the values the join named
+  before the `if` quantified too, conjoined with the method's own pure precondition. Only
+  what the join states is known after the split: a fact established before the `if`
+  that the rest needs, such as `keys0.Value == Pal.Old(this.SpecKeys)`, has to be a
+  `Pal.Join` fact.
+* **Its postcondition and `raises`** are the method's, plus the cells it borrowed.
+
+Nothing is assumed. The outlined function is checked against its contract, and the call
+is checked against it. Splitting is a proof-structuring device, like a lemma: it changes
+how the method is checked, not what is proved. A `Pal.Split` that does not follow a
+`Pal.Join`, or a split in the wrong place, is refused (PALCS0755).
+
+### R30.40 `[OpaqueSpecs]`: a `[Spec]` the solver does not unfold
+
+A `[Spec]` with a body is a transparent F* definition in its own module (`Let_<Type>_<Name>`),
+and the SMT solver unfolds it wherever it occurs. `Dictionary.Search` unfolds to
+`HashChain.search`, which carries the table invariant and quantifiers over the entries; in
+`TryInsert`'s loops every typing query (a `nat`, a sequence index bound) was checked in the
+presence of those quantifiers, about 400 queries at about 0.6 s each.
+
+`[OpaqueSpecs("Search", ...)]` on a method names `[Spec]` members of its declaring type. The
+method's module is checked with `--using_facts_from '* -Let_<Type>_<Name> ...'`: the
+definitions of the named specs are not given to the solver, so what the proof knows of them
+is what the lemmas it calls (`SearchStart`, `SearchStep`, `SearchHit`, `SearchAbsent`)
+ensure, and what is stated in their terms. The setting covers the functions R30.39 outlines
+from the method, which are in the same module. A name that is not a `[Spec]` method of the
+declaring type is refused (PALCS0756).
+
+This is sound in the same way `[Rlimit]` is: it removes facts, so what is proved with it is
+provable without it. `TryInsert` is `[OpaqueSpecs("Search", "Wf", "Mem", "Overwritten")]`.
+Its loops' invariants had relied on `Search` unfolding to recover the table invariant `Wf`;
+with `Search` opaque they state `Wf` too. `Hit` stays transparent: `SearchHit`'s
+precondition is proved from the branch condition by unfolding it.
+
 ### Trusted assumptions
 
 * `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
@@ -9754,7 +9847,11 @@ the sequences before and after.
   minutes. R30.17 changed the SMT context enough that both needed a
   `Pal.Assert(0 <= index && index < entries.Length)` at the end of each insertion arm.
   After R30.31--R30.35 the join assertion `count < _entries.Length` (after the `Resize`
-  arm) timed out at `[Rlimit(4)]`; `[Rlimit(8)]` checks it (about 1h35m, ~115 GB for F*).
+  arm) timed out at `[Rlimit(4)]`; `[Rlimit(8)]` checked it in about 1h35m and ~115 GB
+  for F*. Joins (R30.36) brought that to 15.5 minutes and 13 GB; a split after the
+  search loops (R30.39) to 9:54 and 10.8 GB; a second split before the loops, with
+  `Search`, `Wf`, `Mem` and `Overwritten` opaque (R30.40), to 7:22 and 10.6 GB at the
+  default rlimit (`[Rlimit(8)]` dropped; `/usr/bin/time -v`, one module, `-j2`).
 * **Long division.** `(uint)hashCode % buckets.Length` is computed in `long`; that the
   quotient fits is nonlinear, so `TryInsert` calls a `DivFits` lemma (proved in
   `DictionaryChain.div_fits` with `FStar.Math.Lemmas`) before the bucket lookup after `Resize`.
