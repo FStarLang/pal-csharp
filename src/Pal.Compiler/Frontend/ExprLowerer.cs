@@ -1194,9 +1194,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// nothing determines it but the type argument, and the operation takes the type
     /// arguments explicitly, ahead of its value arguments.
     /// </summary>
-    private static bool InferableTypeParameters(IMethodSymbol method) =>
-        method.OriginalDefinition.TypeParameters.All(tp =>
-            method.OriginalDefinition.Parameters.Any(p => Mentions(p.Type, tp)));
+    private static bool InferableTypeParameters(IMethodSymbol method)
+    {
+        var declaration = (method.ReducedFrom ?? method).OriginalDefinition;
+        return declaration.TypeParameters.All(tp =>
+            declaration.Parameters.Any(p => Mentions(p.Type, tp)));
+    }
 
     private static bool Mentions(ITypeSymbol type, ITypeParameterSymbol tp) => type switch
     {
@@ -1243,12 +1246,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// The declared parameter types of a specification operation, when it is a method
     /// whose arity matches the arguments lowered for it. An instance member puts the
     /// receiver first, and the receiver has no declared parameter, so the two only line up
-    /// for a static call; anything else contributes no types and no coercion.
+    /// for a static call or an extension method's unreduced declaration; anything else
+    /// contributes no types and no coercion.
     /// </summary>
-    private ImmutableArray<IrType?> SpecParamTypes(ISymbol? symbol, ImmutableArray<IrExpr> args) =>
-        symbol is IMethodSymbol m && m.Parameters.Length == args.Length
-            ? Declarations.ParamTypes(m, known, receiver: false)
-            : [];
+    private ImmutableArray<IrType?> SpecParamTypes(ISymbol? symbol, ImmutableArray<IrExpr> args)
+    {
+        if (symbol is not IMethodSymbol method) return [];
+        method = method.ReducedFrom ?? method;
+        return method.Parameters.Length == args.Length
+            ? Declarations.ParamTypes(method, known, receiver: false) : [];
+    }
 
     /// <summary>
     /// R11.3. The empty constructor of this constructor's type — the sibling declared
@@ -2787,7 +2794,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             var ops = ImmutableArray.CreateBuilder<IrExpr>();
             if (!method.IsStatic && Receiver(node.Expression) is { } recv)
-                ops.Add(NonNull(recv));
+                ops.Add(method.ReducedFrom is null ? NonNull(recv) : recv);
             foreach (var a in args) ops.Add(Lower(a.Expression));
             return SpecMember(method, ops.ToImmutable(), node, loc);
         }

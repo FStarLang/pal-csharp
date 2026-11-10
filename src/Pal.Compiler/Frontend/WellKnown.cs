@@ -223,9 +223,12 @@ public sealed class WellKnown
     private readonly Dictionary<string, string> bindings = new(StringComparer.Ordinal);
 
     /// <summary>R21.5. The F* term a library type or member is bound to, if any.</summary>
-    public string? Binding(ISymbol? symbol) =>
-        symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
-        bindings.TryGetValue(id, out var term) ? term : null;
+    public string? Binding(ISymbol? symbol)
+    {
+        var declaration = symbol is IMethodSymbol { ReducedFrom: { } original } ? original : symbol;
+        return declaration?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
+               bindings.TryGetValue(id, out var term) ? term : null;
+    }
     public INamedTypeSymbol SpecOpAttribute { get; }
 
     /// <summary>R27.22. <c>[RegionOp]</c>: a specification operation over a region's nodes.</summary>
