@@ -19,6 +19,9 @@ module Pulse.Lib.CSharp.RangeWalk
 ///   queue after a round, which queues a child only if the range may reach into it),
 ///   `rbf_start` and `rbf_dequeue`. A pruned child's subtree has no in-range key
 ///   (`rbf_prune`), so the walk calls back on exactly the in-range keys of R27.40's walk.
+/// * R35.17. The view's `MinInternal`/`MaxInternal`, a descent from the view's root:
+///   `first_or`/`last_or`, the steps `min_step`/`max_step`, and `min_max_goal`, which says
+///   the descent's target in the root's subtree is the least (greatest) in-range key.
 ///
 /// Every region definition takes the region class's view and links first (`[RegionOp]`,
 /// R27.22). Nothing here is trusted: it is proved from `Region`, `RegionWalk`,
@@ -515,3 +518,173 @@ let rbf_dequeue (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r
       FStar.Classical.forall_intro aux;
       bf_visited_perm keys tr fq fq'
     end
+
+(* ---------------------------------------------------------------------------------- *)
+(* R35.17. The view's `MinInternal`/`MaxInternal`: a descent from the view's root to the  *)
+(* least (greatest) in-range key. Only the lower (upper) bound is tested on the way: every *)
+(* key the descent can stop at is below (above) the root, which is within the other bound. *)
+
+let first_or (#a: Type0) (s: Seq.seq a) (d: a) : a =
+  if Seq.length s > 0 then Seq.index s 0 else d
+
+let last_or (#a: Type0) (s: Seq.seq a) (d: a) : a =
+  if Seq.length s > 0 then Seq.index s (Seq.length s - 1) else d
+
+let first_or_append (#a: Type0) (s t: Seq.seq a) (d: a)
+  : Lemma (first_or (Seq.append s t) d == first_or s (first_or t d))
+  = ()
+
+let last_or_append (#a: Type0) (s t: Seq.seq a) (d: a)
+  : Lemma (last_or (Seq.append s t) d == last_or t (last_or s d))
+  = ()
+
+/// Within the upper bound, the upper bound filters nothing out.
+let rec filter_upper_free (#a: Type0) (c: O.comparer a) (lo hi: a) (la ua: bool) (s: Seq.seq a)
+  : Lemma (requires forall (i: nat). i < Seq.length s ==> ua ==> O.compare c (Seq.index s i) hi <= 0)
+          (ensures filter c lo hi la ua s == filter c lo hi la false s)
+          (decreases Seq.length s)
+  = if Seq.length s = 0 then ()
+    else begin
+      assert (forall (i: nat). i < Seq.length (Seq.tail s) ==> Seq.index (Seq.tail s) i == Seq.index s (i + 1));
+      filter_upper_free c lo hi la ua (Seq.tail s)
+    end
+
+/// Within the lower bound, the lower bound filters nothing out.
+let rec filter_lower_free (#a: Type0) (c: O.comparer a) (lo hi: a) (la ua: bool) (s: Seq.seq a)
+  : Lemma (requires forall (i: nat). i < Seq.length s ==> la ==> O.compare c lo (Seq.index s i) <= 0)
+          (ensures filter c lo hi la ua s == filter c lo hi false ua s)
+          (decreases Seq.length s)
+  = if Seq.length s = 0 then ()
+    else begin
+      assert (forall (i: nat). i < Seq.length (Seq.tail s) ==> Seq.index (Seq.tail s) i == Seq.index s (i + 1));
+      filter_lower_free c lo hi la ua (Seq.tail s)
+    end
+
+/// The range search stops at an in-range key, if at any.
+let rec range_root_key (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Lemma (ensures (match ST.range_root c t lo hi la ua with
+                    | T.Branch _ (k, _) _ -> ST.in_range c lo hi la ua k
+                    | T.Leaf -> True))
+          (decreases t)
+  = match t with
+    | T.Leaf -> ()
+    | T.Branch l (v, _) r ->
+      if la && O.compare c lo v > 0 then range_root_key c r lo hi la ua
+      else if ua && O.compare c hi v < 0 then range_root_key c l lo hi la ua
+      else ()
+
+/// The descent's step at a branch of a sorted tree, testing the lower bound as the code does
+/// (`comp > 0` moves right; else the key is a candidate, and `comp == 0` is the answer).
+let min_step (#a #b: Type0) (c: O.comparer a) (lo hi: a) (la: bool) (t: T.tree (a & b)) (d: a)
+  : Lemma (requires T.Branch? t /\ S.strictly_sorted c (ST.keys t))
+          (ensures (match t with
+                    | T.Branch l (k, _) r ->
+                      S.strictly_sorted c (ST.keys l) /\ S.strictly_sorted c (ST.keys r) /\
+                      T.size l < T.size t /\ T.size r < T.size t /\
+                      (la /\ I32.v (S.compare_i32 c lo k) > 0 ==>
+                         first_or (filter c lo hi la false (ST.keys t)) d ==
+                         first_or (filter c lo hi la false (ST.keys r)) d) /\
+                      (~(la /\ I32.v (S.compare_i32 c lo k) > 0) ==>
+                         first_or (filter c lo hi la false (ST.keys t)) d ==
+                         first_or (filter c lo hi la false (ST.keys l)) k) /\
+                      (la /\ I32.v (S.compare_i32 c lo k) == 0 ==>
+                         first_or (filter c lo hi la false (ST.keys l)) k == k)
+                    | _ -> True))
+  = let T.Branch l (k, g) r = t in
+    ST.sorted_branch c l k g r;
+    let sl = ST.keys l in
+    let sr = ST.keys r in
+    if la && O.compare c lo k > 0 then begin
+      skip_below c lo hi la false l k g r Seq.empty;
+      Seq.append_empty_r (ST.keys t);
+      Seq.append_empty_r sr
+    end
+    else begin
+      filter_append c lo hi la false sl (Seq.cons k sr);
+      filter_cons c lo hi la false k sr;
+      first_or_append (filter c lo hi la false sl) (Seq.cons k (filter c lo hi la false sr)) d;
+      if la && O.compare c lo k = 0 then begin
+        let out (i: nat) : Lemma (i < Seq.length sl ==> not (ST.in_range c lo hi la false (Seq.index sl i)))
+          = if i < Seq.length sl then O.compare_trans c (Seq.index sl i) k lo else ()
+        in
+        FStar.Classical.forall_intro out;
+        filter_none c lo hi la false sl
+      end
+    end
+
+/// The descent's step for the greatest key (`comp < 0` moves left).
+let max_step (#a #b: Type0) (c: O.comparer a) (lo hi: a) (ua: bool) (t: T.tree (a & b)) (d: a)
+  : Lemma (requires T.Branch? t /\ S.strictly_sorted c (ST.keys t))
+          (ensures (match t with
+                    | T.Branch l (k, _) r ->
+                      S.strictly_sorted c (ST.keys l) /\ S.strictly_sorted c (ST.keys r) /\
+                      T.size l < T.size t /\ T.size r < T.size t /\
+                      (ua /\ I32.v (S.compare_i32 c hi k) < 0 ==>
+                         last_or (filter c lo hi false ua (ST.keys t)) d ==
+                         last_or (filter c lo hi false ua (ST.keys l)) d) /\
+                      (~(ua /\ I32.v (S.compare_i32 c hi k) < 0) ==>
+                         last_or (filter c lo hi false ua (ST.keys t)) d ==
+                         last_or (filter c lo hi false ua (ST.keys r)) k) /\
+                      (ua /\ I32.v (S.compare_i32 c hi k) == 0 ==>
+                         last_or (filter c lo hi false ua (ST.keys r)) k == k)
+                    | _ -> True))
+  = let T.Branch l (k, g) r = t in
+    ST.sorted_branch c l k g r;
+    let sl = ST.keys l in
+    let sr = ST.keys r in
+    if ua && O.compare c hi k < 0 then begin
+      skip_above c lo hi false ua l k g r Seq.empty;
+      Seq.append_empty_r (ST.keys t);
+      Seq.append_empty_r sl
+    end
+    else begin
+      filter_append c lo hi false ua sl (Seq.cons k sr);
+      filter_cons c lo hi false ua k sr;
+      last_or_append (filter c lo hi false ua sl) (Seq.cons k (filter c lo hi false ua sr)) d;
+      if ua && O.compare c hi k = 0 then begin
+        let out (i: nat) : Lemma (i < Seq.length sr ==> not (ST.in_range c lo hi false ua (Seq.index sr i)))
+          = if i < Seq.length sr then O.compare_trans c hi k (Seq.index sr i) else ()
+        in
+        FStar.Classical.forall_intro out;
+        filter_none c lo hi false ua sr
+      end
+    end
+
+/// The descent starts at the view's root: its least key within the lower bound is the
+/// least in-range key of the whole tree, and its greatest key within the upper bound the
+/// greatest.
+let min_max_goal (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool) (d: a)
+  : Lemma (requires S.strictly_sorted c (ST.keys t))
+          (ensures S.strictly_sorted c (ST.keys (ST.range_root c t lo hi la ua)) /\
+                   first_or (filter c lo hi la false (ST.keys (ST.range_root c t lo hi la ua))) d ==
+                   first_or (filter c lo hi la ua (ST.keys t)) d /\
+                   last_or (filter c lo hi false ua (ST.keys (ST.range_root c t lo hi la ua))) d ==
+                   last_or (filter c lo hi la ua (ST.keys t)) d)
+  = range_root_filter c t lo hi la ua;
+    range_root_key c t lo hi la ua;
+    match ST.range_root c t lo hi la ua with
+    | T.Leaf -> ()
+    | T.Branch l (k, g) r ->
+      ST.sorted_branch c l k g r;
+      let sl = ST.keys l in
+      let sr = ST.keys r in
+      let ul (i: nat) : Lemma (i < Seq.length sl ==> ua ==> O.compare c (Seq.index sl i) hi <= 0)
+        = if i < Seq.length sl && ua then O.compare_trans c (Seq.index sl i) k hi else ()
+      in
+      let lr (i: nat) : Lemma (i < Seq.length sr ==> la ==> O.compare c lo (Seq.index sr i) <= 0)
+        = if i < Seq.length sr && la then O.compare_trans c lo k (Seq.index sr i) else ()
+      in
+      FStar.Classical.forall_intro ul;
+      FStar.Classical.forall_intro lr;
+      filter_upper_free c lo hi la ua sl;
+      filter_lower_free c lo hi la ua sr;
+      filter_append c lo hi la ua sl (Seq.cons k sr);
+      filter_append c lo hi la false sl (Seq.cons k sr);
+      filter_append c lo hi false ua sl (Seq.cons k sr);
+      filter_cons c lo hi la ua k sr;
+      filter_cons c lo hi la false k sr;
+      filter_cons c lo hi false ua k sr;
+      first_or_append (filter c lo hi la ua sl) (Seq.cons k (filter c lo hi la ua sr)) d;
+      first_or_append (filter c lo hi la false sl) (Seq.cons k (filter c lo hi la false sr)) d;
+      last_or_append (filter c lo hi la ua sl) (Seq.cons k (filter c lo hi la ua sr)) d;
+      last_or_append (filter c lo hi false ua sl) (Seq.cons k (filter c lo hi false ua sr)) d

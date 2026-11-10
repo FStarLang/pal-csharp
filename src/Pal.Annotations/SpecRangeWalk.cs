@@ -92,4 +92,34 @@ public static class SpecRangeWalk
     /// </summary>
     [RegionOp("Pulse.Lib.CSharp.RangeWalk.rbf_dequeue")]
     public static void BfDequeue<K, T, X>(SpecHeap<K> h, IComparer<T> comparer, T lower, T upper, bool lowerActive, bool upperActive, Seq<K> queue, Seq<T> keys, Seq<((T, X), bool)> tr) where K : class => throw Ghost();
+    // R35.17. The view's `MinInternal`/`MaxInternal`, a descent from its root.
+
+    /// <summary>The first item of <paramref name="items"/>, or <paramref name="otherwise"/> if it is empty.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.first_or")]
+    public static T FirstOr<T>(Seq<T> items, T otherwise) => throw Ghost();
+
+    /// <summary>The last item of <paramref name="items"/>, or <paramref name="otherwise"/> if it is empty.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.last_or")]
+    public static T LastOr<T>(Seq<T> items, T otherwise) => throw Ghost();
+
+    /// <summary>
+    /// A lemma: the step of the descent to the least key within the lower bound at a branch
+    /// of a sorted tree. Under the bound, it is that of the right subtree; otherwise it is
+    /// that of the left subtree, or the branch's key if there is none, and the key itself
+    /// if it equals the bound.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.min_step")]
+    public static void MinStep<T, TTag>(IComparer<T> comparer, T lower, T upper, bool lowerActive, SpecTree<(T, TTag)> tree, T otherwise) => throw Ghost();
+
+    /// <summary>A lemma: <see cref="MinStep"/> for the greatest key within the upper bound.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.max_step")]
+    public static void MaxStep<T, TTag>(IComparer<T> comparer, T lower, T upper, bool upperActive, SpecTree<(T, TTag)> tree, T otherwise) => throw Ghost();
+
+    /// <summary>
+    /// A lemma: in the range search's subtree of a sorted tree, the least key within the lower
+    /// bound is the tree's least in-range key, and the greatest within the upper bound its
+    /// greatest.
+    /// </summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.min_max_goal")]
+    public static void MinMaxGoal<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive, T otherwise) => throw Ghost();
 }

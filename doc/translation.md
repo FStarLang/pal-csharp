@@ -9957,21 +9957,18 @@ that the view shares the set's comparer and, when its version is the set's, its 
 * The other non-generic `IDictionary`/`ICollection` members (`this[object]`, `Add(object,
   object)`, `Contains(object)`, `Remove(object)`, `SyncRoot`): they type-test `object`
   keys and values (`is TKey`) and cast them, catching `InvalidCastException`; neither is
-  modelled for type parameters. §35 (R35.7) models the type tests and verifies all but
-  `Add(object, object)`, the `this[object]` setter and `SyncRoot`.
+  modelled for type parameters. §35 (R35.7, R35.12, R35.13) models the type tests and
+  verifies all but `SyncRoot`.
 * `TreeSubSet` members other than those verified above (R32.14):
   * `Clear` builds a `List<T>` of the in-range items in a breadth-first walk lambda, then
     removes them through the set. Its contract would need the walk's per-element trace
     over a queue of region pointers (R32.9 covers only the in-order walk).
-  * `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides: range-pruned walks over a
-    `Stack<Node>`/`Queue<Node>`. They would need R32.11's bounded walk restricted to
-    `range_root`.
-  * The re-count `VersionCheckImpl(updateCount: true)`, and so `Count`, `MinInternal` and
-    `MaxInternal` at a view.
-    * The re-count's lambda writes the view's `count` while the walk holds the view (a
-      PALCS0579 cycle), so `VersionCheckImpl` requires `!updateCount`.
-    * `MinInternal`/`MaxInternal` are reached only through `Min`/`Max`, which read
-      `Count` first.
+  * The `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides and `MinInternal`/`MaxInternal`
+    are now verified (§35, R35.14–R35.17).
+  * The re-count `VersionCheckImpl(updateCount: true)`, and so `Count` at a view. The
+    re-count's lambda writes the view's `count` while the walk holds the view, and the
+    calls form a PALCS0579 cycle. So `VersionCheckImpl` requires `!updateCount` (§35 Not
+    verified).
   * `InternalIndexOf`: it enumerates the view (`foreach (T i in this)`), and a view's
     enumerator is a borrowing struct of a borrowing class, which is not translated.
   * `GetViewBetween` on a view returns a view of the *underlying* set. R32.13's
@@ -10486,6 +10483,24 @@ both arms (an arm that ends in a jump keeps none of it), as R24.24 and R27.31 do
 joins. The trace the arm leaves names the callback's result, which the arm bound; Pulse
 would join the trace as a `match` on the condition, from which nothing later can read it.
 
+**R35.17. The view's least and greatest items.** `TreeSubSet.MinInternal` descends from the
+view's root testing only the lower bound, and `MaxInternal` only the upper one. That is
+enough because the root (`range_root`) holds an in-range key, and every key the descent can
+stop at is on the root's side of the other bound. `Pulse.Lib.CSharp.RangeWalk` (proved, not
+trusted) adds, bound in `SpecRangeWalk`:
+
+| C# | F* | |
+|---|---|---|
+| `FirstOr(s, d)`, `LastOr(s, d)` | `first_or`, `last_or` | `s`'s first (last) item, or `d` |
+| `MinStep(c, lo, hi, la, t, d)` | `min_step` | at a branch of a sorted tree: under the lower bound, `FirstOr` of the lower-bound filter of `t` is that of its right subtree; else it is that of its left subtree with the branch's key as default; at the bound, the key itself |
+| `MaxStep(c, lo, hi, ua, t, d)` | `max_step` | the same for the greatest key and the upper bound |
+| `MinMaxGoal(c, t, lo, hi, la, ua, d)` | `min_max_goal` | in `range_root c t …`, `FirstOr` of the lower-bound filter (`LastOr` of the upper-bound one) is that of the full filter of `t` |
+
+The loop invariant is `Same(FirstOr(Filter(…, la, false, Keys(Tree(current))), result), goal)`,
+and `Pal.Implies(Pal.Broke(), Same(result, goal))` (R26.10) records what the `comp == 0`
+`break` leaves. Both members ensure `Same(Result, FirstOr(Filter(… SpecItems), default(T)))`
+(`LastOr` for the greatest).
+
 ### The model (R35.7)
 
 `pulse/Pulse.Lib.CSharp.TypeTest.fsti` declares:
@@ -10532,19 +10547,69 @@ All of the following verify in the runtime tree's harnesses (`pal/OrderedDiction
 | `IDictionary.Contains`, `IDictionary.Remove`, `IDictionary.this[object]` get | as `ContainsKey`/`Remove`/`TryGetValue` on the unboxed key |
 | `IDictionary.Add(object, object)`, `IDictionary.this[object]` set | as `Add`/`this[TKey]` on the unboxed key and value; `ArgumentNullException` for a null key (or a null value where `TValue`'s default is not null), `ArgumentException` for a key or value of the wrong type (R35.12, R35.13) |
 
+`SortedSet<T>.TreeSubSet` (the view of `GetViewBetween`):
+
+| Member | Contract |
+|---|---|
+| `InOrderTreeWalk` | `SpecWalk.Walked(Filter(… SpecItems), trace, Result)`: the callback is called on the view's items in order until it returns false (R35.14–R35.16) |
+| `BreadthFirstTreeWalk` | `SpecWalk.BfWalked` of the same items, breadth first, over a `Queue<Node>` of pointers into the set's region (R35.14) |
+| `MinInternal`, `MaxInternal` | `Same(Result, FirstOr(Filter(… SpecItems), default(T)))` (`LastOr` for the greatest) (R35.17) |
+
+All three keep the view coherent (`SpecCoherent`, its version the set's, `SpecRootOk`) and
+its bounds.
+
 ### Not verified (§35)
 
 * `ICollection.CopyTo(Array, int)` and `SyncRoot` (all three types): see §32.
-* `SortedDictionary`'s and `SortedSet`'s enumerator constructors and `GetEnumerator`s: the
-  `TreeSet` enumerator core owns a `Stack<Node>`, which R35.3 refuses (§32, R32.12).
-* `TreeSubSet` `Clear`, the range-pruned walks, the re-counting `Count`/`Min`/`Max`,
-  `InternalIndexOf`, a view of a view, and the view enumerators: §32's reasons stand. Each
-  needs a walk over a region with a `Stack`/`Queue` of node pointers, or a write to the view
-  during a walk that holds it. No rule of this section covers that.
-* `LinkedList`: `LinkedListNode<T>(T)` (a node allocated outside every region),
-  `LinkedListNode.List` (it returns the owner, whose invariant the node cannot give),
-  `ValueRef` (a `ref` return), and node arguments outside the list's region (§31's
-  `Pal.InRegion` limitation). Each needs a change to §31's region model.
+* `SortedDictionary`'s enumerator constructors and `GetEnumerator`s. A stack of node
+  pointers is not the obstacle: `SortedSet`'s own enumerator constructors and
+  `GetEnumerator` verify, with the stack holding pointers into the set's region and
+  `SpecWalk.Walkable`/`Pending` as its ghost invariant (R27.35, §32). The dictionary's
+  enumerator builds its core by `dictionary._set.GetEnumerator()`. `_set` is an object the
+  dictionary owns, and its node region is existential inside the dictionary's invariant.
+  A holder cannot expose that region, so the caller cannot be told what the new core
+  borrows (R32.12).
+* `TreeSubSet`'s re-count (`VersionCheckImpl(true)`), and with it the view's `Count`,
+  `Clear` (it tests `Count`) and the base members that read `Count` at a view. Two things
+  are missing:
+  1. *A call cycle.* `VersionCheckImpl` calls `InOrderTreeWalk`, which calls
+     `VersionCheck()`, which calls `VersionCheckImpl(false)`. Every method is its own
+     module, so the cycle is refused (PALCS0579), although the inner call takes the other
+     branch. Breaking it needs the methods specialized to the constant `updateCount`.
+  2. *A write to the view during the walk.* The lambda `n => { count++; return true; }`
+     writes the view's `count` while the walk holds the view's record (R27.39 refuses the
+     capture, PALCS0709). Splitting the record would make this sound: the walk reads only
+     the region and the view's range and version fields, while the lambda writes `count`,
+     which the walk reads only before its loops (the stack's capacity). But a callback's
+     frame is fixed by its `Pal.Protocol` over the trace, and the walk's contract takes
+     `self` whole, so this needs a second calling convention for walks: `self` split into
+     the fields the walk reads and the fields the callback writes.
+  Neither fits in this round.
+* `TreeSubSet` `InternalIndexOf` (a `foreach` over the view), the view enumerators, and a
+  view of a view. An enumerator stores its tree in a field (`_tree`), and a view never
+  exists as an object of the base: it lives in a local and binds statically (R32.13). So
+  there is nothing for the enumerator's field to hold.
+* `LinkedList`: the public `LinkedListNode<T>(T)` constructor and `LinkedListNode.List`
+  (§31). A detached node owning a one-node region of its own, merged into the list's region
+  by `AddFirst`/`AddLast`/`AddBefore`/`AddAfter(node)` (`RegionMove`'s `join` does the
+  merge), fails for three reasons:
+  1. *No value carries a region.* A `[Region]` class's local, parameter or return is a bare
+     pointer into some owner's heap (§27). A node that owns `region {x}` would need a new
+     ownership mode for such values, and a calling convention that consumes it.
+  2. *References copy, and ownership would not follow them.* After `var m = n;
+     a.AddFirst(n);`, `b.AddFirst(m)` must throw, because `m.list` is `a`. Proving that
+     means reading `m`'s owner field, which now lives in `a`'s region, which `b`'s call
+     does not hold. That is §31's `Pal.InRegion` limitation, unchanged.
+  3. *One parameter, two ownership states.* `AddFirst(node)` also accepts a node that
+     `Remove(node)` or `Clear` detached. Such a node stays in this list's region (§31), and
+     its type does not tell it apart from a fresh node. The contract would need a
+     disjunction over resources that only a ghost tag could resolve, and a C# caller cannot
+     supply one.
+  `.List` returns the owner as an object, and a returned object comes with its invariant,
+  which a node cannot give. Expressing it needs a non-owning reference return
+  (`ReferenceEquals` only), which no rule provides.
+* `LinkedList` `ValueRef` (a `ref` return), and node arguments outside the list's region
+  (§31's `Pal.InRegion` limitation).
 * `IEnumerable`/`IDictionary` constructors and serialization (`GetObjectData`,
   `OnDeserialization`) are out of scope.
 
@@ -10558,6 +10623,11 @@ All of the following verify in the runtime tree's harnesses (`pal/OrderedDiction
 * `KeyCollection.IList.IndexOf(object)` and `IList.IndexOf(object)` need `Count >= 0`
   after a call. `OrderedDictionary.Count` now also ensures `0 <= Result`.
 * `IList.Add(object)` returns `Count - 1`, and its overflow check needs that `Count` too.
+* A view member's loop invariants must restate the view's `_min`/`_max`, its coherence and
+  version, and `SpecRootOk`. The view's record is re-bound at each loop head, and only the
+  `__pal_entry__` bool fields are pinned automatically.
+* R35.15's split leaves a limitation when it is not at a block's tail. A local written in a
+  split arm loses its value at the join, as with any un-annotated join (R22.12).
 
 ### Trusted (§35)
 
