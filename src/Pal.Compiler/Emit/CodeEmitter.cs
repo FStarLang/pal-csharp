@@ -892,6 +892,10 @@ public sealed class CodeEmitter(
                     when Frontend.Sorted.IsComparer(cmp) && (assigned is null || assigned.Contains(field.Name)):
                     value = $"({Frontend.Sorted.Order}.default_comparer {Types.Atom(cmpElement)})";
                     break;
+                // R27.6, R34.21. A pointer into a region starts null, in a region that starts empty.
+                case IrClassType rk when IsRegionType(rk):
+                    value = $"(B.null #{PulseEmitter.RegionRaw(rk)})";
+                    break;
                 default:
                     diagnostics.Unsupported(method.Loc,
                         $"A constructor that does not assign `{field.Name}` on every path",
@@ -904,12 +908,32 @@ public sealed class CodeEmitter(
         }
         Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
         Line($"B.pts_to_not_null {Names.Result};");
+        foreach (var k in RegionsOf(decl))
+            Line($"{Frontend.Region.Module}.empty #{PulseEmitter.RegionRaw(k)} ();");
 
         var slot = new Slot(Names.This, alloc, SlotKind.Object, Names.Result)
         {
             PreModel = null,
             PostModel = "post_" + Names.This,
         };
+        // R34.21. A body that names no field of the object, only calls its methods (R4.10c),
+        // runs over the object closed: its invariant is folded at the defaults first, which
+        // must hold of them, and the body is then an instance method's that only delegates.
+        // `this` in a loop invariant names the object's model as the loop holds it.
+        if (decl.Fields.All(f => f.Type is not IrArrayType) && assigned is { Count: 0 } &&
+            !TouchesFields(method) && Check.Statements(new IrBlock(method.Loc, statements))
+                .SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+                .Any(e => e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] }))
+        {
+            Line($"fold {Inv(alloc)} {Names.Result} {ModelWitness(decl, slot)};");
+            var m = FreshValue(alloc.Name);
+            Line($"with {m}. assert ({Inv(alloc)} {Names.Result} {m});");
+            _slots[Names.This] = slot with { PreModel = m };
+            _objects = [];
+            var closed = new IrVar(method.Loc, Names.This) { Type = alloc };
+            EmitSequence([.. statements, new IrReturn(method.Loc, closed)], method, _plan!);
+            return;
+        }
         _slots[Names.This] = slot;
         _objects = [slot];
         _constructsArrays = decl.Fields.Any(f => f.Type is IrArrayType);

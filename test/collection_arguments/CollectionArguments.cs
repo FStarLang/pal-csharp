@@ -171,6 +171,38 @@ public static class Sums
         return n;
     }
 
+    // R34.19. A deconstructing `foreach` over pairs: the components rebuild the pair.
+    [Ensures("0 <= Result && Result <= Pal.Contents(items).Length")]
+    public static int CountOrdered(IEnumerable<(int Lo, int Hi)> items)
+    {
+        int n = 0;
+        foreach ((int lo, int hi) in items)
+        {
+            Pal.Invariant(0 <= n && n <= Pal.Index(lo));
+            Pal.Assert(Pal.Same((lo, hi), Pal.Contents(items)[Pal.Index(lo) - 1]));
+            if (lo <= hi) n++;
+        }
+        return n;
+    }
+
+    // R34.20. `as ICollection<T>`: a non-null alias is the collection, with its `Count`.
+    [Ensures("Result == Pal.Contents(items).Length")]
+    public static int SizeOf(IEnumerable<int> items)
+    {
+        var c = items as ICollection<int>;
+        if (c is not null)
+        {
+            return c.Count;
+        }
+        int n = 0;
+        foreach (int x in items)
+        {
+            Pal.Invariant(n == Pal.Index(x));
+            n++;
+        }
+        return n;
+    }
+
     // R34.16. A `Comparison<T>` is a comparer; testing it against `null` is `is_null`.
     [Throws(typeof(ArgumentNullException), "comparison == null")]
     [Ensures("Result == (comparison != null)")]
@@ -241,5 +273,39 @@ public class Snapshot
         }
         length = 0;
         return new int[0];
+    }
+}
+
+[Spec]
+public struct TallyModel
+{
+    public SpecInt Count;
+}
+
+// R34.21. A constructor whose body only calls the object's methods runs over the object
+// closed, its invariant first folded at the fields' defaults.
+[Invariant("0 <= _n")]
+public class Tally
+{
+    private int _n;
+
+    [Model]
+    private TallyModel Model => new TallyModel { Count = _n };
+
+    [Spec] public SpecInt Count => Model.Count;
+
+    [Requires("@this.Count < int.MaxValue")]
+    [Ensures("@this.Count == Pal.Old(@this.Count) + 1")]
+    public void Bump() { _n++; }
+
+    [Requires("Pal.Contents(items).Length < int.MaxValue")]
+    [Ensures("@this.Count == Pal.Contents(items).Length")]
+    public Tally(IEnumerable<int> items)
+    {
+        foreach (int x in items)
+        {
+            Pal.Invariant(this.Count == Pal.Index(x));
+            Bump();
+        }
     }
 }

@@ -9529,13 +9529,13 @@ and `Version`. Every mutator ensures `Version == Bumped(Old(Version))`, where `B
 | `GetEnumerator`, `IEnumerable<T>.GetEnumerator`, `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) | §28's borrowing enumerator; `MoveNext` throws `InvalidOperationException` when `Version` changed, and otherwise steps `_index` over `Nodes`; requires `Count < int.MaxValue` |
 | `LinkedListNode.Next`, `Previous` | `Succ`/`Pred` of the node in its owner's ring; with the ring's shape, `Nodes[pos ± 1]` or null at the ends |
 | `LinkedListNode.Value` (get and set), `Invalidate` | the node's item; `Detached` |
+| `LinkedList(IEnumerable<T>)` (§34, R34.21) | `SpecItems` the enumerable's items, `SpecCount` their number |
 
 ### Not annotated, and why
 
 * `LinkedListNode.List`. It returns the owner, and a returned object comes with its
   invariant, which the node cannot give.
-* `LinkedList(IEnumerable<T>)` (an interface enumeration), `ICollection.CopyTo(Array, int)`
-  (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
+* `ICollection.CopyTo(Array, int)` (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
   (a `ref` return) and the public `LinkedListNode(T)` constructor (a node allocated outside
   any owner's region). The node-taking overloads therefore insert a node already in this
   list's region and detached from it, such as one `Remove(node)` or `Clear` detached: the
@@ -10441,6 +10441,43 @@ copied into both arms, under R34.11's proviso that the rest is straight-line cod
 (`PriorityQueue.EnqueueRange`'s `if (nodes.Length == i) { Grow(i + 1); nodes = _nodes; }`
 before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
 
+**R34.18. Sift-down on a subtree (harness proof).** Not a translation rule but the proof
+shape for bottom-up heap construction. `PriorityQueue.MoveDown`'s contract gains a second,
+disjoint case: besides R26.10's "a heap with one hole at `nodeIndex`", it accepts
+`HeapAbove(Store, n, nodeIndex)` — every node above `nodeIndex` roots a 4-ary subtree that
+is a heap — and then ensures `HeapAbove(Store, n, nodeIndex - 1)`, the items permuted. The
+loop invariant is `DownR`: the subtree at the original index is a heap except at the
+hole, and the subtrees below it are untouched heaps. `Heapify`'s loop invariant is
+`HeapAbove(Store, n, index)`; it holds initially above the last parent `(n - 2) / 4` and at
+`-1` is the whole heap. The arity-4 subtree reasoning (membership `in_sub`, disjointness
+of sibling subtrees, the step and the finishing lemmas) is proved in F* in
+`pal/PriorityQueue/PriorityQueueHeapify.fst`, included by the harness and called from C#
+`[Lemma]` wrappers.
+
+**R34.19. A deconstructing `foreach`.** `foreach ((A a, B b) in e)` over an enumerable of
+pairs (R34.8) binds the pair `Current` once, then `a` and `b` to its `fst` and `snd`, and
+asserts the pair equals `(a, b)` (eta for pairs, so a later `(a, b)` is the item). The
+cursor is named by either variable: `Pal.Index(a)`. Other deconstructions (nested, `var
+(a, b)` over three or more components, discards) are PALCS0001.
+
+**R34.20. `as ICollection<T>`.** `var c = e as ICollection<T>;`, with `e` an enumerable
+argument and `c` never assigned again, makes `c` an alias of `e` (no copy): `c is not
+null`, `c != null` are R34.4's unknown `is_collection` test, and `c.Count` and
+`c.CopyTo` under that test are R34.5's. (`PriorityQueue.EnqueueRange`'s dispatch.)
+
+**R34.21. A constructor that only delegates.** R22.9's open constructor holds the object
+unfolded, so its invariant cannot be named in a loop invariant (PALCS0300), and a loop that
+calls the object's methods would need it folded at every call. A constructor body that
+assigns no field, reads no field (R4.10c's test), and calls a method on the object runs
+instead over the object closed: it is allocated with every field at its default (a
+region pointer `null`, in an empty region, R27.6), its invariant is folded at once at
+that state — which F\* must prove holds of the defaults — and the body is then an
+instance method's that only delegates. `this` is in scope throughout a constructor's body
+(a loop may be live in it), so a loop invariant's `this.P` names the object's model as
+the loop holds it. A class with an array field is excluded: its default is R22.9's
+stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loop calls
+`AddLast`.)
+
 ### Verified (§34)
 
 * `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
@@ -10460,6 +10497,16 @@ before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
   comparer and the enumerable's count added (both the empty-queue fill, which grows the
   array in place, and the `Enqueue` loop). `Enqueue` gains `SpecCount == Old + 1` and `Grow`
   the preservation of the whole old array as a prefix, both verified.
+* `LinkedList<T>(IEnumerable<T>)` (R34.21): the list's items are the enumerable's, in order,
+  and its count theirs. Requires fewer than `int.MaxValue` items, `AddLast`'s bound.
+* `PriorityQueue<E,P>.Heapify` (R34.18): from any items, a heap that is a permutation of
+  them; `MoveDown` under both of its cases, and all its callers.
+* `PriorityQueue<E,P>(IEnumerable<(E, P)>[, IComparer<P>])`: a heap that is a permutation of
+  the enumerable's items, with the given comparer.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<(E, P)>)`: from a heap, a heap whose items
+  are a permutation of the old items followed by the enumerable's, the comparer unchanged
+  (all three paths: `CopyTo` then `Heapify`, the enumerating fill then `Heapify`, and the
+  `Enqueue` loop).
 
 ### Findings (§34)
 
@@ -10471,18 +10518,15 @@ before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
 * R34.11's split copies the rest of the body into each arm. In `SortedSet<T>.DoRemove`
   (a long loop body after the split) that made a query Z3 did not finish in 24 minutes;
   R34.11 now splits only when the rest is straight-line code.
+* **Deviation.** The `PriorityQueue` `IEnumerable` constructors and
+  `EnqueueRange(IEnumerable<(E, P)>)` require the resulting count to be at most 2^29, the
+  bound `MoveDown` already needs so that its child index `4i + 1` does not overflow (R26.10's
+  finding); the code itself has no such check.
 * `ToArray` returns an array whose length may exceed `length`; callers (`Stack`, `Queue`)
   keep the excess as capacity, which their contracts expose.
 
 ### Not verified (§34)
 
-* `PriorityQueue` `Heapify`, hence `EnqueueRange(IEnumerable<(E, P)>)` and the
-  `IEnumerable` constructors: `MoveDown`'s contract (R26.10) assumes the whole array is a heap
-  but for one hole; bottom-up heap construction needs it for a subtree whose other edges
-  are arbitrary, a second `MoveDown` proof.
-* `LinkedList<T>(IEnumerable<T>)`: its loop calls `AddLast` on the object under
-  construction, whose ring invariant (R31.3) names `this`, which an open constructor's loop
-  invariant cannot (PALCS0300).
 * `SortedSet<T>(IEnumerable<T>, IComparer<T>)` beyond its `[Exactly(SortedSet)]` contract:
   the `as SortedSet<T>` test on an enumerable is not modelled, and the sort-then-dedupe path
   needs a theory of sequences equal modulo the comparer.

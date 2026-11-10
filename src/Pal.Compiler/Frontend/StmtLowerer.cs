@@ -63,6 +63,7 @@ public sealed class StmtLowerer(
             DoStatementSyntax d => LowerDo(d, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
+            ForEachVariableStatementSyntax f => LowerForEachVariable(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
@@ -632,6 +633,19 @@ public sealed class StmtLowerer(
             {
                 _code.Alias(symbol, arrayField);
                 _spec.Alias(symbol, arrayField);
+                continue;
+            }
+            // R34.20. `var c = e as ICollection<T>;`, never written, on an enumerable argument
+            // `e`: `c` is another name for `e`, and null exactly when `e` is no collection.
+            if (symbol is not null && v.Initializer?.Value is BinaryExpressionSyntax collInit &&
+                collInit.IsKind(SyntaxKind.AsExpression) &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                _code.IsEnumerableArgument(collInit.Left) &&
+                model.GetTypeInfo(collInit.Right).Type is INamedTypeSymbol collTarget &&
+                WellKnown.IsCollectionInterface(collTarget))
+            {
+                _code.CollectionAlias(symbol, _code.Lower(collInit.Left));
+                _spec.CollectionAlias(symbol, _spec.Lower(collInit.Left));
                 continue;
             }
             // R32.14. `V? x = this as V;` in a member of a view's base: `x` is null.
@@ -1598,26 +1612,74 @@ public sealed class StmtLowerer(
     /// <c>using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }</c>,
     /// whose cursor <c>Pal.Index(x)</c> names.
     /// </summary>
-    private IrStmt ForEachEnumerable(ForEachStatementSyntax node, IrEnumerableType enumerable, IrLoc loc)
+    private IrStmt ForEachEnumerable(ForEachStatementSyntax node, IrEnumerableType enumerable, IrLoc loc) =>
+        ForEachEnumerable(node.Identifier.ValueText, Locations.From(node.Identifier), node.Expression,
+            node.Statement, enumerable, loc,
+            (vloc, current) => [new IrLocalDecl(vloc, node.Identifier.ValueText, enumerable.Element, current) { Immutable = true }]);
+
+    private IrStmt ForEachEnumerable(string name, IrLoc vloc, ExpressionSyntax expression, StatementSyntax statement,
+        IrEnumerableType enumerable, IrLoc loc, Func<IrLoc, IrExpr, IrStmt[]> bind)
     {
-        var name = node.Identifier.ValueText;
-        var vloc = Locations.From(node.Identifier);
         var cursorName = ExprLowerer.ForEachIndex(name);
-        var source = _code.Lower(node.Expression);
-        var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
+        var source = _code.Lower(expression);
+        var (invariants, decreases, body) = ExtractLoopSpecs(statement);
         IrExpr Cursor() => new IrVar(vloc, cursorName) { Type = IrPrim.Int };
         var moved = new IrEnumOp(vloc, EnumOpKind.MoveNext, source, [Cursor()]) { Type = IrPrim.Bool };
         (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
-        var item = new IrLocalDecl(vloc, name, enumerable.Element,
-            new IrEnumOp(vloc, EnumOpKind.Current, source, [Cursor()]) { Type = enumerable.Element }) { Immutable = true };
+        var items = bind(vloc, new IrEnumOp(vloc, EnumOpKind.Current, source, [Cursor()]) { Type = enumerable.Element });
         return new IrBlock(loc,
         [
             new IrLocalDecl(vloc, cursorName, IrPrim.Int,
                 new IrEnumOp(vloc, EnumOpKind.Start, source, []) { Type = IrPrim.Int }),
             new IrWhile(loc, moved, invariants, decreases,
-                new IrBlock(body.Loc, [item, .. ((IrBlock)body).Statements])),
+                new IrBlock(body.Loc, [.. items, .. ((IrBlock)body).Statements])),
         ]);
     }
+
+    /// <summary>
+    /// R34.19. <c>foreach ((A a, B b) in e)</c> (or <c>foreach (var (a, b) in e)</c>) over an
+    /// enumerable argument of pairs is R34.8's loop whose item is bound to a fresh local
+    /// <c>p</c>, followed by <c>A a = p.Item1; B b = p.Item2;</c>. <c>Pal.Index</c> of either
+    /// variable names the loop's cursor.
+    /// </summary>
+    private IrStmt LowerForEachVariable(ForEachVariableStatementSyntax node, IrLoc loc) => AfterLoop(() =>
+    {
+        if (known.MapType(model.GetTypeInfo(node.Expression).Type) is not IrEnumerableType enumerable ||
+            !_code.IsEnumerableArgument(node.Expression) ||
+            ExprLowerer.DeconstructedPair(node) is not ({ } first, { } second))
+        {
+            diagnostics.Unsupported(loc, "The statement `ForEachVariableStatement`",
+                "A deconstructing `foreach` is translated over an enumerable argument of pairs, with two " +
+                "variables (doc/translation.md R34.19).");
+            return new IrBlock(loc, []);
+        }
+        var name = first.Identifier.ValueText;
+        var pair = name + "__pair";
+        IrType ComponentType(SingleVariableDesignationSyntax v) =>
+            known.MapType((model.GetDeclaredSymbol(v) as ILocalSymbol)?.Type) ?? IrPrim.Int;
+        IrStmt Component(IrLoc vloc, SingleVariableDesignationSyntax v, string proj)
+        {
+            var type = ComponentType(v);
+            return new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
+                new IrSpecOp(vloc, proj, [new IrVar(vloc, pair) { Type = enumerable.Element }])
+                    { MachineArgs = true, Type = type }) { Immutable = true };
+        }
+        return ForEachEnumerable(name, Locations.From(first), node.Expression, node.Statement, enumerable, loc,
+            (vloc, current) =>
+            [
+                new IrLocalDecl(vloc, pair, enumerable.Element, current) { Immutable = true },
+                Component(vloc, first, "fst"),
+                Component(vloc, second, "snd"),
+                // The pair is its components put back together (F*'s eta for pairs).
+                new IrGhostStmt(vloc, GhostKind.Assert, new IrBinary(vloc, BinOp.Eq,
+                    new IrVar(vloc, pair) { Type = enumerable.Element },
+                    new IrSpecOp(vloc, "Mktuple2",
+                    [
+                        new IrVar(vloc, first.Identifier.ValueText) { Type = ComponentType(first) },
+                        new IrVar(vloc, second.Identifier.ValueText) { Type = ComponentType(second) },
+                    ]) { MachineArgs = true, Type = enumerable.Element }) { Type = IrPrim.Bool }, null),
+            ]);
+    }, loc);
 
     private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc) => AfterLoop(() =>
     {
@@ -1643,7 +1705,7 @@ public sealed class StmtLowerer(
     private IrStmt LowerDo(DoStatementSyntax node, IrLoc loc)
     {
         if (node.Statement.DescendantNodesAndSelf(n => n == node.Statement ||
-                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or
+                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax or
                           AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
                 .OfType<ContinueStatementSyntax>().FirstOrDefault() is { } cont)
         {
@@ -1968,7 +2030,7 @@ public sealed class StmtLowerer(
         // R34.2. So is one at an enumerable argument: the caller lends a resource, not null.
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
-            _code.IsEnumerableArgument(args[0].Expression))
+            _code.IsEnumerableArgument(args[0].Expression) && !_code.IsCollectionAlias(args[0].Expression))
             return new IrBlock(loc, []);
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&

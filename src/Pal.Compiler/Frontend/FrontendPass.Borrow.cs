@@ -201,7 +201,7 @@ public static partial class FrontendPass
             bodyEnsures = be;
             body = trimmed ?? body;
             if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
-                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
+                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax))
                 body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);
         }
 

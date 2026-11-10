@@ -32,7 +32,9 @@ public static class Normalize
             // R27.39. A `[Callback]` parameter's trace is in scope as the parameter is.
             Body = Statement(LoopReturns(m.Body),
                 [.. m.Parameters.Select(p => p.Name),
-                 .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name))],
+                 .. m.Parameters.Where(p => p.Callback is not null).Select(p => Frontend.ExprLowerer.TraceName(p.Name)),
+                 // R34.21. The object a constructor builds is in scope throughout its body.
+                 .. m.IsConstructor ? [Emit.Names.This] : Array.Empty<string>()],
                 diagnostics),
         },
         _ => decl,

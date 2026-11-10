@@ -89,6 +89,7 @@ public sealed partial class ExprLowerer
     /// <summary>R21.3. <c>e is P</c>.</summary>
     private IrExpr LowerIsPattern(IsPatternExpressionSyntax node, IrLoc loc)
     {
+        if (CollectionAliasPattern(node, loc) is { } aliasTest) return aliasTest;
         var prelude = ImmutableArray.CreateBuilder<IrStmt>();
         var subject = PatternSubject(node.Expression, prelude);
         var cond = Pattern(node.Pattern, subject);

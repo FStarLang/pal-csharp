@@ -43,6 +43,47 @@ public sealed partial class ExprLowerer
 
     private static IrVar Cursor(IrLoc loc, string name) => new(loc, name) { Type = IrPrim.Int };
 
+    // R34.20. The locals `var c = e as ICollection<T>;` binds, with the enumerable each names.
+    private readonly Dictionary<ISymbol, IrExpr> _collectionAliases = new(SymbolEqualityComparer.Default);
+
+    /// <summary>R34.20. <paramref name="local"/> is <paramref name="source"/> as an <c>ICollection&lt;T&gt;</c>, or null.</summary>
+    public void CollectionAlias(ILocalSymbol local, IrExpr source)
+    {
+        _collectionAliases[local] = source;
+        Alias(local, source);
+    }
+
+    /// <summary>R34.20. Whether <paramref name="e"/> names a local bound by <c>e as ICollection&lt;T&gt;</c>.</summary>
+    public bool IsCollectionAlias(ExpressionSyntax e) =>
+        Unparenthesized(e) is IdentifierNameSyntax id &&
+        model.GetSymbolInfo(id).Symbol is ILocalSymbol local && _collectionAliases.ContainsKey(local);
+
+    /// <summary>
+    /// R34.20. <c>c == null</c>, <c>c is null</c> (and their negations) on such a local: the
+    /// enumerable is not a collection (R34.4's <c>is_collection</c>).
+    /// </summary>
+    private IrExpr? CollectionAliasNullTest(ExpressionSyntax subject, bool isNull, IrLoc loc)
+    {
+        if (Unparenthesized(subject) is not IdentifierNameSyntax id ||
+            model.GetSymbolInfo(id).Symbol is not ILocalSymbol local ||
+            !_collectionAliases.TryGetValue(local, out var source)) return null;
+        IrExpr test = new IrSpecOp(loc, "Pulse.Lib.CSharp.Enumerable.is_collection", [source]) { Type = IrPrim.Bool };
+        return isNull ? new IrUnary(loc, UnOp.Not, test) { Type = IrPrim.Bool } : test;
+    }
+
+    /// <summary>R34.20. <c>c is null</c> / <c>c is not null</c> on a collection alias.</summary>
+    private IrExpr? CollectionAliasPattern(IsPatternExpressionSyntax node, IrLoc loc) =>
+        node.Pattern switch
+        {
+            ConstantPatternSyntax { Expression: var k } when Unparenthesized(k).IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) =>
+                CollectionAliasNullTest(node.Expression, true, loc),
+            UnaryPatternSyntax { Pattern: ConstantPatternSyntax { Expression: var k } } u
+                when u.OperatorToken.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NotKeyword) &&
+                     Unparenthesized(k).IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) =>
+                CollectionAliasNullTest(node.Expression, false, loc),
+            _ => null,
+        };
+
     /// <summary>
     /// R34.3, R34.6. <c>c.Count</c> on an <c>ICollection&lt;T&gt;</c>, and <c>en.Current</c>
     /// on an enumerator in scope. Null when the member is neither.
@@ -99,6 +140,11 @@ public sealed partial class ExprLowerer
     {
         if (node.Kind() is not (Microsoft.CodeAnalysis.CSharp.SyntaxKind.EqualsExpression
                 or Microsoft.CodeAnalysis.CSharp.SyntaxKind.NotEqualsExpression)) return null;
+        bool IsNull(ExpressionSyntax e) =>
+            Unparenthesized(e).IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression);
+        bool eq = node.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.EqualsExpression);
+        if (IsNull(node.Right) && CollectionAliasNullTest(node.Left, eq, loc) is { } l) return l;
+        if (IsNull(node.Left) && CollectionAliasNullTest(node.Right, eq, loc) is { } r) return r;
         bool IsEnum(ExpressionSyntax e) => IsEnumerableArgument(e);
         bool Other(ExpressionSyntax e) =>
             Unparenthesized(e).IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) ||
