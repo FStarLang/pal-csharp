@@ -85,4 +85,7 @@ make -C samples/dotnet-runtime              # all collections
 make -C samples/dotnet-runtime/pal/List     # one
 ```
 
-`make test` at the repository root runs them too.
+`make test` at the repository root runs them too (`SKIP_SAMPLES=dotnet-runtime` leaves them
+out). In CI each harness is its own job, with `OCAMLRUNPARAM=o=20`: a few modules
+(`Dictionary.TryInsert`, `Dictionary.Remove`, `HashSet.AddIfNotPresent`) take several GB for
+F*, and a lower GC space overhead keeps them inside a runner's memory.

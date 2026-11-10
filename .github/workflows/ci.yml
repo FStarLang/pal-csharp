@@ -21,7 +21,60 @@ permissions:
   contents: read
 
 jobs:
+  # Installs the pinned F* into the cache, so that the jobs after it only restore it. It
+  # is a job of its own because several jobs need the toolchain: on a pin change one of
+  # them builds it (about an hour) instead of each.
+  toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      harnesses: ${{ steps.harnesses.outputs.list }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is ~500 MB and changes only when the pin does, so it is cached on
+      # the pin file.
+      - name: Restore F* toolchain
+        id: fstar-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+          lookup-only: true
+
+      - name: Set up OCaml
+        if: steps.fstar-cache.outputs.cache-hit != 'true'
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5.3.0'
+
+      - name: Install F* toolchain
+        if: steps.fstar-cache.outputs.cache-hit != 'true'
+        env:
+          FSTAR_OPAM_DEPS: '1'
+        run: |
+          if [ -f tools/fstar-source.txt ]; then eval "$(opam env)"; fi
+          make tools
+
+      - name: Save F* toolchain
+        if: steps.fstar-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+
+      # The dotnet-runtime harnesses, one job each (see `dotnet-runtime` below). Listed
+      # from the tree so that a new harness cannot be left out of CI.
+      - name: List the dotnet-runtime harnesses
+        id: harnesses
+        run: |
+          list="$(cd samples/dotnet-runtime/pal && for m in */Makefile; do printf '%s\n' "${m%/Makefile}"; done | jq -R . | jq -cs .)"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "$list"
+
   gate:
+    needs: toolchain
     runs-on: ubuntu-latest
     # A full cold-cache gate is about fifteen minutes locally, plus about an hour to build
     # F* when a source pin misses the toolchain cache. The ceiling is here to turn
@@ -43,17 +96,14 @@ jobs:
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', 'Pal.slnx') }}
           restore-keys: nuget-${{ runner.os }}-
 
-      # The toolchain is ~500 MB and changes only when the pin does, so it is cached on
-      # the pin file. Restore and save are separate steps on purpose: `actions/cache`
-      # saves only when the job succeeds, and the expected failure here is a failed
-      # proof -- exactly the case where a contributor pushes again in a minute and should
-      # not wait for another download.
+      # Installed and cached by the `toolchain` job.
       - name: Restore F* toolchain
         id: fstar-cache
         uses: actions/cache/restore@v4
         with:
           path: tools/fstar
           key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+          fail-on-cache-miss: true
 
       # Extracted execution tests need OCaml even when the F* binary is cached.
       - name: Set up OCaml
@@ -63,21 +113,6 @@ jobs:
 
       - name: Install extracted-runtime dependencies
         run: opam install --yes ocamlfind batteries pprint ppx_deriving ppx_deriving_yojson stdint yojson zarith
-
-      - name: Install F* toolchain
-        if: steps.fstar-cache.outputs.cache-hit != 'true'
-        env:
-          FSTAR_OPAM_DEPS: '1'
-        run: |
-          if [ -f tools/fstar-source.txt ]; then eval "$(opam env)"; fi
-          make tools
-
-      - name: Save F* toolchain
-        if: always() && steps.fstar-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: tools/fstar
-          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
 
       # `make tools` builds tools/fstar/bin/fstar.exe from tools/fstar-version.txt, and a
       # restored cache defeats that rule: the archive keeps the toolchain's original
@@ -115,14 +150,15 @@ jobs:
       - name: Build the Pulse support library
         run: make lib
 
-      # The whole gate: both acceptance trees (`test/` and `examples/`), each of which
-      # compiles its C# with the stock compiler and verifies the Pulse that `palcs`
-      # generates from it, followed by the seven lints. This is the root target rather
-      # than `make -C test`, so the lints also see what the emitter produced for the
-      # examples. It runs one F* job per core: the samples alone are over an hour
-      # sequentially.
+      # The whole gate: both acceptance trees (`test/` and `examples/`) and the samples,
+      # each of which compiles its C# with the stock compiler and verifies the Pulse that
+      # `palcs` generates from it, followed by the seven lints. This is the root target
+      # rather than `make -C test`, so the lints also see what the emitter produced for
+      # the examples. It runs one F* job per core. The dotnet-runtime sample is left to
+      # the `dotnet-runtime` jobs: it is hours of verification sequentially, and a few of
+      # its modules need most of a runner's memory.
       - name: Test
-        run: opam exec -- make -j"$(nproc)" test
+        run: opam exec -- make -j"$(nproc)" test SKIP_SAMPLES=dotnet-runtime
 
       # `make test` has already run these; naming the two anti-contortion detectors
       # (doc/translation.md §7.2) separately is for the CI summary, where "the compiler
@@ -138,6 +174,55 @@ jobs:
       # is the one failure mode that can otherwise reach CI reporting `0 error(s)`.
       - name: Every emitted module reference must resolve
         run: bash test/module-refs.sh
+
+  # One job per dotnet-runtime harness (samples/dotnet-runtime/pal/*), each on its own
+  # runner. The heaviest modules (Dictionary, HashSet) need several GB each, so F* runs
+  # with a smaller GC space overhead -- slower, but within a runner's 16 GB -- and two
+  # jobs at a time.
+  dotnet-runtime:
+    needs: toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: ${{ fromJson(needs.toolchain.outputs.harnesses) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/*.props', 'Pal.slnx') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Restore F* toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+          fail-on-cache-miss: true
+
+      # As in the gate: the restored archive is older than the checked-out pin file.
+      - name: Mark the toolchain newer than its pin
+        run: touch tools/fstar/bin/fstar.exe
+
+      - name: Build the translator
+        run: make build
+
+      - name: Build the Pulse support library
+        run: make lib
+
+      - name: Verify ${{ matrix.harness }}
+        env:
+          OCAMLRUNPARAM: o=20
+        run: make -C samples/dotnet-runtime/pal/${{ matrix.harness }} -j2
 
   # `make test` already runs this, as the seventh lint. It is repeated here as its own job
   # because it needs no F* at all: an analyzer regression is reported in about three
