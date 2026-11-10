@@ -64,6 +64,42 @@ jobs:
           path: tools/fstar
           key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
 
+      # The Pulse support library takes about a quarter of an hour to verify, and the gate
+      # and every harness job need it, so it is verified once here and cached on its
+      # sources and the pin.
+      - name: Look up the Pulse support library
+        id: lib-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            pulse/_cache
+            pulse/.depend
+          key: pulselib-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt', 'pulse/*.fst', 'pulse/*.fsti', 'pulse/Makefile') }}
+          lookup-only: true
+
+      - name: Restore F* toolchain for the library
+        if: steps.lib-cache.outputs.cache-hit != 'true' && steps.fstar-cache.outputs.cache-hit == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: tools/fstar
+          key: fstar-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt') }}
+          fail-on-cache-miss: true
+
+      - name: Build the Pulse support library
+        if: steps.lib-cache.outputs.cache-hit != 'true'
+        run: |
+          touch tools/fstar/bin/fstar.exe
+          make lib
+
+      - name: Save the Pulse support library
+        if: steps.lib-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            pulse/_cache
+            pulse/.depend
+          key: pulselib-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt', 'pulse/*.fst', 'pulse/*.fsti', 'pulse/Makefile') }}
+
       # The dotnet-runtime harnesses, one job each (see `dotnet-runtime` below). Listed
       # from the tree so that a new harness cannot be left out of CI.
       - name: List the dotnet-runtime harnesses
@@ -147,8 +183,23 @@ jobs:
       - name: Build the translator
         run: make build
 
+      # Verified and cached by the `toolchain` job. As with F*, the archive's timestamps
+      # are older than the checkout's, so the restored files are stamped with one common
+      # time: `make lib` then finds them up to date instead of verifying again.
+      - name: Restore the Pulse support library
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            pulse/_cache
+            pulse/.depend
+          key: pulselib-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt', 'pulse/*.fst', 'pulse/*.fsti', 'pulse/Makefile') }}
+          fail-on-cache-miss: true
+
       - name: Build the Pulse support library
-        run: make lib
+        run: |
+          t="$(date +%s.%N)"
+          find pulse/_cache pulse/.depend -exec touch -d "@$t" {} +
+          make lib
 
       # The whole gate: both acceptance trees (`test/` and `examples/`) and the samples,
       # each of which compiles its C# with the stock compiler and verifies the Pulse that
@@ -216,8 +267,23 @@ jobs:
       - name: Build the translator
         run: make build
 
+      # Verified and cached by the `toolchain` job. As with F*, the archive's timestamps
+      # are older than the checkout's, so the restored files are stamped with one common
+      # time: `make lib` then finds them up to date instead of verifying again.
+      - name: Restore the Pulse support library
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            pulse/_cache
+            pulse/.depend
+          key: pulselib-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt', 'pulse/*.fst', 'pulse/*.fsti', 'pulse/Makefile') }}
+          fail-on-cache-miss: true
+
       - name: Build the Pulse support library
-        run: make lib
+        run: |
+          t="$(date +%s.%N)"
+          find pulse/_cache pulse/.depend -exec touch -d "@$t" {} +
+          make lib
 
       # Three F* processes on a 4-core, 16 GB runner: with `o=20` no module needs more than
       # about 4.5 GB (Dictionary.TryInsert), so three of the largest still fit.
