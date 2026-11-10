@@ -2407,10 +2407,12 @@ public sealed class StmtLowerer(
         if (moveNext is null || current?.GetMethod is null || variable is null ||
             known.MapType(st) is not { } structType || known.MapType(owner.Type) is not IrClassType ownerType ||
             known.MapType(variable.Type) is not { } elementType ||
-            self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
+            self is null || self.MethodKind == MethodKind.LambdaMethod ||
             !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
             receiver is not IrVar { Name: var ownerName } ||
             (ownerName != Pal.Compiler.Emit.Names.This && !self.Parameters.Any(q => q.Name == ownerName)) ||
+            // R30.41. A static member of the class walks a parameter, never `this`.
+            (self.IsStatic && ownerName == Pal.Compiler.Emit.Names.This) ||
             node.Parent is not BlockSyntax ||
             node.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
                 .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or
@@ -2418,8 +2420,8 @@ public sealed class StmtLowerer(
                           LocalFunctionStatementSyntax or TryStatementSyntax or SwitchSectionSyntax))
         {
             diagnostics.Error("PALCS0714", Locations.From(node.Expression),
-                $"`foreach` over `{node.Expression}`. A `foreach` over an object is translated in an " +
-                "instance method of its class, over `this` or a parameter of the class, directly in a " +
+                $"`foreach` over `{node.Expression}`. A `foreach` over an object is translated in a " +
+                "member of its class, over `this` (in an instance method) or a parameter of the class, directly in a " +
                 "block outside any loop, lambda or `try`, when the class's `GetEnumerator()` returns a " +
                 "borrowing struct with `MoveNext()` and `Current` (doc/translation.md R27.51).");
             return new IrBlock(loc, []);

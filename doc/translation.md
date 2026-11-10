@@ -9797,6 +9797,42 @@ Its loops' invariants had relied on `Search` unfolding to recover the table inva
 with `Search` opaque they state `Wf` too. `Hit` stays transparent: `SearchHit`'s
 precondition is proved from the branch condition by unfolding it.
 
+### R30.41 `HashSet<T>`'s set operations: set relations modulo the comparer
+
+The set operations are specified over the model's items modulo the comparer, in
+`pal/HashSet/HashSetSets.fst` (all proved): `except c s0 o s` (`s` holds what `s0` does and
+`o` does not), `overlaps c s o`, `none_in`, `distinct c xs` (no two items equal at `c`), and
+`equiv c` (`c.Equals` is reflexive, symmetric and transitive). §24 leaves the comparer's
+`Equals` uninterpreted, so `equiv` and `distinct` are hypotheses of the contracts that need
+them, written `Pal.Implies(HashSet<T>.Equiv(c) && HashSet<T>.Distinct(c, Old(items)), ...)`;
+`IEqualityComparer<T>` states the equivalence as an obligation of the comparer, and the
+table's invariant does not make the items distinct (a non-equivalence comparer can store two
+equal items). The pigeonhole principle modulo an equivalence (`HashSetSets.pigeonhole`: a
+distinct sequence all of whose items are in `s` is no longer than `s`) is proved by induction,
+removing one matched item at a time.
+
+* **`foreach` over an `IEnumerable<T>`** (R34) walks `Pal.Contents(other)`; `Pal.Index(x)`
+  is the cursor after `MoveNext`, so the current item is `Pal.Contents(other)[Pal.Index(x) - 1]`
+  and the invariant speaks of `Pal.Slice(Pal.Contents(other), 0, Pal.Index(x))`.
+  `ExceptWith`'s loop calls `Remove`, so it reads the fields: its invariant restates the
+  class invariant in their terms (as every loop that reads fields and calls a method of the
+  receiver does) and states `Except` of `ItemsOf(Pal.Contents(_entries), _count)`.
+  `this.SpecItems` in a method body is the model on entry (`pre_this`), not the current one.
+* **A static member of the class** may `foreach` over a parameter of the class (R27.51 was
+  instance methods only): the enumerator is held from the parameter as from `this`.
+  `OverlapsHashSetImpl(smaller, larger)` walks `smaller`'s prefixes (R30.35) with
+  `OverlapsWalk`/`NoneInWalk`. No ghost read of the parameter's fields was needed: its
+  `[Spec]` members suffice. `this` is still refused in a static member (PALCS0714).
+* **`RemoveWhere`** reads `Entry[]? entries = _entries;` once and calls `Remove` in the loop.
+  The alias is R24.19's name for the field because no statement after it may replace
+  `_entries`: R33.17's check follows `Remove` (and what it calls) and finds no assignment to
+  the field, so every use of `entries` is a read of `_entries` after the last call. A
+  contract cannot state the array's identity (`_entries` is not a `[Spec]` member, PALCS0523,
+  and `ReferenceEquals` of an array is refused, PALCS0733), so that check, not a postcondition
+  of `Remove`, is what keeps the alias valid. `RemoveWhere` ensures that its result is the
+  number of items removed and, at an equivalence and distinct items, that the items stay
+  distinct and are all among the old ones (`AllIn`).
+
 ### Trusted assumptions
 
 * `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
@@ -9815,8 +9851,8 @@ precondition is proved from the branch condition by unfolding it.
 * §24's `Pulse.Lib.CSharp.Equality` bindings of `IEqualityComparer<T>` and
   `EqualityComparer<T>.Default`, unchanged.
 
-Everything else (`HashInsert`, `HashChain`'s new lemmas, `pal/Dictionary/DictionaryChain.fst`)
-is proved.
+Everything else (`HashInsert`, `HashChain`'s new lemmas, `pal/Dictionary/DictionaryChain.fst`,
+`pal/HashSet/HashSetSets.fst`) is proved.
 
 ### The Dictionary model
 
@@ -9872,8 +9908,8 @@ the sequences before and after.
   half rebuilt; with `CopyEntries` `[Open]` and R30.33 both are verified, for `Dictionary`
   and `HashSet`. `TrimExcess` sets `_freeList = -1` before the new arrays are installed, so
   the fact that the old table was well formed (`WfCompactable`) has to be taken before
-  that write. `RemoveWhere` holds an alias of `_entries` across calls to `Remove`, which
-  may replace it; that is not expressible.
+  that write. `RemoveWhere` holds an alias of `_entries` across calls to `Remove`; R33.17
+  shows `Remove` never replaces it (R30.41).
 * **Collections' constructors.** `KeyCollection(dictionary)` and `ValueCollection` check the
   argument for `null` before storing it; R30.32 reads the check as dead, and they are
   verified.
@@ -9883,8 +9919,13 @@ the sequences before and after.
   erased, the fact is the lemma `MaxPrimeIsPrime` (R30.31), proved.
 * **Out of reach.** `ICollection.CopyTo(Array, int)` (type tests and `try`/`catch` over
   `Array`), `SyncRoot`, the non-generic `IEnumerable.GetEnumerator`s (interface dispatch),
-  serialization, and `HashSet`'s public set operations (`IEnumerable<T>` arguments; see
-  R30.35). Of their helpers only `IsSubsetOfHashSetWithSameComparer` is verified.
+  serialization, and those of `HashSet`'s public set operations that test
+  `other is HashSet<T>` (R34 lends an `IEnumerable<T>` and has no type test): `UnionWith`,
+  `IntersectWith`, `SymmetricExceptWith`, `IsSubsetOf`, `IsProperSubsetOf`, `IsSupersetOf`,
+  `IsProperSupersetOf`, `Overlaps` and `SetEquals`. `ExceptWith` is verified, as are the
+  helpers `IsSubsetOfHashSetWithSameComparer`, `OverlapsEnumerableImpl` and
+  `OverlapsHashSetImpl` (R30.41). `CheckUniqueAndUnfoundElements` (`stackalloc`, `BitHelper`)
+  and `SymmetricExceptWith*`/`IntersectWith*` helpers are not.
 * **Write sets.** The write-set scan over-approximated calls to bound members (R30.26),
   which made `ContainsValue` look like it wrote the dictionary.
 

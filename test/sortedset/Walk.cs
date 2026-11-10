@@ -519,6 +519,22 @@ public sealed class WalkSet<T>
         return n;
     }
 
+    // R30.41. The same walk in a static member of the class, over a parameter.
+    [Ensures("Result == other.SpecItems.Length")]
+    [Rlimit(4)]
+    internal static int CountStatic(WalkSet<T> other)
+    {
+        int n = 0;
+        foreach (T item in other)
+        {
+            Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
+                          n + Pal.Enumerator<Enumerator>(item).SpecPending.Length == other.SpecItems.Length);
+            Pal.Decreases(other.SpecItems.Length - n);
+            n++;
+        }
+        return n;
+    }
+
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes) && @this.SpecVersion == 0")]
     internal void ResetVersion() { version = 0; }
 
