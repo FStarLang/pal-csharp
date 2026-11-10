@@ -68,6 +68,9 @@ out.
 | `Queue<T>.Enumerator.MoveNext` | `_q._head + _i`, possible when capacity exceeds 2^30 | `head + Count <= int.MaxValue` | §28 |
 | `SortedList` enumerators | `_index = Count + 1` at the end; also `IEnumerator.Current` and the `IDictionaryEnumerator` members | `Count < int.MaxValue` | §28, §29 |
 | `PriorityQueue.Remove` | sifts down from an arbitrary index, so it has the same `(index << 2) + 1` wrap | `Count <= 2^29` | §33 |
+| `PriorityQueue` `Heapify`, `EnqueueRange(IEnumerable<(E, P)>)` and the `IEnumerable` constructors | the same `(index << 2) + 1`, now from bulk loads with no size check | resulting `Count <= 2^29` | §34 |
+| `SortedSet(IEnumerable<T>, IComparer)` with a different comparer | `EnumerableHelpers.ToArray` may double the array, and `ConstructRootFromSortedArray` needs its length within 2^30 | `2 * count + 2 <= 2^30` | §34 |
+| `EnumerableHelpers.ToArray` | growth `count << 1` wraps, and the `(uint)` comparison that follows catches it; correct, but only under wrapping semantics | verified as `[Wrapping]` | §34 |
 | `Queue<T>.CopyTo` | `arrayIndex + _array.Length - _head` overflows in its first addition, and is correct only because the wrap cancels | verified as `[Wrapping]` | §23 |
 
 ## 3. Behaviour that is easy to misread
@@ -86,7 +89,8 @@ out.
   the two comparers are `Equals`. A comparer whose `Equals` is true for a different order
   yields a set that is not sorted under its own comparer, or a wrong `Overlaps`. The
   verified contracts require the two comparers to be the same object. §27.3 (R27.47,
-  R27.51, R27.52).
+  R27.51, R27.52). The constructor `SortedSet(collection, comparer)` has the same
+  hazard: it clones `collection`'s tree whenever the comparers are `Equals`. §34.
 * **`List<T>.FindIndex`/`FindLastIndex` check the window before `match`.** A bad window
   with a `null` `match` throws `ArgumentOutOfRangeException`, not `ArgumentNullException`.
   `FindLastIndex` on an empty list accepts `startIndex == -1` (and only that) with
@@ -117,6 +121,16 @@ out.
   the first match in array order. §33.
 * **`OrderedDictionary.IndexOf(TKey)` passes one local by `ref` to two `out` parameters.**
   This is harmless only because the callee never reads them. §33.
+* **`List<T>.InsertRange(index, this)`** copies the list into itself in two `Array.Copy`
+  steps. A caller cannot lend the list as an enumerable while owning it as the receiver, so
+  this branch is unreachable in the model and is not verified. §34.
+* **`Dictionary.Resize(forceNewHashCodes: true)`** calls `comparer.GetHashCode(entry.key)`
+  without the null case the default hashing has. It is correct only because a key is never
+  null, which is now part of the verified invariant. §30.
+* **`HashHelpers.ExpandPrime` depends on an erased assertion.** When doubling would pass
+  `MaxPrimeArrayLength` it returns that constant, which is a valid table size only because
+  it is prime. The code checks this only with `Debug.Assert`, which Release builds erase.
+  The proof states it as a lemma (`MaxPrimeIsPrime`, proved). §30 (R30.31).
 * **`HashHelpers.ExpandPrime` throws.** It raises `ArgumentException` once the size
   reaches `MaxPrimeArrayLength`, rather than saturating. §33.
 
@@ -144,6 +158,12 @@ source marks the parameters `[AllowNull]`. §27.3 (R27.28).
   enumeration over an unchanged set. The version check inside the iterator is the
   run-time behaviour of R28.8, and is not stated. §27.3.
 
+* **`Dictionary.Remove(key, out value)` cannot say which value it returns.** C#'s definite
+  assignment rejects naming an `out` parameter in a loop invariant before it is assigned,
+  so the contract states only what `Remove(key)` does. §30.
+* **A `SortedSet` view's `Count` and `Clear` need a precondition the view's constructor
+  cannot establish.** It is that the cached count is current whenever the cached version
+  matches. §1.2's sentinel collision is the reason it cannot be established. §35.
 * **`LinkedList` node arguments from another list.** The code throws
   `InvalidOperationException` for such a node. The model specifies that exception only
   for a node in this list's region, so a caller passing another list's node is outside
@@ -153,6 +173,22 @@ source marks the parameters `[AllowNull]`. §27.3 (R27.28).
 
 Found because a proof that should have failed passed, or failed for the wrong reason.
 
+* **Unsound:** at `object`, `ThrowIfNull(key)` was dropped, because a non-nullable
+  reference was assumed non-null. That assumption does not hold for callers of a
+  non-generic `IDictionary`, so the `[Throws(ArgumentNullException)]` contracts of those
+  members were vacuous (R35.11).
+* A `decreases` clause naming a spec member of `this` produced an ill-typed term in classes
+  with array fields (R30.35).
+* A diagnostic (PALCS0751) was missing from the catalog, and the lint caught it.
+* A pattern lemma whose `unit` argument did not appear in its SMT pattern never fired. Z3
+  only warned. §35.
+* Copying the rest of a loop body into both arms of an `if` (R34.11) made one
+  `SortedSet.DoRemove` query run more than 24 minutes; the split is now limited to
+  straight-line code.
+* `Dictionary.TryInsert` first took about 1h35m and 115 GB to check. Joining the branches,
+  splitting the insertion tail into separately checked functions, and keeping the table's
+  predicates opaque brought it to 7m22s and 10.6 GB, without changing the contract
+  (R30.36–R30.40).
 * Contracts on property `get` accessors were silently ignored (R27.12). Contracts on
   `set` accessors and on explicit interface members were dropped (§29). Those members had
   been "verified" against `true`.
