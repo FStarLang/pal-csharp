@@ -329,6 +329,10 @@ public static class Pal
     public static bool SortedRange<T>(Seq<T> before, Seq<T> after, SpecInt index, SpecInt count,
         System.Collections.Generic.IComparer<T>? comparer) => throw Ghost();
 
+    /// <summary>R34.16. <see cref="SortedRange{T}(Seq{T}, Seq{T}, SpecInt, SpecInt, System.Collections.Generic.IComparer{T})"/> by a <c>Comparison&lt;T&gt;</c>.</summary>
+    public static bool SortedRangeBy<T>(Seq<T> before, Seq<T> after, SpecInt index, SpecInt count,
+        Comparison<T> comparison) => throw Ghost();
+
     /// <summary>
     /// R26.10. Whether <paramref name="s"/> is a 4-ary min-heap of <c>(element, priority)</c>
     /// nodes: every node's priority, by <c>comparer ?? Comparer&lt;TP&gt;.Default</c>, is at

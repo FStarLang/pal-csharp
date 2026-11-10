@@ -11,6 +11,7 @@ using PalLang;
 public struct BagModel
 {
     public Seq<int> Items;
+    public Seq<int> Store;
 }
 
 [Invariant("0 <= _size")]
@@ -21,15 +22,39 @@ public class Bag
     private int _size;
 
     [Model]
-    private BagModel Model => new BagModel { Items = Pal.Slice(Pal.Contents(_items), 0, _size) };
+    private BagModel Model => new BagModel { Items = Pal.Slice(Pal.Contents(_items), 0, _size), Store = Pal.Contents(_items) };
 
     [Spec] public Seq<int> Items => Model.Items;
+
+    [Spec] public Seq<int> Store => Model.Store;
 
     [Ensures("@this.Items.Length == 0")]
     public Bag()
     {
         _items = new int[4];
         _size = 0;
+    }
+
+    // R34.15. A chained constructor whose one call may raise, leaving the object built so far.
+    [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+    [Ensures("@this.Items.Length == 0")]
+    public Bag(int capacity) : this()
+    {
+        Reserve(capacity);
+    }
+
+    [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+    [Ensures("@this.Items == Pal.Old(@this.Items)")]
+    public void Reserve(int capacity)
+    {
+        if (capacity < 0)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
+        if (capacity > _items.Length)
+        {
+            int[] grown = new int[capacity];
+            Array.Copy(_items, grown, _size);
+            _items = grown;
+        }
     }
 
     [Requires("@this.Items.Length < int.MaxValue")]
@@ -44,6 +69,34 @@ public class Bag
         }
         _items[_size] = item;
         _size++;
+    }
+
+    [Requires("@this.Store.Length < min")]
+    [Ensures("@this.Store.Length >= min")]
+    [Ensures("@this.Items == Pal.Old(@this.Items)")]
+    [Ensures("Pal.Slice(@this.Store, 0, Pal.Old(@this.Store).Length) == Pal.Old(@this.Store)")]
+    private void GrowTo(int min)
+    {
+        int[] grown = new int[min];
+        Array.Copy(_items, grown, _items.Length);
+        _items = grown;
+    }
+
+    // R34.17. An arm that grows the receiver, before the write that needs the new capacity.
+    [Requires("@this.Items.Length == 0")]
+    [Requires("Pal.Contents(items).Length < int.MaxValue")]
+    [Ensures("@this.Items.Length == Pal.Contents(items).Length")]
+    public void Fill(IEnumerable<int> items)
+    {
+        int i = 0;
+        foreach (int x in items)
+        {
+            Pal.Invariant(0 <= i && i <= _items.Length && i == Pal.Index(x) && _size == 0);
+            if (_items.Length == i)
+                GrowTo(i + 1);
+            _items[i++] = x;
+        }
+        _size = i;
     }
 
     // R34.4–R34.7. The fast path copies a collection; the slow path enumerates.
@@ -117,6 +170,15 @@ public static class Sums
         }
         return n;
     }
+
+    // R34.16. A `Comparison<T>` is a comparer; testing it against `null` is `is_null`.
+    [Throws(typeof(ArgumentNullException), "comparison == null")]
+    [Ensures("Result == (comparison != null)")]
+    public static bool Checked(Comparison<int> comparison)
+    {
+        if (comparison == null) throw new ArgumentNullException(nameof(comparison));
+        return comparison != null;
+    }
 }
 
 // R34.9-R34.14. A copy of an enumeration into a growing array, in the style of the BCL's
@@ -129,7 +191,7 @@ public class Snapshot
     private int _size;
 
     [Model]
-    private BagModel Model => new BagModel { Items = Pal.Slice(Pal.Contents(_items), 0, _size) };
+    private BagModel Model => new BagModel { Items = Pal.Slice(Pal.Contents(_items), 0, _size), Store = Pal.Contents(_items) };
 
     [Spec] public Seq<int> Items => Model.Items;
 

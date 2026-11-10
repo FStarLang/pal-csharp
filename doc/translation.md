@@ -10413,6 +10413,34 @@ after the statement: `_array = ToArray(c, out _size);` is
 callee's write and the copy, and the callee cannot reach the field, so the difference is
 unobservable.
 
+**R34.15. A chained constructor's raising call.** `C(…) : this(…) { M(…); }`, where `M` is
+an instance method of the object that may raise (its `[Throws]`) and its arguments are
+parameters or literals: an exception leaves the object the chained constructor built,
+which the caller never receives. The call runs inside a local function that catches it,
+as R31.14's does, whose contract restates `M`'s: its `[Ensures]` over the model the
+chained constructor left and the one `M` leaves when it returns, and its `[Throws]`
+conditions when it raises. The object is then dropped and the exception raised again,
+or it is returned. A local function is needed because Pulse's `try` forwards an
+unhandled exception with what the `try` raises, which would still hold the object.
+(SortedList's `SortedList(int, IComparer)`, whose `Capacity = capacity` throws for a
+negative capacity.)
+
+**R34.16. `Comparison<T>` is a comparer.** A `System.Comparison<T>` maps to the same
+`Pulse.Lib.CSharp.Order.comparer t` an `IComparer<T>` does (R22.24), so the order it decides
+is subject to the same trusted laws. `c == null` / `c != null`, which C# compares with the
+delegate operator (its `null` converted to `Comparison<T>`), is R25.4's `is_null c`.
+`Pal.SortedRangeBy(before, after, i, n, comparison)` is `Pal.SortedRange` with a
+`Comparison<T>` (a separate name, because an overload makes `SortedRange(…, null)`
+ambiguous). CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)` is
+R26.7's `Array.Sort(a, i, n, comparer)`.
+
+**R34.17. An arm that changes the receiver, before more of the body.** R27.54's case (an
+arm calling a method that changes its receiver, after which Pulse's join keeps neither
+arm's facts about it) when the `if` is not last in the loop body: the rest of the body is
+copied into both arms, under R34.11's proviso that the rest is straight-line code.
+(`PriorityQueue.EnqueueRange`'s `if (nodes.Length == i) { Grow(i + 1); nodes = _nodes; }`
+before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
+
 ### Verified (§34)
 
 * `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
@@ -10422,6 +10450,16 @@ unobservable.
 * `List<T>(IEnumerable<T>)`, `List<T>.AddRange` and `InsertRange` (both branches).
 * `Stack<T>(IEnumerable<T>)` and `Queue<T>(IEnumerable<T>)`: the stack's or queue's items are
   the enumerable's, in order.
+* `Stack<T>.TrimExcess()`, `Queue<T>.TrimExcess()` and `SortedList<K,V>.TrimExcess()`: the
+  items (keys, values, comparer) are unchanged, and the capacity is unchanged or the count.
+* `SortedList<K,V>(int, IComparer<K>)`: throws `ArgumentOutOfRangeException` for a negative
+  capacity (R34.15); otherwise empty, with that capacity and `comparer ?? Comparer<K>.Default`.
+* `List<T>.Sort(Comparison<T>)`: throws `ArgumentNullException` for `null`; otherwise the
+  items are a sorted permutation of the old ones (R34.16), count and capacity unchanged.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<E>, P)`: from a heap, a heap with the same
+  comparer and the enumerable's count added (both the empty-queue fill, which grows the
+  array in place, and the `Enqueue` loop). `Enqueue` gains `SpecCount == Old + 1` and `Grow`
+  the preservation of the whole old array as a prefix, both verified.
 
 ### Findings (§34)
 
@@ -10430,8 +10468,27 @@ unobservable.
   receiver, so the branch is dead in the model and **not verified**.
 * `ToArray`'s growth `count << 1` relies on two's-complement wrap and on the `(uint)` cast
   to catch it; the code is correct, but only as a `[Wrapping]` method (an added attribute).
+* R34.11's split copies the rest of the body into each arm. In `SortedSet<T>.DoRemove`
+  (a long loop body after the split) that made a query Z3 did not finish in 24 minutes;
+  R34.11 now splits only when the rest is straight-line code.
 * `ToArray` returns an array whose length may exceed `length`; callers (`Stack`, `Queue`)
   keep the excess as capacity, which their contracts expose.
+
+### Not verified (§34)
+
+* `PriorityQueue` `Heapify`, hence `EnqueueRange(IEnumerable<(E, P)>)` and the
+  `IEnumerable` constructors: `MoveDown`'s contract (R26.10) assumes the whole array is a heap
+  but for one hole; bottom-up heap construction needs it for a subtree whose other edges
+  are arbitrary, a second `MoveDown` proof.
+* `LinkedList<T>(IEnumerable<T>)`: its loop calls `AddLast` on the object under
+  construction, whose ring invariant (R31.3) names `this`, which an open constructor's loop
+  invariant cannot (PALCS0300).
+* `SortedSet<T>(IEnumerable<T>, IComparer<T>)` beyond its `[Exactly(SortedSet)]` contract:
+  the `as SortedSet<T>` test on an enumerable is not modelled, and the sort-then-dedupe path
+  needs a theory of sequences equal modulo the comparer.
+* `SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])`: there is no model of an
+  `IDictionary<K,V>` argument (its `Keys`/`Values` `CopyTo`, the pair sort, the duplicate
+  check).
 
 ### Trusted (§34)
 
@@ -10441,5 +10498,6 @@ unobservable.
   and `CopyTo` writes exactly them; nothing else holding the object changes it during the
   call (the caller's lent permission). A user-defined `IEnumerable<T>` with side effects or a
   `Count` that disagrees with its enumeration is outside this model.
+* A `Comparison<T>` is a lawful total order, as every comparer is (R22.24, R34.16).
 * Whether an argument is an `ICollection<T>` is unknown to the method (R34.4); no assumption
   is made about it.

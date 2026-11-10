@@ -1488,6 +1488,20 @@ public sealed class StmtLowerer(
             ArrayBulkOp(method, args, loc) is { } bulk)
             return bulk;
 
+        // R34.16. CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)`, which
+        // `List<T>.Sort(Comparison<T>)` calls, is R26.7's `Array.Sort(a, i, n, comparer)`.
+        if (method is { IsStatic: true, Name: "Sort" } &&
+            method.ContainingType is { Name: "ArraySortHelper", Arity: 1 } && args.Count == 2 &&
+            args.All(a => a.NameColon is null) &&
+            args[0].Expression is ObjectCreationExpressionSyntax { ArgumentList.Arguments: [var sa, var si, var sn] } span &&
+            model.GetTypeInfo(span).Type is INamedTypeSymbol { Name: "Span", Arity: 1 } &&
+            model.GetTypeInfo(sa.Expression).Type is IArrayTypeSymbol { Rank: 1 } &&
+            model.GetTypeInfo(si.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            model.GetTypeInfo(sn.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            known.MapType(model.GetTypeInfo(args[1].Expression).Type) is IrUserSpecType { FStar: Sorted.ComparerType })
+            return new IrArrayOp(loc, ArrayOpKind.Sort,
+                [_code.Lower(sa.Expression), _code.Lower(si.Expression), _code.Lower(sn.Expression), _code.Lower(args[1].Expression)]);
+
         // R23.4. `Array.Resize(ref a, n)` replaces `a` by a fresh array of length `n`.
         if (method is { IsStatic: true, Name: "Resize", IsGenericMethod: true } &&
             method.ContainingType?.SpecialType == SpecialType.System_Array && args.Count == 2 &&

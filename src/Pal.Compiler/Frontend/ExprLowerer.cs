@@ -1838,6 +1838,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private IrExpr LowerBinary(BinaryExpressionSyntax node, IrLoc loc)
     {
         if (EnumerableEquality(node, loc) is { } enumerableEquality) return enumerableEquality;
+        // R34.16. `c == null` / `c != null` on a `Comparison<T>`, which C# compares by the
+        // delegate operator (its `null` converted to the comparer, R26.7), is R25.4's `is_null`.
+        if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
+            (node.Right.IsKind(SyntaxKind.NullLiteralExpression) ? node.Left
+             : node.Left.IsKind(SyntaxKind.NullLiteralExpression) ? node.Right : null) is { } cmpTested &&
+            Sorted.IsComparisonSymbol(model.GetTypeInfo(cmpTested).Type))
+        {
+            var test = Sorted.IsNull(loc, Lower(cmpTested));
+            return node.IsKind(SyntaxKind.EqualsExpression) ? test : new IrUnary(loc, UnOp.Not, test) { Type = IrPrim.Bool };
+        }
         // R26.1. `d == null` / `d != null` on a callable delegate asks the model whether the
         // reference is null.
         if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
@@ -3126,7 +3136,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R26.7. Permutation, and what a sort guarantees.
             case nameof(PalLang.Pal.Permutation):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.permutation", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
-            case nameof(PalLang.Pal.SortedRange):
+            case nameof(PalLang.Pal.SortedRange) or nameof(PalLang.Pal.SortedRangeBy):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.sorted_range",
                     [Arg(0), Arg(1), Arg(2), Arg(3), Arg(4)]) { Type = IrPrim.Bool };
             // R26.10. A 4-ary min-heap of (element, priority) nodes.

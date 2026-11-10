@@ -117,6 +117,7 @@ Both forms lower to the same thing. Mix them freely.
 | `ConvertAll(s, f)` | `s` mapped through the `Converter<T, TOutput>` `f` (R26.3) |
 | `Permutation(s, t)` | `t` is a rearrangement of `s`, by an explicit bijection (R26.7) |
 | `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
+| `SortedRangeBy(s0, s1, i, n, comparison)` | `SortedRange` with a `Comparison<T>` (R34.16) |
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
 | `Tree<V>(x)`, `WellFormed(x)` | the `SpecTree<V>` of views a `[Region]` pointer reaches; every path from it ends at `null` (R27.7) |

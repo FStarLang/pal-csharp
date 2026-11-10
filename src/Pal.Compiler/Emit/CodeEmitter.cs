@@ -692,6 +692,11 @@ public sealed class CodeEmitter(
         var obj = Expr(chained);
         var m = FreshValue(built.Name);
         Line($"with {m}. assert ({Inv(built)} {obj} {m});");
+        if (RaisingTailCall(rest) is { } tail)
+        {
+            ChainedRaisingCall(built, obj, m, tail);
+            return;
+        }
         var slot = new Slot(Names.This, built, SlotKind.Object, obj)
         {
             PreModel = m,
@@ -702,6 +707,108 @@ public sealed class CodeEmitter(
         _objects = [slot];
         _objectResults.Remove(obj);
         EmitSequence(CloseWith(rest, self), method, _plan!);
+    }
+
+    /// <summary>
+    /// R34.15. The rest of a chained constructor's body when it is one call on the object
+    /// that may raise, with plain arguments.
+    /// </summary>
+    private IrCall? RaisingTailCall(ImmutableArray<IrStmt> rest) =>
+        rest is [IrExprStmt { Expr: IrCall { HasReceiver: true, DoesNotReturn: false } c }] &&
+        c.Args is [IrVar { Name: Names.This }, ..] &&
+        raising?.Contains(c.Callee) == true && openMethods?.Contains(c.Callee) != true &&
+        (heapIndexed is null || !heapIndexed.ContainsKey(c.Callee)) &&
+        (Methods ?? methods)?.TryGetValue(c.Callee, out var callee) == true &&
+        callee!.Parameters.Length == c.Args.Length &&
+        c.Args.Skip(1).All(a => a is IrLiteral || a is IrVar v && _slots.TryGetValue(v.Name, out var vs) &&
+                                 vs.Kind is SlotKind.Value or SlotKind.Cell)
+            ? c : null;
+
+    /// <summary>
+    /// R34.15. <c>C(…) : this(…) { M(…); }</c> with <c>M</c> raising: an exception leaves the
+    /// object built so far, which the caller never receives, to be discarded. The call is
+    /// caught in a local function, as R31.14's is, whose contract restates the callee's
+    /// (read at the arguments and at the model the chained constructor left); the object
+    /// is then dropped and the exception raised again, or returned.
+    /// </summary>
+    private void ChainedRaisingCall(IrClassType built, string obj, string m, IrCall call)
+    {
+        var callee = (Methods ?? methods)![call.Callee];
+        var inv = Inv(built);
+        var pre = new SpecScope();
+        var args = new List<IrExpr> { call.Args[0] };
+        for (var i = 1; i < call.Args.Length; i++)
+        {
+            var t = Fresh();
+            Line($"let {t} = {Expr(call.Args[i])};");
+            var name = "$arg" + t;
+            _slots[name] = new Slot(name, callee.Parameters[i].Type, SlotKind.Value, t);
+            args.Add(new IrVar(call.Args[i].Loc, name) { Type = call.Args[i].Type });
+            pre.Bind(callee.Parameters[i].Name, new Term(t, MethodPlan.KindOf(callee.Parameters[i].Type), callee.Parameters[i].Type));
+        }
+        _slots[Names.This] = new Slot(Names.This, built, SlotKind.Object, obj) { PreModel = m, PostModel = m };
+        _objects = [];
+        pre.Bind(Names.This, new Term(m, TermKind.Math, built));
+        var m1 = FreshValue(built.Name);
+        var post = new SpecScope(pre) { Pre = pre };
+        post.Bind(Names.This, new Term(m1, TermKind.Math, built));
+        var normal = callee.Ensures.Select(e => spec.AsProp(spec.Emit(e, post))).DefaultIfEmpty("True");
+        var ex = $"ex_{_try++}";
+        var thrown = callee.Throws.Select(t =>
+        {
+            pre.Bind(Frontend.FrontendPass.ThrownParameter, new Term(ex, TermKind.Other, t.Type));
+            var parts = new List<string>();
+            if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {ex}");
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, pre)));
+            return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
+        }).DefaultIfEmpty("False").ToList();
+        var res = FreshValue("caught");
+        var settled = $"exists* {m1}. {inv} {obj} {m1} ** " +
+            $"pure (None? {res} ==> ({string.Join(" /\\ ", normal)})) ** " +
+            $"pure (Some? {res} ==> (let {ex} = Some?.v {res} in {string.Join(" \\/ ", thrown)}))";
+        var helper = $"catch_{_try++}";
+        Line($"fn {helper} ()");
+        _indent++;
+        Line($"requires {inv} {obj} {m}");
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        _indent--;
+        Line("{");
+        _indent++;
+        Line("try");
+        _indent++;
+        Line($"returns {res}: option exn");
+        Line($"ensures {settled}");
+        Line($"raises (fun ({ex}: exn) -> exists* {m1}. {inv} {obj} {m1} ** pure ({string.Join(" \\/ ", thrown)}))");
+        _indent--;
+        Line("{");
+        _indent++;
+        _catching = true;
+        try { Line(Expr(call with { Args = [.. args] }) + ";"); }
+        finally { _catching = false; }
+        Line("None #exn");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{ex} -> {{ Some {ex} }}");
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+        var outcome = Fresh();
+        Line($"let {outcome} = {helper} ();");
+        Line($"if (Some? {outcome}) {{");
+        _indent++;
+        var dead = FreshValue(built.Name);
+        Line($"with {dead}. assert ({inv} {obj} {dead});");
+        Line($"drop_ ({inv} {obj} {dead});");
+        Line($"raise (Some?.v {outcome})");
+        _indent--;
+        Line("} else {");
+        _indent++;
+        Line(obj);
+        _indent--;
+        Line("}");
     }
 
     private static bool LoopOrTryReturn(IrStmt s) => s switch
@@ -4315,7 +4422,7 @@ public sealed class CodeEmitter(
         for (var k = 0; k < statements.Length - 1; k++)
             if (statements[k] is IrIf i && NullTest(i.Cond) is null && !MayEscape(i) &&
                 (CallsLocalObject(i) ||
-                 (DeclaresCell(i) || AssignsConditional(i)) && Straight(statements.Skip(k + 1))))
+                 (DeclaresCell(i) || AssignsConditional(i) || ChangesReceiver(i)) && Straight(statements.Skip(k + 1))))
                 return k;
         return null;
     }
@@ -4336,6 +4443,13 @@ public sealed class CodeEmitter(
     /// </summary>
     private static bool AssignsConditional(IrIf i) =>
         Passes.Check.Statements(i).Skip(1).Any(st => st is IrAssign { Target: IrVar, Value: IrConditional });
+
+    /// <summary>
+    /// R34.17. Whether an arm of <paramref name="i"/> calls a method that changes its receiver
+    /// (R27.54's case, before more of the body): the join keeps neither arm's facts about it.
+    /// </summary>
+    private bool ChangesReceiver(IrIf i) =>
+        Passes.Check.Statements(i).SelectMany(Passes.Check.Expressions).Any(MovesReceiver);
 
     /// <summary>
     /// R34.11. Whether <paramref name="rest"/>, which a split copies into both arms, has no
