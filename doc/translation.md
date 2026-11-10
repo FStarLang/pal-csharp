@@ -9530,13 +9530,13 @@ and `Version`. Every mutator ensures `Version == Bumped(Old(Version))`, where `B
 | `GetEnumerator`, `IEnumerable<T>.GetEnumerator`, `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) | §28's borrowing enumerator; `MoveNext` throws `InvalidOperationException` when `Version` changed, and otherwise steps `_index` over `Nodes`; requires `Count < int.MaxValue` |
 | `LinkedListNode.Next`, `Previous` | `Succ`/`Pred` of the node in its owner's ring; with the ring's shape, `Nodes[pos ± 1]` or null at the ends |
 | `LinkedListNode.Value` (get and set), `Invalidate` | the node's item; `Detached` |
+| `LinkedList(IEnumerable<T>)` (§34, R34.21) | `SpecItems` the enumerable's items, `SpecCount` their number |
 
 ### Not annotated, and why
 
 * `LinkedListNode.List`. It returns the owner, and a returned object comes with its
   invariant, which the node cannot give.
-* `LinkedList(IEnumerable<T>)` (an interface enumeration), `ICollection.CopyTo(Array, int)`
-  (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
+* `ICollection.CopyTo(Array, int)` (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
   (a `ref` return) and the public `LinkedListNode(T)` constructor (a node allocated outside
   any owner's region). The node-taking overloads therefore insert a node already in this
   list's region and detached from it, such as one `Remove(node)` or `Clear` detached: the
@@ -10315,6 +10315,318 @@ allocate) are the case.
   carry `[Throws]` and `[Ensures("false")]`; their bodies (a `throw`) are translated and
   checked against these contracts.
 
+## 34. Collection arguments: IEnumerable<T> / ICollection<T> dispatch and range operations
+
+The BCL collections' range members (`List<T>(IEnumerable<T>)`, `AddRange`, `InsertRange`,
+the `IEnumerable<T>` constructors of `Stack<T>` and `Queue<T>`, and the shared
+`EnumerableHelpers.ToArray`) take an `IEnumerable<T>`, test whether it is an
+`ICollection<T>`, and either ask it for its `Count` and `CopyTo` or walk it with an
+enumerator. This section translates such an argument. The test `test/collection_arguments`
+exercises each rule below (the name avoids the word "dispatch", which the test-name lint
+reserves).
+
+**R34.1. An enumerable argument.** A parameter of type `IEnumerable<T>` or `ICollection<T>`
+(and only a parameter, or a local initialised from one) is the abstract
+`Pulse.Lib.CSharp.Enumerable.enumerable T`. It is not a pure sequence but a resource,
+`Enumerable.pts_to e #p s`, which the caller lends for the call at any permission `p` and
+gets back unchanged. The items it yields, in order, are the ghost sequence `s`; a contract
+names them `Pal.Contents(e)`. A caller can lend a read-only array (`Enumerable.lend`), so
+the interface is implemented in `Pulse.Lib.CSharp.Enumerable.fst` with no assumption of
+its own.
+
+**R34.2. Identity and nullness.** `e == null` on an enumerable argument is `false`, and so
+is `this == e` (and `!=` the negations), and `ArgumentNullException.ThrowIfNull(e)` is
+nothing: the caller lends a resource, which a null reference is not, and which is owned
+apart from every object the method holds. A call that would pass an object's own view as
+the argument (`list.InsertRange(0, list)`) is therefore not provable by the caller: it
+would have to own the list both as the receiver and as the enumerable. The member's
+self-insertion branch is dead in the model (see Findings).
+
+**R34.3. `Count`.** `c.Count` on an `ICollection<T>` argument, or on an enumerable the
+method has tested to be one (R34.4), is `Enumerable.count c`, the length of its items.
+
+**R34.4. The type test.** `e is ICollection<T> c` (and `e is ICollection<T>`) on an
+enumerable argument is the abstract `Enumerable.is_collection e`, and `c` is `e`. The method
+is verified in both branches, which must meet one postcondition: no caller can tell them
+apart.
+
+**R34.5. `CopyTo`.** `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into the array
+`a` from index `i`; the caller owes `0 <= i` and `i + Count <= a.Length`.
+
+**R34.6. Enumerators.** `using (IEnumerator<T> en = e.GetEnumerator()) { ... }`, or the
+declaration `using IEnumerator<T> en = e.GetEnumerator();`, on an enumerable argument `e`
+declares a *cursor*: an `int` cell holding how many items `en` has moved past, which starts
+at 0. `en.MoveNext()` advances it and is true while it is within the items;
+`en.Current` is the item before the cursor; disposing does nothing. In a contract,
+`Pal.Index(en)` is the cursor. `GetEnumerator()` anywhere else is reported (PALCS0860), as
+is any other member of the enumerator (PALCS0861) or an enumerator whose cursor is not a
+local of the method (PALCS0862).
+
+**R34.7. Enumerator loops.** A loop whose condition is `en.MoveNext()` has the extra
+invariant `0 <= Pal.Index(en) <= Pal.Contents(e).Length`, and, unless it states its own,
+the measure `Pal.Contents(e).Length - Pal.Index(en)`.
+
+**R34.8. `foreach`.** `foreach (T x in e) body` over an enumerable argument is
+`using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }`, and
+`Pal.Index(x)` names its cursor.
+
+**R34.9. `return` inside a block.** R24.14's sinking of what follows an `if` into its arms
+also applies to a block (a `using` block, say) that returns on some path and is followed by
+code, and recurses into the arms of an `if` that holds such a block. `using (...) { if (c)
+{ ...; return a; } } rest` is `using (...) { if (c) { ...; return a; } else { rest } }`.
+
+**R34.10. A reassigned array local.** A local of array type that the method assigns after
+declaring it (`T[] arr = new T[4]; ... Array.Resize(ref arr, n); ... return arr;`) is a
+cell holding the array, `Pulse.Lib.CSharp.ArrayCell.pts_to c s`, which owns the array too.
+Reading its length or an element, writing an element, `Array.Resize(ref arr, n)` (a fresh
+array of length `n` holding the old prefix, with the rest at the default), assigning it a
+fresh `new T[n]`, and returning it are translated; any other use of it is reported
+(PALCS0863). The old array is dropped on a resize or a reassignment, as the garbage
+collector would.
+
+**R34.11. Arms that a join would lose.** An `if` in a loop body, followed by more of the
+body, whose arm declares a local (a Pulse `let mut`, which needs a known post-condition) or
+assigns a local a conditional value `n = c ? a : b` (whose own join, inside the arm, leaves
+Pulse's join of the arms with that arm's value only), has the rest of the body copied into
+both arms, as R26.5 does, provided that rest has no `if` or loop of its own; otherwise the
+copies would multiply (SortedSet's `DoRemove`, whose arm declares `order`, is left joined).
+
+**R34.12. Wrapping shift.** In a `[Wrapping]` method, `x << s` on `int` is
+`Int32.shift_left_wrap x s`: the distance is taken modulo 32 and the product wraps to 32
+bits, as C#'s unchecked shift does. Lemmas give its value for `x << 1` on a non-negative
+`x` (`2x`, or `2x - 2^32` once that no longer fits), the value of `(uint)x`, and the value of
+a wrapping sum that fits.
+
+**R34.13. `const` locals.** A `const` local is its value, as a `const` field is (R20.9).
+
+**R34.14. `out` fields.** `out _f`, for an instance field `_f` that the statement mentions
+nowhere else, passes a fresh local at the field's default, which is copied into the field
+after the statement: `_array = ToArray(c, out _size);` is
+`int t = 0; _array = ToArray(c, out t); _size = t;`. No other code runs between the
+callee's write and the copy, and the callee cannot reach the field, so the difference is
+unobservable.
+
+**R34.15. A chained constructor's raising call.** `C(…) : this(…) { M(…); }`, where `M` is
+an instance method of the object that may raise (its `[Throws]`) and its arguments are
+parameters or literals: an exception leaves the object the chained constructor built,
+which the caller never receives. The call runs inside a local function that catches it,
+as R31.14's does, whose contract restates `M`'s: its `[Ensures]` over the model the
+chained constructor left and the one `M` leaves when it returns, and its `[Throws]`
+conditions when it raises. The object is then dropped and the exception raised again,
+or it is returned. A local function is needed because Pulse's `try` forwards an
+unhandled exception with what the `try` raises, which would still hold the object.
+(SortedList's `SortedList(int, IComparer)`, whose `Capacity = capacity` throws for a
+negative capacity.)
+
+**R34.16. `Comparison<T>` is a comparer.** A `System.Comparison<T>` maps to the same
+`Pulse.Lib.CSharp.Order.comparer t` an `IComparer<T>` does (R22.24), so the order it decides
+is subject to the same trusted laws. `c == null` / `c != null`, which C# compares with the
+delegate operator (its `null` converted to `Comparison<T>`), is R25.4's `is_null c`.
+`Pal.SortedRangeBy(before, after, i, n, comparison)` is `Pal.SortedRange` with a
+`Comparison<T>` (a separate name, because an overload makes `SortedRange(…, null)`
+ambiguous). CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)` is
+R26.7's `Array.Sort(a, i, n, comparer)`.
+
+**R34.17. An arm that changes the receiver, before more of the body.** R27.54's case (an
+arm calling a method that changes its receiver, after which Pulse's join keeps neither
+arm's facts about it) when the `if` is not last in the loop body: the rest of the body is
+copied into both arms, under R34.11's proviso that the rest is straight-line code.
+(`PriorityQueue.EnqueueRange`'s `if (nodes.Length == i) { Grow(i + 1); nodes = _nodes; }`
+before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
+
+**R34.18. Sift-down on a subtree (harness proof).** Not a translation rule but the proof
+shape for bottom-up heap construction. `PriorityQueue.MoveDown`'s contract gains a second,
+disjoint case: besides R26.10's "a heap with one hole at `nodeIndex`", it accepts
+`HeapAbove(Store, n, nodeIndex)` — every node above `nodeIndex` roots a 4-ary subtree that
+is a heap — and then ensures `HeapAbove(Store, n, nodeIndex - 1)`, the items permuted. The
+loop invariant is `DownR`: the subtree at the original index is a heap except at the
+hole, and the subtrees below it are untouched heaps. `Heapify`'s loop invariant is
+`HeapAbove(Store, n, index)`; it holds initially above the last parent `(n - 2) / 4` and at
+`-1` is the whole heap. The arity-4 subtree reasoning (membership `in_sub`, disjointness
+of sibling subtrees, the step and the finishing lemmas) is proved in F* in
+`pal/PriorityQueue/PriorityQueueHeapify.fst`, included by the harness and called from C#
+`[Lemma]` wrappers.
+
+**R34.19. A deconstructing `foreach`.** `foreach ((A a, B b) in e)` over an enumerable of
+pairs (R34.8) binds the pair `Current` once, then `a` and `b` to its `fst` and `snd`, and
+asserts the pair equals `(a, b)` (eta for pairs, so a later `(a, b)` is the item). The
+cursor is named by either variable: `Pal.Index(a)`. Other deconstructions (nested, `var
+(a, b)` over three or more components, discards) are PALCS0001.
+
+**R34.20. `as ICollection<T>`.** `var c = e as ICollection<T>;`, with `e` an enumerable
+argument and `c` never assigned again, makes `c` an alias of `e` (no copy): `c is not
+null`, `c != null` are R34.4's unknown `is_collection` test, and `c.Count` and
+`c.CopyTo` under that test are R34.5's. (`PriorityQueue.EnqueueRange`'s dispatch.)
+
+**R34.21. A constructor that only delegates.** R22.9's open constructor holds the object
+unfolded, so its invariant cannot be named in a loop invariant (PALCS0300), and a loop that
+calls the object's methods would need it folded at every call. A constructor body that
+assigns no field, reads no field (R4.10c's test), and calls a method on the object runs
+instead over the object closed: it is allocated with every field at its default (a
+region pointer `null`, in an empty region, R27.6), its invariant is folded at once at
+that state — which F\* must prove holds of the defaults — and the body is then an
+instance method's that only delegates. `this` is in scope throughout a constructor's body
+(a loop may be live in it), so a loop invariant's `this.P` names the object's model as
+the loop holds it. A class with an array field is excluded: its default is R22.9's
+stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loop calls
+`AddLast`.)
+
+**R34.22. An `IDictionary<K,V>` argument.** An argument of type `IDictionary<K,V>` is an
+enumerable of pairs `(K, V)` (R34.8): `Pal.Contents(d)` is a ghost sequence of pairs. Its
+`Count` is R34.5's (`d?.Count ?? b`, the argument being non-null, is `d.Count`), and
+`d.Keys.CopyTo(a, i)` / `d.Values.CopyTo(a, i)` are `Enumerable.copy_keys` / `copy_values`,
+which write the contents' keys, respectively values, into `a` from `i` in the same order.
+`Array.Sort<K,V>(keys, values, comparer)` is `SortPairs.sort_pairs`, a verified insertion
+sort of both arrays together: the keys end sorted by `comparer ?? Comparer<K>.Default` and
+the zipped pairs are a permutation of the zipped pairs before. `SpecKeyMap.Zip(ks, vs)` and
+`SpecKeyMap.DistinctKeys(c, s)` (no two keys of `s` compare equal under `c`) name these in
+contracts; the lemmas relating them (`copied_pairs`, `dup_found`, `strict_step`) are in
+`Pulse.Lib.CSharp.SortPairs`. (`SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])`.)
+
+**R34.23. An array element in an exception message.** R25.9's message arguments include
+`a[i]` for an array local `a` and a local or parameter `i`. Unlike the other message
+arguments it may fail (out of bounds), so it is not dropped: the read is emitted, its
+result discarded, before the exception is built, and its bounds are proved as any read's.
+(`SR.Format(SR.Argument_AddingDuplicate, keys[i])`.)
+
+**R34.24. A field getter read in a constructor.** In a constructor body, a read of a
+non-virtual, non-specification property of the same class whose getter is exactly
+`return f;` (or `=> f`, or `this.f`) for an instance field `f` of the representation is
+that field's read. It is the getter's whole meaning, and reading it directly keeps the
+object open: a call would close it, and closing it forgets what its model does not expose
+(array contents past `_size`). (`SortedList`'s `comparer = Comparer;`.)
+
+**R34.25. A chained constructor that throws.** A `throw` in the body of a constructor
+that chains to another (R22.10) drops the object built so far — its arrays and its box —
+as R22.9's open constructor does, rather than closing it: the caller never receives it.
+
+**R34.26. An object passed as a snapshot of its items.** An argument at a parameter of
+type `IEnumerable<T>` or `ICollection<T>` that is an object of a translated class `C` — a
+parameter `[Exactly(typeof(C))]`, or an expression of static type `C` where `C` is sealed or
+effectively sealed (R27.1), so that the object's dynamic type is `C` — is passed as a
+snapshot of its items: `var s = new T[o.Count]; o.CopyTo(s, 0);`, then `s` lent as the
+enumerable (`Enumerable.lend`/`view`) for the call and taken back (`unlend`) once the call
+returns. The snapshot's contents are `C`'s items by `Count`'s and `CopyTo`'s verified
+contracts (`SortDedupe.splice_whole` collapses a whole-array `CopyTo`). `C` must have
+`Count`, `CopyTo(T[], int)` and `GetEnumerator()` translated, and implement
+`ICollection<T>` when the parameter is one; otherwise PALCS0864. A parameter that is itself
+`[Exactly]` is the object (R27.46), not a snapshot. What is trusted is that the runtime's
+dispatch of the interface's members reaches `C`'s, whose contracts all yield the same items
+(see Trusted). Relatedly, an array local initialised by a call that returns an array (and
+never reassigned) owns that array, named by the call's result, as `new T[n]` would be: so
+`Pal.Contents(a)` of such a local is the call's postcondition's.
+(`EnumerableHelpers.ToArray(collection, out count)` in `SortedSet<T>`'s constructor.)
+
+**R34.27. Sort-then-dedupe (harness proof).** `SortedSet<T>(IEnumerable<T>, IComparer<T>)`
+with a collection whose comparer differs copies the items out (R34.26), sorts them with the
+new comparer and keeps the first of each run of equivalent items. The sort is not stable, so
+which of the equivalent items is kept is unspecified; the result is specified by
+`SpecSortDedupe.SetOf(c, items, src)`: `items` is strictly sorted under `c`, every item of
+`src` is equivalent under `c` to one of `items`, and every one of `items` occurs in `src`.
+`Pulse.Lib.CSharp.SortDedupe` proves the loop's invariant `DedupeInv` (`dedupe_init`,
+`dedupe_step` — both arms stated before the `if`, so that the join keeps them — and
+`dedupe_done`); `DedupeInv`'s and `SetOf`'s quantified parts are opaque to SMT outside those
+lemmas. `SpecSortDedupe.ComparerEquals(c, d)` is `c.Equals(d)`, uninterpreted (R27.47).
+
+### Verified (§34)
+
+* `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
+  the enumerable's items, and `length` is their count. Both the `ICollection<T>` branch
+  (`Count` and `CopyTo`) and the enumerator branch (with `Array.Resize` growth, its
+  `(uint)` overflow check and the `Array.MaxLength` cap) are verified.
+* `List<T>(IEnumerable<T>)`, `List<T>.AddRange` and `InsertRange` (both branches).
+* `Stack<T>(IEnumerable<T>)` and `Queue<T>(IEnumerable<T>)`: the stack's or queue's items are
+  the enumerable's, in order.
+* `Stack<T>.TrimExcess()`, `Queue<T>.TrimExcess()` and `SortedList<K,V>.TrimExcess()`: the
+  items (keys, values, comparer) are unchanged, and the capacity is unchanged or the count.
+* `SortedList<K,V>(int, IComparer<K>)`: throws `ArgumentOutOfRangeException` for a negative
+  capacity (R34.15); otherwise empty, with that capacity and `comparer ?? Comparer<K>.Default`.
+* `List<T>.Sort(Comparison<T>)`: throws `ArgumentNullException` for `null`; otherwise the
+  items are a sorted permutation of the old ones (R34.16), count and capacity unchanged.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<E>, P)`: from a heap, a heap with the same
+  comparer and the enumerable's count added (both the empty-queue fill, which grows the
+  array in place, and the `Enqueue` loop). `Enqueue` gains `SpecCount == Old + 1` and `Grow`
+  the preservation of the whole old array as a prefix, both verified.
+* `LinkedList<T>(IEnumerable<T>)` (R34.21): the list's items are the enumerable's, in order,
+  and its count theirs. Requires fewer than `int.MaxValue` items, `AddLast`'s bound.
+* `PriorityQueue<E,P>.Heapify` (R34.18): from any items, a heap that is a permutation of
+  them; `MoveDown` under both of its cases, and all its callers.
+* `PriorityQueue<E,P>(IEnumerable<(E, P)>[, IComparer<P>])`: a heap that is a permutation of
+  the enumerable's items, with the given comparer.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<(E, P)>)`: from a heap, a heap whose items
+  are a permutation of the old items followed by the enumerable's, the comparer unchanged
+  (all three paths: `CopyTo` then `Heapify`, the enumerating fill then `Heapify`, and the
+  `Enqueue` loop).
+* `SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])` (R34.22–R34.25): throws
+  `ArgumentException` only if two of the dictionary's keys compare equal under
+  `comparer ?? Comparer<K>.Default`; otherwise its comparer is that, its count and capacity
+  the dictionary's count, and its key/value pairs a permutation of the dictionary's.
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for a `SortedSet<T>` argument, with any
+  comparer (R34.26, R34.27): the set's comparer is `comparer ?? Comparer<T>.Default`, its
+  items are `SetOf` the argument's under it, and equal to the argument's when the comparers
+  are the same. With the same comparer the tree is cloned; otherwise the items are copied,
+  sorted and deduplicated.
+
+### Findings (§34)
+
+* `List<T>.InsertRange(index, this)` copies the list into itself in two `Array.Copy` steps.
+  Under R34.2 a caller cannot lend the list as an enumerable while owning it as the
+  receiver, so the branch is dead in the model and **not verified**.
+* `ToArray`'s growth `count << 1` relies on two's-complement wrap and on the `(uint)` cast
+  to catch it; the code is correct, but only as a `[Wrapping]` method (an added attribute).
+* R34.11's split copies the rest of the body into each arm. In `SortedSet<T>.DoRemove`
+  (a long loop body after the split) that made a query Z3 did not finish in 24 minutes;
+  R34.11 now splits only when the rest is straight-line code.
+* **Deviation.** The `PriorityQueue` `IEnumerable` constructors and
+  `EnqueueRange(IEnumerable<(E, P)>)` require the resulting count to be at most 2^29, the
+  bound `MoveDown` already needs so that its child index `4i + 1` does not overflow (R26.10's
+  finding); the code itself has no such check.
+* `ToArray` returns an array whose length may exceed `length`; callers (`Stack`, `Queue`)
+  keep the excess as capacity, which their contracts expose.
+* `SortedSet<T>(collection, comparer)` copies `collection`'s tree as it stands when
+  `comparer.Equals(collection.Comparer)` (`HasEqualComparer`), even if the two comparers are
+  different objects. If they are equal but order differently (a user `Equals` that is
+  wrong), the new set's tree is in the wrong order for its comparer. The contract excludes
+  that case: the comparers are the same, or not `Equals`.
+* **Deviation.** With a different comparer, `SortedSet<T>(collection, comparer)` requires
+  `2 * count + 2 <= 2^30`: `ToArray`'s growth may double the array, and
+  `ConstructRootFromSortedArray` needs the array's length within 2^30. The code has no such
+  check.
+
+### Not verified (§34)
+
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for an argument that is not a
+  `SortedSet<T>`: the constructor's `as SortedSet<T>` on an arbitrary enumerable would hand
+  it a set object it does not own, which a lent enumerable (a ghost sequence) cannot
+  provide. The contract stays `[Exactly(SortedSet)]`; the sort-then-dedupe path itself is
+  verified (R34.27), reached with a different comparer.
+* `SortedDictionary<K,V>(IDictionary<K,V>[, IComparer<K>])`: it tests
+  `dictionary is SortedDictionary<K,V>` and then reads that object's tree, which an
+  `IDictionary` argument modelled as a ghost sequence of pairs (R34.22) does not own, for
+  the same reason.
+
+### Trusted (§34)
+
+* An `IEnumerable<T>` argument behaves as `Pulse.Lib.CSharp.Enumerable` models it:
+  enumerating it yields exactly the items `Pal.Contents(e)`, in the same order each time;
+  `MoveNext` terminates and has no effect beyond the cursor; `Count` is the number of items
+  and `CopyTo` writes exactly them; nothing else holding the object changes it during the
+  call (the caller's lent permission). A user-defined `IEnumerable<T>` with side effects or a
+  `Count` that disagrees with its enumeration is outside this model.
+* An `IDictionary<K,V>` argument (R34.22) is pure and terminating as an enumerable is, and
+  its `Count`, its enumeration, and its `Keys.CopyTo` and `Values.CopyTo` all agree with one
+  ghost sequence of pairs `Pal.Contents(d)`: the keys and values are copied in the
+  enumeration's order. A dictionary whose key and value collections disagree with its
+  enumeration is outside this model. That its keys are distinct is not assumed: the
+  constructors that need it check it.
+* A `Comparison<T>` is a lawful total order, as every comparer is (R22.24, R34.16).
+* R34.26's snapshot: enumerating an object of a translated class `C` passed at an
+  `IEnumerable<T>`/`ICollection<T>` parameter reaches `C`'s own `GetEnumerator`, `Count` and
+  `CopyTo` (the class is sealed, or the parameter `[Exactly(C)]`), and these agree on the
+  items: the snapshot `Count` then `CopyTo` make stands for what the callee enumerates.
+* Whether an argument is an `ICollection<T>` is unknown to the method (R34.4); no assumption
+  is made about it.
+
 ## 35. Remaining views, nodes and non-generic members
 
 This section finishes members that §§31–33 left out: `OrderedDictionary`'s key and value
@@ -10716,3 +11028,4 @@ is the set's version, `count` is the number of in-range items (see Findings).
 `Pulse.Lib.CSharp.TypeTest` (above) is new: `is_a`, `unbox`, `null_obj` and the three
 lemmas. Its consistency argument is in the interface's comment. It also holds `unbox_or`
 (R35.12), which is a definition from `is_a` and `unbox`, so it adds no assumption.
+

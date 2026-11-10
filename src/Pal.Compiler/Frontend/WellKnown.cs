@@ -561,6 +561,22 @@ public sealed class WellKnown
     /// R29.4. <c>object</c>, and the enumerator interfaces a collection's explicit members
     /// return: a value of one of them is an <see cref="ObjType"/>.
     /// </summary>
+    /// <summary>R34.1. <c>IEnumerable&lt;T&gt;</c> or <c>ICollection&lt;T&gt;</c>.</summary>
+    public static bool IsEnumerableInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IEnumerable<T>"
+            or "System.Collections.Generic.ICollection<T>";
+
+    /// <summary>R34.22. <c>IDictionary&lt;K, V&gt;</c>.</summary>
+    public static bool IsDictionaryInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IDictionary<TKey, TValue>";
+
+    /// <summary>R34.4. <c>ICollection&lt;T&gt;</c>.</summary>
+    public static bool IsCollectionInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.ICollection<T>";
+
     public static bool IsObjectLike(ITypeSymbol? type) =>
         type is { SpecialType: SpecialType.System_Object } ||
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
@@ -670,6 +686,15 @@ public sealed class WellKnown
             // span that is the whole of exactly one array, and the point of a span is that
             // it need not be. Being its own type is what lets `a.AsSpan(i, n)` translate
             // (R17.5) and lets a method taking `Span<T>` be called with a window.
+            // R34.1. An enumerable argument is lent, read-only, as an abstract resource.
+            case INamedTypeSymbol named when IsEnumerableInterface(named) &&
+                                             MapType(named.TypeArguments[0]) is { } enumerableElement:
+                return new IrEnumerableType(enumerableElement, IsCollectionInterface(named));
+            // R34.22. An `IDictionary<K, V>` argument is the collection of its pairs.
+            case INamedTypeSymbol named when IsDictionaryInterface(named) &&
+                                             MapType(named.TypeArguments[0]) is { } dk && IsPlainValue(dk) &&
+                                             MapType(named.TypeArguments[1]) is { } dv && IsPlainValue(dv):
+                return new IrEnumerableType(new IrUserSpecType("ValueTuple", TupleType, [dk, dv]), true);
             case INamedTypeSymbol named when IsAnySpan(named) &&
                                              MapType(named.TypeArguments[0]) is { } spanElement:
                 return new IrSpanType(spanElement);

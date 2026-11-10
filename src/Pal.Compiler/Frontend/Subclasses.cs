@@ -132,7 +132,7 @@ internal static class Subclasses
     {
         switch (node)
         {
-            case ForEachStatementSyntax fe:
+            case CommonForEachStatementSyntax fe:
                 var info = model.GetForEachStatementInfo(fe);
                 if (info.GetEnumeratorMethod is { } ge) yield return ge;
                 if (info.MoveNextMethod is { } mn) yield return mn;

@@ -117,6 +117,7 @@ Both forms lower to the same thing. Mix them freely.
 | `ConvertAll(s, f)` | `s` mapped through the `Converter<T, TOutput>` `f` (R26.3) |
 | `Permutation(s, t)` | `t` is a rearrangement of `s`, by an explicit bijection (R26.7) |
 | `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
+| `SortedRangeBy(s0, s1, i, n, comparison)` | `SortedRange` with a `Comparison<T>` (R34.16) |
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
 | `Tree<V>(x)`, `WellFormed(x)` | the `SpecTree<V>` of views a `[Region]` pointer reaches; every path from it ends at `null` (R27.7) |
@@ -298,6 +299,28 @@ foreach (var band in schedule)
 ```
 
 doc/translation.md §20 has the rules, and the library assumptions such a proof trusts.
+
+An `IEnumerable<T>` or `ICollection<T>` parameter is a read-only argument whose items, in
+order, are `Pal.Contents(e)`. An enumerator declared by `using` over it is a cursor, and
+`Pal.Index(en)` is how many items it has moved past:
+
+```csharp
+[Ensures("Result == Pal.Contents(items).Length")]
+public static int CountAll(IEnumerable<int> items)
+{
+    int n = 0;
+    using IEnumerator<int> en = items.GetEnumerator();
+    while (en.MoveNext())
+    {
+        Pal.Invariant(n == Pal.Index(en));
+        n++;
+    }
+    return n;
+}
+```
+
+`items is ICollection<int> c` is a test whose outcome the method cannot know, so both
+branches are verified. doc/translation.md §34 has the rules and what they trust.
 
 ## 3. Ownership
 

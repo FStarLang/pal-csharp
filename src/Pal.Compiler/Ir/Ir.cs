@@ -102,6 +102,18 @@ public sealed record IrSpanType(IrType Element) : IrType
     protected override string Describe() => $"Span<{Element}>";
 }
 
+/// <summary>
+/// R34.1. An <c>IEnumerable&lt;T&gt;</c>, <c>ICollection&lt;T&gt;</c> or
+/// <c>IReadOnlyCollection&lt;T&gt;</c> argument: a read-only resource the caller lends,
+/// <c>Pulse.Lib.CSharp.Enumerable.pts_to</c>, whose items a specification names with
+/// <c>Pal.Contents</c>. <see cref="Collection"/> is set when the static type is
+/// <c>ICollection&lt;T&gt;</c>, which the precondition then says the object is.
+/// </summary>
+public sealed record IrEnumerableType(IrType Element, bool Collection) : IrType
+{
+    protected override string Describe() => Collection ? $"ICollection<{Element}>" : $"IEnumerable<{Element}>";
+}
+
 /// <summary>The spec-only ghost box <c>Ghost&lt;T&gt;</c>.</summary>
 public sealed record IrGhostType(IrType Inner) : IrType
 {
@@ -731,18 +743,25 @@ public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 /// <item><c>Move</c>: <c>a, si, di, len</c> -- the same, within one array.</item>
 /// <item><c>Clear</c>, <c>Reverse</c>: <c>a, i, n</c>.</item>
 /// <item><c>Sort</c>: <c>a, i, n, comparer</c> (R26.7).</item>
+/// <item><c>CopyFrom</c>: <c>e, a, i</c> -- <c>((ICollection&lt;T&gt;)e).CopyTo(a, i)</c> (R34.5).</item>
+/// <item><c>CopyKeys</c>, <c>CopyValues</c>: <c>e, a, i</c> -- <c>d.Keys.CopyTo(a, i)</c> (R34.22).</item>
+/// <item><c>SortPairs</c>: <c>keys, values, comparer</c> (R34.22).</item>
 /// </list>
-public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort }
+public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort, CopyFrom, CopyKeys, CopyValues, SortPairs }
 
 public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr> Args) : IrStmt(Loc)
 {
     /// <summary>The array the operation writes.</summary>
     public IrExpr Written => Op switch
     {
-        ArrayOpKind.Copy => Args[1],
+        ArrayOpKind.Copy or ArrayOpKind.CopyFrom or ArrayOpKind.CopyKeys or ArrayOpKind.CopyValues => Args[1],
         ArrayOpKind.CopyAt => Args[2],
         _ => Args[0],
     };
+
+    /// <summary>Every array the operation writes.</summary>
+    public IEnumerable<IrExpr> AllWritten =>
+        Op == ArrayOpKind.SortPairs ? [Args[0], Args[1]] : [Written];
 }
 
 /// <summary>
@@ -758,6 +777,20 @@ public sealed record IrArraySearch(IrLoc Loc, bool Last, IrExpr Array, IrExpr It
 /// </summary>
 public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, IrExpr Count, IrExpr Item, IrExpr Comparer)
     : IrExpr(Loc);
+
+/// <summary>
+/// R34.3–R34.6. An operation on an enumerable argument (<see cref="IrEnumerableType"/>).
+/// <list type="bullet">
+/// <item><c>Count</c>: <c>((ICollection&lt;T&gt;)e).Count</c>.</item>
+/// <item><c>Start</c>: <c>e.GetEnumerator()</c>, a cursor that has yielded nothing.</item>
+/// <item><c>MoveNext</c>, <c>Current</c>: on the enumerator whose cursor local is <c>Args[0]</c>.</item>
+/// <item><c>Lend</c> (R34.26): the array <c>Source</c>, lent as an enumerable argument for the
+/// statement's call (an <see cref="IrEnumerableType"/> of the node's type), and taken back after it.</item>
+/// </list>
+/// </summary>
+public enum EnumOpKind { Count, Start, MoveNext, Current, Lend }
+
+public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
 
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 {

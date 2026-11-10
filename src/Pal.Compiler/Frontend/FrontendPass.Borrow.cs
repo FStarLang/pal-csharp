@@ -206,7 +206,7 @@ public static partial class FrontendPass
             if (body is not null && lowerer.Expressions.HoistedCells.Count > 0)
                 body = new IrBlock(body.Loc, [.. lowerer.Expressions.HoistedCells.Values.OrderBy(d => d.Name, StringComparer.Ordinal), body]);
             if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
-                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
+                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax))
                 body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);
         }
 

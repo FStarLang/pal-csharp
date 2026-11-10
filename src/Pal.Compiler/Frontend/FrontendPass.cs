@@ -1981,6 +1981,7 @@ public static partial class FrontendPass
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); if (na.Source is { } nas) Walk(nas); return;
                 case IrContents ct: Walk(ct.Array); return;
+                case IrEnumOp eo: Walk(eo.Source); foreach (var a in eo.Args) Walk(a); return;
                 case IrQuantifier q: Walk(q.Body); return;
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;
                 case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
