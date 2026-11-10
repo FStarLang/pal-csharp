@@ -647,7 +647,7 @@ public static partial class FrontendPass
 
                     // R29.4. Nor does a static one producing an `object`: it reads no
                     // specification type, and an `obj` is no type's to own.
-                    var producesObject = member.IsStatic && WellKnown.IsObjectLike(member switch
+                    var producesObject = member.IsStatic && WellKnown.IsObjectLikeReturn(member switch
                     {
                         IMethodSymbol om => om.ReturnType,
                         IPropertySymbol op => op.Type,
@@ -2369,7 +2369,7 @@ public static partial class FrontendPass
                               // R35.3. So does one about a wrapping struct it creates.
                               Borrowing.IsWrapping(candidate.Symbol.ReturnType, known) ||
                               // R29.4. A boxed result is described by the state of what it boxes.
-                              WellKnown.IsObjectLike(candidate.Symbol.ReturnType),
+                              WellKnown.IsObjectLikeReturn(candidate.Symbol.ReturnType),
                 });
             }
 
@@ -2737,7 +2737,7 @@ public static partial class FrontendPass
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
             // R32.13. A method returning a view exactly returns its record.
-            : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+            : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -2877,7 +2877,7 @@ public static partial class FrontendPass
         Candidate candidate, SemanticModel model, WellKnown known, DiagnosticBag diagnostics,
         IrLoc loc, ImmutableArray<IrParam> parameters, Specs specs)
     {
-        var returnType = known.MapType(candidate.Symbol.ReturnType);
+        var returnType = known.MapReturnType(candidate.Symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The [Spec] return type `{candidate.Symbol.ReturnType}`");

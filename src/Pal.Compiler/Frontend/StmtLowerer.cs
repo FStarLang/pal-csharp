@@ -71,10 +71,10 @@ public sealed class StmtLowerer(
             // R35.2. `out var x` in a returned expression: declared ahead, as R33.9's `if`.
             ReturnStatementSyntax { Expression: { } re } r when OutDeclarations(re, loc) is { IsEmpty: false } outs =>
                 new IrBlock(loc, [.. outs, new IrReturn(loc,
-                    _code.ToDeclared(_code.Lower(re), known.MapType(ReturnType(r))))]) { Splice = true },
+                    _code.ToDeclared(_code.Lower(re), known.MapReturnType(ReturnType(r))))]) { Splice = true },
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
-                    known.MapType(ReturnType(r)))),
+                    known.MapReturnType(ReturnType(r)))),
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
@@ -2051,7 +2051,7 @@ public sealed class StmtLowerer(
         {
             // R35.2. As in a `return`, an `out var x` in it is declared ahead.
             var outs = OutDeclarations(arrow.Expression, loc);
-            IrStmt ret = new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+            IrStmt ret = new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapReturnType(m.ReturnType)));
             return outs.IsEmpty ? ret : new IrBlock(loc, [.. outs, ret]) { Splice = true };
         }
         if (arrow.Expression is ThrowExpressionSyntax th)

@@ -729,7 +729,7 @@ public sealed partial class ExprLowerer
 
     /// <summary>R32.13. A member's result type, or the view its <c>[return: Exactly]</c> names.</summary>
     internal IrType? ViewResultType(IMethodSymbol callee) =>
-        FrontendPass.ExactReturn(callee, known) is { } exact ? known.MapType(exact) : known.MapType(callee.ReturnType);
+        FrontendPass.ExactReturn(callee, known) is { } exact ? known.MapReturnType(exact) : known.MapReturnType(callee.ReturnType);
 
     /// <summary>
     /// R28.2/R27.37. A call of a borrowing member's translation: the borrowed object, the
@@ -744,7 +744,7 @@ public sealed partial class ExprLowerer
         return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), self, .. owned, .. args])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(callee.ReturnType),
+            ResultType = known.MapReturnType(callee.ReturnType),
             HasReceiver = true,
             ParamTypes = [null, null, .. owned.Select(o => o.Type), .. callee.Parameters.Select(p => known.MapType(p.Type))],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],

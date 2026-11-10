@@ -10329,7 +10329,9 @@ reserves).
 (and only a parameter, or a local initialised from one) is the abstract
 `Pulse.Lib.CSharp.Enumerable.enumerable T`. It is not a pure sequence but a resource,
 `Enumerable.pts_to e #p s`, which the caller lends for the call at any permission `p` and
-gets back unchanged. The items it yields, in order, are the ghost sequence `s`; a contract
+gets back unchanged. A member's *result* at either interface, and an object converted to one
+other than as an argument, is instead R35.6's box: R34 owns the parameter positions and R35.6
+the result positions (see R35.6 for the split). The items it yields, in order, are the ghost sequence `s`; a contract
 names them `Pal.Contents(e)`. A caller can lend a read-only array (`Enumerable.lend`), so
 the interface is implemented in `Pulse.Lib.CSharp.Enumerable.fst` with no assumption of
 its own.
@@ -10674,11 +10676,24 @@ now does so in a contract too, and through a held struct (`_enumerator.Current` 
 wrapping struct's member). So a `[Spec]` property `SpecCurrent => Current` and a wrapping
 struct's contract `@this._enumerator.SpecCurrent.Key` both read the field.
 
-**R35.6. Collection interfaces are boxes.** R29.4's `object`-like types also include:
-* `ICollection`, `ICollection<T>` and `IEnumerable<T>`. These are what a dictionary's
-  explicit `Keys` and `Values` return.
+**R35.6. Collection interfaces are boxes.** R29.4's `object`-like types also include
+`ICollection`, `ICollection<T>` and `IEnumerable<T>`, which are what a dictionary's explicit
+`Keys` and `Values` return, at these positions:
+* the non-generic `ICollection` everywhere (it has no element type R34.1 could lend at);
+* `ICollection<T>` and `IEnumerable<T>` as a *result*: the return type of a method or
+  property, the value of a call or property read at that type, and a postcondition's
+  `Result`;
+* `ICollection<T>` and `IEnumerable<T>` as the target of a conversion of an object anywhere
+  but at a call's argument (`IEnumerable<T> AsEnumerable() => this;`).
 
-A value seen at one of them is an abstract `obj`. A class converted to one is `box`ed, and a
+Elsewhere -- a parameter, a local derived from one by `is`/`as` or `foreach`, and the
+conversion of an argument to a parameter -- the generic two are R34.1's lent enumerables,
+not boxes. The split is by position, so the two readings never meet: a box is produced only
+where a member's result is, and a lent enumerable exists only for the duration of the call
+that lends it, so no value is ever seen at both. R34.1 never translated a member *returning*
+an enumerable, so no R34 program changes meaning.
+
+A value seen at a boxed position is an abstract `obj`. A class converted to one is `box`ed, and a
 contract describes the result with `Pal.Boxes(Result, c)` for some view `c`. This does not
 apply to an `[Exactly]` operand (R27.46): one seen at such an interface is still the object of
 its exact class, not a box. For example, `foreach (T x in other)` over an

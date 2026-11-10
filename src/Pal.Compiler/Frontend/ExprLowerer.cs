@@ -385,7 +385,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var atExact = ExactArgument(node, info, loc);
         // R10.2. `null` has no type of its own; what it denotes is fixed by the context,
         // and that is the only thing that says *which* class's `None` this is.
-        var type = Declared(node) ?? known.MapType(info.Type)
+        var type = (MemberResult(node, info) ? WellKnown.Obj : Declared(node) ?? known.MapType(info.Type))
             ?? (node.IsKind(SyntaxKind.NullLiteralExpression) ? known.MapType(info.ConvertedType) : null);
 
         // R20.3. A method group converted to a delegate is a value of an opaque type. The
@@ -629,7 +629,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (type is not null && !WellKnown.IsObj(type) && !ReferenceEqualityOperand(node) && !atExact && !ExactOperand(node) &&
             !(WellKnown.IsBoxedCollectionInterface(info.ConvertedType) && info.Type is { TypeKind: TypeKind.Array or TypeKind.Interface }) &&
             node.Parent is not (ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression }) &&
-            WellKnown.IsObj(known.MapType(info.ConvertedType)))
+            (WellKnown.IsObj(known.MapType(info.ConvertedType)) ||
+             // R35.6. An object seen at a collection interface is boxed except at an argument,
+             // where R34.1 lends it (R34.26) and the interface is the parameter's enumerable.
+             WellKnown.IsBoxedCollectionInterface(info.ConvertedType) && !AtArgument(node)))
             result = Box(loc, result);
 
         // R9.15. C# inserts a reference conversion silently wherever a derived reference
@@ -1561,7 +1564,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrCall(loc, Naming.Of(getter), [receiver])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(prop.Type),
+            ResultType = known.MapReturnType(prop.Type),
             HasReceiver = true,
             ParamTypes = Declarations.ParamTypes(getter, known, true),
             TypeArguments = known.TypeArguments(getter),
@@ -1592,7 +1595,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                  ToDeclared(Lower(node.Right), known.MapType(itemSetter.Parameters[1].Type))])
             {
                 Kind = CalleeKind.Method,
-                ResultType = known.MapType(itemSetter.ReturnType),
+                ResultType = known.MapReturnType(itemSetter.ReturnType),
                 HasReceiver = true,
                 ParamTypes = Declarations.ParamTypes(itemSetter, known, true),
                 TypeArguments = known.TypeArguments(itemSetter),
@@ -1619,7 +1622,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         return new IrCall(loc, Naming.Of(setter), [receiver, ToDeclared(Lower(node.Right), known.MapType(setter.Parameters[0].Type))])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(setter.ReturnType),
+            ResultType = known.MapReturnType(setter.ReturnType),
             HasReceiver = true,
             ParamTypes = Declarations.ParamTypes(setter, known, true),
             TypeArguments = known.TypeArguments(setter),
@@ -1949,7 +1952,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             return new IrCall(loc, Naming.Of(itemGetter), [receiver, index])
             {
                 Kind = CalleeKind.Method,
-                ResultType = known.MapType(itemGetter.ReturnType),
+                ResultType = known.MapReturnType(itemGetter.ReturnType),
                 HasReceiver = true,
                 ParamTypes = Declarations.ParamTypes(itemGetter, known, true),
                 TypeArguments = known.TypeArguments(itemGetter),
@@ -2523,6 +2526,29 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             : LowerArgument(arg));
 
     /// <summary>
+    /// R35.6. Whether <paramref name="node"/> is a member's result at a collection interface
+    /// -- a call, a property read, or a postcondition's <c>Result</c> -- which is a box.
+    /// </summary>
+    private bool MemberResult(ExpressionSyntax node, TypeInfo info) =>
+        WellKnown.IsBoxedCollectionInterface(info.Type) &&
+        model.GetSymbolInfo(node).Symbol switch
+        {
+            IMethodSymbol { MethodKind: not MethodKind.Constructor } or IPropertySymbol => true,
+            IParameterSymbol { Name: SpecBinder.ResultParameter } p =>
+                p.ContainingSymbol.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal),
+            _ => false,
+        };
+
+    /// <summary>R35.6. Whether <paramref name="node"/> is, up to parentheses and <c>!</c>, a call's argument.</summary>
+    private static bool AtArgument(SyntaxNode node)
+    {
+        var p = node.Parent;
+        while (p is ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression })
+            p = p.Parent;
+        return p is ArgumentSyntax;
+    }
+
+    /// <summary>
     /// R34.26. An object of a translated class <c>C</c> passed at an enumerable parameter:
     /// an <c>[Exactly(typeof(C))]</c> parameter, or an expression of static type <c>C</c>
     /// where every translated object of <c>C</c> has dynamic type <c>C</c> (R27.1). It is
@@ -2587,7 +2613,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var copy = new IrCall(loc, Naming.Of(copyTo), [receiver, snapshot, new IrLiteral(loc, 0) { Type = IrPrim.Int }])
         {
             Kind = copyKind,
-            ResultType = known.MapType(copyTo.ReturnType),
+            ResultType = known.MapReturnType(copyTo.ReturnType),
             HasReceiver = true,
             KeepsArguments = true,
             ParamTypes = Declarations.ParamTypes(copyTo, known, true),
@@ -2838,7 +2864,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R29.1. `KeyValuePair.Create(k, v)`.
         if (method is { IsStatic: true, Name: "Create", Parameters.Length: 2 } &&
             method.ContainingType?.ToDisplayString() == "System.Collections.Generic.KeyValuePair" &&
-            known.MapType(method.ReturnType) is IrUserSpecType created)
+            known.MapReturnType(method.ReturnType) is IrUserSpecType created)
             return Pair(loc, created, args[0].Expression, args[1].Expression);
 
         if (known.IsPalIntrinsic(method))
@@ -2939,7 +2965,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (!SpecPosition &&
             method is { IsStatic: true, Name: "Empty", IsGenericMethod: true, Parameters.Length: 0 } &&
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
-            known.MapType(method.ReturnType) is IrArrayType emptyType)
+            known.MapReturnType(method.ReturnType) is IrArrayType emptyType)
             return new IrNewArray(loc, emptyType.Element, new IrLiteral(loc, 0) { Type = IrPrim.Int }) { Type = emptyType };
 
         // R23.12. `Math.Min(a, b)` and `Math.Max(a, b)` at `int`, with effect-free arguments,
@@ -3058,7 +3084,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             var lowered = args.Select(a => Lower(a.Expression)).ToImmutableArray();
             return new IrSpecOp(loc, fn, lowered)
             {
-                Type = method.ReturnsVoid ? null : known.MapType(method.ReturnType),
+                Type = method.ReturnsVoid ? null : known.MapReturnType(method.ReturnType),
                 ParamTypes = SpecParamTypes(method, lowered),
                 Region = true,
             };
@@ -3197,7 +3223,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 : [receiver, .. args.Select((a, i) => LowerCallArgument(a, i, method)), .. omitted])
         {
             Kind = kind.Value,
-            ResultType = known.MapType(method.ReturnType),
+            ResultType = known.MapReturnType(method.ReturnType),
             HasReceiver = receiver is not null,
             KeepsArguments = method.MethodKind != MethodKind.Constructor &&
                 !method.Parameters.Any(p => Declarations.Has(p, known.ConsumesAttribute)),
@@ -3218,7 +3244,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         new(loc, Naming.Of(method), [receiver])
         {
             Kind = Declarations.KindOf(method, known)!.Value,
-            ResultType = known.MapType(method.ReturnType),
+            ResultType = known.MapReturnType(method.ReturnType),
             HasReceiver = true,
             KeepsArguments = true,
             ParamTypes = [.. Declarations.ParamTypes(method, known, true)],
@@ -3321,7 +3347,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R24.14. Inside a loop, the method's result is the cell its `return` stored to.
             case nameof(PalLang.Pal.Result) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedValue)
-                    { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapType(rm.ReturnType) : null };
+                    { Type = model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol rm ? known.MapReturnType(rm.ReturnType) : null };
             case nameof(PalLang.Pal.Result): return new IrResult(loc);
             case nameof(PalLang.Pal.Returned) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedFlag) { Type = IrPrim.Bool };
@@ -3387,8 +3413,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R27.42. The values an iterator has yielded: so far, in its body; all, in its contract.
             case nameof(PalLang.Pal.Yielded):
                 return IteratorTrace is { } trace
-                    ? new IrVar(loc, trace) { Type = known.MapType(method.ReturnType) }
-                    : new IrResult(loc) { Type = known.MapType(method.ReturnType) };
+                    ? new IrVar(loc, trace) { Type = known.MapReturnType(method.ReturnType) }
+                    : new IrResult(loc) { Type = known.MapReturnType(method.ReturnType) };
             case nameof(PalLang.Pal.EmptySeq):
                 return new IrSeqOp(loc, SeqOpKind.Empty, []);
             case nameof(PalLang.Pal.Reverse):
@@ -3422,7 +3448,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         nameof(PalLang.Pal.FindAll) => "Pulse.Lib.CSharp.Find.find_all",
                         nameof(PalLang.Pal.RemoveAll) => "Pulse.Lib.CSharp.Find.remove_all",
                         _ => "Pulse.Lib.CSharp.Find.map",
-                    }, [Arg(0), Arg(1)]) { Type = known.MapType(method.ReturnType), Built = true };
+                    }, [Arg(0), Arg(1)]) { Type = known.MapReturnType(method.ReturnType), Built = true };
             // R26.7. Permutation, and what a sort guarantees.
             case nameof(PalLang.Pal.Permutation):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Sort.permutation", [Arg(0), Arg(1)]) { Type = IrPrim.Bool };
@@ -3452,7 +3478,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // R23.10. A circular buffer's live elements.
             case nameof(PalLang.Pal.Ring):
                 return new IrSpecOp(loc, "CS.ring", [Arg(0), Arg(1), Arg(2)])
-                    { Type = known.MapType(method.ReturnType) };
+                    { Type = known.MapReturnType(method.ReturnType) };
             // §25. Comparers and sorted sequences.
             case nameof(PalLang.Pal.Compare):
                 return new IrSpecOp(loc, "Pulse.Lib.CSharp.Order.compare", [Arg(0), Arg(1), Arg(2)])
@@ -3486,7 +3512,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         "(doc/translation.md R27.21).");
                     return new IrLiteral(loc, null);
                 }
-                return new IrVar(loc, HeapVarName(hc.Name)) { Type = known.MapType(method.ReturnType) };
+                return new IrVar(loc, HeapVarName(hc.Name)) { Type = known.MapReturnType(method.ReturnType) };
             }
             case nameof(PalLang.Pal.Tree) or nameof(PalLang.Pal.WellFormed) or nameof(PalLang.Pal.InRegion)
                 or nameof(PalLang.Pal.Unshared) or nameof(PalLang.Pal.Reshaped)
@@ -3524,7 +3550,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         $"{Region.Module}.link_at {Names.ClassModule(rc.Name)}." +
                         (method.Name == nameof(PalLang.Pal.LeftOf) ? Region.LeftOf(rc.Name) : Region.RightOf(rc.Name)),
                         [heap, Arg(0)])
-                        { Type = known.MapType(method.ReturnType), MachineArgs = true };
+                        { Type = known.MapReturnType(method.ReturnType), MachineArgs = true };
                 if (method.Name == nameof(PalLang.Pal.Unshared))
                     return new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.UnsharedOf(rc.Name)}", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };
@@ -3534,7 +3560,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                         { Type = IrPrim.Bool, MachineArgs = true };
                 return method.Name == nameof(PalLang.Pal.Tree)
                     ? new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.TreeOf(rc.Name)}", [heap, Arg(0)])
-                        { Type = known.MapType(method.ReturnType), MachineArgs = true }
+                        { Type = known.MapReturnType(method.ReturnType), MachineArgs = true }
                     : new IrSpecOp(loc, $"{Names.ClassModule(rc.Name)}.{Region.WfOf(rc.Name)}", [heap, Arg(0)])
                         { Type = IrPrim.Bool, MachineArgs = true };
             }

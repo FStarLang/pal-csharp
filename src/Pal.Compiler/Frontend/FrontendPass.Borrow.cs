@@ -112,7 +112,7 @@ public static partial class FrontendPass
                new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value),
                .. owned.Select(o => new IrParam(loc, Borrowing.OwnedName(o.Field), o.Type, ParamMode.Value))];
 
-        var returnType = isCtor ? selfType : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+        var returnType = isCtor ? selfType : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");

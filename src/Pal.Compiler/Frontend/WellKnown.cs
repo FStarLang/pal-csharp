@@ -582,15 +582,28 @@ public sealed class WellKnown
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
         i.OriginalDefinition.ToDisplayString() is "System.Collections.IEnumerator"
             or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator"
-            // R35.6. And the collection interfaces a dictionary's explicit `Keys` and `Values` return.
-            or "System.Collections.ICollection" or "System.Collections.Generic.ICollection<T>"
-            or "System.Collections.Generic.IEnumerable<T>";
+            // R35.6. And the non-generic `ICollection`, which has no element type to lend at.
+            or "System.Collections.ICollection";
 
-    /// <summary>R35.6. The collection interfaces <see cref="IsObjectLike"/> admits.</summary>
+    /// <summary>
+    /// R35.6. The collection interfaces a dictionary's explicit <c>Keys</c> and <c>Values</c>
+    /// return. The generic two are R34.1's lent enumerables at a parameter (and in what is
+    /// derived from one); they are boxes only where R35.6 places them: a member's result
+    /// (<see cref="MapReturnType"/>, <see cref="IsObjectLikeReturn"/>) and an object converted
+    /// to one anywhere but at an argument.
+    /// </summary>
     public static bool IsBoxedCollectionInterface(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
         i.OriginalDefinition.ToDisplayString() is "System.Collections.ICollection"
             or "System.Collections.Generic.ICollection<T>" or "System.Collections.Generic.IEnumerable<T>";
+
+    /// <summary>R29.4/R35.6. A member result that is an <c>obj</c>.</summary>
+    public static bool IsObjectLikeReturn(ITypeSymbol? type) =>
+        IsObjectLike(type) || IsBoxedCollectionInterface(type);
+
+    /// <summary>R35.6. The type of a member's result: a collection interface there is a box.</summary>
+    public IrType? MapReturnType(ITypeSymbol? type) =>
+        IsBoxedCollectionInterface(type) ? Obj : MapType(type);
 
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
@@ -620,7 +633,7 @@ public sealed class WellKnown
             if (MapType(p.Type) is not { } pt) return null;
             ps.Add(pt);
         }
-        var ret = invoke.ReturnsVoid ? new IrPulseType("unit", "unit") : MapType(invoke.ReturnType);
+        var ret = invoke.ReturnsVoid ? new IrPulseType("unit", "unit") : MapReturnType(invoke.ReturnType);
         if (ret is null) return null;
         return new IrDelegateType(del.ToDisplayString()) { Params = ps.ToImmutable(), Return = ret };
     }

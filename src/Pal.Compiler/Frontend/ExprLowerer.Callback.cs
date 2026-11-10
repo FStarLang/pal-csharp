@@ -37,7 +37,7 @@ public sealed partial class ExprLowerer
             known.IsRegionClass(node) && known.MapType(node) is IrClassType region &&
             node.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute)) is IPropertySymbol view &&
             known.MapType(view.Type) is { } viewType &&
-            known.MapType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
+            known.MapReturnType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
             return new IrCallback(region with { Nullable = false }, viewType, result)
             {
                 Bounded = Declarations.Find(p, known.CallbackAttribute) is { } data &&
@@ -97,7 +97,7 @@ public sealed partial class ExprLowerer
         if (args is not [{ Expression: IdentifierNameSyntax id }] || !TraceTarget(id))
             return Refused("PALCS0708", loc,
                 "`Pal.Trace` takes a `[Callback]` parameter of the enclosing method (doc/translation.md R27.39).");
-        return new IrVar(loc, TraceName(id.Identifier.ValueText)) { Type = known.MapType(method.ReturnType) };
+        return new IrVar(loc, TraceName(id.Identifier.ValueText)) { Type = known.MapReturnType(method.ReturnType) };
     }
 
     /// <summary>
