@@ -309,6 +309,11 @@ namespace System.Collections.Generic
         private static bool Search(Seq<int> buckets, Seq<Entry> entries, SpecInt count, SpecInt freeList,
             SpecInt freeCount, IEqualityComparer<T>? comparer, T item, SpecInt i, SpecInt q) => throw new InvalidOperationException();
 
+        /// <summary>The hash code AddIfNotPresent stores for <paramref name="item"/>.</summary>
+        [Spec]
+        [PulseBody("I32.v (Pulse.Lib.CSharp.Equality.hash (HashSetChain.eff $(comparer)) $(item))")]
+        private static SpecInt HashCodeOf(IEqualityComparer<T>? comparer, T item) => throw new InvalidOperationException();
+
         [Spec]
         [PulseBody("HashSetChain.hit $(entries) $(comparer) $(item) $(i)")]
         private static bool Hit(Seq<Entry> entries, IEqualityComparer<T>? comparer, T item, SpecInt i)
@@ -2351,13 +2356,23 @@ namespace System.Collections.Generic
         [Ensures("Implies(!Result, HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, value))")]
         [Ensures("HashSet<T>.SameEquality(Old(@this.SpecComparer), @this.SpecComparer)")]
         [Rlimit(2)]
+        [OpaqueSpecs("Search", "Wf", "Mem")]
         private bool AddIfNotPresent(T value, out int location)
         {
             Ghost<int> liveIn = _count - _freeCount;
+            Ghost<Seq<T>> itemsIn = ItemsOf(Pal.Contents(_entries), _count);
             if (_buckets == null)
             {
                 Initialize(0);
+                Pal.Assert(ItemsOf(Pal.Contents(_entries), _count) == itemsIn.Value && _count - _freeCount == liveIn.Value);
             }
+            Pal.Join(_buckets != null && _entries != null && _buckets.Length == _entries.Length && 0 < _entries.Length && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length));
+            Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= _entries.Length && _count < 0x7FFFFFC3);
+            Pal.Join(_comparer == Pal.Old(this.SpecComparer) && (typeof(T).IsValueType || _comparer != null));
+            Pal.Join(HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer));
+            Pal.Join(ItemsOf(Pal.Contents(_entries), _count) == itemsIn.Value && _count - _freeCount == liveIn.Value);
+            Pal.Join(itemsIn.Value == Pal.Old(this.SpecItems) && liveIn.Value == Pal.Old(this.SpecCount) && !Pal.Returned());
+            Pal.Split();
             Debug.Assert(_buckets != null);
 
             Entry[]? entries = _entries;
@@ -2380,9 +2395,10 @@ namespace System.Collections.Generic
                 // ValueType: Devirtualize with EqualityComparer<TValue>.Default intrinsic
                 while ((uint)i < (uint)entries.Length)
                 {
-                    Pal.Invariant(collisionCount <= (uint)entries.Length);
-                    Pal.Invariant(Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, value, i, collisionCount));
-                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), value)));
+                    Pal.Invariant(collisionCount <= (uint)entries.Length && _entries == entries && _comparer == comparer);
+                    Pal.Invariant(HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer) && ItemsOf(Pal.Contents(entries), _count) == itemsIn.Value);
+                    Pal.Invariant(Pal.Implies(!Pal.Returned(), Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount)));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(comparer, itemsIn.Value, value)));
                     Pal.Decreases((uint)entries.Length - collisionCount);
                     ref Entry entry = ref entries[i];
                     if (entry.HashCode == hashCode && EqualityComparer<T>.Default.Equals(entry.Value, value))
@@ -2412,9 +2428,10 @@ namespace System.Collections.Generic
                 int i = bucket - 1; // Value in _buckets is 1-based
                 while ((uint)i < (uint)entries.Length)
                 {
-                    Pal.Invariant(collisionCount <= (uint)entries.Length);
-                    Pal.Invariant(Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, value, i, collisionCount));
-                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), value)));
+                    Pal.Invariant(collisionCount <= (uint)entries.Length && _entries == entries && _comparer == comparer);
+                    Pal.Invariant(HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer) && ItemsOf(Pal.Contents(entries), _count) == itemsIn.Value);
+                    Pal.Invariant(Pal.Implies(!Pal.Returned(), Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount)));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(comparer, itemsIn.Value, value)));
                     Pal.Decreases((uint)entries.Length - collisionCount);
                     ref Entry entry = ref entries[i];
                     if (entry.HashCode == hashCode && comparer.Equals(entry.Value, value))
@@ -2435,6 +2452,15 @@ namespace System.Collections.Generic
                 }
                 SearchAbsent(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
             }
+            Pal.Join(collisionCount <= (uint)entries.Length && _entries == entries && _comparer == comparer && _count - _freeCount == liveIn.Value);
+            Pal.Join(HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer) && ItemsOf(Pal.Contents(entries), _count) == itemsIn.Value);
+            Pal.Join(Pal.Implies(!Pal.Returned(), !HashSet<T>.Mem(comparer, itemsIn.Value, value)));
+            Pal.Join(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && HashSet<T>.Mem(comparer, itemsIn.Value, value)));
+            Pal.Join(itemsIn.Value == Pal.Old(this.SpecItems) && liveIn.Value == Pal.Old(this.SpecCount) && comparer == Pal.Old(this.SpecComparer));
+            Pal.Join(_buckets != null && _entries != null && _buckets.Length == _entries.Length && 0 < _entries.Length && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length));
+            Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= _entries.Length && _count < 0x7FFFFFC3 && (typeof(T).IsValueType || comparer != null));
+            Pal.Join(hashCode == HashSet<T>.HashCodeOf(comparer, value) && Pal.Index(bucket) == (uint)hashCode % (uint)_buckets.Length);
+            Pal.Split();
 
             Ghost<Seq<T>> items0 = ItemsOf(Pal.Contents(entries), _count);
             Ghost<int> count0 = _count;
@@ -2459,13 +2485,24 @@ namespace System.Collections.Generic
                     Resize();
                     bucket = ref GetBucketRef(hashCode);
                     InsertPre(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, comparer, value);
+                    Pal.Assert(count < _entries.Length);
                 }
+                Pal.Join(_buckets != null && _entries != null && _buckets.Length == _entries.Length && 0 < _entries.Length && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length));
+                Pal.Join(_freeCount == 0 && _count == count && count == count0.Value && count < _entries.Length && _comparer == comparer && _count - _freeCount == live0.Value);
+                Pal.Join(HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(_entries), count, _freeList, 0, comparer));
+                Pal.Join(Pal.Index(bucket) == (uint)hashCode % (uint)_buckets.Length && 0 <= HashSet<T>.Bucket(Pal.Contents(_buckets), Pal.Contents(_entries), comparer, value) && HashSet<T>.Bucket(Pal.Contents(_buckets), Pal.Contents(_entries), comparer, value) <= _entries.Length);
+                Pal.Join(ItemsOf(Pal.Contents(_entries), count) == items0.Value);
                 index = count;
                 _count = count + 1;
                 entries = _entries;
                 Pal.Assert(_freeCount == 0 && index == count0.Value && _count == count0.Value + 1 && HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), count0.Value, _freeList, 0, comparer));
                 Pal.Assert(0 <= index && index < entries.Length);
             }
+            Pal.Join(_buckets != null && _entries != null && _buckets.Length == _entries.Length && 0 < _entries.Length && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length));
+            Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= _entries.Length && entries == _entries && _comparer == comparer);
+            Pal.Join(0 <= index && index < entries.Length && Pal.Index(bucket) == (uint)hashCode % (uint)_buckets.Length && 0 <= HashSet<T>.Bucket(Pal.Contents(_buckets), Pal.Contents(entries), comparer, value) && HashSet<T>.Bucket(Pal.Contents(_buckets), Pal.Contents(entries), comparer, value) <= entries.Length);
+            Pal.Join((_count == count0.Value && _freeCount >= 0 && HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), count0.Value, index, _freeCount + 1, comparer) && _freeList == HashSet<T>.FNext(Pal.Contents(entries), index)) || (_freeCount == 0 && index == count0.Value && _count == count0.Value + 1 && HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), count0.Value, _freeList, 0, comparer)));
+            Pal.Join(ItemsOf(Pal.Contents(entries), count0.Value) == items0.Value && _count - _freeCount == live0.Value + 1);
 
             Ghost<Seq<int>> buckets0 = Pal.Contents(_buckets);
             Ghost<Seq<Entry>> entries0 = Pal.Contents(entries);

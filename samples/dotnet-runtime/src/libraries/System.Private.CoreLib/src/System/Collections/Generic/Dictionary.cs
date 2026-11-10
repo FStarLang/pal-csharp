@@ -263,6 +263,7 @@ namespace System.Collections.Generic
         [Requires("0 <= i && i < entries.Length")]
         [Ensures("-1 <= entries[i].next && entries[i].next < entries.Length")]
         [Ensures("-1 <= freeList && freeList < entries.Length")]
+        [Ensures("last < 0 || (0 <= last && last < entries.Length && last != i)")]
         [PulseBody("DictionaryChain.search_next $(buckets) $(entries) $(count) $(freeList) $(freeCount) $(comparer) $(key) $(i) $(q) $(last)")]
         [Conditional("PAL")]
         private static void SearchNext(Seq<int> buckets, Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount, IEqualityComparer<TKey>? comparer, TKey key, SpecInt i, SpecInt q, SpecInt last) { }
@@ -288,6 +289,12 @@ namespace System.Collections.Generic
         [PulseBody("DictionaryChain.wf_fresh $(buckets) $(entries) $(comparer)")]
         [Conditional("PAL")]
         private static void WfFresh(Seq<int> buckets, Seq<Entry> entries, IEqualityComparer<TKey>? comparer) { }
+
+        [Lemma]
+        [Ensures("Pal.Implies(count == 0, !Dictionary<TKey, TValue>.Mem(comparer, Dictionary<TKey, TValue>.KeysOf(entries, count), key))")]
+        [PulseBody("DictionaryChain.not_mem_none $(entries) $(count) $(comparer) $(key)")]
+        [Conditional("PAL")]
+        private static void NotMemNone(Seq<Entry> entries, SpecInt count, IEqualityComparer<TKey>? comparer, TKey key) { }
 
         /// <summary>An empty table is well formed at any comparer (the constructors set it after <c>Initialize</c>).</summary>
         [Lemma]
@@ -2141,6 +2148,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.Implies(!Result, !Dictionary<TKey, TValue>.Mem(Old(@this.SpecComparer), Old(@this.SpecKeys), key) && @this.SpecKeys == Old(@this.SpecKeys) && @this.SpecValues == Old(@this.SpecValues) && @this.SpecCount == Old(@this.SpecCount))")]
         [Ensures("@this.SpecComparer == Old(@this.SpecComparer)")]
         [Rlimit(4)]
+        [OpaqueSpecs("SearchLast", "Wf", "Mem", "RemovedAny", "Removed")]
         public bool Remove(TKey key)
         {
             // The overload Remove(TKey key, out TValue value) is a copy of this method with one additional
@@ -2153,6 +2161,7 @@ namespace System.Collections.Generic
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.key);
             }
 
+            NotMemNone(Pal.Contents(_entries), _count, _comparer, key);
             if (_buckets != null)
             {
                 Debug.Assert(_entries != null, "entries should be non-null");
@@ -2181,6 +2190,7 @@ namespace System.Collections.Generic
                         Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
                         Pal.Invariant(typeof(TKey).IsValueType || _comparer != null);
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
+                        Pal.Invariant(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
                         Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
@@ -2211,11 +2221,13 @@ namespace System.Collections.Generic
                             {
                                 entry.key = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                             {
                                 entry.value = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             RemoveOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                             RemovedForget(comparer, keys0.Value, values0.Value, KeysOf(Pal.Contents(entries), _count), ValuesOf(Pal.Contents(entries), _count), key, entries0.Value[i].value);
@@ -2224,6 +2236,13 @@ namespace System.Collections.Generic
                             Pal.Assert(0 <= length0.Value - collisionCount);
                             return true;
                         }
+                        Pal.Join(entries != null && _buckets != null && _comparer == comparer && _entries == entries);
+                        Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
+                        Pal.Join((typeof(TKey).IsValueType || _comparer != null) && collisionCount <= (uint)entries.Length && entries.Length == length0.Value && entries.Length <= Array.MaxLength);
+                        Pal.Join(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), 0 <= i && i < entries.Length && !Dictionary<TKey, TValue>.Hit(Pal.Contents(entries), comparer, key, i) && Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
+                        Pal.Join(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
 
                         SearchLastStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                         last = i;
@@ -2250,6 +2269,7 @@ namespace System.Collections.Generic
                         Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
                         Pal.Invariant(typeof(TKey).IsValueType || _comparer != null);
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
+                        Pal.Invariant(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
                         Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
@@ -2280,11 +2300,13 @@ namespace System.Collections.Generic
                             {
                                 entry.key = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                             {
                                 entry.value = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             RemoveOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                             RemovedForget(comparer, keys0.Value, values0.Value, KeysOf(Pal.Contents(entries), _count), ValuesOf(Pal.Contents(entries), _count), key, entries0.Value[i].value);
@@ -2293,6 +2315,13 @@ namespace System.Collections.Generic
                             Pal.Assert(0 <= length0.Value - collisionCount);
                             return true;
                         }
+                        Pal.Join(entries != null && _buckets != null && _comparer == comparer && _entries == entries);
+                        Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
+                        Pal.Join((typeof(TKey).IsValueType || _comparer != null) && collisionCount <= (uint)entries.Length && entries.Length == length0.Value && entries.Length <= Array.MaxLength);
+                        Pal.Join(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), 0 <= i && i < entries.Length && !Dictionary<TKey, TValue>.Hit(Pal.Contents(entries), comparer, key, i) && Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
+                        Pal.Join(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
 
                         SearchLastStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                         last = i;
@@ -2319,6 +2348,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.Implies(!Result, !Dictionary<TKey, TValue>.Mem(Old(@this.SpecComparer), Old(@this.SpecKeys), key) && @this.SpecKeys == Old(@this.SpecKeys) && @this.SpecValues == Old(@this.SpecValues) && @this.SpecCount == Old(@this.SpecCount))")]
         [Ensures("@this.SpecComparer == Old(@this.SpecComparer)")]
         [Rlimit(4)]
+        [OpaqueSpecs("SearchLast", "Wf", "Mem", "RemovedAny", "Removed")]
         public bool Remove(TKey key, [MaybeNullWhen(false)] out TValue value)
         {
             // This overload is a copy of the overload Remove(TKey key) with one additional
@@ -2331,6 +2361,7 @@ namespace System.Collections.Generic
                 ThrowHelper.ThrowArgumentNullException(ExceptionArgument.key);
             }
 
+            NotMemNone(Pal.Contents(_entries), _count, _comparer, key);
             if (_buckets != null)
             {
                 Debug.Assert(_entries != null, "entries should be non-null");
@@ -2359,6 +2390,7 @@ namespace System.Collections.Generic
                         Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
                         Pal.Invariant(typeof(TKey).IsValueType || _comparer != null);
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
+                        Pal.Invariant(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
                         Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
@@ -2391,11 +2423,13 @@ namespace System.Collections.Generic
                             {
                                 entry.key = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                             {
                                 entry.value = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             RemoveOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                             RemovedForget(comparer, keys0.Value, values0.Value, KeysOf(Pal.Contents(entries), _count), ValuesOf(Pal.Contents(entries), _count), key, entries0.Value[i].value);
@@ -2404,6 +2438,13 @@ namespace System.Collections.Generic
                             Pal.Assert(0 <= length0.Value - collisionCount);
                             return true;
                         }
+                        Pal.Join(entries != null && _buckets != null && _comparer == comparer && _entries == entries);
+                        Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
+                        Pal.Join((typeof(TKey).IsValueType || _comparer != null) && collisionCount <= (uint)entries.Length && entries.Length == length0.Value && entries.Length <= Array.MaxLength);
+                        Pal.Join(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), 0 <= i && i < entries.Length && !Dictionary<TKey, TValue>.Hit(Pal.Contents(entries), comparer, key, i) && Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
+                        Pal.Join(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
 
                         SearchLastStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                         last = i;
@@ -2430,6 +2471,7 @@ namespace System.Collections.Generic
                         Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
                         Pal.Invariant(typeof(TKey).IsValueType || _comparer != null);
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
+                        Pal.Invariant(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
                         Pal.Invariant(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
                         Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
@@ -2462,11 +2504,13 @@ namespace System.Collections.Generic
                             {
                                 entry.key = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             if (RuntimeHelpers.IsReferenceOrContainsReferences<TValue>())
                             {
                                 entry.value = default!;
                             }
+                            Pal.Join(Dictionary<TKey, TValue>.RemoveWrites(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), comparer, key, _freeList, i, last) && entries.Length == length0.Value);
 
                             RemoveOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                             RemovedForget(comparer, keys0.Value, values0.Value, KeysOf(Pal.Contents(entries), _count), ValuesOf(Pal.Contents(entries), _count), key, entries0.Value[i].value);
@@ -2475,6 +2519,13 @@ namespace System.Collections.Generic
                             Pal.Assert(0 <= length0.Value - collisionCount);
                             return true;
                         }
+                        Pal.Join(entries != null && _buckets != null && _comparer == comparer && _entries == entries);
+                        Pal.Join(0 <= _freeCount && _freeCount <= _count && _count <= entries.Length && _buckets.Length == entries.Length);
+                        Pal.Join((typeof(TKey).IsValueType || _comparer != null) && collisionCount <= (uint)entries.Length && entries.Length == length0.Value && entries.Length <= Array.MaxLength);
+                        Pal.Join(Dictionary<TKey, TValue>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), 0 <= i && i < entries.Length && !Dictionary<TKey, TValue>.Hit(Pal.Contents(entries), comparer, key, i) && Dictionary<TKey, TValue>.SearchLast(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, key, i, collisionCount, last)));
+                        Pal.Join(Pal.Implies(!Pal.Returned(), Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count) == keys0.Value && Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count) == values0.Value && _count - _freeCount == live0.Value));
+                        Pal.Join(Pal.Implies(Pal.Returned(), Pal.Result<bool>() && Dictionary<TKey, TValue>.Mem(_comparer, keys0.Value, key) && Dictionary<TKey, TValue>.RemovedAny(_comparer, keys0.Value, values0.Value, Dictionary<TKey, TValue>.KeysOf(Pal.Contents(entries), _count), Dictionary<TKey, TValue>.ValuesOf(Pal.Contents(entries), _count), key) && _count - _freeCount == live0.Value - 1));
 
                         SearchLastStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, key, i, collisionCount, last);
                         last = i;

@@ -191,8 +191,17 @@ let search_next (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n fl f
                 (k: tk) (i q last: int)
   : Lemma (requires search_last bs es n fl fc c k i q last /\ 0 <= i /\ i < Seq.length es)
           (ensures -1 <= I32.v (Seq.index es i).E.fld_next /\ I32.v (Seq.index es i).E.fld_next < Seq.length es /\
-                   -1 <= fl /\ fl < Seq.length es)
-  = HC.search_next (ops tk tv) (eff c) bs es n fl fc k i q
+                   -1 <= fl /\ fl < Seq.length es /\
+                   (last < 0 \/ (0 <= last /\ last < Seq.length es /\ last <> i)))
+  = HC.search_next (ops tk tv) (eff c) bs es n fl fc k i q;
+    let b = HC.bkt (HC.hv (eff c) k) (Seq.length es) in
+    let h = I32.v (Seq.index bs b) - 1 in
+    let l = HC.chain_of (ops tk tv) (eff c) bs es n fl fc b in
+    if q >= l then HC.walk_end (ops tk tv) es h l q;
+    if q > 0 then begin
+      HC.chain_live (ops tk tv) es n (-1) b h l (q - 1);
+      HC.chain_distinct (ops tk tv) es n (-1) b h l (q - 1) q
+    end
 
 let search_last_absent (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n fl fc: int) (c: option (Eq.comparer tk))
                        (k: tk) (i q last: int)
@@ -255,6 +264,11 @@ let wf_fresh (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (c: option
   : Lemma (requires Seq.length bs == Seq.length es /\ zeros bs)
           (ensures wf bs es 0 (-1) 0 c /\ keys es 0 == Seq.empty /\ values es 0 == Seq.empty)
   = HC.wf_empty (ops tk tv) (eff c) bs es
+
+/// A table with no slots holds no key (`Remove` on a table never allocated).
+let not_mem_none (#tk #tv: Type0) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) (k: tk)
+  : Lemma (n == 0 ==> ~(mem c (keys es n) k))
+  = ()
 
 (* ---------------------------------------------------------------------------------- *)
 (* TryInsert *)
