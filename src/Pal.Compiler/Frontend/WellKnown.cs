@@ -40,6 +40,7 @@ public sealed class WellKnown
         ConsumesAttribute = Type("ConsumesAttribute");
         ExactlyAttribute = Type("ExactlyAttribute");
         CallbackAttribute = Type("CallbackAttribute");
+        SpecializeAttribute = Type("SpecializeAttribute");
         PlainAttribute = Type("PlainAttribute");
         RegionAttribute = Type("RegionAttribute");
         WrappingAttribute = Type("WrappingAttribute");
@@ -119,6 +120,20 @@ public sealed class WellKnown
     /// <summary>R27.57. Replicas asked for and not yet lowered.</summary>
     public Queue<ReplicaRequest> ReplicaDemand { get; } = new();
     public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>R35.18. A method translated at constant values of its <c>[Specialize]</c> parameters.</summary>
+    public sealed record SpecializationRequest(string Source, string Name, ImmutableDictionary<string, bool> Values);
+
+    /// <summary>R35.18. The specialization being lowered, while one is.</summary>
+    public SpecializationRequest? Specialization { get; set; }
+
+    /// <summary>R35.18. Specializations asked for and not yet lowered.</summary>
+    public Queue<SpecializationRequest> SpecializationDemand { get; } = new();
+    public HashSet<string> SpecializationSeen { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>R35.18. Whether a method has a <c>[Specialize]</c> parameter.</summary>
+    public bool IsSpecialized(IMethodSymbol m) =>
+        m.Parameters.Any(p => p.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, SpecializeAttribute)));
     public INamedTypeSymbol? Exception { get; }
 
     /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
@@ -155,6 +170,8 @@ public sealed class WellKnown
     public INamedTypeSymbol ExactlyAttribute { get; }
     /// <summary>R27.39. <c>[Callback]</c>: a delegate parameter called with region pointers.</summary>
     public INamedTypeSymbol CallbackAttribute { get; }
+    /// <summary>R35.18. <c>[Specialize]</c>: a <c>bool</c> parameter translated at each constant.</summary>
+    public INamedTypeSymbol SpecializeAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
 
     /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>

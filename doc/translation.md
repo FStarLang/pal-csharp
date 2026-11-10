@@ -9960,15 +9960,9 @@ that the view shares the set's comparer and, when its version is the set's, its 
   modelled for type parameters. §35 (R35.7, R35.12, R35.13) models the type tests and
   verifies all but `SyncRoot`.
 * `TreeSubSet` members other than those verified above (R32.14):
-  * `Clear` builds a `List<T>` of the in-range items in a breadth-first walk lambda, then
-    removes them through the set. Its contract would need the walk's per-element trace
-    over a queue of region pointers (R32.9 covers only the in-order walk).
-  * The `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides and `MinInternal`/`MaxInternal`
-    are now verified (§35, R35.14–R35.17).
-  * The re-count `VersionCheckImpl(updateCount: true)`, and so `Count` at a view. The
-    re-count's lambda writes the view's `count` while the walk holds the view, and the
-    calls form a PALCS0579 cycle. So `VersionCheckImpl` requires `!updateCount` (§35 Not
-    verified).
+  * The `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides, `MinInternal`/`MaxInternal`,
+    the re-count `VersionCheckImpl(updateCount: true)`, `Count` at a view and `Clear` are
+    now verified (§35, R35.14–R35.19).
   * `InternalIndexOf`: it enumerates the view (`foreach (T i in this)`), and a view's
     enumerator is a borrowing struct of a borrowing class, which is not translated.
   * `GetViewBetween` on a view returns a view of the *underlying* set. R32.13's
@@ -10501,6 +10495,56 @@ and `Pal.Implies(Pal.Broke(), Same(result, goal))` (R26.10) records what the `co
 `break` leaves. Both members ensure `Same(Result, FirstOr(Filter(… SpecItems), default(T)))`
 (`LastOr` for the greatest).
 
+**R35.18. A `[Specialize]` parameter is translated once per constant.** A `bool` parameter
+marked `[Specialize]` is not a value the method receives but a choice among translations.
+Each call must pass a literal, or, inside a specialization, forward the parameter of that
+specialization (PALCS0881 otherwise; a call outside a view's dispatch reports it too). The
+call `M(…, true, …)` names the module `M__p_true`, which is lowered on demand, once:
+* its signature is `M`'s, with the parameter kept and `requires p == true` added, so the
+  contract is `M`'s at that constant and nothing is assumed;
+* in its body an `if` whose condition is built from literals and specialized parameters by
+  `!`, `&&`, `||` and parentheses (`&&`/`||` only when the left operand decides) is decided,
+  and only the arm taken is lowered.
+
+So a call that only some constants make, such as `VersionCheckImpl(true)`'s walk, is not a
+call of the other specializations. That is what breaks the cycle `VersionCheckImpl →
+InOrderTreeWalk → VersionCheck → VersionCheckImpl`. The walk calls `VersionCheck()`, which
+is `VersionCheck__updateCount_false`, whose decided body never calls the walk. R10.7's cycle
+check (PALCS0579) then runs on the specialized graph unchanged. The unspecialized method is
+not emitted.
+
+**R35.19. A lambda passed to the view's own member may write the view's scalar fields.**
+R27.39 refuses a lambda that captures the receiver, since the callee holds it. R35.19 allows
+the one case the re-count needs. A lambda passed by a view member to another member of the
+same view may name fields of the view that are:
+* state (not the borrow, not `readonly`);
+* of machine-integer or `bool` type;
+* written as bare identifiers (not through `this` or `base`).
+
+Each such field `f` becomes a cell `__pal_cap_f`, declared where the member's body begins
+(a `let mut` in an arm would need an annotated postcondition, R5.8d). Around the call:
+1. the cell is assigned `f`;
+2. the lambda captures the cell, by reference if it writes `f`;
+3. after the call, `f` is assigned the cell back if the lambda writes it.
+
+The lambda's `Pal.Protocol` names `f`, meaning the cell. The callee's ownership of the view
+record is unchanged. The copy is sound only if the callee never reads `f` once a callback
+may have run, and never writes `f`. PALCS0883 checks this on the callee's IR, transitively
+through what it calls, flow-sensitively (a read before the first callback, like the walk's
+stack capacity `new Stack<Node>(2 * Log2(count + 1))`, is allowed). The copy-out is skipped
+by a raise, as R32.12's is, so the capture is refused inside a `try` (PALCS0882). An emitted
+`if` one of whose arms passes such a call is not joined (R32.6, through statement-expressions
+too).
+
+This is the second calling convention §35's previous round asked for. The walk takes the
+view's record and the set's region as before, and the callback receives only the scalar
+fields it counts in. `Pulse.Lib.CSharp.RangeWalk` adds, bound in `SpecRangeWalk`:
+* `AllTrue(tr)` (`all_true`): every call in the trace returned true;
+* the patterns that keep it;
+* `counted`: a walk whose calls all returned true called back on every key.
+
+The re-count's protocol is `count == tr.Length && AllTrue(tr)`.
+
 ### The model (R35.7)
 
 `pulse/Pulse.Lib.CSharp.TypeTest.fsti` declares:
@@ -10554,9 +10598,14 @@ All of the following verify in the runtime tree's harnesses (`pal/OrderedDiction
 | `InOrderTreeWalk` | `SpecWalk.Walked(Filter(… SpecItems), trace, Result)`: the callback is called on the view's items in order until it returns false (R35.14–R35.16) |
 | `BreadthFirstTreeWalk` | `SpecWalk.BfWalked` of the same items, breadth first, over a `Queue<Node>` of pointers into the set's region (R35.14) |
 | `MinInternal`, `MaxInternal` | `Same(Result, FirstOr(Filter(… SpecItems), default(T)))` (`LastOr` for the greatest) (R35.17) |
+| `VersionCheck(false)`, `VersionCheckImpl(false)` | `count` and `_countVersion` unchanged (R35.18) |
+| `VersionCheck(true)`, `VersionCheckImpl(true)` (the re-count) | `count == Filter(… SpecItems).Length` and `_countVersion` the set's version (R35.18, R35.19) |
+| `Count` (the base's getter at the view) | `Result == Filter(… SpecItems).Length` |
+| `Clear` | `count == 0`; the in-range items are collected by the breadth-first walk into a `List<T>` and removed from the set |
 
-All three keep the view coherent (`SpecCoherent`, its version the set's, `SpecRootOk`) and
-its bounds.
+All of them keep the view coherent (`SpecCoherent`, its version the set's, `SpecRootOk`) and
+its bounds. The re-count, `Count` and `Clear` require `SpecCountOk`: whenever `_countVersion`
+is the set's version, `count` is the number of in-range items (see Findings).
 
 ### Not verified (§35)
 
@@ -10567,28 +10616,51 @@ its bounds.
   `SpecWalk.Walkable`/`Pending` as its ghost invariant (R27.35, §32). The dictionary's
   enumerator builds its core by `dictionary._set.GetEnumerator()`. `_set` is an object the
   dictionary owns, and its node region is existential inside the dictionary's invariant.
-  A holder cannot expose that region, so the caller cannot be told what the new core
-  borrows (R32.12).
-* `TreeSubSet`'s re-count (`VersionCheckImpl(true)`), and with it the view's `Count`,
-  `Clear` (it tests `Count`) and the base members that read `Count` at a view. Two things
-  are missing:
-  1. *A call cycle.* `VersionCheckImpl` calls `InOrderTreeWalk`, which calls
-     `VersionCheck()`, which calls `VersionCheckImpl(false)`. Every method is its own
-     module, so the cycle is refused (PALCS0579), although the inner call takes the other
-     branch. Breaking it needs the methods specialized to the constant `updateCount`.
-  2. *A write to the view during the walk.* The lambda `n => { count++; return true; }`
-     writes the view's `count` while the walk holds the view's record (R27.39 refuses the
-     capture, PALCS0709). Splitting the record would make this sound: the walk reads only
-     the region and the view's range and version fields, while the lambda writes `count`,
-     which the walk reads only before its loops (the stack's capacity). But a callback's
-     frame is fixed by its `Pal.Protocol` over the trace, and the walk's contract takes
-     `self` whole, so this needs a second calling convention for walks: `self` split into
-     the fields the walk reads and the fields the callback writes.
-  Neither fits in this round.
+  So the caller cannot be told what the new core borrows (R32.12).
+
+  *Design (not implemented).* "Exposing the region for the duration of a call" is not
+  enough, because the enumerator outlives the call: `GetEnumerator` returns it. The holder
+  has to be borrowed with the region named for the enumerator's whole lifetime:
+  1. *A heap-indexed invariant for holders.* A class that owns a field of a region class
+     gets `class_D__inv_heap d m h`, its invariant with the owned set's region `h` a
+     parameter rather than an existential. This is R27.22's `inv_heap`, lifted one level.
+     Also emit `of_heap`/`to_heap` lemmas between it and `class_D__inv`, so that callers
+     holding `inv` are unchanged.
+  2. *A borrowing struct indexed by the holder's heap.* `SortedDictionary.Enumerator`
+     borrows `dictionary` as `inv_heap d m h` (R32.12 with the extra index `h`). Its core
+     `_set.GetEnumerator()` borrows `class_SortedSet__inv_heap d._set ms h`, obtained by
+     unfolding the holder's `inv_heap`. The two borrows are one: the struct's invariant
+     holds the unfolded holder, and its `Dispose`/end of borrow refolds it.
+  3. *A caller rule.* A method that creates such an enumerator holds the dictionary as
+     `inv_heap` until the enumerator's last use (R27.41's scoping), and then refolds `inv`.
+  Every piece exists for a region class at depth one. The work is generating and threading
+  the second level, and it touches every holder's emitted invariant.
 * `TreeSubSet` `InternalIndexOf` (a `foreach` over the view), the view enumerators, and a
   view of a view. An enumerator stores its tree in a field (`_tree`), and a view never
   exists as an object of the base: it lives in a local and binds statically (R32.13). So
   there is nothing for the enumerator's field to hold.
+
+  *Design (not implemented).* A view is a record (its scalar fields and range) plus a borrow
+  of `_underlying`. Every contract states it through `SpecCoherent`, a predicate over the
+  record and the set, never its identity. The design follows from that:
+  1. *A view stored in a field is a copy of its record.* `SortedSet<T>.Enumerator`
+     translated at the view (as R32.14 replicates base members at the view) has a `_tree`
+     field of the view's record type, and borrows `_underlying` as R32.12 borrows `_tree`
+     for a plain set. C# shares the view object between the local and the enumerator, and
+     the copy does not. That is harmless only because the two can diverge in cache fields
+     alone (`root`, `version`, `count`, `_countVersion`), each of which `SpecCoherent` /
+     `SpecCountOk` ties to the set. So the copy is allowed exactly when every field the
+     enumerator or the local writes is such a cache. A new check is needed: no member
+     reached from either writes a field outside the coherence predicate's caches, and
+     `_min`/`_max`/bounds are `readonly`.
+  2. *Static binding.* The enumerator's calls on `_tree` (`VersionCheck`, the walk's
+     `root`) bind to the view's overrides, as the replica's calls do (R32.14).
+  3. *A view of a view.* `TreeSubSet.GetViewBetween` builds `new TreeSubSet(_underlying, …)`:
+     a new record over the same borrow. Returning it needs R32.13's `Exactly` return from a
+     member of the view. The result borrows what the receiver borrows, which R32.12's
+     borrowed-result convention already states for a set.
+
+  `InternalIndexOf` then translates as a `foreach` over a view enumerator (R27.41).
 * `LinkedList`: the public `LinkedListNode<T>(T)` constructor and `LinkedListNode.List`
   (§31). A detached node owning a one-node region of its own, merged into the list's region
   by `AddFirst`/`AddLast`/`AddBefore`/`AddAfter(node)` (`RegionMove`'s `join` does the
@@ -10628,6 +10700,16 @@ its bounds.
   `__pal_entry__` bool fields are pinned automatically.
 * R35.15's split leaves a limitation when it is not at a block's tail. A local written in a
   split arm loses its value at the join, as with any un-annotated join (R22.12).
+* The stale count of §32's Findings keeps `SpecCountOk` (`_countVersion` the set's version
+  implies `count` is right) from being established at the view's constructor. So the
+  re-count, `Count` and `Clear` take it as a precondition: `GetViewBetween` cannot ensure it
+  while the set's version may equal the constructor's sentinel.
+* `Clear` ensures only `count == 0`. Its early return (`Count == 0`) leaves `root` as it was.
+  Proving that `root` is null there needs a lemma that an empty filter has a null
+  `range_root`.
+* `SpecRangeWalk`'s `all_true_empty` first took a `unit` argument, and its SMT pattern then
+  did not mention every bound variable. Z3 only warned about it, and the lemma never fired.
+  A pattern lemma takes no argument the pattern does not contain.
 
 ### Trusted (§35)
 

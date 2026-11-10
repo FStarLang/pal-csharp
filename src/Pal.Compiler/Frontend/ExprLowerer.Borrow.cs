@@ -603,7 +603,72 @@ public sealed partial class ExprLowerer
         if (callee is { IsStatic: true } or { MethodKind: MethodKind.Constructor }) return null;
         if (ViewTarget(bw.Struct, callee, viaBase) is not { } name) return null;
         var self = new IrRefArg(loc, new IrVar(loc, bw.SelfName) { Type = bw.StructType });
-        return ViewCall(bw, name, callee, self, args.Select(Lower), loc);
+        // R35.19. A lambda at a `[Callback]` parameter is lifted, as at any other call.
+        var lowered = args.Select((a, i) =>
+            a.Parent is ArgumentSyntax { NameColon: null } arg && i < callee.Parameters.Length &&
+            CallbackOf(callee.Parameters[i], known, diagnostics) is { } cb
+                ? AtViewCall(() => LowerCallbackArgument(arg, cb, Locations.From(arg)))
+                : Lower(a)).ToList();
+        return WithFieldCaptures(ViewCall(bw, name, callee, self, lowered, loc), args, loc);
+    }
+
+    /// <summary>
+    /// R35.19. A call passing a lambda that captures fields of the view: each field is copied
+    /// to its cell before the call, and each the lambda writes is copied back after it. The
+    /// callee holds the view's record, so the lambda cannot reach it; the copies are the
+    /// same program because the callee neither writes the fields nor reads them once it has
+    /// called back (checked on the translation, PALCS0882). A raise skips the copy back, as
+    /// R32.12's does, and is refused inside a <c>try</c> for the same reason.
+    /// </summary>
+    private bool _atViewCall;
+
+    /// <summary>R35.19. The cells of field captures, declared at the start of the member's body.</summary>
+    public Dictionary<string, IrLocalDecl> HoistedCells { get; } = new(StringComparer.Ordinal);
+
+    private IrExpr AtViewCall(Func<IrExpr> lower)
+    {
+        var outer = _atViewCall;
+        _atViewCall = true;
+        try { return lower(); }
+        finally { _atViewCall = outer; }
+    }
+
+    private IrExpr WithFieldCaptures(IrCall call, IReadOnlyList<ExpressionSyntax> args, IrLoc loc)
+    {
+        if (PendingFieldCaptures.Count == 0) return call;
+        var pending = PendingFieldCaptures.ToList();
+        PendingFieldCaptures.Clear();
+        if (args.Any(a => a.Ancestors().Any(n => n is TryStatementSyntax)))
+        {
+            diagnostics.Error("PALCS0882", loc,
+                "A lambda capturing fields of the view is passed inside a `try`: the fields are copied back " +
+                "when the call returns, so a handler could see them before it (doc/translation.md R35.19).");
+            return new IrLiteral(loc, null);
+        }
+        // The cells are declared where the member's body begins: a Pulse `let mut` inside a
+        // branch needs an annotated postcondition (R5.8d).
+        var stmts = ImmutableArray.CreateBuilder<IrStmt>();
+        foreach (var (cell, field, _) in pending)
+        {
+            HoistedCells[cell.Name] = new IrLocalDecl(loc, cell.Name, cell.Type!,
+                new IrLiteral(loc, cell.Type is IrPrim { Kind: PrimKind.Bool } ? false : 0) { Type = cell.Type });
+            stmts.Add(new IrAssign(loc, cell, field));
+        }
+        IrExpr value;
+        if (call.ResultType is null or IrPrim { Kind: PrimKind.Void })
+        {
+            stmts.Add(new IrExprStmt(loc, call));
+            value = new IrLiteral(loc, null) { Type = call.ResultType };
+        }
+        else
+        {
+            var result = Fresh("capResult");
+            stmts.Add(new IrLocalDecl(loc, result, call.ResultType, call) { Immutable = true });
+            value = new IrVar(loc, result) { Type = call.ResultType };
+        }
+        foreach (var (cell, field, writes) in pending)
+            if (writes) stmts.Add(new IrAssign(loc, field, cell));
+        return new IrStmtExpr(loc, stmts.ToImmutable(), value) { Type = value.Type };
     }
 
     private IrCall ViewCall(BorrowContext bw, string name, IMethodSymbol callee, IrExpr self, IEnumerable<IrExpr> args, IrLoc loc)
@@ -615,6 +680,7 @@ public sealed partial class ExprLowerer
             if (callee.Parameters[k] is { HasExplicitDefaultValue: true, ExplicitDefaultValue: bool or int } dp &&
                 known.MapType(dp.Type) is { } dt)
                 given.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
+        name = Specialized(bw, name, callee, given, loc);
         return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. given])
         {
             Kind = CalleeKind.Method,
@@ -624,6 +690,41 @@ public sealed partial class ExprLowerer
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
             MutatesReceiver = false,
         };
+    }
+
+    /// <summary>
+    /// R35.18. A call of a view member with <c>[Specialize]</c> parameters calls its
+    /// translation at the constants passed (asked for, as a replica is); an argument there
+    /// that is not a literal is refused.
+    /// </summary>
+    private string Specialized(BorrowContext bw, string name, IMethodSymbol callee, List<IrExpr> given, IrLoc loc)
+    {
+        var target = SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition)
+            ? callee : Subclasses.OverrideOf(bw.Struct, callee) ?? callee;
+        if (Naming.Of(target.OriginalDefinition) != name || !known.IsSpecialized(target)) return name;
+        var values = ImmutableDictionary.CreateBuilder<string, bool>(StringComparer.Ordinal);
+        foreach (var p in target.Parameters)
+        {
+            if (!Declarations.Has(p, known.SpecializeAttribute)) continue;
+            // A `[Specialize]` parameter of the specialization being lowered is its constant.
+            if (p.Ordinal < given.Count && given[p.Ordinal] is IrVar fwd &&
+                known.Specialization?.Values.TryGetValue(fwd.Name, out var fixedValue) == true)
+                given[p.Ordinal] = new IrLiteral(loc, fixedValue) { Type = IrPrim.Bool };
+            if (p.Type.SpecialType != SpecialType.System_Boolean || p.Ordinal >= given.Count ||
+                given[p.Ordinal] is not IrLiteral { Value: bool v })
+            {
+                diagnostics.Error("PALCS0881", loc,
+                    $"`{target.Name}` is translated at each constant of its `[Specialize]` parameter `{p.Name}`, " +
+                    "so a call passes a `bool` literal there (doc/translation.md R35.18).");
+                return name;
+            }
+            values[p.Name] = v;
+        }
+        var specialized = name + string.Concat(values.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => $"__{kv.Key}_{(kv.Value ? "true" : "false")}"));
+        if (known.SpecializationSeen.Add(specialized))
+            known.SpecializationDemand.Enqueue(new WellKnown.SpecializationRequest(name, specialized, values.ToImmutable()));
+        return specialized;
     }
 
     /// <summary>R32.13. A member's result type, or the view its <c>[return: Exactly]</c> names.</summary>

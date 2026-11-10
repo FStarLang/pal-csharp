@@ -833,8 +833,7 @@ public sealed class CodeEmitter(
     /// existential trace, and Pulse's join keeps it of one arm only.
     /// </summary>
     private static bool PassesLambda(IrStmt s) =>
-        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
-            .Any(e => e is IrLambdaRef);
+        Check.DeepExpressions(s).Any(e => e is IrLambdaRef);
 
     /// <summary>
     /// R33.16. An arm that replaces the record of an `[Open]` receiver owning arrays: their

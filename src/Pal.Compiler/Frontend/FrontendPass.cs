@@ -42,6 +42,9 @@ public static partial class FrontendPass
 
         foreach (var candidate in candidates)
         {
+            // R35.18. A method with a `[Specialize]` parameter is translated only at the
+            // constants its callers pass.
+            if (known.IsSpecialized(candidate.Symbol)) continue;
             // The semantic model must be re-fetched: adding the shim trees produced a
             // new compilation, and models are not portable across compilations.
             var model = compilation.GetSemanticModel(candidate.Syntax.SyntaxTree);
@@ -55,8 +58,13 @@ public static partial class FrontendPass
         // R27.57. The replicas the bodies asked for, each a base body verified again at a
         // representation-sharing subclass; a replica's own calls may ask for more.
         Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
-        while (known.ReplicaDemand.Count > 0)
+        while (known.ReplicaDemand.Count > 0 || known.SpecializationDemand.Count > 0)
         {
+            if (known.SpecializationDemand.Count > 0)
+            {
+                LowerSpecialization(known.SpecializationDemand.Dequeue(), candidates, compilation, known, bound, diagnostics, declarations);
+                continue;
+            }
             var request = known.ReplicaDemand.Dequeue();
             var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
             if (source is null)
@@ -91,6 +99,32 @@ public static partial class FrontendPass
         InheritContracts(declarations, diagnostics);
         PropagateDefaults(declarations);
         return new IrProgram(declarations.ToImmutable());
+    }
+
+    /// <summary>
+    /// R35.18. A method lowered at constant values of its <c>[Specialize]</c> parameters: its
+    /// body with each <c>if</c> those decide folded to the branch taken, under the name the
+    /// callers were redirected to, requiring that each parameter is its constant.
+    /// </summary>
+    private static void LowerSpecialization(WellKnown.SpecializationRequest request, ImmutableArray<Candidate> candidates,
+        CSharpCompilation compilation, WellKnown known, ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
+        ImmutableArray<IrDecl>.Builder declarations)
+    {
+        var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
+        if (source is null) return;
+        var model = compilation.GetSemanticModel(source.Syntax.SyntaxTree);
+        var lifted = new List<IrMethod>();
+        var outer = known.Specialization;
+        known.Specialization = request;
+        var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
+        known.Specialization = outer;
+        if (decl is not IrMethod m) return;
+        var loc = m.Loc;
+        var pins = request.Values.Select(kv => (IrExpr)new IrBinary(loc, BinOp.Eq,
+            new IrVar(loc, kv.Key) { Type = IrPrim.Bool }, new IrLiteral(loc, kv.Value) { Type = IrPrim.Bool })
+            { Type = IrPrim.Bool });
+        declarations.Add(m with { Name = request.Name, Requires = [.. pins, .. m.Requires] });
+        declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor }));
     }
 
     /// <summary>
@@ -2730,7 +2764,7 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        lowerer.Expressions.LiftPrefix = known.Replica?.Name ?? Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ?? known.Replica?.Name ?? Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
         if (iterated is not null) lowerer.Iterate(iterated);
 

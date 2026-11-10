@@ -201,7 +201,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         var symbol = model.GetSymbolInfo(node).Symbol;
         // R21.6. A pattern variable is the value it was bound to, at that value's type:
         // `var` declares it nullable whatever it matched.
-        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound.Type;
+        if (symbol is ILocalSymbol or IParameterSymbol or IFieldSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound.Type;
         if (symbol is ILocalSymbol && _lazyAliases.TryGetValue(symbol, out var lazy)) return lazy().Type;
         var declared = symbol switch
         {
@@ -1448,7 +1448,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         // R21.3. A pattern variable is the expression it was bound to.
         // R24.8/R24.9. So is a `ref` local, and a parameter of an inlined `ref` method.
-        if (symbol is ILocalSymbol or IParameterSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
+        if (symbol is ILocalSymbol or IParameterSymbol or IFieldSymbol && _patternBindings.TryGetValue(symbol, out var bound)) return bound;
         if (symbol is ILocalSymbol && _lazyAliases.TryGetValue(symbol, out var lazy)) return lazy();
         if (symbol is IFieldSymbol ef && known.CaseConstructor(ef) is { } enumCtor)
             return new IrSpecOp(loc, enumCtor, []) { EnumCase = true };
@@ -2973,6 +2973,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 return new IrLiteral(loc, null);
             }
             context = fields;
+        }
+
+        // R35.18. A method translated only at constants is reached only through a view's call.
+        if (!SpecPosition && known.IsSpecialized(method))
+        {
+            diagnostics.Error("PALCS0881", loc,
+                $"`{method.Name}` has a `[Specialize]` parameter and is called here other than as a member of a " +
+                "view on the view itself (doc/translation.md R35.18).");
+            return new IrLiteral(loc, null);
         }
 
         // R27.38. An omitted optional argument is the parameter's constant default.

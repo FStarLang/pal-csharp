@@ -493,6 +493,12 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 
     /// <summary>R32.11. Whether the lambda's protocol states a bound on its calls.</summary>
     public bool Bounded { get; init; }
+
+    /// <summary>
+    /// R35.19. The fields of the caller's view the lambda captures: copied to cells around
+    /// the call, which the callee must neither write nor read once it calls back.
+    /// </summary>
+    public ImmutableArray<string> FieldCaptures { get; init; } = [];
 }
 
 /// <summary>

@@ -122,4 +122,8 @@ public static class SpecRangeWalk
     /// </summary>
     [SpecOp("Pulse.Lib.CSharp.RangeWalk.min_max_goal")]
     public static void MinMaxGoal<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive, T otherwise) => throw Ghost();
+
+    /// <summary>R35.19. Every call in the trace returned true.</summary>
+    [SpecOp("Pulse.Lib.CSharp.RangeWalk.all_true")]
+    public static bool AllTrue<E>(Seq<(E, bool)> trace) => throw Ghost();
 }

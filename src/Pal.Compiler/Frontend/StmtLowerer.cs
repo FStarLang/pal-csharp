@@ -46,6 +46,9 @@ public sealed class StmtLowerer(
             BlockSyntax b => LowerBlock(b),
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
+            // R35.18. In a specialization, an `if` its constants decide is the branch taken.
+            IfStatementSyntax i when Decided(i.Condition) is { } taken =>
+                taken ? Lower(i.Statement) : i.Else is null ? new IrBlock(loc, []) : Lower(i.Else.Statement),
             IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
             // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
             IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
@@ -378,6 +381,30 @@ public sealed class StmtLowerer(
     /// null. (A pattern otherwise substitutes the subject for <c>x</c>, re-reading the heap at
     /// each use.)
     /// </summary>
+    /// <summary>
+    /// R35.18. The value of a condition built by <c>!</c>, <c>&amp;&amp;</c>, <c>||</c> and
+    /// parentheses from <c>bool</c> literals and the parameters a specialization fixes, when
+    /// those decide it (<c>false &amp;&amp; e</c> is false, and <c>e</c> never evaluated); else null.
+    /// </summary>
+    private bool? Decided(ExpressionSyntax e)
+    {
+        if (known.Specialization is not { } sp) return null;
+        return e switch
+        {
+            ParenthesizedExpressionSyntax p => Decided(p.Expression),
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.TrueLiteralExpression) => true,
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.FalseLiteralExpression) => false,
+            IdentifierNameSyntax id when model.GetSymbolInfo(id).Symbol is IParameterSymbol p &&
+                Declarations.Has(p, known.SpecializeAttribute) && sp.Values.TryGetValue(p.Name, out var v) => v,
+            PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.LogicalNotExpression) => !Decided(u.Operand),
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalAndExpression) =>
+                Decided(b.Left) is { } l ? (l ? Decided(b.Right) : false) : null,
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalOrExpression) =>
+                Decided(b.Left) is { } l ? (l ? true : Decided(b.Right)) : null,
+            _ => null,
+        };
+    }
+
     private IrStmt? RegionPatternIf(IfStatementSyntax i, IrLoc loc)
     {
         if (i.Condition is not IsPatternExpressionSyntax

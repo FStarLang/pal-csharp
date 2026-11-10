@@ -174,7 +174,8 @@ public static partial class FrontendPass
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
         // R32.11. A lambda a borrowing member passes to a `[Callback]` is lifted as any other's.
-        lowerer.Expressions.LiftPrefix = view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ??
+            (view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol));
         lowerer.Expressions.LiftTypeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
@@ -202,6 +203,8 @@ public static partial class FrontendPass
             bodyRequires = br;
             bodyEnsures = be;
             body = trimmed ?? body;
+            if (body is not null && lowerer.Expressions.HoistedCells.Count > 0)
+                body = new IrBlock(body.Loc, [.. lowerer.Expressions.HoistedCells.Values.OrderBy(d => d.Name, StringComparer.Ordinal), body]);
             if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
                     n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
                 body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);

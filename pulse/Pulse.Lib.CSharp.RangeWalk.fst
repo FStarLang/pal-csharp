@@ -22,6 +22,9 @@ module Pulse.Lib.CSharp.RangeWalk
 /// * R35.17. The view's `MinInternal`/`MaxInternal`, a descent from the view's root:
 ///   `first_or`/`last_or`, the steps `min_step`/`max_step`, and `min_max_goal`, which says
 ///   the descent's target in the root's subtree is the least (greatest) in-range key.
+/// * R35.19. The view's re-count, a walk whose callback always returns true: `all_true`
+///   (every call in a trace returned true), kept by such a call (`all_true_snoc`); a walk
+///   whose calls all returned true called back on every key (`counted`).
 ///
 /// Every region definition takes the region class's view and links first (`[RegionOp]`,
 /// R27.22). Nothing here is trusted: it is proved from `Region`, `RegionWalk`,
@@ -688,3 +691,23 @@ let min_max_goal (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a)
       first_or_append (filter c lo hi la false sl) (Seq.cons k (filter c lo hi la false sr)) d;
       last_or_append (filter c lo hi la ua sl) (Seq.cons k (filter c lo hi la ua sr)) d;
       last_or_append (filter c lo hi false ua sl) (Seq.cons k (filter c lo hi false ua sr)) d
+
+let all_true (#e: Type0) (tr: Seq.seq (e & bool)) : prop =
+  forall (i: nat). i < Seq.length tr ==> snd (Seq.index tr i) == true
+
+let all_true_snoc (#e: Type0) (tr: Seq.seq (e & bool)) (x: e & bool)
+  : Lemma (requires all_true tr /\ snd x == true)
+          (ensures all_true (Seq.snoc tr x))
+          [SMTPat (all_true (Seq.snoc tr x))]
+  = ()
+
+let all_true_empty (e: Type0)
+  : Lemma (all_true #e Seq.empty)
+          [SMTPat (all_true #e Seq.empty)]
+  = ()
+
+let counted (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) (res: bool)
+  : Lemma (requires RW.walked keys tr res /\ all_true tr)
+          (ensures Seq.length tr == Seq.length keys)
+          [SMTPat (RW.walked keys tr res); SMTPat (all_true tr)]
+  = ()
