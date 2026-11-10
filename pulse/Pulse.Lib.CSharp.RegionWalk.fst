@@ -75,7 +75,8 @@ let rec pending (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r
 
 let walkable (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B.box r)
     (h: heap r) (s: Seq.seq (B.box r)) : prop =
-  forall (i: nat). i < Seq.length s ==> wf left right h (Seq.index s i) /\ not (B.is_null (Seq.index s i))
+  forall (i: nat). {:pattern Seq.index s i}
+    i < Seq.length s ==> wf left right h (Seq.index s i) /\ not (B.is_null (Seq.index s i))
 
 let pending_empty (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B.box r)
     (rev: bool) (h: heap r) (s: Seq.seq (B.box r))
@@ -192,16 +193,16 @@ let tkey (#a #b #c: Type0) (e: (a & b) & c) : a = fst (fst e)
 /// The callback has been called on `keys[0..|tr|)`, in order, and returned true each time.
 let visited (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) : prop =
   Seq.length tr <= Seq.length keys /\
-  (forall (i: nat). i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i /\ snd (Seq.index tr i) == true)
+  (forall (i: nat). {:pattern Seq.index tr i} i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i /\ snd (Seq.index tr i) == true)
 
 /// A walk over `keys` that returned `res`: the callback was called on a prefix of `keys`, in
 /// order; it returned true on all but possibly the last call; and the walk returned true
 /// exactly when it went through all of `keys`, false when the last call returned false.
 let walked (#a #b: Type0) (keys: Seq.seq a) (tr: Seq.seq ((a & b) & bool)) (res: bool) : prop =
   Seq.length tr <= Seq.length keys /\
-  (forall (i: nat). i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i) /\
-  (forall (i: nat). i + 1 < Seq.length tr ==> snd (Seq.index tr i) == true) /\
-  (res == true ==> Seq.length tr == Seq.length keys /\ (forall (i: nat). i < Seq.length tr ==> snd (Seq.index tr i) == true)) /\
+  (forall (i: nat). {:pattern Seq.index tr i} i < Seq.length tr ==> tkey (Seq.index tr i) == Seq.index keys i) /\
+  (forall (i: nat). {:pattern Seq.index tr i} i + 1 < Seq.length tr ==> snd (Seq.index tr i) == true) /\
+  (res == true ==> Seq.length tr == Seq.length keys /\ (forall (i: nat). {:pattern Seq.index tr i} i < Seq.length tr ==> snd (Seq.index tr i) == true)) /\
   (res == false ==> Seq.length tr > 0 /\ snd (Seq.index tr (Seq.length tr - 1)) == false)
 
 let visited_empty (#a #b: Type0) (keys: Seq.seq a)

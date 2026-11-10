@@ -888,6 +888,7 @@ admitted lemma is assumed rather than proved.
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
 | `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
+| `[Fuel(f, i)]` | start the method's queries at `f` unfoldings of recursive definitions and `i` of inductive types, retrying with more (R30.44) |
 | `[OpaqueSpecs("S", ...)]` | the solver does not unfold the declaring type's `[Spec]`s `S`, ... while checking the method (R30.40) |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 

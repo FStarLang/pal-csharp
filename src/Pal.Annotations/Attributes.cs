@@ -337,6 +337,20 @@ public sealed class RlimitAttribute(int factor) : Attribute
 }
 
 /// <summary>
+/// R30.44. Check this method's proof starting from <paramref name="fuel"/> unfoldings of
+/// recursive definitions and <paramref name="ifuel"/> of inductive types (F*'s
+/// <c>--initial_fuel</c> and <c>--initial_ifuel</c>). A query that fails is retried with more,
+/// up to the usual maximum. Like <see cref="RlimitAttribute"/> it changes how the proof is
+/// found, not what is proved.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class FuelAttribute(int fuel, int ifuel) : Attribute
+{
+    public int Fuel { get; } = fuel;
+    public int Ifuel { get; } = ifuel;
+}
+
+/// <summary>
 /// R30.40. The named <c>[Spec]</c> members of the declaring type are opaque to the SMT solver
 /// while this method is checked (F*'s <c>--using_facts_from</c>): their definitions are not
 /// unfolded, so what the proof knows of them comes from lemmas and from facts stated in

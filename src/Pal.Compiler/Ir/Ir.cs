@@ -942,6 +942,8 @@ public sealed record IrMethod(
     public bool Admit { get; init; }
     /// <summary>R22.31. The method's `[Rlimit]` factor, if any.</summary>
     public int? RlimitFactor { get; init; }
+    /// <summary>R30.44. The method's `[Fuel]` initial fuel and ifuel, if any.</summary>
+    public (int Fuel, int Ifuel)? InitialFuel { get; init; }
 
     /// <summary>R30.40. The modules of the <c>[Spec]</c> members hidden from the SMT solver.</summary>
     public ImmutableArray<string> OpaqueSpecs { get; init; } = [];

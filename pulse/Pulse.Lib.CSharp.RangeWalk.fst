@@ -178,7 +178,7 @@ let key_at (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (h: heap r) (x: B.b
 /// Every pointer on the stack holds an in-range key over a strictly sorted subtree.
 let rwalkable (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B.box r)
     (h: heap r) (c: O.comparer a) (lo hi: a) (la ua: bool) (s: Seq.seq (B.box r)) : prop =
-  forall (i: nat). i < Seq.length s ==>
+  forall (i: nat). {:pattern Seq.index s i} i < Seq.length s ==>
     (mem h (Seq.index s i) /\
      ST.in_range c lo hi la ua (key_at view h (Seq.index s i)) /\
      S.strictly_sorted c (ST.keys (tree_of view left right h (Seq.index s i))))
@@ -304,7 +304,7 @@ let pop_at (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B
 /// Every pointer in the queue is a node of the region over a strictly sorted subtree.
 let rqueue (#r #a #b: Type0) (view: B.box r -> r -> (a & b)) (left right: r -> B.box r)
     (h: heap r) (c: O.comparer a) (q: Seq.seq (B.box r)) : prop =
-  forall (i: nat). i < Seq.length q ==>
+  forall (i: nat). {:pattern Seq.index q i} i < Seq.length q ==>
     (mem h (Seq.index q i) /\ S.strictly_sorted c (ST.keys (tree_of view left right h (Seq.index q i))))
 
 /// The view's walk queues a child only if the range may reach into it: the left one unless

@@ -167,6 +167,7 @@ public static class Opaque
     [Requires("Big(x)")]
     [Ensures("Result > 0")]
     [OpaqueSpecs("Big")]
+    [Fuel(0, 0)]
     public static int Halve(int x)
     {
         BigPos(x);

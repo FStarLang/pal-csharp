@@ -52,7 +52,7 @@ public static partial class FrontendPass
             var decl = LowerDeclaration(candidate, model, known, bound, diagnostics, lifted);
             if (decl is not null) declarations.Add(decl);
             if (decl is IrMethod enclosing)
-                declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor }));
+                declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor, InitialFuel = enclosing.InitialFuel }));
         }
 
         // R27.57. The replicas the bodies asked for, each a base body verified again at a
@@ -86,7 +86,7 @@ public static partial class FrontendPass
                 Throws = [.. replica.Throws, .. replica.AtThrows.Where(t => t.At == request.At.Name).Select(t => t.Throws)],
                 AtThrows = [],
             });
-            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor }));
+            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor, InitialFuel = replica.InitialFuel }));
         }
 
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
@@ -124,7 +124,7 @@ public static partial class FrontendPass
             new IrVar(loc, kv.Key) { Type = IrPrim.Bool }, new IrLiteral(loc, kv.Value) { Type = IrPrim.Bool })
             { Type = IrPrim.Bool });
         declarations.Add(m with { Name = request.Name, Requires = [.. pins, .. m.Requires] });
-        declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor }));
+        declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor, InitialFuel = m.InitialFuel }));
     }
 
     /// <summary>
@@ -2691,6 +2691,19 @@ public static partial class FrontendPass
     // Lower
     // -----------------------------------------------------------------------
 
+    /// <summary>R30.44. The initial fuel and ifuel <c>[Fuel]</c> sets.</summary>
+    private static (int, int)? InitialFuel(IMethodSymbol symbol, WellKnown known, IrLoc loc, DiagnosticBag diagnostics)
+    {
+        if (Declarations.Find(symbol, known.FuelAttribute) is not { ConstructorArguments: [{ Value: int fuel }, { Value: int ifuel }] })
+            return null;
+        if (fuel < 0 || ifuel < 0)
+        {
+            diagnostics.Error("PALCS0757", loc, $"`[Fuel({fuel}, {ifuel})]`: fuel and ifuel must not be negative (R30.44).");
+            return null;
+        }
+        return (fuel, ifuel);
+    }
+
     /// <summary>R30.40. The modules of the <c>[Spec]</c> members <c>[OpaqueSpecs]</c> names.</summary>
     private static ImmutableArray<string> OpaqueSpecs(IMethodSymbol symbol, WellKnown known, IrLoc loc, DiagnosticBag diagnostics)
     {
@@ -2850,6 +2863,7 @@ public static partial class FrontendPass
             Admit = admitted,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
+            InitialFuel = InitialFuel(symbol, known, loc, diagnostics),
             OpaqueSpecs = OpaqueSpecs(symbol, known, loc, diagnostics),
             Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
