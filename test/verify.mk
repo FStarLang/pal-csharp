@@ -33,6 +33,13 @@ EXTRA_INCLUDES ?=
 # The modules of that development, checked by its own build: used, never re-checked here.
 # Comma-separated, as F*'s `--already_cached` takes them.
 EXTRA_CACHED ?=
+# Harness directories that verify some of the same sources. A module that is byte-identical
+# to one of theirs, together with everything here it depends on, is checked with its proof
+# obligations admitted: the owner discharges them (see verified-by.py).
+VERIFIED_BY ?=
+# Each owner is translated into a directory of this harness's own, so that this harness never
+# writes another's output while that harness is building.
+owner_out = $(CACHE_DIR)/owners/$(notdir $(1))
 comma := ,
 
 # `--message_format json` so that a failure can be read by `palcs report` and said again
@@ -69,7 +76,8 @@ $(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst)
 	@touch $@
 
 verify: translate
-	@$(MAKE) --no-print-directory -f $(PAL_ROOT)/test/verify.mk PHASE=verify _verify
+	@$(foreach d,$(VERIFIED_BY),$(MAKE) --no-print-directory -C $(d) translate OUT=$(CURDIR)/$(call owner_out,$(d)) &&) true
+	@$(MAKE) --no-print-directory -f $(PAL_ROOT)/test/verify.mk PHASE=verify VERIFIED_BY="$(VERIFIED_BY)" _verify
 
 GENERATED := $(sort $(wildcard $(OUT)/*.fst))
 CHECKED   := $(patsubst $(OUT)/%.fst,$(CACHE_DIR)/%.fst.checked,$(GENERATED))
@@ -88,16 +96,27 @@ $(CACHE_DIR)/.depend: $(GENERATED)
 	    --output_deps_to $@
 
 include $(CACHE_DIR)/.depend
+
+ifneq ($(VERIFIED_BY),)
+$(CACHE_DIR)/.assumed.mk: $(CACHE_DIR)/.depend $(GENERATED) $(PAL_ROOT)/test/verified-by.py \
+                          $(wildcard $(foreach d,$(VERIFIED_BY),$(call owner_out,$(d))/*.fst))
+	@python3 $(PAL_ROOT)/test/verified-by.py --out $(OUT) --cache $(CACHE_DIR) \
+	    --depend $(CACHE_DIR)/.depend $(foreach d,$(VERIFIED_BY),$(d)=$(call owner_out,$(d))) > $@.tmp && mv $@.tmp $@
+
+include $(CACHE_DIR)/.assumed.mk
 endif
 endif
+endif
+
+module_of = $(basename $(basename $(notdir $(1))))
 
 # F*'s messages go through `palcs report`, which maps each one back to the C# line that
 # produced the Pulse it is about. The exit status has to be F*'s, not the reporter's --
 # `pipefail` is what keeps a failed proof a failed build.
 %.checked:
 	@mkdir -p $(CACHE_DIR)
-	@echo "$(FSTAR_EXE) $(FSTAR_OPTIONS) $<"
-	@set -o pipefail; $(FSTAR_EXE) $(FSTAR_OPTIONS) $< 2>&1 | $(PALCS) report -q -o $(OUT)
+	@echo "$(FSTAR_EXE) $(FSTAR_OPTIONS) $(if $(ASSUMED_BY_$(call module_of,$@)),--admit_smt_queries true )$<$(if $(ASSUMED_BY_$(call module_of,$@)),  # verified by $(ASSUMED_BY_$(call module_of,$@)))"
+	@set -o pipefail; $(FSTAR_EXE) $(FSTAR_OPTIONS) $(if $(ASSUMED_BY_$(call module_of,$@)),--admit_smt_queries true) $< 2>&1 | $(PALCS) report -q -o $(OUT)
 
 clean:
 	rm -rf $(OUT) $(CACHE_DIR) bin obj

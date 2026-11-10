@@ -89,3 +89,11 @@ make -C samples/dotnet-runtime/pal/List     # one
 out). In CI each harness is its own job, with `OCAMLRUNPARAM=o=20`: a few modules
 (`Dictionary.TryInsert`, `Dictionary.Remove`, `HashSet.AddIfNotPresent`) take several GB for
 F*, and a lower GC space overhead keeps them inside a runner's memory.
+
+The SortedSet harness also translates `List.cs`, `Queue.cs` and `Stack.cs`, which their own
+harnesses verify. Its Makefile names them in `VERIFIED_BY`, and `test/verified-by.py`
+compares the generated F*. If a module and everything it depends on in this harness are
+byte-identical to an owner's, the module is checked with `--admit_smt_queries true`, and
+the owner discharges its proof obligations. Any module that differs is verified as usual.
+For example, `Queue.CopyTo` differs because this harness numbers `ExceptionResource`
+differently. An owner may not use `VERIFIED_BY` itself.
