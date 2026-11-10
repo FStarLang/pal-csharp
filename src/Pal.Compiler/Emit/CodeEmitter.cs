@@ -5511,7 +5511,11 @@ public sealed class CodeEmitter(
     private Captured Bound(string term) => Capture(() =>
     {
         var t = Fresh();
-        Line($"let {t} = {term};");
+        // A type parameter's default leaves its dictionary to be resolved, which Pulse's
+        // join of the arms does not wait for; the annotation resolves it first (R35.7).
+        if (System.Text.RegularExpressions.Regex.Match(term, @"^\(Pulse\.Lib\.CSharp\.Inhabited\.default_of (.+)\)$") is { Success: true } dm)
+            Line($"let {t} : {dm.Groups[1].Value} = {term};");
+        else Line($"let {t} = {term};");
         return t;
     });
 

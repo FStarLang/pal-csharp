@@ -39,7 +39,8 @@ public static class Sorted
     /// R25.4. The types whose null the model cannot see: a type parameter, and a comparer.
     /// Whether a value of one is null is <c>is_null</c>.
     /// </summary>
-    public static bool HasOpaqueNull(IrType? type) => type is IrTypeParamType || IsComparer(type);
+    // R35.7. An `object` may be null too; `ThrowIfNull(o)` and `o is null` test it.
+    public static bool HasOpaqueNull(IrType? type) => type is IrTypeParamType || IsComparer(type) || WellKnown.IsObj(type);
 
     public static IrExpr IsNull(IrLoc loc, IrExpr value) =>
         new IrSpecOp(loc, Module + ".is_null", [value]) { Type = IrPrim.Bool, MachineArgs = true };

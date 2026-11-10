@@ -9956,7 +9956,8 @@ that the view shares the set's comparer and, when its version is the set's, its 
 * The other non-generic `IDictionary`/`ICollection` members (`this[object]`, `Add(object,
   object)`, `Contains(object)`, `Remove(object)`, `SyncRoot`): they type-test `object`
   keys and values (`is TKey`) and cast them, catching `InvalidCastException`; neither is
-  modelled for type parameters.
+  modelled for type parameters. §35 (R35.7) models the type tests and verifies all but
+  `Add(object, object)`, the `this[object]` setter and `SyncRoot`.
 * `TreeSubSet` members other than those verified above (R32.14):
   * `Clear` builds a `List<T>` of the in-range items in a breadth-first walk lambda, then
     removes them through the set. Its contract would need the walk's per-element trace
@@ -10321,3 +10322,181 @@ allocate) are the case.
   `ThrowConcurrentOperation`, `ThrowIndexArgumentOutOfRange` and `ThrowVersionCheckFailed`
   carry `[Throws]` and `[Ensures("false")]`; their bodies (a `throw`) are translated and
   checked against these contracts.
+
+## 35. Remaining views, nodes and non-generic members
+
+This section finishes members that §§31–33 left out: `OrderedDictionary`'s key and value
+enumerators and its boxed views, `SortedDictionary`'s non-generic and `DictionaryEntry`
+members, and the leftovers of `LinkedList<T>` and `SortedSet<T>`. The harnesses are
+`pal/OrderedDictionary` and `pal/SortedSet` (which also verifies `SortedDictionary`) in the
+runtime tree. The test `test/views2` exercises each rule below.
+
+**R35.1. A null guard with a parameter name.** R23.1's `ArgumentNullException.ThrowIfNull(x)`
+also accepts trailing arguments that are constants (`ThrowIfNull(key, nameof(key))`). The
+name affects only the exception's message, which no contract reads.
+
+**R35.2. `out var` in a returned expression.** `return TryGet(i, out T? v) && P(v);` declares
+`v` before the `return`, at its type's `default`, as R33.9 does for an `if`'s condition. C#'s
+definite assignment means the call writes `v` before anything reads it.
+
+**R35.3. Creating a wrapping struct.** R32.12 refuses the constructor of a wrapping struct,
+and `new W(...)`, because the core it wraps must come from the owner. Both are accepted when
+both of these hold:
+* the struct wraps its core directly, through one field;
+* the core owns no objects (R28: no `[Owned]`-style fields; an index, a version and the owner).
+
+The constructor then has the shape `_inner = owner.GetEnumerator()` (more statements may
+assign the struct's other fields), where `owner` is a constructor parameter of the owner's
+class. That parameter is the owner the struct borrows, as R28's constructor parameter is for
+a borrowing struct. The constructor's body reads the core through `Result._inner`, so its
+contract may state the core's fields (`Result._inner._index == 0`). A method that returns a
+wrapping struct may state facts about the struct it creates, as one returning a borrowing
+struct may (R28). A core that owns objects (`SortedSet`'s enumerator owns a `Stack<Node>`)
+is still refused (PALCS0801): the wrapping struct would have to take that ownership over.
+
+**R35.4. A helper forwarding to a held struct.** A call `H.M(ref e)` is the call `e.M()` of
+the held struct `e`'s implementation of `M` when all of these hold:
+* `H.M<T>` is a static generic method with one `ref T` parameter;
+* its body is one call of an interface member on that parameter, with no arguments
+  (`Reset<T>(ref T e) where T : IEnumerator => e.Reset()`);
+* `e` is a struct the method holds (R32.12).
+
+That is what the helper does at that `T`. The R4.11 analysis counts a field passed by `ref`
+or `out` as written, so a method making such a call is a writer.
+
+**R35.5. Auto-properties of a held struct.** R33.26 reads a borrowing struct's
+auto-property (`public T Current { get; private set; }`) as its backing field in code. It
+now does so in a contract too, and through a held struct (`_enumerator.Current` in a
+wrapping struct's member). So a `[Spec]` property `SpecCurrent => Current` and a wrapping
+struct's contract `@this._enumerator.SpecCurrent.Key` both read the field.
+
+**R35.6. Collection interfaces are boxes.** R29.4's `object`-like types also include:
+* `ICollection`, `ICollection<T>` and `IEnumerable<T>`. These are what a dictionary's
+  explicit `Keys` and `Values` return.
+
+A value seen at one of them is an abstract `obj`. A class converted to one is `box`ed, and a
+contract describes the result with `Pal.Boxes(Result, c)` for some view `c`. This does not
+apply to an `[Exactly]` operand (R27.46): one seen at such an interface is still the object of
+its exact class, not a box. For example, `foreach (T x in other)` over an
+`[Exactly(typeof(SortedSet<>))] IEnumerable<T> other` keeps its R27.51 meaning.
+
+R35.6 does not box a sequence that a LINQ operator or a `foreach` reads. When the converted
+type is a collection interface and the operand is already an array or an interface
+(`lines.OrderBy(...)` on an `IList<Line>`), the operand keeps its R20.6 meaning.
+
+**R35.7. Type tests of `object`.** A type test or cast of a value at `object` is translated
+when the target is a type parameter or `KeyValuePair<K, V>` (a `tuple2`):
+* `o is T` is `Pulse.Lib.CSharp.TypeTest.is_a T o`;
+* `o is T t` binds `t` to `unbox T o`;
+* `(T)o` is `is_a T o ? unbox T o : (is_null o ? default : raise InvalidCastException)`. A
+  null `o` casts to `default(T)` when that is null, and raises `NullReferenceException`
+  otherwise.
+
+`o is null` and `ThrowIfNull(o)` at `object` use R25.4's `is_null`, and the `null` literal
+at `object` is `TypeTest.null_obj`. Contracts use `Pal.IsA<T>(o)` and `Pal.Unbox<T>(o)`. A
+`Pal.Unbox` is well-typed only where its `Pal.IsA` holds, so contracts guard it
+(`Pal.IsA<TKey>(key) && Mem(..., Pal.Unbox<TKey>(key))`).
+
+The emitter writes a `default_of` let with its type (`let t : T = default_of T`), so that the
+`has_default` instance resolves inside an `if`'s branch.
+
+**R35.8. `typeof` in an exception message.** `typeof(T)` may be an argument of an exception's
+message (`SR.Format(SR.Arg_WrongType, key, typeof(TKey))`). R21.7 already leaves the message
+unmodelled.
+
+**R35.9. A call through `((I)this)` in a sealed class.** `((I)this).M(...)` in a sealed class
+is the class's own implementation of `I.M`, called with `this` as its receiver. It is not a
+dispatch: no subclass can override that implementation.
+
+**R35.10. An indexer assignment through a translated setter.** `x[k] = v` where `x`'s
+indexer is a translated class member (`this[key] = value` in `OrderedDictionary`'s
+`IDictionary.this[object]` setter) is a call of the setter. It is not an array write.
+
+**R35.11. `ThrowIfNull` of a non-nullable `object`.** R23.2 drops
+`ArgumentNullException.ThrowIfNull(x)` at a non-nullable class type, because R10 makes such a
+reference non-null. That does not hold at `object`, which R35.7 lets be null: the non-generic
+members take `object key` from callers that NRT does not constrain. So at `object`, the guard
+is R25.7's test, `if (is_null x) throw`. Before this rule, the guard was silently dropped, and
+a member's `[Throws(ArgumentNullException)]` was vacuous.
+
+### The model (R35.7)
+
+`pulse/Pulse.Lib.CSharp.TypeTest.fsti` declares:
+* `is_a a o`;
+* `unbox a (o: obj{is_a a o})`, which returns a `v: a` with `box v == o` and `~(is_null v)`;
+* the lemmas `is_a a (box x) == not (is_null x)`, `is_a a o ==> not (is_null o)` and
+  `is_null (box x) == is_null x`;
+* `null_obj`, an `obj` that `is_null`.
+
+The model says nothing about `unbox (box x)`, and must not. Boxes are not injective
+(`Pulse.Lib.CSharp.Obj`), so `unbox (box x) == x` would be inconsistent. The interface's
+comment gives a model that satisfies every declaration: `obj` as `option unit`.
+
+### Verified (§35)
+
+All of the following verify in the runtime tree's harnesses (`pal/OrderedDictionary`,
+`pal/SortedSet`).
+
+`OrderedDictionary<TKey, TValue>`:
+
+| Member | Contract |
+|---|---|
+| `IsReadOnly`, `IsFixedSize`, `IsSynchronized` (dictionary and both views) | constants |
+| `IReadOnlyList<KVP>.this[int]`, `IList<KVP>.this[int]` get and set, `IList<KVP>.IndexOf`/`Insert`, `ICollection<KVP>.Add`/`Contains`/`Remove` | through `GetAt`/`SetAt`/`IndexOf`/`Insert`/`Add`, as in §33 |
+| `GetEnumerator`, `IEnumerable<KVP>.GetEnumerator`, `IDictionary.GetEnumerator` | the enumerator at index 0 with the dictionary's version, and `_useDictionaryEntry` (R35.3) |
+| `Enumerator`: `IEnumerator.Current`, `IDictionaryEnumerator.Entry`/`Key`/`Value`, `Dispose` | `Boxes` of the current pair, key or value |
+| `KeyCollection`/`ValueCollection` `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) and their `GetEnumerator`s | the wrapped dictionary enumerator (R35.3–R35.5) |
+| `Keys`/`Values` through `IDictionary<,>`, `IReadOnlyDictionary<,>`, `IDictionary` | `Boxes(Result, c)` of the view of this dictionary (R35.6) |
+| `KeyCollection`/`ValueCollection` `IList<T>.this[int]` (get; set throws), `IEnumerable<T>.GetEnumerator`, `ValueCollection` `IList<TValue>.IndexOf` | the item at the index; the first index whose value `DefaultEquals` the item |
+| The views' `ICollection<T>`/`IList` mutators | always throw `NotSupportedException` |
+| `IList.this[int]` get and set | `Boxes` of the pair; set: `SetAt` with the unboxed pair, `ArgumentNullException`/`ArgumentException` when `value` is null or not a pair, or when its key is null |
+| `IDictionary.this[object]` get and set | get: `Boxes` of the key's value, null when absent or not a key; set: as `this[TKey]`, with the argument exceptions |
+| `IDictionary.Add`, `IDictionary.Contains`, `IDictionary.Remove` | as `Add`/`ContainsKey`/`Remove` on the unboxed key, or an argument exception / `false` / nothing |
+| `IList.Add`, `IList.Contains`, `IList.IndexOf`, `IList.Insert`, `IList.Remove` | as the generic members on the unboxed pair |
+| `KeyCollection` `IList.Contains`/`IndexOf`, `ValueCollection` `IList.Contains`/`IndexOf` | on the unboxed key or value; `ValueCollection.IList.IndexOf(null)` finds a null value |
+
+`SortedDictionary<TKey, TValue>`:
+
+| Member | Contract |
+|---|---|
+| `Enumerator` `IEnumerator.Current`, `IDictionaryEnumerator.Key`/`Value`/`Entry` | `Boxes` of the current pair, key or value, by `_getEnumeratorRetType` |
+| `Keys`/`Values` through `IDictionary<,>`, `IReadOnlyDictionary<,>`, `IDictionary` | `Boxes(Result, c)` of the view of this dictionary (R35.6) |
+| `IsCompatibleKey` | `Pal.IsA<TKey>(key)`; throws on a null key |
+| `IDictionary.Contains`, `IDictionary.Remove`, `IDictionary.this[object]` get | as `ContainsKey`/`Remove`/`TryGetValue` on the unboxed key |
+
+### Not verified (§35)
+
+* `SortedDictionary`'s `IDictionary.Add(object, object)` and `IDictionary.this[object]` set.
+  They cast inside `try { ... } catch (InvalidCastException)`. A Pulse `try`'s `ensures`
+  keeps no pure facts, and the cast's value is bound by a `let` of an `if`, which forgets the
+  branch's refinement. So `Add`'s precondition `~(is_null tempKey)` cannot be proved. Their
+  contracts were written (with `Requires` for the key's absence) and failed only there.
+* `ICollection.CopyTo(Array, int)` and `SyncRoot` (all three types): see §32.
+* `SortedDictionary`'s and `SortedSet`'s enumerator constructors and `GetEnumerator`s: the
+  `TreeSet` enumerator core owns a `Stack<Node>`, which R35.3 refuses (§32, R32.12).
+* `TreeSubSet` `Clear`, the range-pruned walks, the re-counting `Count`/`Min`/`Max`,
+  `InternalIndexOf`, a view of a view, and the view enumerators: §32's reasons stand. Each
+  needs a walk over a region with a `Stack`/`Queue` of node pointers, or a write to the view
+  during a walk that holds it. No rule of this section covers that.
+* `LinkedList`: `LinkedListNode<T>(T)` (a node allocated outside every region),
+  `LinkedListNode.List` (it returns the owner, whose invariant the node cannot give),
+  `ValueRef` (a `ref` return), and node arguments outside the list's region (§31's
+  `Pal.InRegion` limitation). Each needs a change to §31's region model.
+* `IEnumerable`/`IDictionary` constructors and serialization (`GetObjectData`,
+  `OnDeserialization`) are out of scope.
+
+### Findings (§35)
+
+* At `object`, `ThrowIfNull(key)` was dropped (R35.11). R23.2 assumed that a non-nullable
+  reference is not null, which callers of a non-generic `IDictionary` need not respect.
+* `is_null` of a struct (`KeyValuePair`) is uninterpreted. So a caller cannot prove
+  `is_a KVP (box p)` for its own pair, and the `IList` members that take a boxed pair are
+  usable only when the pair comes in as `object`.
+* `KeyCollection.IList.IndexOf(object)` and `IList.IndexOf(object)` need `Count >= 0`
+  after a call. `OrderedDictionary.Count` now also ensures `0 <= Result`.
+* `IList.Add(object)` returns `Count - 1`, and its overflow check needs that `Count` too.
+
+### Trusted (§35)
+
+`Pulse.Lib.CSharp.TypeTest` (above) is new: `is_a`, `unbox`, `null_obj` and the three
+lemmas. Its consistency argument is in the interface's comment.

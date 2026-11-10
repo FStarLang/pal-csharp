@@ -60,6 +60,10 @@ public sealed class StmtLowerer(
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
+            // R35.2. `out var x` in a returned expression: declared ahead, as R33.9's `if`.
+            ReturnStatementSyntax { Expression: { } re } r when OutDeclarations(re, loc) is { IsEmpty: false } outs =>
+                new IrBlock(loc, [.. outs, new IrReturn(loc,
+                    _code.ToDeclared(_code.Lower(re), known.MapType(ReturnType(r))))]) { Splice = true },
             ReturnStatementSyntax r => new IrReturn(loc,
                 r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
                     known.MapType(ReturnType(r)))),
@@ -1502,7 +1506,7 @@ public sealed class StmtLowerer(
         if ((known.RegionOpName(method) is not null || known.SpecOpName(method) is not null) && method.ReturnsVoid)
             return new IrGhostStmt(loc, GhostKind.LemmaCall, _spec.Lower(node), null);
 
-        var kind = Declarations.KindOf(method, known);
+        var kind = Declarations.KindOf(_code.ThisInterfaceImpl(node, method) ?? method, known);
         if (kind == CalleeKind.Lemma)
         {
             var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
@@ -1518,6 +1522,9 @@ public sealed class StmtLowerer(
         // position, so it is lowered by the same code: the receiver threading of §4.5 and
         // the `MutatesReceiver` flag of R4.11 are decided in exactly one place.
         if (kind == CalleeKind.Method) return new IrExprStmt(loc, _code.Lower(node));
+        // R35.4. A helper forwarding to a held struct's member is that member's call.
+        if (_code.ForwardedToHeld(node, method, loc) is { } forwarded)
+            return new IrExprStmt(loc, forwarded);
 
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");
         return new IrBlock(loc, []);
@@ -1838,7 +1845,12 @@ public sealed class StmtLowerer(
     {
         var loc = Locations.From(arrow);
         if (model.GetEnclosingSymbol(arrow.Expression.SpanStart) is IMethodSymbol { ReturnsVoid: false } m)
-            return new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+        {
+            // R35.2. As in a `return`, an `out var x` in it is declared ahead.
+            var outs = OutDeclarations(arrow.Expression, loc);
+            IrStmt ret = new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+            return outs.IsEmpty ? ret : new IrBlock(loc, [.. outs, ret]) { Splice = true };
+        }
         if (arrow.Expression is ThrowExpressionSyntax th)
             return new IrThrow(loc, _code.Lower(th.Expression));
         return LowerSideEffect(arrow.Expression, loc);
@@ -1874,7 +1886,9 @@ public sealed class StmtLowerer(
              model.GetSymbolInfo(args[0].Expression).Symbol is IParameterSymbol xp &&
              FrontendPass.ExactParameter(xp, model.Compilation, known) is not null) &&
             nt.Nullability.FlowState == NullableFlowState.NotNull &&
-            nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
+            nt.Type.NullableAnnotation != NullableAnnotation.Annotated &&
+            // R35.11. Not one at `object`, which may be null (R35.7) and is tested (R25.7).
+            ntType.SpecialType != SpecialType.System_Object)
             return new IrBlock(loc, []);
 
         // R33.1. System.Collections' own polyfills of the same guards (its `ThrowHelper`,
@@ -1925,7 +1939,9 @@ public sealed class StmtLowerer(
     /// </summary>
     private IrStmt? OpaqueNullGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
-        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        // R35.1. A trailing parameter-name argument (`nameof(item)`) is a constant, not evaluated.
+        if (!method.IsStatic || args.Count < 1 || args[0].NameColon is not null ||
+            args.Skip(1).Any(a => !model.GetConstantValue(a.Expression).HasValue)) return null;
         var owner = method.ContainingType?.ToDisplayString();
         IrExpr test;
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")

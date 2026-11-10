@@ -360,6 +360,13 @@ public sealed partial class ExprLowerer
                 ? cond
                 : False(loc);
 
+        // R35.7. An `object` is a `T` when it is a non-null box of one; the value is unboxed.
+        if (WellKnown.IsObj(value.Type) && TypeTests.Target(known, target) is { } boxed)
+        {
+            narrowed = TypeTests.Unbox(loc, boxed, value);
+            return TypeTests.IsA(loc, boxed, value);
+        }
+
         diagnostics.Error("PALCS0627", loc,
             $"A test that a `{subject.Type}` is a `{target}`. A type pattern translates when " +
             "the type is a case of the subject's closed record hierarchy, or the subject's " +

@@ -111,8 +111,7 @@ public static partial class FrontendPass
             {
                 if (declarations[i] is not IrMethod { Body: { } body } m) continue;
                 var needed = new HashSet<string>(m.DefaultedTypeParameters);
-                foreach (var call in Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
-                             .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>())
+                foreach (var call in CallsIn(body))
                 {
                     if (!byName.TryGetValue(call.Callee, out var callee)) continue;
                     foreach (var tp in callee.DefaultedTypeParameters)
@@ -133,6 +132,14 @@ public static partial class FrontendPass
             }
         } while (changed);
     }
+
+    // The calls of a body, with those in a statement expression's prelude (R32.12's write-back).
+    private static IEnumerable<IrCall> CallsIn(IrStmt body) =>
+        Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions)
+            .SelectMany(e => e is IrStmtExpr se
+                ? se.Prelude.SelectMany(CallsIn)
+                : e is IrCall c ? [c] : Enumerable.Empty<IrCall>());
 
     // R22.22. The type parameters a `has_default` instance at `t` is resolved from: `t`
     // itself, or those of a tuple's or a struct's arguments (their instances are built
@@ -2324,6 +2331,8 @@ public static partial class FrontendPass
                               atView is not null ||
                               Borrowing.IsMember(candidate.Symbol, known) ||
                               Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known) ||
+                              // R35.3. So does one about a wrapping struct it creates.
+                              Borrowing.IsWrapping(candidate.Symbol.ReturnType, known) ||
                               // R29.4. A boxed result is described by the state of what it boxes.
                               WellKnown.IsObjectLike(candidate.Symbol.ReturnType),
                 });

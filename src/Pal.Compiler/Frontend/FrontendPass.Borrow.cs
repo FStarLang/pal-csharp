@@ -35,7 +35,9 @@ public static partial class FrontendPass
         // R32.12. A wrapping struct's member is one of the object its core borrows.
         var (corePath, core) = Borrowing.Innermost(self, known);
         var owner = Borrowing.OwnerField(core, known)!;
-        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor)
+        // R35.3. Unless the core owns no objects and is created by a method of the owner's class.
+        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor &&
+            !(Borrowing.CreatableWrapping(self, known) && Borrowing.OwnerParameter(symbol, owner, known.Compilation) is not null))
         {
             diagnostics.Error("PALCS0801", loc,
                 $"The constructor of the wrapping struct `{self.Name}`. A wrapping struct's members are " +

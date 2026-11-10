@@ -193,6 +193,20 @@ public static class Pal
     /// </summary>
     public static bool Boxes<T>(object? o, T value) => throw Ghost();
 
+    /// <summary>
+    /// R35.7. <c>o is T</c>: whether <c>o</c> is a non-null box of a <c>T</c>. Of the box of a
+    /// <c>T</c> it holds exactly when the value boxed is not null; otherwise it is left
+    /// uninterpreted (<c>Pulse.Lib.CSharp.TypeTest.is_a</c>).
+    /// </summary>
+    public static bool IsA<T>(object? o) => throw Ghost();
+
+    /// <summary>
+    /// R35.7. <c>(T)o</c> where <c>Pal.IsA&lt;T&gt;(o)</c>: a <c>T</c> that <c>o</c> boxes.
+    /// Boxing is not injective in the model, so which one is not determined by
+    /// <c>Pal.Boxes</c>; it is the one the program's cast yields.
+    /// </summary>
+    public static T Unbox<T>(object? o) => throw Ghost();
+
     public static bool Forall<T1>(Func<T1, bool> body) => throw Ghost();
     public static bool Forall<T1, T2>(Func<T1, T2, bool> body) => throw Ghost();
     public static bool Forall<T1, T2, T3>(Func<T1, T2, T3, bool> body) => throw Ghost();

@@ -548,7 +548,16 @@ public sealed class WellKnown
         type is { SpecialType: SpecialType.System_Object } ||
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
         i.OriginalDefinition.ToDisplayString() is "System.Collections.IEnumerator"
-            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator";
+            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator"
+            // R35.6. And the collection interfaces a dictionary's explicit `Keys` and `Values` return.
+            or "System.Collections.ICollection" or "System.Collections.Generic.ICollection<T>"
+            or "System.Collections.Generic.IEnumerable<T>";
+
+    /// <summary>R35.6. The collection interfaces <see cref="IsObjectLike"/> admits.</summary>
+    public static bool IsCollectionInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.ICollection"
+            or "System.Collections.Generic.ICollection<T>" or "System.Collections.Generic.IEnumerable<T>";
 
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };

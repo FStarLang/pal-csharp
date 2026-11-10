@@ -116,10 +116,15 @@ public sealed partial class ExprLowerer
             : SelfOf(Borrow, loc);
 
     /// <summary>R32.12. The struct <paramref name="held"/> is of, read through its wrapped fields.</summary>
-    private IrExpr SelfOf(BorrowContext held, IrLoc loc) =>
-        held.SelfIsResult ? new IrResult(loc) { Type = held.StructType } :
-        held.SelfPath.Aggregate((IrExpr)new IrVar(loc, held.SelfName) { Type = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType) },
-            (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+    private IrExpr SelfOf(BorrowContext held, IrLoc loc)
+    {
+        var rootType = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType);
+        // R35.3. The struct a wrapping constructor builds is its result, read through its wrapped field.
+        IrExpr root = held.SelfIsResult
+            ? new IrResult(loc) { Type = rootType }
+            : new IrVar(loc, held.SelfName) { Type = rootType };
+        return held.SelfPath.Aggregate(root, (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+    }
 
     /// <summary>
     /// R32.12. The context of the struct a wrapping struct wraps, read through the wrapped
@@ -136,6 +141,7 @@ public sealed partial class ExprLowerer
             CorePath = path,
             SelfName = outer.SelfName,
             SelfPath = outer.SelfPath.Add(field),
+            SelfIsResult = outer.SelfIsResult || outer.Constructor,
             OwnerName = outer.OwnerName,
             OwnedNames = outer.OwnedNames,
         };
@@ -264,12 +270,54 @@ public sealed partial class ExprLowerer
             ResultView(rp.ContainingType) is { } rv)
             return InlineSpec(rv, rp, loc);
         if (symbol is IMethodSymbol || HeldContext(node.Expression) is not { } held) return null;
+        // R35.5. A held struct's auto-property is its backing field (R33.26).
+        if (Borrowing.IsAutoProperty(symbol, held.Struct) && symbol is IPropertySymbol autoProp)
+            return new IrField(loc, SelfOf(held, loc), autoProp.Name) { Type = known.MapType(autoProp.Type) };
         if (symbol is IPropertySymbol sp && SpecPosition && Declarations.Has(sp, known.SpecAttribute))
             return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
         if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
             (Borrowing.IsMember(getter, known) || held.ViewBase is not null))
             return WithHeld(held, () => HeldCall(held, getter, [], loc, node));
         return HeldRefused(node, loc);
+    }
+
+    /// <summary>
+    /// R35.4. <c>H.M(ref e)</c>, for a static generic helper whose body is one call of an
+    /// interface member on its <c>ref</c> parameter (<c>Reset&lt;T&gt;(ref T e) where T :
+    /// IEnumerator =&gt; e.Reset()</c>), and a held struct <c>e</c>: the struct's
+    /// implementation of that member called on <c>e</c>, as the helper's body is at it.
+    /// </summary>
+    internal IrExpr? ForwardedToHeld(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc)
+    {
+        if (SpecPosition || !method.IsStatic || method.TypeArguments.Length != 1 ||
+            method.OriginalDefinition.Parameters is not [{ RefKind: RefKind.Ref, Type: ITypeParameterSymbol tp } param] ||
+            !SymbolEqualityComparer.Default.Equals(tp, method.OriginalDefinition.TypeParameters[0]) ||
+            node.ArgumentList.Arguments is not [{ RefKindKeyword.RawKind: (int)Microsoft.CodeAnalysis.CSharp.SyntaxKind.RefKeyword } arg] ||
+            method.TypeArguments[0] is not INamedTypeSymbol { TypeKind: TypeKind.Struct } structType ||
+            HeldContext(arg.Expression) is not { } held ||
+            !SymbolEqualityComparer.Default.Equals(held.Struct.OriginalDefinition, structType.OriginalDefinition))
+            return null;
+        var decl = method.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() as MethodDeclarationSyntax;
+        var body = decl switch
+        {
+            { ExpressionBody.Expression: var e } => e,
+            { Body.Statements: [ExpressionStatementSyntax { Expression: var e }] } => e,
+            _ => null,
+        };
+        if (body is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv },
+                ArgumentList.Arguments.Count: 0,
+            } inner ||
+            recv.Identifier.ValueText != param.Name)
+            return null;
+        var helperModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        if (helperModel.GetSymbolInfo(inner).Symbol is not IMethodSymbol { IsStatic: false } im ||
+            im.ContainingType.TypeKind != TypeKind.Interface ||
+            structType.FindImplementationForInterfaceMember(im) is not IMethodSymbol impl ||
+            !Borrowing.IsMember(impl, known))
+            return null;
+        return WithHeld(held, () => HeldCall(held, impl, [], loc, node));
     }
 
     private IrExpr HeldRefused(ExpressionSyntax node, IrLoc loc)
@@ -392,7 +440,8 @@ public sealed partial class ExprLowerer
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
             // R33.26. The struct's auto-property is its backing field.
-            case IPropertySymbol ap when !SpecPosition && !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
+            // R35.5. So it is in a contract, where a `[Spec]` property reads it.
+            case IPropertySymbol ap when !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
                 return new IrField(loc, SelfExpr(loc), ap.Name) { Type = known.MapType(ap.Type) };
             case IFieldSymbol f when bw.IsState(f):
                 if (bw.Constructor && !SpecPosition && _ctorGiven.TryGetValue(f.Name, out var givenValue))
@@ -610,7 +659,8 @@ public sealed partial class ExprLowerer
     private IrExpr BorrowingConstruction(
         BaseObjectCreationExpressionSyntax node, IMethodSymbol ctor, INamedTypeSymbol named, IrLoc loc)
     {
-        var owner = Borrowing.OwnerField(named, known)!;
+        // R35.3. A wrapping struct's is its core's.
+        var owner = Borrowing.OwnerField(Borrowing.Innermost(named, known).Core, known)!;
         if (Borrowing.OwnerParameter(ctor, owner, known.Compilation) is not { } op || node.ArgumentList is null ||
             node.Initializer is not null)
         {
@@ -673,7 +723,7 @@ public sealed partial class ExprLowerer
     {
         var bw = Borrow!;
         var given = new List<IrFieldInit>();
-        var extended = !bw.Owned.IsEmpty || bw.ViewBase is not null;
+        var extended = !bw.Owned.IsEmpty || bw.ViewBase is not null || bw.Wrapping;
         var prefix = new List<IrStmt>();
         // R32.13. A view's constructor runs its base's first: each argument is a local, and
         // each field the base's constructor assigns is given its value over those locals.
