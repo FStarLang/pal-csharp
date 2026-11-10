@@ -9753,6 +9753,8 @@ the sequences before and after.
   arms and `[Rlimit]`; `TryInsert` takes about an hour to check, `Remove(key)` about 35
   minutes. R30.17 changed the SMT context enough that both needed a
   `Pal.Assert(0 <= index && index < entries.Length)` at the end of each insertion arm.
+  After R30.31--R30.35 the join assertion `count < _entries.Length` (after the `Resize`
+  arm) timed out at `[Rlimit(4)]`; `[Rlimit(8)]` checks it (about 1h35m, ~115 GB for F*).
 * **Long division.** `(uint)hashCode % buckets.Length` is computed in `long`; that the
   quotient fits is nonlinear, so `TryInsert` calls a `DivFits` lemma (proved in
   `DictionaryChain.div_fits` with `FStar.Math.Lemmas`) before the bucket lookup after `Resize`.
