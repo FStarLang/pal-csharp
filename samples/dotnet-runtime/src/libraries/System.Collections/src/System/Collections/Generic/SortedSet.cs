@@ -754,6 +754,10 @@ namespace System.Collections.Generic
                             SpecTopDownRemove.MidPre<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
                             sibling = parent.GetSibling(current);
                         }
+                        Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
+                        Pal.Join(SpecTopDownRemove.RMid<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value));
+                        Pal.Join(current != null && parent != null && sibling != null);
+                        Pal.Join(Pal.Implies(current == Pal.LeftOf(parent), sibling == Pal.RightOf(parent)) && Pal.Implies(current != Pal.LeftOf(parent), sibling == Pal.LeftOf(parent)));
 
                         SpecTopDownRemove.AtMid<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, sibling, foundMatch, m0.Value);
                         Debug.Assert(Node.IsNonNullBlack(sibling));
@@ -792,6 +796,9 @@ namespace System.Collections.Generic
                         }
                     }
                 }
+                Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
+                Pal.Join(current != null);
+                Pal.Join(SpecTopDownRemove.RFx<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, match, parentOfMatch, foundMatch, m0.Value));
 
                 SpecTopDownRemove.AtFx<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, match, parentOfMatch, foundMatch, m0.Value);
                 // We don't need to compare after we find the match.

@@ -320,9 +320,8 @@ namespace System.Collections.Generic
                                   comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue &&
                                   SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items).Length <= _underlying.SpecItems.Length &&
                                   0 <= Pal.Trace<(T, bool), bool>(action).Length && Pal.Trace<(T, bool), bool>(action).Length <= SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length &&
-                                  (Pal.Returned()
-                                      ? !Pal.ReturnValue<bool>() && SpecWalk.Walked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)
-                                      : SpecWalk.Visited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action)) &&
+                                  Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() && SpecWalk.Walked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)) &&
+                                  Pal.Implies(!Pal.Returned(), SpecWalk.Visited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action)) &&
                                         SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items)) == Pal.Slice(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action).Length, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length)));
                     Pal.Assert(stack.Items.Length > 0);
                     SpecRangeWalk.PopAt<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action).Length);
@@ -393,9 +392,8 @@ namespace System.Collections.Generic
                     Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), processQueue.Items) && SpecRangeWalk.Queue<Node, T>(Pal.Heap<Node>(), comparer, processQueue.Items) &&
                                   comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue &&
                                   SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items).Length <= _underlying.SpecItems.Length &&
-                                  (Pal.Returned()
-                                      ? !Pal.ReturnValue<bool>() && SpecWalk.BfWalked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)
-                                      : SpecWalk.BfVisited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items)))));
+                                  Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() && SpecWalk.BfWalked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)) &&
+                                  Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items)))));
                     Ghost<Seq<Node>> q0 = processQueue.Items;
                     SpecRangeWalk.BfDequeue<Node, T, bool>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action));
                     current = processQueue.Dequeue();
@@ -403,16 +401,26 @@ namespace System.Collections.Generic
                     {
                         return false;
                     }
+                    Pal.Join(current == q0.Value[0]);
+                    Pal.Join(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && SpecWalk.BfWalked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)));
+                    Pal.Join(Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), SpecRangeWalk.BfNext<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value))))));
                     Pal.Assert(processQueue.SpecCount < int.MaxValue);
                     if (current.Left != null && (!_lBoundActive || Comparer.Compare(_min, current.Item) < 0))
                     {
                         processQueue.Enqueue(current.Left);
                     }
+                    Pal.Join(processQueue.Items == (Pal.LeftOf(current) != null && (!_lBoundActive || Pal.Compare(comparer, _min, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(current), _min)) < 0)
+                        ? Pal.Snoc(Pal.Slice(q0.Value, 1, q0.Value.Length), Pal.LeftOf(current))
+                        : Pal.Slice(q0.Value, 1, q0.Value.Length)));
+                    Ghost<Seq<Node>> q1 = processQueue.Items;
                     Pal.Assert(processQueue.SpecCount < int.MaxValue);
                     if (current.Right != null && (!_uBoundActive || Comparer.Compare(_max, current.Item) > 0))
                     {
                         processQueue.Enqueue(current.Right);
                     }
+                    Pal.Join(processQueue.Items == (Pal.RightOf(current) != null && (!_uBoundActive || Pal.Compare(comparer, _max, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(current), _min)) > 0)
+                        ? Pal.Snoc(q1.Value, Pal.RightOf(current))
+                        : q1.Value));
                     Pal.Assert(processQueue.Items == SpecRangeWalk.BfNext<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value));
                 }
                 return true;
