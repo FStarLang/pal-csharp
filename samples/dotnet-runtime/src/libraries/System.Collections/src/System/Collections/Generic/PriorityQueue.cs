@@ -190,6 +190,12 @@ namespace System.Collections.Generic
         ///  Constructs the heap using a heapify operation,
         ///  which is generally faster than enqueuing individual elements sequentially.
         /// </remarks>
+        // Heapify's MoveDown computes (nodeIndex << 2) + 1, which wraps for nodeIndex >= 2^29; see the spec findings.
+        [Requires("Pal.Contents(items).Length <= 536870912")]
+        [Ensures("@this.SpecCount == Pal.Contents(items).Length")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Pal.Permutation(Pal.Contents(items), @this.Items)")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == Comparer<TPriority>.Default")]
         public PriorityQueue(IEnumerable<(TElement Element, TPriority Priority)> items)
             : this(items, comparer: null)
         {
@@ -212,12 +218,18 @@ namespace System.Collections.Generic
         ///  Constructs the heap using a heapify operation,
         ///  which is generally faster than enqueuing individual elements sequentially.
         /// </remarks>
+        [Requires("Pal.Contents(items).Length <= 536870912")]
+        [Ensures("@this.SpecCount == Pal.Contents(items).Length")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Pal.Permutation(Pal.Contents(items), @this.Items)")]
+        [Ensures("(@this.Order ?? Comparer<TPriority>.Default) == (comparer ?? Comparer<TPriority>.Default)")]
         public PriorityQueue(IEnumerable<(TElement Element, TPriority Priority)> items, IComparer<TPriority>? comparer)
         {
             ArgumentNullException.ThrowIfNull(items);
 
             _nodes = EnumerableHelpers.ToArray(items, out _size);
             _comparer = InitializeComparer(comparer);
+            PermutationRefl(Pal.Contents(items));
 
             if (_size > 1)
             {
@@ -264,6 +276,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
         [Ensures("Pal.Permutation(Pal.Snoc(Pal.Old(@this.Items), (element, priority)), @this.Items)")]
         [Ensures("@this.Order == Pal.Old(@this.Order)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1")]
         public void Enqueue(TElement element, TPriority priority)
         {
             // Virtually add the node at the end of the underlying array.
@@ -521,6 +534,13 @@ namespace System.Collections.Generic
         /// <exception cref="ArgumentNullException">
         ///  The specified <paramref name="items"/> argument was <see langword="null"/>.
         /// </exception>
+        [Requires("Pal.IsHeap(@this.Items, @this.Order)")]
+        // Heapify's MoveDown computes (nodeIndex << 2) + 1, which wraps for nodeIndex >= 2^29; see the spec findings.
+        [Requires("@this.SpecCount + Pal.Contents(items).Length <= 536870912")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("@this.Order == Pal.Old(@this.Order)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + Pal.Contents(items).Length")]
+        [Ensures("Pal.Permutation(Pal.Concat(Pal.Old(@this.Items), Pal.Contents(items)), @this.Items)")]
         public void EnqueueRange(IEnumerable<(TElement Element, TPriority Priority)> items)
         {
             ArgumentNullException.ThrowIfNull(items);
@@ -540,6 +560,7 @@ namespace System.Collections.Generic
                 {
                     collection.CopyTo(_nodes, 0);
                     _size = count;
+                    Pal.Assert(Pal.Slice(Pal.Contents(_nodes), 0, _size) == Pal.Contents(items));
                 }
                 else
                 {
@@ -547,19 +568,26 @@ namespace System.Collections.Generic
                     (TElement, TPriority)[] nodes = _nodes;
                     foreach ((TElement element, TPriority priority) in items)
                     {
+                        Pal.Invariant(0 <= i && i <= nodes.Length && i == Pal.Index(element));
+                        Pal.Invariant(_size == 0 && nodes == _nodes && _comparer == Pal.Old(this.Order));
+                        Pal.Invariant(Pal.Slice(Pal.Contents(_nodes), 0, i) == Pal.Slice(Pal.Contents(items), 0, i));
                         if (nodes.Length == i)
                         {
                             Grow(i + 1);
                             nodes = _nodes;
                         }
 
+                        FillStep(Pal.Contents(_nodes), Pal.Contents(items), i, (element, priority));
                         nodes[i++] = (element, priority);
                     }
 
                     _size = i;
+                    Pal.Assert(Pal.Slice(Pal.Contents(_nodes), 0, _size) == Pal.Contents(items));
                 }
 
                 _version++;
+                AppendEmpty(Pal.Old(this.Items), Pal.Contents(items));
+                PermutationRefl(Pal.Contents(items));
 
                 if (_size > 1)
                 {
@@ -568,9 +596,18 @@ namespace System.Collections.Generic
             }
             else
             {
+                PermutationRefl(Pal.Old(this.Items));
+                AppendNothing(Pal.Old(this.Items), Pal.Contents(items));
                 foreach ((TElement element, TPriority priority) in items)
                 {
+                    Pal.Invariant(_size == Pal.Old(this.SpecCount) + Pal.Index(element));
+                    Pal.Invariant(0 <= _size && _size <= _nodes.Length);
+                    Pal.Invariant(_comparer == Pal.Old(this.Order));
+                    Pal.Invariant(Pal.IsHeap(Pal.Slice(Pal.Contents(_nodes), 0, _size), _comparer));
+                    Pal.Invariant(Pal.Permutation(Pal.Concat(Pal.Old(this.Items), Pal.Slice(Pal.Contents(items), 0, Pal.Index(element))), Pal.Slice(Pal.Contents(_nodes), 0, _size)));
+                    Ghost<Seq<(TElement Element, TPriority Priority)>> before = Pal.Slice(Pal.Contents(_nodes), 0, _size);
                     Enqueue(element, priority);
+                    EnqueueStep(Pal.Old(this.Items), Pal.Contents(items), before.Value, Pal.Slice(Pal.Contents(_nodes), 0, _size), Pal.Index(element));
                 }
             }
         }
@@ -584,6 +621,11 @@ namespace System.Collections.Generic
         /// <exception cref="ArgumentNullException">
         ///  The specified <paramref name="elements"/> argument was <see langword="null"/>.
         /// </exception>
+        [Requires("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Requires("@this.SpecCount + Pal.Contents(elements).Length < int.MaxValue")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("@this.Order == Pal.Old(@this.Order)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + Pal.Contents(elements).Length")]
         public void EnqueueRange(IEnumerable<TElement> elements, TPriority priority)
         {
             ArgumentNullException.ThrowIfNull(elements);
@@ -603,6 +645,10 @@ namespace System.Collections.Generic
                 (TElement, TPriority)[] nodes = _nodes;
                 foreach (TElement element in elements)
                 {
+                    Pal.Invariant(0 <= i && i <= nodes.Length && i == Pal.Index(element));
+                    Pal.Invariant(_size == 0 && nodes == _nodes && _comparer == Pal.Old(this.Order));
+                    Pal.Invariant(Pal.Forall((int j) => Pal.Implies(0 <= j && j < i, Pal.Same(Pal.Contents(nodes)[j].Item2, priority))));
+                    Pal.Invariant(Pal.IsHeap(Pal.Slice(Pal.Contents(nodes), 0, i), _comparer));
                     if (nodes.Length == i)
                     {
                         Grow(i + 1);
@@ -619,6 +665,10 @@ namespace System.Collections.Generic
             {
                 foreach (TElement element in elements)
                 {
+                    Pal.Invariant(_size == Pal.Old(this.SpecCount) + Pal.Index(element));
+                    Pal.Invariant(0 <= _size && _size <= _nodes.Length);
+                    Pal.Invariant(_comparer == Pal.Old(this.Order));
+                    Pal.Invariant(Pal.IsHeap(Pal.Slice(Pal.Contents(_nodes), 0, _size), _comparer));
                     Enqueue(element, priority);
                 }
             }
@@ -775,6 +825,7 @@ namespace System.Collections.Generic
         [Ensures("@this.Items == Pal.Old(@this.Items)")]
         [Ensures("@this.Order == Pal.Old(@this.Order)")]
         [Ensures("@this.SpecCapacity >= minCapacity")]
+        [Ensures("Pal.Slice(@this.Store, 0, Pal.Old(@this.SpecCapacity)) == Pal.Old(@this.Store)")]
         private void Grow(int minCapacity)
         {
             Debug.Assert(_nodes.Length < minCapacity);
@@ -942,6 +993,110 @@ namespace System.Collections.Generic
         [Conditional("PAL")]
         private static void HeapRemoveDone(Seq<(TElement Element, TPriority Priority)> s, int n, int i, Seq<(TElement Element, TPriority Priority)> r) { }
 
+        // MoveDown*'s and Heapify's proof steps (pal-csharp doc/translation.md R34.18,
+        // pal/PriorityQueue/PriorityQueueHeapify.fst): sifting down from r keeps the subtree at r
+        // a heap but for the hole and leaves everything outside it alone.
+        [Lemma]
+        [Requires("0 <= r && r < n && n <= s.Length && t == Pal.SetAt(Pal.Slice(s, 0, n), r, x)")]
+        [Requires("Pal.HeapDown(s, n, r, x, c, t) || PriorityQueue<TElement, TPriority>.HeapAbove(s, n, r, c)")]
+        [Ensures("PriorityQueue<TElement, TPriority>.DownR(s, n, r, r, x, c, t, s)")]
+        [PulseBody("PriorityQueueHeapify.down_r_init _ _ $(s) $(n) $(r) $(x) $(c) $(t)")]
+        [Conditional("PAL")]
+        private static void DownRInit(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, (TElement Element, TPriority Priority) x, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t) { }
+
+        [Lemma]
+        [Requires("PriorityQueue<TElement, TPriority>.DownR(s0, n, r, h, x, c, t, s) && 4 * h + 1 < n && Pal.HeapMinChild(s, 4 * h + 1, (4 * h + 5 < n ? 4 * h + 5 : n), m, c) && !Pal.HeapDownStop(s, n, h, x, m, c)")]
+        [Ensures("PriorityQueue<TElement, TPriority>.DownR(s0, n, r, m, x, c, t, Pal.SetAt(s, h, s[m]))")]
+        [PulseBody("PriorityQueueHeapify.down_r_step _ _ $(s0) $(s) $(n) $(r) $(h) $(x) $(m) $(c) $(t)")]
+        [Conditional("PAL")]
+        private static void DownRStep(Seq<(TElement Element, TPriority Priority)> s0, Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, SpecInt h, (TElement Element, TPriority Priority) x, SpecInt m, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t) { }
+
+        [Lemma]
+        [Requires("PriorityQueue<TElement, TPriority>.DownR(s0, n, r, h, x, c, t, s) && Pal.HeapDownStop(s, n, h, x, m, c)")]
+        [Ensures("PriorityQueue<TElement, TPriority>.SubHeap(Pal.SetAt(s, h, x), n, r, c)")]
+        [Ensures("Pal.Permutation(t, Pal.Slice(Pal.SetAt(s, h, x), 0, n))")]
+        [PulseBody("PriorityQueueHeapify.down_r_done _ _ $(s0) $(s) $(n) $(r) $(h) $(x) $(m) $(c) $(t)")]
+        [Conditional("PAL")]
+        private static void DownRDone(Seq<(TElement Element, TPriority Priority)> s0, Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, SpecInt h, (TElement Element, TPriority Priority) x, SpecInt m, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t) { }
+
+        [Lemma]
+        [Requires("PriorityQueue<TElement, TPriority>.DownR(s0, n, r, h, x, c, t, s)")]
+        [Requires("(i == 4 * h + 1 && i >= n) || (PriorityQueue<TElement, TPriority>.SubHeap(Pal.SetAt(s, h, x), n, r, c) && Pal.Permutation(t, Pal.Slice(Pal.SetAt(s, h, x), 0, n)))")]
+        [Ensures("PriorityQueue<TElement, TPriority>.SubHeap(Pal.SetAt(s, h, x), n, r, c)")]
+        [Ensures("Pal.Permutation(t, Pal.Slice(Pal.SetAt(s, h, x), 0, n))")]
+        [PulseBody("PriorityQueueHeapify.down_r_finish _ _ $(s0) $(s) $(n) $(r) $(h) $(x) $(c) $(t) $(i)")]
+        [Conditional("PAL")]
+        private static void DownRFinish(Seq<(TElement Element, TPriority Priority)> s0, Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, SpecInt h, (TElement Element, TPriority Priority) x, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t, SpecInt i) { }
+
+        [Lemma]
+        [Requires("PriorityQueue<TElement, TPriority>.DownR(s0, n, r, h, x, c, t, s) && PriorityQueue<TElement, TPriority>.SubHeap(Pal.SetAt(s, h, x), n, r, c)")]
+        [Ensures("Pal.Implies(Pal.HeapDown(s0, n, r, x, c, t), Pal.IsHeap(Pal.Slice(Pal.SetAt(s, h, x), 0, n), c))")]
+        [Ensures("Pal.Implies(PriorityQueue<TElement, TPriority>.HeapAbove(s0, n, r, c), PriorityQueue<TElement, TPriority>.HeapAbove(Pal.SetAt(s, h, x), n, r - 1, c))")]
+        [PulseBody("PriorityQueueHeapify.down_r_result _ _ $(s0) $(s) $(n) $(r) $(h) $(x) $(c) $(t)")]
+        [Conditional("PAL")]
+        private static void DownRResult(Seq<(TElement Element, TPriority Priority)> s0, Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, SpecInt h, (TElement Element, TPriority Priority) x, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t) { }
+
+        [Lemma]
+        [Requires("1 < n && n <= s.Length")]
+        [Ensures("PriorityQueue<TElement, TPriority>.HeapAbove(s, n, (n - 2) / 4, c)")]
+        [PulseBody("PriorityQueueHeapify.heap_above_init _ _ $(s) $(n) $(c)")]
+        [Conditional("PAL")]
+        private static void HeapAboveInit(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, IComparer<TPriority>? c) { }
+
+        [Lemma]
+        [Requires("0 <= n && PriorityQueue<TElement, TPriority>.HeapAbove(s, n, -1, c)")]
+        [Ensures("Pal.IsHeap(Pal.Slice(s, 0, n), c)")]
+        [PulseBody("PriorityQueueHeapify.heap_above_done _ _ $(s) $(n) $(c)")]
+        [Conditional("PAL")]
+        private static void HeapAboveDone(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, IComparer<TPriority>? c) { }
+
+        [Lemma]
+        [Requires("0 <= i && i < n && n <= s.Length")]
+        [Ensures("Pal.SetAt(Pal.Slice(s, 0, n), i, s[i]) == Pal.Slice(s, 0, n)")]
+        [PulseBody("PriorityQueueHeapify.set_at_same _ _ $(s) $(n) $(i)")]
+        [Conditional("PAL")]
+        private static void SetAtSame(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt i) { }
+
+        [Lemma]
+        [Requires("0 < k && k <= c.Length && Pal.Permutation(Pal.Concat(a, Pal.Slice(c, 0, k - 1)), b) && Pal.Permutation(Pal.Snoc(b, c[k - 1]), b2)")]
+        [Ensures("Pal.Permutation(Pal.Concat(a, Pal.Slice(c, 0, k)), b2)")]
+        [PulseBody("PriorityQueueHeapify.enqueue_step $(a) $(c) $(b) $(b2) $(k)")]
+        [Conditional("PAL")]
+        private static void EnqueueStep(Seq<(TElement Element, TPriority Priority)> a, Seq<(TElement Element, TPriority Priority)> c, Seq<(TElement Element, TPriority Priority)> b, Seq<(TElement Element, TPriority Priority)> b2, SpecInt k) { }
+
+        [Lemma]
+        [Requires("0 <= i && i < s.Length && i < c.Length && Pal.Slice(s, 0, i) == Pal.Slice(c, 0, i) && Pal.Same(x, c[i])")]
+        [Ensures("Pal.Slice(Pal.SetAt(s, i, x), 0, i + 1) == Pal.Slice(c, 0, i + 1)")]
+        [PulseBody("PriorityQueueHeapify.fill_step $(s) $(c) $(i) $(x)")]
+        [Conditional("PAL")]
+        private static void FillStep(Seq<(TElement Element, TPriority Priority)> s, Seq<(TElement Element, TPriority Priority)> c, SpecInt i, (TElement Element, TPriority Priority) x) { }
+
+        [Lemma]
+        [Ensures("Pal.Concat(a, Pal.Slice(c, 0, 0)) == a")]
+        [PulseBody("PriorityQueueHeapify.append_nothing $(a) $(c)")]
+        [Conditional("PAL")]
+        private static void AppendNothing(Seq<(TElement Element, TPriority Priority)> a, Seq<(TElement Element, TPriority Priority)> c) { }
+
+        [Lemma]
+        [Requires("a.Length == 0")]
+        [Ensures("Pal.Concat(a, c) == c")]
+        [PulseBody("PriorityQueueHeapify.append_empty $(a) $(c)")]
+        [Conditional("PAL")]
+        private static void AppendEmpty(Seq<(TElement Element, TPriority Priority)> a, Seq<(TElement Element, TPriority Priority)> c) { }
+
+        [Lemma]
+        [Ensures("Pal.Permutation(a, a)")]
+        [PulseBody("Pulse.Lib.CSharp.Sort.permutation_refl $(a)")]
+        [Conditional("PAL")]
+        private static void PermutationRefl(Seq<(TElement Element, TPriority Priority)> a) { }
+
+        [Lemma]
+        [Requires("Pal.Permutation(a, b) && Pal.Permutation(b, d)")]
+        [Ensures("Pal.Permutation(a, d)")]
+        [PulseBody("Pulse.Lib.CSharp.Heap.permutation_trans $(a) $(b) $(d)")]
+        [Conditional("PAL")]
+        private static void PermutationTrans(Seq<(TElement Element, TPriority Priority)> a, Seq<(TElement Element, TPriority Priority)> b, Seq<(TElement Element, TPriority Priority)> d) { }
+
         /// <summary>
         /// Gets the index of an element's parent.
         /// </summary>
@@ -959,6 +1114,12 @@ namespace System.Collections.Generic
         /// <summary>
         /// Converts an unordered list into a heap.
         /// </summary>
+        [Requires("1 < @this.SpecCount && @this.SpecCount <= 536870912")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount)")]
+        [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
+        [Ensures("@this.Order == Pal.Old(@this.Order)")]
+        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Pal.Permutation(Pal.Old(@this.Items), @this.Items)")]
         private void Heapify()
         {
             // Leaves of the tree are in fact 1-element heaps, for which there
@@ -968,21 +1129,42 @@ namespace System.Collections.Generic
 
             (TElement Element, TPriority Priority)[] nodes = _nodes;
             int lastParentWithChildren = GetParentIndex(_size - 1);
+            Ghost<Seq<(TElement Element, TPriority Priority)>> items0 = Pal.Slice(Pal.Contents(_nodes), 0, _size);
+            HeapAboveInit(Pal.Contents(_nodes), _size, _comparer);
+            PermutationRefl(items0.Value);
 
             if (_comparer == null)
             {
                 for (int index = lastParentWithChildren; index >= 0; --index)
                 {
+                    Pal.Invariant(-1 <= index && index <= (_size - 2) / 4);
+                    Pal.Invariant(_size == Pal.Old(this.SpecCount) && _comparer == Pal.Old(this.Order) && nodes == _nodes && _nodes.Length == Pal.Old(this.SpecCapacity));
+                    Pal.Invariant(HeapAbove(Pal.Contents(_nodes), _size, index, _comparer));
+                    Pal.Invariant(Pal.Permutation(items0.Value, Pal.Slice(Pal.Contents(_nodes), 0, _size)));
+                    Pal.Decreases(index + 1);
+                    Ghost<Seq<(TElement Element, TPriority Priority)>> before = Pal.Slice(Pal.Contents(_nodes), 0, _size);
+                    SetAtSame(Pal.Contents(_nodes), _size, index);
                     MoveDownDefaultComparer(nodes[index], index);
+                    PermutationTrans(items0.Value, before.Value, Pal.Slice(Pal.Contents(_nodes), 0, _size));
                 }
             }
             else
             {
                 for (int index = lastParentWithChildren; index >= 0; --index)
                 {
+                    Pal.Invariant(-1 <= index && index <= (_size - 2) / 4);
+                    Pal.Invariant(_size == Pal.Old(this.SpecCount) && _comparer == Pal.Old(this.Order) && nodes == _nodes && _nodes.Length == Pal.Old(this.SpecCapacity));
+                    Pal.Invariant(HeapAbove(Pal.Contents(_nodes), _size, index, _comparer));
+                    Pal.Invariant(Pal.Permutation(items0.Value, Pal.Slice(Pal.Contents(_nodes), 0, _size)));
+                    Pal.Decreases(index + 1);
+                    Ghost<Seq<(TElement Element, TPriority Priority)>> before = Pal.Slice(Pal.Contents(_nodes), 0, _size);
+                    SetAtSame(Pal.Contents(_nodes), _size, index);
                     MoveDownCustomComparer(nodes[index], index);
+                    PermutationTrans(items0.Value, before.Value, Pal.Slice(Pal.Contents(_nodes), 0, _size));
                 }
             }
+
+            HeapAboveDone(Pal.Contents(_nodes), _size, _comparer);
         }
 
         /// <summary>
@@ -1085,11 +1267,14 @@ namespace System.Collections.Generic
         [Requires("0 <= nodeIndex && nodeIndex < @this.SpecCount")]
         // (nodeIndex << 2) + 1 wraps for nodeIndex >= 2^29; see the spec findings.
         [Requires("@this.SpecCount <= 536870912")]
-        [Requires("Pal.HeapDown(@this.Store, @this.SpecCount, nodeIndex, node, @this.Order, Pal.SetAt(@this.Items, nodeIndex, node))")]
+        // Either a heap but for the hole at nodeIndex (Dequeue, Remove, ...), or only the subtrees
+        // below nodeIndex are heaps (Heapify); R34.18.
+        [Requires("Pal.HeapDown(@this.Store, @this.SpecCount, nodeIndex, node, @this.Order, Pal.SetAt(@this.Items, nodeIndex, node)) || PriorityQueue<TElement, TPriority>.HeapAbove(@this.Store, @this.SpecCount, nodeIndex, @this.Order)")]
         [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount)")]
         [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
         [Ensures("@this.Order == Pal.Old(@this.Order)")]
-        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Pal.Implies(Pal.HeapDown(Pal.Old(@this.Store), Pal.Old(@this.SpecCount), nodeIndex, node, Pal.Old(@this.Order), Pal.Old(Pal.SetAt(@this.Items, nodeIndex, node))), Pal.IsHeap(@this.Items, @this.Order))")]
+        [Ensures("Pal.Implies(PriorityQueue<TElement, TPriority>.HeapAbove(Pal.Old(@this.Store), Pal.Old(@this.SpecCount), nodeIndex, Pal.Old(@this.Order)), PriorityQueue<TElement, TPriority>.HeapAbove(@this.Store, @this.SpecCount, nodeIndex - 1, @this.Order))")]
         [Ensures("Pal.Permutation(Pal.Old(Pal.SetAt(@this.Items, nodeIndex, node)), @this.Items)")]
         private void MoveDownDefaultComparer((TElement Element, TPriority Priority) node, int nodeIndex)
         {
@@ -1102,13 +1287,14 @@ namespace System.Collections.Generic
 
             (TElement Element, TPriority Priority)[] nodes = _nodes;
             int size = _size;
+            DownRInit(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.SetAt(this.Items, nodeIndex, node));
 
             int i;
             while ((i = GetFirstChildIndex(nodeIndex)) < size)
             {
                 Pal.Invariant(Pal.Implies(!Pal.Broke(), i == 4 * nodeIndex + 1));
-                Pal.Invariant(Pal.HeapDown(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node))));
-                Pal.Invariant(Pal.Implies(Pal.Broke(), Pal.IsHeap(Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size), _comparer) && Pal.Permutation(Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size))));
+                Pal.Invariant(DownR(Pal.Old(this.Store), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Contents(_nodes)));
+                Pal.Invariant(Pal.Implies(Pal.Broke(), SubHeap(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), _size, Pal.Old(nodeIndex), _comparer) && Pal.Permutation(Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size))));
                 Pal.Decreases(_size - nodeIndex);
                 // Find the child node with the minimal priority
                 (TElement Element, TPriority Priority) minChild = nodes[i];
@@ -1134,18 +1320,19 @@ namespace System.Collections.Generic
                 // Heap property is satisfied; insert node in this location.
                 if (Comparer<TPriority>.Default.Compare(node.Priority, minChild.Priority) <= 0)
                 {
-                    HeapDownDone(Pal.Contents(_nodes), _size, nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
+                    DownRDone(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
                     break;
                 }
 
-                HeapDownStep(Pal.Contents(_nodes), _size, nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
+                DownRStep(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
                 // Move the minimal child up by one node and
                 // continue recursively from its location.
                 nodes[nodeIndex] = minChild;
                 nodeIndex = minChildIndex;
             }
 
-            HeapDownFinish(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), i);
+            DownRFinish(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), i);
+            DownRResult(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
             nodes[nodeIndex] = node;
         }
 
@@ -1156,11 +1343,14 @@ namespace System.Collections.Generic
         [Requires("0 <= nodeIndex && nodeIndex < @this.SpecCount")]
         // (nodeIndex << 2) + 1 wraps for nodeIndex >= 2^29; see the spec findings.
         [Requires("@this.SpecCount <= 536870912")]
-        [Requires("Pal.HeapDown(@this.Store, @this.SpecCount, nodeIndex, node, @this.Order, Pal.SetAt(@this.Items, nodeIndex, node))")]
+        // Either a heap but for the hole at nodeIndex (Dequeue, Remove, ...), or only the subtrees
+        // below nodeIndex are heaps (Heapify); R34.18.
+        [Requires("Pal.HeapDown(@this.Store, @this.SpecCount, nodeIndex, node, @this.Order, Pal.SetAt(@this.Items, nodeIndex, node)) || PriorityQueue<TElement, TPriority>.HeapAbove(@this.Store, @this.SpecCount, nodeIndex, @this.Order)")]
         [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount)")]
         [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
         [Ensures("@this.Order == Pal.Old(@this.Order)")]
-        [Ensures("Pal.IsHeap(@this.Items, @this.Order)")]
+        [Ensures("Pal.Implies(Pal.HeapDown(Pal.Old(@this.Store), Pal.Old(@this.SpecCount), nodeIndex, node, Pal.Old(@this.Order), Pal.Old(Pal.SetAt(@this.Items, nodeIndex, node))), Pal.IsHeap(@this.Items, @this.Order))")]
+        [Ensures("Pal.Implies(PriorityQueue<TElement, TPriority>.HeapAbove(Pal.Old(@this.Store), Pal.Old(@this.SpecCount), nodeIndex, Pal.Old(@this.Order)), PriorityQueue<TElement, TPriority>.HeapAbove(@this.Store, @this.SpecCount, nodeIndex - 1, @this.Order))")]
         [Ensures("Pal.Permutation(Pal.Old(Pal.SetAt(@this.Items, nodeIndex, node)), @this.Items)")]
         private void MoveDownCustomComparer((TElement Element, TPriority Priority) node, int nodeIndex)
         {
@@ -1174,13 +1364,14 @@ namespace System.Collections.Generic
             IComparer<TPriority> comparer = _comparer;
             (TElement Element, TPriority Priority)[] nodes = _nodes;
             int size = _size;
+            DownRInit(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.SetAt(this.Items, nodeIndex, node));
 
             int i;
             while ((i = GetFirstChildIndex(nodeIndex)) < size)
             {
                 Pal.Invariant(Pal.Implies(!Pal.Broke(), i == 4 * nodeIndex + 1));
-                Pal.Invariant(Pal.HeapDown(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node))));
-                Pal.Invariant(Pal.Implies(Pal.Broke(), Pal.IsHeap(Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size), _comparer) && Pal.Permutation(Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size))));
+                Pal.Invariant(DownR(Pal.Old(this.Store), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Contents(_nodes)));
+                Pal.Invariant(Pal.Implies(Pal.Broke(), SubHeap(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), _size, Pal.Old(nodeIndex), _comparer) && Pal.Permutation(Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), Pal.Slice(Pal.SetAt(Pal.Contents(_nodes), nodeIndex, node), 0, _size))));
                 Pal.Decreases(_size - nodeIndex);
                 // Find the child node with the minimal priority
                 (TElement Element, TPriority Priority) minChild = nodes[i];
@@ -1206,17 +1397,18 @@ namespace System.Collections.Generic
                 // Heap property is satisfied; insert node in this location.
                 if (comparer.Compare(node.Priority, minChild.Priority) <= 0)
                 {
-                    HeapDownDone(Pal.Contents(_nodes), _size, nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
+                    DownRDone(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
                     break;
                 }
 
-                HeapDownStep(Pal.Contents(_nodes), _size, nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
+                DownRStep(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, minChildIndex, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
                 // Move the minimal child up by one node and continue recursively from its location.
                 nodes[nodeIndex] = minChild;
                 nodeIndex = minChildIndex;
             }
 
-            HeapDownFinish(Pal.Contents(_nodes), _size, nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), i);
+            DownRFinish(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)), i);
+            DownRResult(Pal.Old(this.Store), Pal.Contents(_nodes), _size, Pal.Old(nodeIndex), nodeIndex, node, _comparer, Pal.Old(Pal.SetAt(this.Items, nodeIndex, node)));
             nodes[nodeIndex] = node;
         }
 
@@ -1275,6 +1467,21 @@ namespace System.Collections.Generic
         [Spec]
         [PulseBody("PriorityQueueRemove.no_match $(c) $(x) $(s) $(i)")]
         public static bool NoMatch(IEqualityComparer<TElement>? c, TElement x, Seq<(TElement Element, TPriority Priority)> s, SpecInt i) => throw new InvalidOperationException();
+
+        /// <summary>Every subtree of <paramref name="s"/>[0, <paramref name="n"/>) rooted beyond <paramref name="lo"/> is a heap (pal-csharp doc/translation.md R34.18).</summary>
+        [Spec]
+        [PulseBody("PriorityQueueHeapify.heap_above $(c) $(s) $(n) $(lo)")]
+        public static bool HeapAbove(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt lo, IComparer<TPriority>? c) => throw new InvalidOperationException();
+
+        /// <summary>The subtree of <paramref name="s"/>[0, <paramref name="n"/>) rooted at <paramref name="r"/> is a heap.</summary>
+        [Spec]
+        [PulseBody("PriorityQueueHeapify.sub_heap $(c) $(s) $(n) $(r)")]
+        public static bool SubHeap(Seq<(TElement Element, TPriority Priority)> s, SpecInt n, SpecInt r, IComparer<TPriority>? c) => throw new InvalidOperationException();
+
+        /// <summary>MoveDown*'s loop, started at <paramref name="r"/> on <paramref name="s0"/>, with the hole now at <paramref name="h"/> in <paramref name="s"/>.</summary>
+        [Spec]
+        [PulseBody("PriorityQueueHeapify.down_r $(s0) $(n) $(r) $(h) $(x) $(c) $(t) $(s)")]
+        public static bool DownR(Seq<(TElement Element, TPriority Priority)> s0, SpecInt n, SpecInt r, SpecInt h, (TElement Element, TPriority Priority) x, IComparer<TPriority>? c, Seq<(TElement Element, TPriority Priority)> t, Seq<(TElement Element, TPriority Priority)> s) => throw new InvalidOperationException();
 
         /// <summary>
         /// Initializes the custom comparer to be used internally by the heap.

@@ -644,22 +644,27 @@ namespace System.Collections.Generic
         }
 
         /// <summary>Gets the number of key/value pairs contained in the <see cref="OrderedDictionary{TKey, TValue}"/>.</summary>
-        [Ensures("Result == @this.SpecCount")]
+        [Ensures("Result == @this.SpecCount && 0 <= Result")]
         public int Count => _count;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool ICollection<KeyValuePair<TKey, TValue>>.IsReadOnly => false;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool IDictionary.IsReadOnly => false;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool IList.IsReadOnly => false;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool IDictionary.IsFixedSize => false;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool IList.IsFixedSize => false;
 
         /// <summary>Gets a collection containing the keys in the <see cref="OrderedDictionary{TKey, TValue}"/>.</summary>
@@ -667,12 +672,15 @@ namespace System.Collections.Generic
         public KeyCollection Keys => field ??= new(this);
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         IEnumerable<TKey> IReadOnlyDictionary<TKey, TValue>.Keys => Keys;
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection<TKey> IDictionary<TKey, TValue>.Keys => Keys;
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection IDictionary.Keys => Keys;
 
         /// <summary>Gets a collection containing the values in the <see cref="OrderedDictionary{TKey, TValue}"/>.</summary>
@@ -680,15 +688,19 @@ namespace System.Collections.Generic
         public ValueCollection Values => field ??= new(this);
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         IEnumerable<TValue> IReadOnlyDictionary<TKey, TValue>.Values => Values;
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection<TValue> IDictionary<TKey, TValue>.Values => Values;
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection IDictionary.Values => Values;
 
         /// <inheritdoc/>
+        [Ensures("!Result")]
         bool ICollection.IsSynchronized => false;
 
         /// <inheritdoc/>
@@ -697,7 +709,18 @@ namespace System.Collections.Generic
         /// <inheritdoc/>
         object? IList.this[int index]
         {
+            [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+            [Ensures("0 <= index && index < @this.SpecCount && index < @this.SpecKeys.Length && index < @this.SpecValues.Length")]
+            [Ensures("Pal.Exists((KeyValuePair<TKey, TValue> p) => Pal.Boxes(Result, p) && Pal.Same(p.Key, @this.SpecKeys[index]) && Pal.Same(p.Value, @this.SpecValues[index]))")]
             get => GetAt(index);
+            [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(value) || (Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key))")]
+            [Throws(typeof(ArgumentException), "!Pal.IsA<KeyValuePair<TKey, TValue>>(value) || OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+            [Ensures("Pal.IsA<KeyValuePair<TKey, TValue>>(value) && 0 <= index && index < Pal.Old(@this.SpecCount) && index < Pal.Old(@this.SpecKeys).Length && index < Pal.Old(@this.SpecValues).Length")]
+            [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecComparer == Pal.Old(@this.SpecComparer) && @this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
+            [Ensures("@this.SpecValues == Pal.SetAt(Pal.Old(@this.SpecValues), index, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value)")]
+            [Ensures("Pal.Implies(0 <= index && index < Pal.Old(@this.SpecKeys).Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key, Pal.Old(@this.SpecKeys)[index]), @this.SpecKeys == Pal.Old(@this.SpecKeys))")]
+            [Ensures("Pal.Implies(0 <= index && index < Pal.Old(@this.SpecKeys).Length && !OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key, Pal.Old(@this.SpecKeys)[index]), @this.SpecKeys == Pal.SetAt(Pal.Old(@this.SpecKeys), index, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key))")]
             set
             {
                 ArgumentNullException.ThrowIfNull(value);
@@ -714,6 +737,9 @@ namespace System.Collections.Generic
         /// <inheritdoc/>
         object? IDictionary.this[object key]
         {
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+            [Ensures("Pal.Implies(!(Pal.IsA<TKey>(key) && OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))), Pal.IsNull(Result))")]
+            [Ensures("Pal.Implies(Pal.IsA<TKey>(key) && OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)), Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<TKey>(key)) && Pal.Boxes(Result, @this.SpecValues[i])))")]
             get
             {
                 ArgumentNullException.ThrowIfNull(key);
@@ -725,6 +751,12 @@ namespace System.Collections.Generic
 
                 return null;
             }
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key) || (Pal.IsNull(value) && !Pal.IsNull(default(TValue)))")]
+            [Throws(typeof(ArgumentException), "!Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value)) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+            [Ensures("Pal.IsA<TKey>(key) && (Pal.IsNull(value) || Pal.IsA<TValue>(value)) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+            [Ensures("Pal.Implies(Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))), @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys))")]
+            [Ensures("Pal.Implies(Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))), Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < Pal.Old(@this.SpecValues).Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<TKey>(key)) && @this.SpecValues == Pal.SetAt(Pal.Old(@this.SpecValues), i, (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)))))")]
+            [Ensures("Pal.Implies(!Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))), @this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), Pal.Old(@this.SpecCount), Pal.Unbox<TKey>(key)) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), Pal.Old(@this.SpecCount), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue))))")]
             set
             {
                 ArgumentNullException.ThrowIfNull(key);
@@ -756,11 +788,17 @@ namespace System.Collections.Generic
         /// <inheritdoc/>
         KeyValuePair<TKey, TValue> IList<KeyValuePair<TKey, TValue>>.this[int index]
         {
+            [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+            [Ensures("0 <= index && index < @this.SpecCount")]
+            [Ensures("index < @this.SpecKeys.Length && index < @this.SpecValues.Length && Pal.Same(Result.Key, @this.SpecKeys[index]) && Pal.Same(Result.Value, @this.SpecValues[index])")]
             get => GetAt(index);
             set => SetAt(index, value.Key, value.Value);
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this.SpecCount")]
+        [Ensures("0 <= index && index < @this.SpecCount")]
+        [Ensures("index < @this.SpecKeys.Length && index < @this.SpecValues.Length && Pal.Same(Result.Key, @this.SpecKeys[index]) && Pal.Same(Result.Value, @this.SpecValues[index])")]
         KeyValuePair<TKey, TValue> IReadOnlyList<KeyValuePair<TKey, TValue>>.this[int index] => GetAt(index);
 
         /// <summary>Gets or sets the value associated with the specified key.</summary>
@@ -1876,9 +1914,12 @@ namespace System.Collections.Generic
         /// <summary>Returns an enumerator that iterates through the <see cref="OrderedDictionary{TKey, TValue}"/>.</summary>
         /// <returns>A <see cref="OrderedDictionary{TKey, TValue}.Enumerator"/> structure for the <see cref="OrderedDictionary{TKey, TValue}"/>.</returns>
         [Ensures("ReferenceEquals(Result._dictionary, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
+        [Ensures("!Result._useDictionaryEntry")]
         public Enumerator GetEnumerator() => new(this, useDictionaryEntry: false);
 
         /// <inheritdoc/>
+        [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((OrderedDictionary<TKey, TValue>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._dictionary, @this) && e._version == @this.SpecVersion && e._index == 0 && !e._useDictionaryEntry))")]
         IEnumerator<KeyValuePair<TKey, TValue>> IEnumerable<KeyValuePair<TKey, TValue>>.GetEnumerator() =>
             Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<KeyValuePair<TKey, TValue>>() :
             GetEnumerator();
@@ -1887,9 +1928,17 @@ namespace System.Collections.Generic
         IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<KeyValuePair<TKey, TValue>>)this).GetEnumerator();
 
         /// <inheritdoc/>
+        [Ensures("Pal.Exists((OrderedDictionary<TKey, TValue>.Enumerator e) => Pal.Boxes(Result, e) && " +
+            "ReferenceEquals(e._dictionary, @this) && e._version == @this.SpecVersion && e._index == 0 && e._useDictionaryEntry)")]
         IDictionaryEnumerator IDictionary.GetEnumerator() => new Enumerator(this, useDictionaryEntry: true);
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(item.Key)")]
+        [Ensures("-1 <= Result && Result < @this.SpecCount")]
+        [Ensures("Pal.Implies(Result >= 0, Result < @this.SpecKeys.Length && Result < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[Result], item.Key) && Pal.DefaultEquals(item.Value, @this.SpecValues[Result]))")]
+        // IndexOf(TKey) finds *a* matching key (§33 Findings), so a miss is either no key or a key whose value differs.
+        [Ensures("Pal.Implies(Result < 0, !OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], item.Key) && !Pal.DefaultEquals(item.Value, @this.SpecValues[i])))")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         int IList<KeyValuePair<TKey, TValue>>.IndexOf(KeyValuePair<TKey, TValue> item)
         {
             ArgumentNullException.ThrowIfNull(item.Key, nameof(item));
@@ -1908,12 +1957,25 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index > @this.SpecCount")]
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(item.Key)")]
+        [Throws(typeof(ArgumentException), "OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+        [Ensures("0 <= index && index <= Pal.Old(@this.SpecCount) && !Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key)) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), index, item.Key) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), index, item.Value)")]
         void IList<KeyValuePair<TKey, TValue>>.Insert(int index, KeyValuePair<TKey, TValue> item) => Insert(index, item.Key, item.Value);
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(item.Key)")]
+        [Throws(typeof(ArgumentException), "OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+        [Ensures("!Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key)) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), Pal.Old(@this.SpecCount), item.Key) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), Pal.Old(@this.SpecCount), item.Value)")]
         void ICollection<KeyValuePair<TKey, TValue>>.Add(KeyValuePair<TKey, TValue> item) => Add(item.Key, item.Value);
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(item.Key)")]
+        [Ensures("Pal.Implies(Result, Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], item.Key) && Pal.DefaultEquals(@this.SpecValues[i], item.Value)))")]
+        [Ensures("Pal.Implies(!Result, !OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], item.Key) && !Pal.DefaultEquals(@this.SpecValues[i], item.Value)))")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Contains(KeyValuePair<TKey, TValue> item)
         {
             ArgumentNullException.ThrowIfNull(item.Key, nameof(item));
@@ -1952,6 +2014,11 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(item.Key)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("Pal.Implies(Result, @this.SpecCount == Pal.Old(@this.SpecCount) - 1 && Pal.Exists((int i) => 0 <= i && i < Pal.Old(@this.SpecCount) && i < Pal.Old(@this.SpecKeys).Length && i < Pal.Old(@this.SpecValues).Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, Pal.Old(@this.SpecKeys)[i], item.Key) && Pal.DefaultEquals(Pal.Old(@this.SpecValues)[i], item.Value) && @this.SpecKeys == OrderedDictionary<TKey, TValue>.DelK(Pal.Old(@this.SpecKeys), i) && @this.SpecValues == OrderedDictionary<TKey, TValue>.DelV(Pal.Old(@this.SpecValues), i)))")]
+        [Ensures("Pal.Implies(!Result, @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues))")]
+        [Ensures("Pal.Implies(!Result, !Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, item.Key)) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], item.Key) && !Pal.DefaultEquals(@this.SpecValues[i], item.Value)))")]
         bool ICollection<KeyValuePair<TKey, TValue>>.Remove(KeyValuePair<TKey, TValue> item)
         {
             if (TryGetValue(item.Key, out TValue? value, out int index) && EqualityComparer<TValue>.Default.Equals(value, item.Value))
@@ -1964,6 +2031,10 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key) || (Pal.IsNull(value) && !Pal.IsNull(default(TValue)))")]
+        [Throws(typeof(ArgumentException), "!Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value)) || OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+        [Ensures("Pal.IsA<TKey>(key) && (Pal.IsNull(value) || Pal.IsA<TValue>(value)) && !Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), Pal.Old(@this.SpecCount), Pal.Unbox<TKey>(key)) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), Pal.Old(@this.SpecCount), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)))")]
         void IDictionary.Add(object key, object? value)
         {
             ArgumentNullException.ThrowIfNull(key);
@@ -1992,6 +2063,8 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+        [Ensures("Result == (Pal.IsA<TKey>(key) && OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)))")]
         bool IDictionary.Contains(object key)
         {
             ArgumentNullException.ThrowIfNull(key);
@@ -2000,6 +2073,10 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("Pal.Implies(!(Pal.IsA<TKey>(key) && OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, Pal.Old(@this.SpecKeys), Pal.Unbox<TKey>(key))), @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues))")]
+        [Ensures("Pal.Implies(Pal.IsA<TKey>(key) && OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, Pal.Old(@this.SpecKeys), Pal.Unbox<TKey>(key)), @this.SpecCount == Pal.Old(@this.SpecCount) - 1 && Pal.Exists((int i) => 0 <= i && i < Pal.Old(@this.SpecCount) && i < Pal.Old(@this.SpecKeys).Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, Pal.Old(@this.SpecKeys)[i], Pal.Unbox<TKey>(key)) && @this.SpecKeys == OrderedDictionary<TKey, TValue>.DelK(Pal.Old(@this.SpecKeys), i) && @this.SpecValues == OrderedDictionary<TKey, TValue>.DelV(Pal.Old(@this.SpecValues), i)))")]
         void IDictionary.Remove(object key)
         {
             ArgumentNullException.ThrowIfNull(key);
@@ -2058,6 +2135,10 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+        [Throws(typeof(ArgumentException), "!Pal.IsA<KeyValuePair<TKey, TValue>>(value) || OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+        [Ensures("Pal.IsA<KeyValuePair<TKey, TValue>>(value) && !Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)) && @this.SpecComparer == Pal.Old(@this.SpecComparer) && Result == Pal.Old(@this.SpecCount)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), Pal.Old(@this.SpecCount), Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), Pal.Old(@this.SpecCount), Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value)")]
         int IList.Add(object? value)
         {
             if (value is not KeyValuePair<TKey, TValue> pair)
@@ -2070,12 +2151,21 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+        [Ensures("Pal.Implies(Result, Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && Pal.DefaultEquals(@this.SpecValues[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value)))")]
+        [Ensures("Pal.Implies(!Result, !Pal.IsA<KeyValuePair<TKey, TValue>>(value) || !OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && !Pal.DefaultEquals(@this.SpecValues[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value)))")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         bool IList.Contains(object? value) =>
             value is KeyValuePair<TKey, TValue> pair &&
             TryGetValue(pair.Key, out TValue? v) &&
             EqualityComparer<TValue>.Default.Equals(v, pair.Value);
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+        [Ensures("-1 <= Result")]
+        [Ensures("Pal.Implies(Result >= 0, Result < @this.SpecCount && Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Result < @this.SpecKeys.Length && Result < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[Result], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && Pal.DefaultEquals(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value, @this.SpecValues[Result]))")]
+        [Ensures("Pal.Implies(Result < 0, !Pal.IsA<KeyValuePair<TKey, TValue>>(value) || !OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && !Pal.DefaultEquals(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value, @this.SpecValues[i])))")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         int IList.IndexOf(object? value)
         {
             if (value is KeyValuePair<TKey, TValue> pair)
@@ -2087,6 +2177,11 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index > @this.SpecCount")]
+        [Throws(typeof(ArgumentNullException), "Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+        [Throws(typeof(ArgumentException), "!Pal.IsA<KeyValuePair<TKey, TValue>>(value) || OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) || @this.SpecCapacity >= System.Collections.HashHelpers.MaxPrimeArrayLength")]
+        [Ensures("Pal.IsA<KeyValuePair<TKey, TValue>>(value) && 0 <= index && index <= Pal.Old(@this.SpecCount) && !Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)) && @this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount) + 1 && @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), index, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), index, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value)")]
         void IList.Insert(int index, object? value)
         {
             if (value is not KeyValuePair<TKey, TValue> pair)
@@ -2098,6 +2193,11 @@ namespace System.Collections.Generic
         }
 
         /// <inheritdoc/>
+        [Throws(typeof(ArgumentNullException), "Pal.IsA<KeyValuePair<TKey, TValue>>(value) && Pal.IsNull(Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("Pal.Implies(!Pal.IsA<KeyValuePair<TKey, TValue>>(value), @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues))")]
+        [Ensures("Pal.Implies(Pal.IsA<KeyValuePair<TKey, TValue>>(value) && @this.SpecCount != Pal.Old(@this.SpecCount), @this.SpecCount == Pal.Old(@this.SpecCount) - 1 && Pal.Exists((int i) => 0 <= i && i < Pal.Old(@this.SpecCount) && i < Pal.Old(@this.SpecKeys).Length && i < Pal.Old(@this.SpecValues).Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, Pal.Old(@this.SpecKeys)[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && Pal.DefaultEquals(Pal.Old(@this.SpecValues)[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value) && @this.SpecKeys == OrderedDictionary<TKey, TValue>.DelK(Pal.Old(@this.SpecKeys), i) && @this.SpecValues == OrderedDictionary<TKey, TValue>.DelV(Pal.Old(@this.SpecValues), i)))")]
+        [Ensures("Pal.Implies(Pal.IsA<KeyValuePair<TKey, TValue>>(value) && @this.SpecCount == Pal.Old(@this.SpecCount), @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecKeys == Pal.Old(@this.SpecKeys) && @this.SpecValues == Pal.Old(@this.SpecValues) && (!OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) || Pal.Exists((int i) => 0 <= i && i < @this.SpecCount && i < @this.SpecKeys.Length && i < @this.SpecValues.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this.SpecComparer, @this.SpecKeys[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Key) && !Pal.DefaultEquals(@this.SpecValues[i], Pal.Unbox<KeyValuePair<TKey, TValue>>(value).Value))))")]
         void IList.Remove(object? value)
         {
             if (value is KeyValuePair<TKey, TValue> pair)
@@ -2132,8 +2232,17 @@ namespace System.Collections.Generic
             /// <summary>The current index.</summary>
             private int _index;
 
+            // R32.12. What the key and value enumerators, which wrap this one, state of it.
+            [Spec] internal bool SpecFresh => _version == _dictionary.SpecVersion;
+            [Spec] internal SpecInt SpecIndex => _index;
+            [Spec] internal SpecInt SpecCount => _dictionary.SpecCount;
+            [Spec] internal Seq<TKey> SpecKeys => _dictionary.SpecKeys;
+            [Spec] internal Seq<TValue> SpecValues => _dictionary.SpecValues;
+            [Spec] internal KeyValuePair<TKey, TValue> SpecCurrent => Current;
+
             /// <summary>Initialize the enumerator.</summary>
             [Ensures("ReferenceEquals(@this._dictionary, dictionary) && @this._version == dictionary.SpecVersion && @this._index == 0")]
+            [Ensures("@this._useDictionaryEntry == useDictionaryEntry")]
             internal Enumerator(OrderedDictionary<TKey, TValue> dictionary, bool useDictionaryEntry)
             {
                 _dictionary = dictionary;
@@ -2145,17 +2254,22 @@ namespace System.Collections.Generic
             public KeyValuePair<TKey, TValue> Current { get; private set; }
 
             /// <inheritdoc/>
+            [Ensures("Pal.Implies(@this._useDictionaryEntry, Pal.Boxes(Result, new System.Collections.DictionaryEntry(@this.Current.Key, @this.Current.Value)))")]
+            [Ensures("Pal.Implies(!@this._useDictionaryEntry, Pal.Boxes(Result, @this.Current))")]
             readonly object IEnumerator.Current => _useDictionaryEntry ?
                 new DictionaryEntry(Current.Key, Current.Value) :
                 Current;
 
             /// <inheritdoc/>
+            [Ensures("Pal.Boxes(Result.Key, @this.Current.Key) && Pal.Boxes(Result.Value, @this.Current.Value)")]
             readonly DictionaryEntry IDictionaryEnumerator.Entry => new(Current.Key, Current.Value);
 
             /// <inheritdoc/>
+            [Ensures("Pal.Boxes(Result, @this.Current.Key)")]
             readonly object IDictionaryEnumerator.Key => Current.Key;
 
             /// <inheritdoc/>
+            [Ensures("Pal.Boxes(Result, @this.Current.Value)")]
             readonly object? IDictionaryEnumerator.Value => Current.Value;
 
             /// <inheritdoc/>
@@ -2202,6 +2316,7 @@ namespace System.Collections.Generic
             }
 
             /// <inheritdoc/>
+            [Ensures("true")]
             readonly void IDisposable.Dispose() { }
         }
 
@@ -2222,15 +2337,19 @@ namespace System.Collections.Generic
             public int Count => _dictionary.Count;
 
             /// <inheritdoc/>
+            [Ensures("Result")]
             bool ICollection<TKey>.IsReadOnly => true;
 
             /// <inheritdoc/>
+            [Ensures("Result")]
             bool IList.IsReadOnly => true;
 
             /// <inheritdoc/>
+            [Ensures("!Result")]
             bool IList.IsFixedSize => false;
 
             /// <inheritdoc/>
+            [Ensures("!Result")]
             bool ICollection.IsSynchronized => false;
 
             /// <inheritdoc/>
@@ -2242,6 +2361,7 @@ namespace System.Collections.Generic
             public bool Contains(TKey key) => _dictionary.ContainsKey(key);
 
             /// <inheritdoc/>
+            [Ensures("Result == (Pal.IsA<TKey>(value) && OrderedDictionary<TKey, TValue>.Mem(@this._dictionary.SpecComparer, @this._dictionary.SpecKeys, Pal.Unbox<TKey>(value)))")]
             bool IList.Contains(object? value) => value is TKey key && Contains(key);
 
             /// <inheritdoc/>
@@ -2338,7 +2458,11 @@ namespace System.Collections.Generic
             /// <inheritdoc/>
             object? IList.this[int index]
             {
+                [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this._dictionary.SpecCount")]
+                [Ensures("0 <= index && index < @this._dictionary.SpecCount && index < @this._dictionary.SpecKeys.Length && Pal.Boxes(Result, @this._dictionary.SpecKeys[index])")]
                 get => _dictionary.GetAt(index).Key;
+                [Throws(typeof(NotSupportedException))]
+                [Ensures("false")]
                 set => throw new NotSupportedException();
             }
 
@@ -2349,9 +2473,12 @@ namespace System.Collections.Generic
 
             /// <summary>Returns an enumerator that iterates through the <see cref="OrderedDictionary{TKey, TValue}.KeyCollection"/>.</summary>
             /// <returns>A <see cref="OrderedDictionary{TKey, TValue}.KeyCollection.Enumerator"/> for the <see cref="OrderedDictionary{TKey, TValue}.KeyCollection"/>.</returns>
+            [Ensures("ReferenceEquals(Result._enumerator._dictionary, @this._dictionary) && Result._enumerator._version == @this._dictionary.SpecVersion && Result._enumerator._index == 0")]
             public Enumerator GetEnumerator() => new(_dictionary);
 
             /// <inheritdoc/>
+            [Ensures("Pal.Implies(@this._dictionary.SpecCount != 0, Pal.Exists((OrderedDictionary<TKey, TValue>.KeyCollection.Enumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._enumerator._dictionary, @this._dictionary) && e._enumerator._version == @this._dictionary.SpecVersion && e._enumerator._index == 0))")]
             IEnumerator<TKey> IEnumerable<TKey>.GetEnumerator() =>
                 Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<TKey>() :
                 GetEnumerator();
@@ -2392,21 +2519,34 @@ namespace System.Collections.Generic
             void IList<TKey>.RemoveAt(int index) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             int IList.Add(object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Clear() => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Ensures("-1 <= Result && Pal.Implies(Result >= 0, Result < @this._dictionary.SpecCount)")]
+            [Ensures("(Result >= 0) == (Pal.IsA<TKey>(value) && OrderedDictionary<TKey, TValue>.Mem(@this._dictionary.SpecComparer, @this._dictionary.SpecKeys, Pal.Unbox<TKey>(value)))")]
+            [Ensures("Pal.Implies(Result >= 0, Pal.IsA<TKey>(value) && Result < @this._dictionary.SpecKeys.Length && OrderedDictionary<TKey, TValue>.KeyEq(@this._dictionary.SpecComparer, @this._dictionary.SpecKeys[Result], Pal.Unbox<TKey>(value)))")]
             int IList.IndexOf(object? value) => value is TKey key ? _dictionary.IndexOf(key) : -1;
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Insert(int index, object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Remove(object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.RemoveAt(int index) => throw new NotSupportedException();
 
             /// <summary>Enumerates the elements of a <see cref="OrderedDictionary{TKey, TValue}.KeyCollection"/>.</summary>
@@ -2416,21 +2556,33 @@ namespace System.Collections.Generic
                 private OrderedDictionary<TKey, TValue>.Enumerator _enumerator;
 
                 /// <summary>Initialize the enumerator.</summary>
+                [Ensures("@this._enumerator.SpecFresh && @this._enumerator.SpecIndex == 0")]
                 internal Enumerator(OrderedDictionary<TKey, TValue> dictionary) => _enumerator = dictionary.GetEnumerator();
 
                 /// <inheritdoc/>
+                [Ensures("Pal.Same(Result, @this._enumerator.SpecCurrent.Key)")]
                 public TKey Current => _enumerator.Current.Key;
 
                 /// <inheritdoc/>
+                [Ensures("Pal.Boxes(Result, @this._enumerator.SpecCurrent.Key)")]
                 object IEnumerator.Current => Current;
 
                 /// <inheritdoc/>
+                [Requires("0 <= @this._enumerator.SpecIndex")]
+                [Throws(typeof(InvalidOperationException), "!@this._enumerator.SpecFresh")]
+                [Ensures("@this._enumerator.SpecFresh && 0 <= @this._enumerator.SpecIndex")]
+                [Ensures("Result == (Pal.Old(@this._enumerator.SpecIndex) < @this._enumerator.SpecCount)")]
+                [Ensures("Pal.Implies(Result, @this._enumerator.SpecIndex == Pal.Old(@this._enumerator.SpecIndex) + 1 && Pal.Old(@this._enumerator.SpecIndex) < @this._enumerator.SpecKeys.Length && Pal.Same(@this._enumerator.SpecCurrent.Key, @this._enumerator.SpecKeys[Pal.Old(@this._enumerator.SpecIndex)]))")]
+                [Ensures("Pal.Implies(!Result, @this._enumerator.SpecIndex == Pal.Old(@this._enumerator.SpecIndex))")]
                 public bool MoveNext() => _enumerator.MoveNext();
 
                 /// <inheritdoc/>
+                [Throws(typeof(InvalidOperationException), "!@this._enumerator.SpecFresh")]
+                [Ensures("@this._enumerator.SpecFresh && @this._enumerator.SpecIndex == 0")]
                 void IEnumerator.Reset() => EnumerableHelpers.Reset(ref _enumerator);
 
                 /// <inheritdoc/>
+                [Ensures("true")]
                 readonly void IDisposable.Dispose() { }
             }
         }
@@ -2452,15 +2604,19 @@ namespace System.Collections.Generic
             public int Count => _dictionary.Count;
 
             /// <inheritdoc/>
+            [Ensures("Result")]
             bool ICollection<TValue>.IsReadOnly => true;
 
             /// <inheritdoc/>
+            [Ensures("Result")]
             bool IList.IsReadOnly => true;
 
             /// <inheritdoc/>
+            [Ensures("!Result")]
             bool IList.IsFixedSize => false;
 
             /// <inheritdoc/>
+            [Ensures("!Result")]
             bool ICollection.IsSynchronized => false;
 
             /// <inheritdoc/>
@@ -2501,6 +2657,7 @@ namespace System.Collections.Generic
 
             /// <summary>Returns an enumerator that iterates through the <see cref="OrderedDictionary{TKey, TValue}.ValueCollection"/>.</summary>
             /// <returns>A <see cref="OrderedDictionary{TKey, TValue}.ValueCollection.Enumerator"/> for the <see cref="OrderedDictionary{TKey, TValue}.ValueCollection"/>.</returns>
+            [Ensures("ReferenceEquals(Result._enumerator._dictionary, @this._dictionary) && Result._enumerator._version == @this._dictionary.SpecVersion && Result._enumerator._index == 0")]
             public Enumerator GetEnumerator() => new(_dictionary);
 
             /// <inheritdoc/>
@@ -2522,7 +2679,11 @@ namespace System.Collections.Generic
             /// <inheritdoc/>
             object? IList.this[int index]
             {
+                [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index >= @this._dictionary.SpecCount")]
+                [Ensures("0 <= index && index < @this._dictionary.SpecCount && index < @this._dictionary.SpecValues.Length && Pal.Boxes(Result, @this._dictionary.SpecValues[index])")]
                 get => _dictionary.GetAt(index).Value;
+                [Throws(typeof(NotSupportedException))]
+                [Ensures("false")]
                 set => throw new NotSupportedException();
             }
 
@@ -2531,6 +2692,8 @@ namespace System.Collections.Generic
             bool ICollection<TValue>.Contains(TValue item) => _dictionary.ContainsValue(item);
 
             /// <inheritdoc/>
+            [Ensures("Pal.Implies(@this._dictionary.SpecCount != 0, Pal.Exists((OrderedDictionary<TKey, TValue>.ValueCollection.Enumerator e) => Pal.Boxes(Result, e) && " +
+                "ReferenceEquals(e._enumerator._dictionary, @this._dictionary) && e._enumerator._version == @this._dictionary.SpecVersion && e._enumerator._index == 0))")]
             IEnumerator<TValue> IEnumerable<TValue>.GetEnumerator() =>
                 Count == 0 ? EnumerableHelpers.GetEmptyEnumerator<TValue>() :
                 GetEnumerator();
@@ -2539,6 +2702,9 @@ namespace System.Collections.Generic
             IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<TValue>)this).GetEnumerator();
 
             /// <inheritdoc/>
+            [Ensures("-1 <= Result && Result < @this._dictionary.SpecCount")]
+            [Ensures("Pal.Implies(0 <= Result, Result < @this._dictionary.SpecValues.Length && Pal.DefaultEquals(item, @this._dictionary.SpecValues[Result]) && !OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, item, Result))")]
+            [Ensures("Pal.Implies(Result < 0, !OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, item, @this._dictionary.SpecCount))")]
             int IList<TValue>.IndexOf(TValue item)
             {
                 Entry[]? entries = _dictionary._entries;
@@ -2547,6 +2713,10 @@ namespace System.Collections.Generic
                     int count = _dictionary._count;
                     for (int i = 0; i < count; i++)
                     {
+                        Pal.Invariant(0 <= i && i <= count);
+                        Pal.Invariant(!HasValue(ValuesOf(Pal.Contents(entries), count), item, i));
+                        Pal.Invariant(Pal.Implies(Pal.Returned(), 0 <= Pal.Result<int>() && Pal.Result<int>() < count && Pal.Result<int>() < ValuesOf(Pal.Contents(entries), count).Length &&
+                            Pal.DefaultEquals(item, ValuesOf(Pal.Contents(entries), count)[Pal.Result<int>()]) && !HasValue(ValuesOf(Pal.Contents(entries), count), item, Pal.Result<int>())));
                         if (EqualityComparer<TValue>.Default.Equals(item, entries[i].Value))
                         {
                             return i;
@@ -2583,18 +2753,27 @@ namespace System.Collections.Generic
             void IList<TValue>.RemoveAt(int index) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             int IList.Add(object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Clear() => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Ensures("Result == (Pal.IsNull(value) && Pal.IsNull(default(TValue)) ? OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, default(TValue), @this._dictionary.SpecCount) : Pal.IsA<TValue>(value) && OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, Pal.Unbox<TValue>(value), @this._dictionary.SpecCount))")]
             bool IList.Contains(object? value) =>
                 value is null && default(TValue) is null ?
                     _dictionary.ContainsValue(default!) :
                     value is TValue tvalue && _dictionary.ContainsValue(tvalue);
 
             /// <inheritdoc/>
+            [Ensures("-1 <= Result && Pal.Implies(0 <= Result, Result < @this._dictionary.SpecCount && Result < @this._dictionary.SpecValues.Length)")]
+            [Ensures("Pal.Implies(0 <= Result && Pal.IsNull(value), Pal.IsNull(@this._dictionary.SpecValues[Result]))")]
+            [Ensures("Pal.Implies(0 <= Result && !Pal.IsNull(value), Pal.IsA<TValue>(value) && Pal.DefaultEquals(Pal.Unbox<TValue>(value), @this._dictionary.SpecValues[Result]) && !OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, Pal.Unbox<TValue>(value), Result))")]
+            [Ensures("Pal.Implies(Result < 0 && Pal.IsA<TValue>(value), !OrderedDictionary<TKey, TValue>.HasValue(@this._dictionary.SpecValues, Pal.Unbox<TValue>(value), @this._dictionary.SpecCount))")]
             int IList.IndexOf(object? value)
             {
                 Entry[]? entries = _dictionary._entries;
@@ -2606,6 +2785,8 @@ namespace System.Collections.Generic
                     {
                         for (int i = 0; i < count; i++)
                         {
+                            Pal.Invariant(0 <= i && i <= count);
+                            Pal.Invariant(Pal.Implies(Pal.Returned(), 0 <= Pal.Result<int>() && Pal.Result<int>() < count && Pal.Result<int>() < ValuesOf(Pal.Contents(entries), count).Length && Pal.IsNull(ValuesOf(Pal.Contents(entries), count)[Pal.Result<int>()])));
                             if (entries[i].Value is null)
                             {
                                 return i;
@@ -2616,6 +2797,10 @@ namespace System.Collections.Generic
                     {
                         for (int i = 0; i < count; i++)
                         {
+                            Pal.Invariant(0 <= i && i <= count);
+                            Pal.Invariant(Pal.IsA<TValue>(value) && !HasValue(ValuesOf(Pal.Contents(entries), count), Pal.Unbox<TValue>(value), i));
+                            Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.IsA<TValue>(value) && 0 <= Pal.Result<int>() && Pal.Result<int>() < count && Pal.Result<int>() < ValuesOf(Pal.Contents(entries), count).Length &&
+                                Pal.DefaultEquals(Pal.Unbox<TValue>(value), ValuesOf(Pal.Contents(entries), count)[Pal.Result<int>()]) && !HasValue(ValuesOf(Pal.Contents(entries), count), Pal.Unbox<TValue>(value), Pal.Result<int>())));
                             if (EqualityComparer<TValue>.Default.Equals(tvalue, entries[i].Value))
                             {
                                 return i;
@@ -2628,12 +2813,18 @@ namespace System.Collections.Generic
             }
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Insert(int index, object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.Remove(object? value) => throw new NotSupportedException();
 
             /// <inheritdoc/>
+            [Throws(typeof(NotSupportedException))]
+            [Ensures("false")]
             void IList.RemoveAt(int index) => throw new NotSupportedException();
 
             /// <inheritdoc/>
@@ -2690,21 +2881,33 @@ namespace System.Collections.Generic
                 private OrderedDictionary<TKey, TValue>.Enumerator _enumerator;
 
                 /// <summary>Initialize the enumerator.</summary>
+                [Ensures("@this._enumerator.SpecFresh && @this._enumerator.SpecIndex == 0")]
                 internal Enumerator(OrderedDictionary<TKey, TValue> dictionary) => _enumerator = dictionary.GetEnumerator();
 
                 /// <inheritdoc/>
+                [Ensures("Pal.Same(Result, @this._enumerator.SpecCurrent.Value)")]
                 public TValue Current => _enumerator.Current.Value;
 
                 /// <inheritdoc/>
+                [Ensures("Pal.Boxes(Result, @this._enumerator.SpecCurrent.Value)")]
                 object? IEnumerator.Current => Current;
 
                 /// <inheritdoc/>
+                [Requires("0 <= @this._enumerator.SpecIndex")]
+                [Throws(typeof(InvalidOperationException), "!@this._enumerator.SpecFresh")]
+                [Ensures("@this._enumerator.SpecFresh && 0 <= @this._enumerator.SpecIndex")]
+                [Ensures("Result == (Pal.Old(@this._enumerator.SpecIndex) < @this._enumerator.SpecCount)")]
+                [Ensures("Pal.Implies(Result, @this._enumerator.SpecIndex == Pal.Old(@this._enumerator.SpecIndex) + 1 && Pal.Old(@this._enumerator.SpecIndex) < @this._enumerator.SpecValues.Length && Pal.Same(@this._enumerator.SpecCurrent.Value, @this._enumerator.SpecValues[Pal.Old(@this._enumerator.SpecIndex)]))")]
+                [Ensures("Pal.Implies(!Result, @this._enumerator.SpecIndex == Pal.Old(@this._enumerator.SpecIndex))")]
                 public bool MoveNext() => _enumerator.MoveNext();
 
                 /// <inheritdoc/>
+                [Throws(typeof(InvalidOperationException), "!@this._enumerator.SpecFresh")]
+                [Ensures("@this._enumerator.SpecFresh && @this._enumerator.SpecIndex == 0")]
                 void IEnumerator.Reset() => EnumerableHelpers.Reset(ref _enumerator);
 
                 /// <inheritdoc/>
+                [Ensures("true")]
                 readonly void IDisposable.Dispose() { }
             }
         }
