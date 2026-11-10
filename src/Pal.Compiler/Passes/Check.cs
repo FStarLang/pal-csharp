@@ -564,6 +564,7 @@ public static class Check
             IrArraySearch s => [s.Array, s.Item, s.Start, s.Count],
             IrArrayBinarySearch b => [b.Array, b.Start, b.Count, b.Item, b.Comparer],
             IrContents c => [c.Array],
+            IrEnumOp e => [e.Source, .. e.Args],
             IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,

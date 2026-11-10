@@ -350,6 +350,17 @@ public sealed class CodeEmitter(
                 // may read a field and so needs the representation still open; it is
                 // let-bound so that the `fold` can be interposed between the read and the
                 // block's value.
+                // R34.10. A reassigned array local is taken out of its cell.
+                if (ret.Value is IrVar rv && ArrayCellOf(rv) is { } taken)
+                {
+                    var a = Fresh();
+                    Line($"let {a} = Pulse.Lib.CSharp.ArrayCell.take {taken.Binder};");
+                    _objectLocals.Remove(taken);
+                    _slots[rv.Name] = taken with { Kind = SlotKind.Array, Binder = a };
+                    CloseObjects(method, plan, a);
+                    Line(a);
+                    return;
+                }
                 var text = Inject(method.ReturnType, ret.Value!, Expr(ret.Value!));
                 if (!NeedsEpilogue) { Line(text); return; }
 
@@ -425,7 +436,7 @@ public sealed class CodeEmitter(
                 // Each arm ends the method, so what one arm moves out of a local (R22.12)
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
-                var arrays = _slots.Where(p => p.Value.Kind == SlotKind.Array).ToList();
+                var arrays = _slots.Where(p => p.Value.Kind is SlotKind.Array or SlotKind.ArrayCell).ToList();
                 // R27.50. Likewise the receiver is as dirty in the other arm as before both.
                 var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
@@ -2101,6 +2112,12 @@ public sealed class CodeEmitter(
                 Line($"rewrite ({local.Resource(m)}) as ({(local with { Binder = $"({ownedBy}.{proj})" }).Resource(m)});");
                 continue;
             }
+            // R34.10. The cell itself is reclaimed with its scope; the array is dropped.
+            if (local.Kind == SlotKind.ArrayCell)
+            {
+                Line($"Pulse.Lib.CSharp.ArrayCell.release {local.Binder};");
+                continue;
+            }
             Line($"with {m}. assert ({local.Resource(m)});");
             Line($"drop_ ({local.Resource(m)});");
         }
@@ -2589,9 +2606,15 @@ public sealed class CodeEmitter(
                     ArrayOpKind.Move => "move",
                     ArrayOpKind.Clear => "clear",
                     ArrayOpKind.Sort => "sort",
+                    ArrayOpKind.CopyFrom => "copy_to",
                     _ => "reverse",
                 };
-                var module = c.Op == ArrayOpKind.Sort ? "Pulse.Lib.CSharp.Sort" : "Pulse.Lib.CSharp.Array";
+                var module = c.Op switch
+                {
+                    ArrayOpKind.Sort => "Pulse.Lib.CSharp.Sort",
+                    ArrayOpKind.CopyFrom => "Pulse.Lib.CSharp.Enumerable",
+                    _ => "Pulse.Lib.CSharp.Array",
+                };
                 WithArrays(c.Args.Zip(args, (e, t) => (e, t)).Where(p => p.e.Type is IrArrayType),
                     () => Line($"{module}.{fn} {string.Join(" ", args)};"));
                 return;
@@ -2703,6 +2726,19 @@ public sealed class CodeEmitter(
     private void ArrayLocal(IrLocalDecl d)
     {
         var binder = Names.Local(d.Name);
+        if (d.Init is IrNewArray first && Reassigned(d))
+        {
+            // R34.10. A cell holding the array, owned with it.
+            var t = Fresh();
+            Line($"let {t} = {NewArray(first)};");
+            Line($"let mut {binder} = {t};");
+            Line($"Pulse.Lib.CSharp.ArrayCell.intro {binder};");
+            var cell = new Slot(d.Name, d.Type, SlotKind.ArrayCell, binder);
+            _slots[d.Name] = cell;
+            _objectLocals.Add(cell);
+            if (_closingBlocks > 0) _nestedArrays[cell] = d.Loc;
+            return;
+        }
         switch (d.Init)
         {
             case IrNewArray na:
@@ -2718,6 +2754,24 @@ public sealed class CodeEmitter(
         // R22.17. In a nested block the array must have been moved into a field (R22.12)
         // by the time the block closes; Scoped checks that it was.
         if (_closingBlocks > 0) _nestedArrays[local] = d.Loc;
+    }
+
+    /// <summary>R34.10. The slot of a reassigned array local, when <paramref name="v"/> is one.</summary>
+    private Slot? ArrayCellOf(IrVar v) =>
+        _slots.TryGetValue(v.Name, out var s) && s.Kind == SlotKind.ArrayCell ? s : null;
+
+    /// <summary>R34.10. Whether the method assigns the local <paramref name="name"/> after declaring it.</summary>
+    private bool Reassigned(IrLocalDecl d)
+    {
+        if (_method?.Body is not { } body) return false;
+        // What follows the declaration in its block is its scope; another local of the
+        // same name in a sibling block is another local.
+        var scope = Passes.Check.Statements(body).OfType<IrBlock>()
+            .FirstOrDefault(b => b.Statements.Any(st => ReferenceEquals(st, d))) is { } home
+            ? home.Statements.SkipWhile(st => !ReferenceEquals(st, d)).Skip(1)
+                .SelectMany(Passes.Check.Statements)
+            : Passes.Check.Statements(body);
+        return scope.Any(st => st is IrAssign { Target: IrVar v } && v.Name == d.Name);
     }
 
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
@@ -2865,6 +2919,32 @@ public sealed class CodeEmitter(
         Adopt(a);
         switch (a.Target)
         {
+            // R34.10. `Array.Resize(ref arr, n)` on a reassigned array local.
+            case IrVar v when ArrayCellOf(v) is { } resized:
+                if (a.Value is IrNewArray { Source: IrVar src } grown && src.Name == v.Name)
+                    Line($"Pulse.Lib.CSharp.ArrayCell.resize {resized.Binder} {Expr(grown.Length)};");
+                else if (a.Value is IrNewArray fresh && fresh.Source is null)
+                {
+                    var t = Fresh();
+                    Line($"let {t} = {NewArray(fresh)};");
+                    Line($"Pulse.Lib.CSharp.ArrayCell.release {resized.Binder};");
+                    Line($"{resized.Binder} := {t};");
+                    Line($"Pulse.Lib.CSharp.ArrayCell.intro {resized.Binder};");
+                }
+                else
+                    diagnostics.Error("PALCS0863", a.Loc,
+                        $"`{v.Name}` is an array local that is reassigned (doc/translation.md R34.10). " +
+                        "It may be assigned only a fresh array, `new T[n]` or `Array.Resize(ref " + v.Name + ", n)`.");
+                return;
+
+            case IrElement { Array: IrVar wv } wel when ArrayCellOf(wv) is { } wcell:
+            {
+                var index = Expr(wel.Index);
+                var value = Expr(a.Value);
+                Line($"Pulse.Lib.CSharp.ArrayCell.write {wcell.Binder} {index} {value};");
+                return;
+            }
+
             case IrVar v when _objectLocals.Any(l => l.Name == v.Name && l.Kind == SlotKind.Array):
                 diagnostics.Error("PALCS0623", a.Loc,
                     $"`{v.Name}` owns the array it was initialised with, and assigning it " +
@@ -4234,9 +4314,38 @@ public sealed class CodeEmitter(
         if (_escape is not null) return null;
         for (var k = 0; k < statements.Length - 1; k++)
             if (statements[k] is IrIf i && NullTest(i.Cond) is null && !MayEscape(i) &&
-                CallsLocalObject(i))
+                (CallsLocalObject(i) ||
+                 (DeclaresCell(i) || AssignsConditional(i)) && Straight(statements.Skip(k + 1))))
                 return k;
         return null;
+    }
+
+    /// <summary>
+    /// R34.11. Whether an arm of <paramref name="i"/> declares a local, which is a Pulse
+    /// <c>let mut</c>: Pulse allocates one only where its scope ends at an annotated
+    /// postcondition, which an arm joined with its sibling does not have, and an arm that
+    /// is a tail does.
+    /// </summary>
+    private static bool DeclaresCell(IrIf i) =>
+        Passes.Check.Statements(i).Skip(1).Any(st => st is IrLocalDecl { Immutable: false });
+
+    /// <summary>
+    /// R34.11. Whether an arm of <paramref name="i"/> assigns a local a conditional value
+    /// (<c>n = c ? a : b</c>): the value's own join sits inside the arm, and Pulse's join of
+    /// the arms then keeps the local's value of the assigning arm only.
+    /// </summary>
+    private static bool AssignsConditional(IrIf i) =>
+        Passes.Check.Statements(i).Skip(1).Any(st => st is IrAssign { Target: IrVar, Value: IrConditional });
+
+    /// <summary>
+    /// R34.11. Whether <paramref name="rest"/>, which a split copies into both arms, has no
+    /// branch or loop of its own, so the copy stays linear.
+    /// </summary>
+    private static bool Straight(IEnumerable<IrStmt> rest)
+    {
+        foreach (var st in rest)
+            if (Passes.Check.Statements(st).Any(x => x is IrIf or IrWhile or IrFor)) return false;
+        return true;
     }
 
     private bool CallsLocalObject(IrStmt s) =>
@@ -4275,6 +4384,16 @@ public sealed class CodeEmitter(
     /// mutable locals but may not mention the invariant's existentials, so every cell
     /// denotes <c>!var_x</c> here rather than a value binder.
     /// </summary>
+    /// <summary>R34.6. The cell holding an enumerator's cursor, which its members are passed.</summary>
+    private string CursorCell(IrExpr cursor)
+    {
+        if (cursor is IrVar v && _slots.TryGetValue(v.Name, out var slot) && slot.Kind == SlotKind.Cell)
+            return slot.Binder;
+        diagnostics.Error("PALCS0862", cursor.Loc,
+            "An enumerator is used where its cursor is not a local of this method (doc/translation.md R34.6).");
+        return "()";
+    }
+
     private SpecScope DerefScope()
     {
         var scope = new SpecScope();
@@ -4283,6 +4402,8 @@ public sealed class CodeEmitter(
             var text = slot.Kind is SlotKind.Cell or SlotKind.RefParam ? $"!{slot.Binder}"
                 // R27.39. A trace is read from its protocol, as a heap is from its region.
                 : slot.Kind is SlotKind.Trace ? $"(Pulse.Lib.CSharp.Callback.trace_now {slot.Binder} ())"
+                // R34.1. An enumerable is the items it yields, which never change.
+                : slot.Kind is SlotKind.Enumerable && slot.Items is { } items ? items
                 : slot.Binder;
             // Here an array denotes the live array, not its contents: a measure may
             // dereference a mutable local (F3) but may not mention the invariant's
@@ -4580,6 +4701,15 @@ public sealed class CodeEmitter(
                     "same object: use that name instead.");
                 return "()";
 
+            // R34.10. A reassigned array local is read, written, measured, resized and
+            // returned through its cell; it is not a value to pass elsewhere.
+            case IrVar v when _slots.TryGetValue(v.Name, out var cellArray) && cellArray.Kind == SlotKind.ArrayCell:
+                diagnostics.Error("PALCS0863", v.Loc,
+                    $"`{v.Name}` is an array local that is reassigned, so it is held in a cell " +
+                    "(doc/translation.md R34.10). Such a local may be indexed, written, measured " +
+                    "with `.Length`, resized with `Array.Resize` and returned, but not otherwise used.");
+                return "()";
+
             case IrVar v when _slots.TryGetValue(v.Name, out var slot):
                 if (slot.Kind is SlotKind.Cell or SlotKind.RefParam)
                 {
@@ -4606,6 +4736,21 @@ public sealed class CodeEmitter(
             // R3.3/R17.3. `a.Length` and `s.Length`. One node, two libraries: a span's
             // length is `Slice.len`, which is pure and non-ghost exactly as an array's
             // header field is, so nothing but the qualifier differs.
+            case IrLength { Array: IrVar lv } when ArrayCellOf(lv) is { } lcell:
+            {
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.ArrayCell.length {lcell.Binder};");
+                return t;
+            }
+
+            case IrElement { Array: IrVar rv } rel when ArrayCellOf(rv) is { } rcell:
+            {
+                var index = Expr(rel.Index);
+                var t = Fresh();
+                Line($"let {t} = Pulse.Lib.CSharp.ArrayCell.read {rcell.Binder} {index};");
+                return t;
+            }
+
             case IrLength len:
             {
                 var array = Expr(len.Array);
@@ -4672,6 +4817,22 @@ public sealed class CodeEmitter(
                 return operands.Count == 0
                     ? so.Function
                     : $"({so.Function} {string.Join(" ", operands)})";
+            }
+
+            // R34.3, R34.6. An enumerable's count; an enumerator's start, step and item.
+            case IrEnumOp eo:
+            {
+                if (eo.Op == EnumOpKind.Start) return "0l";
+                var source = Expr(eo.Source);
+                var t = Fresh();
+                var call = eo.Op switch
+                {
+                    EnumOpKind.Count => $"count {source}",
+                    EnumOpKind.MoveNext => $"move_next {source} {CursorCell(eo.Args[0])}",
+                    _ => $"current {source} {CursorCell(eo.Args[0])}",
+                };
+                Line($"let {t} = Pulse.Lib.CSharp.Enumerable.{call};");
+                return t;
             }
 
             // R20.6. A stable sort into a fresh array, at the order the key's type has.
@@ -5377,6 +5538,11 @@ public sealed class CodeEmitter(
             diagnostics.Unsupported(b.Loc, $"The operator `{b.Op}` in executable code");
             return "()";
         }
+
+        // R34.12. A wrapping `<<` on `int`: C# masks the distance to five bits and keeps
+        // the low 32 bits of the product. An unsigned `shift_left` already wraps.
+        if (b.Wraps && b.Op is BinOp.Shl && b.Left.Type is IrPrim { Kind: PrimKind.Int })
+            return $"(Pulse.Lib.CSharp.Int32.shift_left_wrap {l} {r})";
 
         // R22.14. A wrapping add/sub/mul: `_mod` for an unsigned width, which F* provides,
         // and the library's `_wrap` for `int`, which F* does not.

@@ -299,6 +299,28 @@ foreach (var band in schedule)
 
 doc/translation.md §20 has the rules, and the library assumptions such a proof trusts.
 
+An `IEnumerable<T>` or `ICollection<T>` parameter is a read-only argument whose items, in
+order, are `Pal.Contents(e)`. An enumerator declared by `using` over it is a cursor, and
+`Pal.Index(en)` is how many items it has moved past:
+
+```csharp
+[Ensures("Result == Pal.Contents(items).Length")]
+public static int CountAll(IEnumerable<int> items)
+{
+    int n = 0;
+    using IEnumerator<int> en = items.GetEnumerator();
+    while (en.MoveNext())
+    {
+        Pal.Invariant(n == Pal.Index(en));
+        n++;
+    }
+    return n;
+}
+```
+
+`items is ICollection<int> c` is a test whose outcome the method cannot know, so both
+branches are verified. doc/translation.md §34 has the rules and what they trust.
+
 ## 3. Ownership
 
 Most of what PAL spells with macros is already in the C# type system.

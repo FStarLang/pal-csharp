@@ -44,6 +44,10 @@ public sealed class StmtLowerer(
         return node switch
         {
             BlockSyntax b => LowerBlock(b),
+            LocalDeclarationStatementSyntax d when EnumeratorDeclaration(d.UsingKeyword.IsKind(SyntaxKind.UsingKeyword)
+                ? d.Declaration : null, loc) is { } enumerator => enumerator,
+            UsingStatementSyntax u when EnumeratorDeclaration(u.Declaration, loc) is { } enumerator =>
+                new IrBlock(loc, [enumerator, Lower(u.Statement)]),
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
             IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
@@ -1037,7 +1041,8 @@ public sealed class StmtLowerer(
         // R33.18. A call of a method that does nothing.
         if (node.Expression is InvocationExpressionSyntax call && DoesNothing(call))
             return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
-        return LowerSideEffect(node.Expression, loc);
+        var (stmt, writes) = _code.OutFieldWrites(node, () => LowerSideEffect(node.Expression, loc));
+        return writes.IsEmpty ? stmt : new IrBlock(loc, [stmt, .. writes]);
     }
 
     /// <summary>R33.17. The statements <c>a = _field;</c> that re-read a field alias.</summary>
@@ -1467,6 +1472,14 @@ public sealed class StmtLowerer(
         if (ArgumentGuard(method, args, loc) is { } guard)
             return guard;
 
+        // R34.5. `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into `a` from `i`.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax copied &&
+            known.MapType(model.GetTypeInfo(copied.Expression).Type) is IrEnumerableType { Collection: true } &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc, ArrayOpKind.CopyFrom,
+                [_code.Lower(copied.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -1523,10 +1536,81 @@ public sealed class StmtLowerer(
         return new IrBlock(loc, []);
     }
 
+    /// <summary>
+    /// R34.6. <c>using (IEnumerator&lt;T&gt; en = e.GetEnumerator())</c>, or the declaration
+    /// <c>using IEnumerator&lt;T&gt; en = e.GetEnumerator();</c>, on an enumerable argument
+    /// <c>e</c>: <c>en</c> is a cursor, the number of items it has moved past, which starts
+    /// at 0. Disposing it does nothing. Null when the declaration is not one.
+    /// </summary>
+    private IrStmt? EnumeratorDeclaration(VariableDeclarationSyntax? declaration, IrLoc loc)
+    {
+        if (declaration is not { Variables: [{ Initializer.Value: var init } v] } ||
+            ExprLowerer.Unparenthesized(init) is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetEnumerator" } access,
+                ArgumentList.Arguments.Count: 0,
+            } ||
+            !_code.IsEnumerableArgument(access.Expression))
+            return null;
+        var source = _code.Lower(access.Expression);
+        var name = v.Identifier.ValueText;
+        _code.HoldCursor(name, source);
+        _spec.HoldCursor(name, _spec.Lower(access.Expression));
+        return new IrLocalDecl(Locations.From(v), name, IrPrim.Int,
+            new IrEnumOp(Locations.From(init), EnumOpKind.Start, source, []) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.7. A loop that moves an enumerator on keeps it within the items, and ends
+    /// because the items it has not yet moved past are fewer each time round.
+    /// </summary>
+    private static (ImmutableArray<IrExpr>, IrExpr?) EnumeratorLoopSpecs(
+        IrEnumOp moved, ImmutableArray<IrExpr> invariants, IrExpr? decreases)
+    {
+        var loc = moved.Loc;
+        var cursor = moved.Args[0];
+        IrExpr Length() => new IrSeqOp(loc, SeqOpKind.Length,
+            [new IrContents(loc, moved.Source) { Type = new IrSeqType(((IrEnumerableType)moved.Source.Type!).Element) }])
+            { Type = IrPrim.Int };
+        var bounds = new IrBinary(loc, BinOp.And,
+            new IrBinary(loc, BinOp.Le, new IrLiteral(loc, 0) { Type = IrPrim.Int }, cursor) { Type = IrPrim.Bool },
+            new IrBinary(loc, BinOp.Le, cursor, Length()) { Type = IrPrim.Bool }) { Type = IrPrim.Bool };
+        return (invariants.Insert(0, bounds),
+                decreases ?? new IrBinary(loc, BinOp.Sub, Length(), cursor) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.8. <c>foreach (T x in e) body</c> over an enumerable argument <c>e</c> is
+    /// <c>using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }</c>,
+    /// whose cursor <c>Pal.Index(x)</c> names.
+    /// </summary>
+    private IrStmt ForEachEnumerable(ForEachStatementSyntax node, IrEnumerableType enumerable, IrLoc loc)
+    {
+        var name = node.Identifier.ValueText;
+        var vloc = Locations.From(node.Identifier);
+        var cursorName = ExprLowerer.ForEachIndex(name);
+        var source = _code.Lower(node.Expression);
+        var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
+        IrExpr Cursor() => new IrVar(vloc, cursorName) { Type = IrPrim.Int };
+        var moved = new IrEnumOp(vloc, EnumOpKind.MoveNext, source, [Cursor()]) { Type = IrPrim.Bool };
+        (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
+        var item = new IrLocalDecl(vloc, name, enumerable.Element,
+            new IrEnumOp(vloc, EnumOpKind.Current, source, [Cursor()]) { Type = enumerable.Element }) { Immutable = true };
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(vloc, cursorName, IrPrim.Int,
+                new IrEnumOp(vloc, EnumOpKind.Start, source, []) { Type = IrPrim.Int }),
+            new IrWhile(loc, moved, invariants, decreases,
+                new IrBlock(body.Loc, [item, .. ((IrBlock)body).Statements])),
+        ]);
+    }
+
     private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc) => AfterLoop(() =>
     {
         var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
         var cond = _code.Lower(node.Condition);
+        if (cond is IrEnumOp { Op: EnumOpKind.MoveNext } moved)
+            (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
         // R26.11. A guard that writes -- `(i = f(n)) < size`, `++i < bound` -- is a `for`
         // whose init and step are the write: the guard's effect runs before each test, the
         // loop specification describes the state just after it, and a `continue` still
@@ -1651,6 +1735,8 @@ public sealed class StmtLowerer(
     {
         var collectionType = model.GetTypeInfo(node.Expression).Type;
         var symbol = model.GetSymbolInfo(node.Expression).Symbol;
+        if (known.MapType(collectionType) is IrEnumerableType enumerable && _code.IsEnumerableArgument(node.Expression))
+            return ForEachEnumerable(node, enumerable, loc);
         if (known.MapType(collectionType) is not IrArrayType && ForEachOwner(node, loc) is { } overOwner)
             return overOwner;
         if (known.MapType(collectionType) is not IrArrayType { Element: var element } arrayType ||
@@ -1865,6 +1951,11 @@ public sealed class StmtLowerer(
     private IrStmt? IntegerGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         var owner = method.ContainingType?.ToDisplayString();
+        // R34.2. So is one at an enumerable argument: the caller lends a resource, not null.
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
+            _code.IsEnumerableArgument(args[0].Expression))
+            return new IrBlock(loc, []);
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
             // R27.40. So is one at a non-nullable delegate type (R26.1).

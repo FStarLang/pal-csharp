@@ -350,6 +350,14 @@ public sealed partial class ExprLowerer
                 target.WithNullableAnnotation(NullableAnnotation.NotAnnotated)))
             return cond;
 
+        // R34.4. Whether an enumerable argument is an `ICollection<T>` is the abstract
+        // `is_collection`, which the fast path's `Count` and `CopyTo` require.
+        if (value is IrVar { Type: IrEnumerableType } && WellKnown.IsCollectionInterface(target))
+        {
+            narrowed = value;
+            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Enumerable.is_collection", [value]) { Type = Bool };
+        }
+
         if (known.CaseConstructor(target) is { } ctor)
             return Conj(loc, cond, new IrSpecOp(loc, ctor + "?", [narrowed]) { Type = Bool });
 

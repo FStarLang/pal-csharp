@@ -1404,6 +1404,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                      model.GetEnclosingSymbol(node.SpanStart) is IMethodSymbol { MethodKind: not MethodKind.Constructor } &&
                      Declarations.ContextFields(powner, model.Compilation, known)
                          .Contains(pp, SymbolEqualityComparer.Default) => ContextRead(pp),
+            // R34.13. A `const` local is its value, as a `const` field is: read through a cell,
+            // an arm reading it would leave Pulse's join generalising the cell afresh.
+            ILocalSymbol { IsConst: true, HasConstantValue: true } lc => new IrLiteral(loc, lc.ConstantValue),
             IParameterSymbol or ILocalSymbol or IRangeVariableSymbol => new IrVar(loc, node.Identifier.ValueText),
             IFieldSymbol f when f.HasConstantValue => new IrLiteral(loc, f.ConstantValue),
             IFieldSymbol { IsStatic: true, IsReadOnly: true } shared
@@ -1510,6 +1513,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
 
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
+        if (EnumerableMember(node, symbol, loc) is { } enumerableMember) return enumerableMember;
         // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
         if (HeldMember(node, symbol, loc) is { } heldMember) return heldMember;
         if (BorrowedMember(node, symbol, loc) is { } borrowedMember) return borrowedMember;
@@ -1833,6 +1837,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerBinary(BinaryExpressionSyntax node, IrLoc loc)
     {
+        if (EnumerableEquality(node, loc) is { } enumerableEquality) return enumerableEquality;
         // R26.1. `d == null` / `d != null` on a callable delegate asks the model whether the
         // reference is null.
         if (node.Kind() is SyntaxKind.EqualsExpression or SyntaxKind.NotEqualsExpression &&
@@ -1918,7 +1923,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         }
         return new IrBinary(loc, op.Value, left, right)
         {
-            Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul && InWrappingMethod(node),
+            Wraps = op is BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Shl && InWrappingMethod(node),
         };
     }
 
@@ -2318,7 +2323,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public static bool HasEffect(IrExpr expr) =>
         Subexpressions(expr).Any(e => e is IrCall { Kind: CalleeKind.Method }
-                                       or IrStmtExpr or IrNew or IrNewArray or IrRaise);
+                                       or IrStmtExpr or IrNew or IrNewArray or IrRaise
+                                       or IrEnumOp { Op: EnumOpKind.MoveNext });
 
     private static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
@@ -2344,6 +2350,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrQuantifier q => [q.Body],
             IrNewArray n => n.Source is { } src ? [n.Length, src] : [n.Length],
             IrContents c => [c.Array],
+            IrEnumOp e => [e.Source, .. e.Args],
             IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
@@ -2366,6 +2373,29 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ? LowerCallbackArgument(arg, cb, Locations.From(arg))
             : LowerArgument(arg);
 
+    private List<IrStmt>? _outFieldWrites;
+    private SyntaxNode? _outFieldStatement;
+
+    /// <summary>
+    /// R34.14. Lowers the expression of statement <paramref name="statement"/>, returning the
+    /// field writes its <c>out</c> field arguments leave to follow it.
+    /// </summary>
+    public (T Value, ImmutableArray<IrStmt> Writes) OutFieldWrites<T>(SyntaxNode statement, Func<T> lower)
+    {
+        var (saved, savedStmt) = (_outFieldWrites, _outFieldStatement);
+        _outFieldWrites = [];
+        _outFieldStatement = statement;
+        try
+        {
+            var value = lower();
+            return (value, [.. _outFieldWrites]);
+        }
+        finally
+        {
+            (_outFieldWrites, _outFieldStatement) = (saved, savedStmt);
+        }
+    }
+
     public IrExpr LowerArgument(ArgumentSyntax arg)
     {
         // R33.7. `out _` passes a fresh local at its type's default, which nothing reads; so
@@ -2384,6 +2414,23 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             var name = Fresh("discard");
             return new IrStmtExpr(dloc, [new IrLocalDecl(dloc, name, discardIr, discardInit)],
                 new IrRefArg(dloc, new IrVar(dloc, name) { Type = discardIr })) { Type = discardIr };
+        }
+        // R34.14. `out _f`, for a field `_f` the statement mentions nowhere else, passes a
+        // fresh local, copied into the field once the call returns (OutFieldWrites).
+        if (!SpecPosition && _outFieldWrites is { } outWrites &&
+            arg.RefKindKeyword.IsKind(SyntaxKind.OutKeyword) &&
+            model.GetSymbolInfo(arg.Expression).Symbol is IFieldSymbol { IsStatic: false } outField &&
+            _outFieldStatement is { } outStmt &&
+            outStmt.DescendantNodes().OfType<SimpleNameSyntax>().Count(n =>
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(n).Symbol, outField)) == 1 &&
+            known.MapType(outField.Type) is { } outIr &&
+            DefaultValue(outField.Type, Locations.From(arg)) is { } outInit)
+        {
+            var oloc = Locations.From(arg);
+            var name = Fresh("out");
+            outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
+            return new IrStmtExpr(oloc, [new IrLocalDecl(oloc, name, outIr, outInit)],
+                new IrRefArg(oloc, new IrVar(oloc, name) { Type = outIr })) { Type = outIr };
         }
         var inner = Lower(arg.Expression);
         if (!arg.RefKindKeyword.IsKind(SyntaxKind.None))
@@ -2543,6 +2590,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         if (known.IsPalIntrinsic(method))
             return LowerIntrinsic(method, node, args, loc);
+        if (EnumerableCall(node, method, loc) is { } enumerableCall) return enumerableCall;
 
         // R28.3. Reference identity, in a contract.
         if (SpecPosition && method is { IsStatic: true, Name: "ReferenceEquals", Parameters.Length: 2 } &&
@@ -3015,6 +3063,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case nameof(PalLang.Pal.Contents): return new IrContents(loc, Arg(0));
             // R20.5. The position of a `foreach` iteration variable: the loop's counter.
             case nameof(PalLang.Pal.Index):
+                // R34.6. How many items an enumerator in scope has moved past.
+                if (CursorOf(args[0].Expression) is ({ } cursor, _))
+                    return Cursor(loc, cursor);
                 if (args[0].Expression is IdentifierNameSyntax iter &&
                     model.GetSymbolInfo(iter).Symbol is ILocalSymbol local &&
                     local.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is ForEachStatementSyntax)

@@ -216,10 +216,17 @@ public static class Pal
     public static Seq<T> Contents<T>(System.Collections.Generic.IList<T> list) => throw Ghost();
 
     /// <summary>
+    /// R34.1. The items an <c>IEnumerable&lt;T&gt;</c> argument yields, in order. The
+    /// argument is lent to the method, read-only, so they are the same throughout it.
+    /// </summary>
+    public static Seq<T> Contents<T>(System.Collections.Generic.IEnumerable<T> items) => throw Ghost();
+
+    /// <summary>
     /// R20.5. In a loop invariant of a <c>foreach</c>, the position of the element
     /// <paramref name="element"/> -- the loop's iteration variable -- in the collection:
     /// how many elements the loop has already finished with. It is the counter the
     /// translation of the <c>foreach</c> runs on, which C# gives no name.
+    /// R34.6. Of an enumerator of an enumerable argument: how many items it has moved past.
     /// </summary>
     public static int Index<T>(T element) => throw Ghost();
 
