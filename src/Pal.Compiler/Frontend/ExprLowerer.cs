@@ -717,6 +717,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             case ParenthesizedExpressionSyntax p: return IsMessageArgument(p.Expression);
             case CastExpressionSyntax c: return IsMessageArgument(c.Expression);
+            // R34.23. An element of an array local, at a local: read, then discarded.
+            case ElementAccessExpressionSyntax { ArgumentList.Arguments: [var index] } ea:
+                return model.GetTypeInfo(ea.Expression).Type is IArrayTypeSymbol { Rank: 1 } &&
+                       ea.Expression is IdentifierNameSyntax && index.Expression is IdentifierNameSyntax &&
+                       IsMessageArgument(ea.Expression) && IsMessageArgument(index.Expression);
             case IdentifierNameSyntax:
                 return model.GetSymbolInfo(e).Symbol is IParameterSymbol or ILocalSymbol;
             case MemberAccessExpressionSyntax ma:
@@ -779,7 +784,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                     "from constants: its message is not modelled (doc/translation.md R21.7).");
                 return new IrLiteral(loc, null);
             }
-            return LibraryException(loc, libExn.ToDisplayString());
+            // R34.23. An array element the message shows is still read, so an index out of
+            // range raises as it does in the CLR.
+            var reads = args.SelectMany(a => a.Expression.DescendantNodesAndSelf().OfType<ElementAccessExpressionSyntax>())
+                .Select(ea => (IrStmt)new IrExprStmt(Locations.From(ea), Lower(ea))).ToImmutableArray();
+            var thrown = LibraryException(loc, libExn.ToDisplayString());
+            return reads.IsEmpty ? thrown : new IrStmtExpr(loc, reads, thrown) { Type = thrown.Type };
         }
 
         // R20.7. A `[SpecOp]` constructor of a specification type is an application of its
@@ -1430,10 +1440,44 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                                      ComputedRead(rcp, loc, RegionThis(loc, rcp.ContainingType)) is { } rcall => rcall,
             IPropertySymbol { GetMethod: { } selfGetter } when BorrowingSelfCall(selfGetter, [], loc) is { } selfRead
                 => selfRead,
+            // R34.24. In a constructor, a getter that returns a field is that field's read.
+            IPropertySymbol fp when !SpecPosition && FieldGetter(fp, node) is { } gotten
+                => new IrField(loc, new IrVar(loc, Names.This), gotten),
             IPropertySymbol prop when ComputedRead(prop, loc, new IrVar(loc, Names.This)) is { } call
                 => call,
             _ => Unsupported(node, loc),
         };
+    }
+
+    /// <summary>
+    /// R34.24. The field a property of the constructor's own class reads, when its getter is
+    /// exactly <c>return f;</c> or <c>=&gt; f</c> for an instance field <c>f</c> of the
+    /// representation, and the property is neither virtual nor a specification member.
+    /// </summary>
+    private string? FieldGetter(IPropertySymbol prop, SyntaxNode at)
+    {
+        if (prop is not { IsStatic: false, IsVirtual: false, IsOverride: false, IsAbstract: false, GetMethod: { } getter } ||
+            model.GetEnclosingSymbol(at.SpanStart) is not IMethodSymbol { MethodKind: MethodKind.Constructor } ctor ||
+            !SymbolEqualityComparer.Default.Equals(prop.ContainingType, ctor.ContainingType) ||
+            Declarations.Has(prop, known.SpecAttribute) || Declarations.Has(prop, known.ModelAttribute))
+            return null;
+        if (getter.DeclaringSyntaxReferences is not [var reference]) return null;
+        var returned = reference.GetSyntax() switch
+        {
+            AccessorDeclarationSyntax { ExpressionBody.Expression: var e } => e,
+            AccessorDeclarationSyntax { Body.Statements: [ReturnStatementSyntax { Expression: { } e }] } => e,
+            ArrowExpressionClauseSyntax { Expression: var e } => e,
+            _ => null,
+        };
+        if (returned is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } thisAccess)
+            returned = thisAccess.Name;
+        if (returned is not IdentifierNameSyntax id) return null;
+        var getterModel = model.Compilation.GetSemanticModel(returned.SyntaxTree);
+        return getterModel.GetSymbolInfo(id).Symbol is IFieldSymbol { IsStatic: false } f &&
+               SymbolEqualityComparer.Default.Equals(f.ContainingType, prop.ContainingType) &&
+               ObjectFields.Contains(f.Name)
+            ? f.Name
+            : null;
     }
 
     /// <summary>
@@ -1996,6 +2040,15 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     private IrExpr LowerCoalesce(BinaryExpressionSyntax node, IrLoc loc)
     {
+        // R34.22. `e?.Count ?? b` on an enumerable argument, which is never null (R34.2):
+        // `e.Count`, and `b` is not evaluated.
+        if (node.Left is ConditionalAccessExpressionSyntax
+            {
+                WhenNotNull: MemberBindingExpressionSyntax { Name.Identifier.ValueText: "Count" }
+            } countAccess &&
+            IsEnumerableArgument(countAccess.Expression) &&
+            known.MapType(model.GetTypeInfo(countAccess.Expression).Type) is IrEnumerableType { Collection: true })
+            return new IrEnumOp(loc, EnumOpKind.Count, Lower(countAccess.Expression), []) { Type = IrPrim.Int };
         // R33.8. `a?.Length ?? d` on an array `a`: `a == null ? d : a.Length` (R24.7).
         if (node.Left is ConditionalAccessExpressionSyntax
             {

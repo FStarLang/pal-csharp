@@ -738,18 +738,24 @@ public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 /// <item><c>Clear</c>, <c>Reverse</c>: <c>a, i, n</c>.</item>
 /// <item><c>Sort</c>: <c>a, i, n, comparer</c> (R26.7).</item>
 /// <item><c>CopyFrom</c>: <c>e, a, i</c> -- <c>((ICollection&lt;T&gt;)e).CopyTo(a, i)</c> (R34.5).</item>
+/// <item><c>CopyKeys</c>, <c>CopyValues</c>: <c>e, a, i</c> -- <c>d.Keys.CopyTo(a, i)</c> (R34.22).</item>
+/// <item><c>SortPairs</c>: <c>keys, values, comparer</c> (R34.22).</item>
 /// </list>
-public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort, CopyFrom }
+public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort, CopyFrom, CopyKeys, CopyValues, SortPairs }
 
 public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr> Args) : IrStmt(Loc)
 {
     /// <summary>The array the operation writes.</summary>
     public IrExpr Written => Op switch
     {
-        ArrayOpKind.Copy or ArrayOpKind.CopyFrom => Args[1],
+        ArrayOpKind.Copy or ArrayOpKind.CopyFrom or ArrayOpKind.CopyKeys or ArrayOpKind.CopyValues => Args[1],
         ArrayOpKind.CopyAt => Args[2],
         _ => Args[0],
     };
+
+    /// <summary>Every array the operation writes.</summary>
+    public IEnumerable<IrExpr> AllWritten =>
+        Op == ArrayOpKind.SortPairs ? [Args[0], Args[1]] : [Written];
 }
 
 /// <summary>

@@ -1486,6 +1486,19 @@ public sealed class StmtLowerer(
         if (ArgumentGuard(method, args, loc) is { } guard)
             return guard;
 
+        // R34.22. `d.Keys.CopyTo(a, i)` and `d.Values.CopyTo(a, i)` on an `IDictionary<K, V>`
+        // argument write its keys, or its values, into `a` from `i`, in the pairs' order.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax { Expression: MemberAccessExpressionSyntax part } &&
+            part.Name.Identifier.ValueText is "Keys" or "Values" &&
+            model.GetSymbolInfo(part).Symbol is IPropertySymbol { IsStatic: false } partProperty &&
+            WellKnown.IsDictionaryInterface(partProperty.ContainingType) &&
+            _code.IsEnumerableArgument(part.Expression) &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc,
+                part.Name.Identifier.ValueText == "Keys" ? ArrayOpKind.CopyKeys : ArrayOpKind.CopyValues,
+                [_code.Lower(part.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
         // R34.5. `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into `a` from `i`.
         if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
             node.Expression is MemberAccessExpressionSyntax copied &&
@@ -2168,6 +2181,13 @@ public sealed class StmtLowerer(
 
             case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
                 return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);
+
+            // R34.22. `Array.Sort<K, V>(keys, values, comparer)`: the keys sorted, each value
+            // moved with its key.
+            case ("Sort", 3) when method.IsGenericMethod && method.TypeArguments.Length == 2 &&
+                ArrayOf(byParam[0]) is { } && ArrayOf(byParam[1]) is { } &&
+                known.MapType(method.Parameters[2].Type) is IrUserSpecType { FStar: Sorted.ComparerType }:
+                return new IrArrayOp(loc, ArrayOpKind.SortPairs, [L(0), L(1), L(2)]);
 
             // R26.7. `Array.Sort<T>(a, index, length, comparer)`.
             case ("Sort", 4) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } &&

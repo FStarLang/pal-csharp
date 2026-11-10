@@ -2738,12 +2738,16 @@ public sealed class CodeEmitter(
                     ArrayOpKind.Clear => "clear",
                     ArrayOpKind.Sort => "sort",
                     ArrayOpKind.CopyFrom => "copy_to",
+                    ArrayOpKind.CopyKeys => "copy_keys",
+                    ArrayOpKind.CopyValues => "copy_values",
+                    ArrayOpKind.SortPairs => "sort_pairs",
                     _ => "reverse",
                 };
                 var module = c.Op switch
                 {
                     ArrayOpKind.Sort => "Pulse.Lib.CSharp.Sort",
-                    ArrayOpKind.CopyFrom => "Pulse.Lib.CSharp.Enumerable",
+                    ArrayOpKind.SortPairs => "Pulse.Lib.CSharp.SortPairs",
+                    ArrayOpKind.CopyFrom or ArrayOpKind.CopyKeys or ArrayOpKind.CopyValues => "Pulse.Lib.CSharp.Enumerable",
                     _ => "Pulse.Lib.CSharp.Array",
                 };
                 WithArrays(c.Args.Zip(args, (e, t) => (e, t)).Where(p => p.e.Type is IrArrayType),
@@ -3957,7 +3961,7 @@ public sealed class CodeEmitter(
         }
         if (!NeedsEpilogue) return false;
         if (_method is { IsConstructor: true } &&
-            _objects.FirstOrDefault(o => o.Binder == Names.Result) is { } built)
+            _objects.FirstOrDefault(o => o.Binder == Names.Result || o.Name == Names.This && o.Kind == SlotKind.Object) is { } built)
         {
             var saved = _objects;
             _objects = [.. _objects.Where(o => o != built)];

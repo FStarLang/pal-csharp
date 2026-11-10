@@ -10478,6 +10478,35 @@ the loop holds it. A class with an array field is excluded: its default is R22.9
 stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loop calls
 `AddLast`.)
 
+**R34.22. An `IDictionary<K,V>` argument.** An argument of type `IDictionary<K,V>` is an
+enumerable of pairs `(K, V)` (R34.8): `Pal.Contents(d)` is a ghost sequence of pairs. Its
+`Count` is R34.5's (`d?.Count ?? b`, the argument being non-null, is `d.Count`), and
+`d.Keys.CopyTo(a, i)` / `d.Values.CopyTo(a, i)` are `Enumerable.copy_keys` / `copy_values`,
+which write the contents' keys, respectively values, into `a` from `i` in the same order.
+`Array.Sort<K,V>(keys, values, comparer)` is `SortPairs.sort_pairs`, a verified insertion
+sort of both arrays together: the keys end sorted by `comparer ?? Comparer<K>.Default` and
+the zipped pairs are a permutation of the zipped pairs before. `SpecKeyMap.Zip(ks, vs)` and
+`SpecKeyMap.DistinctKeys(c, s)` (no two keys of `s` compare equal under `c`) name these in
+contracts; the lemmas relating them (`copied_pairs`, `dup_found`, `strict_step`) are in
+`Pulse.Lib.CSharp.SortPairs`. (`SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])`.)
+
+**R34.23. An array element in an exception message.** R25.9's message arguments include
+`a[i]` for an array local `a` and a local or parameter `i`. Unlike the other message
+arguments it may fail (out of bounds), so it is not dropped: the read is emitted, its
+result discarded, before the exception is built, and its bounds are proved as any read's.
+(`SR.Format(SR.Argument_AddingDuplicate, keys[i])`.)
+
+**R34.24. A field getter read in a constructor.** In a constructor body, a read of a
+non-virtual, non-specification property of the same class whose getter is exactly
+`return f;` (or `=> f`, or `this.f`) for an instance field `f` of the representation is
+that field's read. It is the getter's whole meaning, and reading it directly keeps the
+object open: a call would close it, and closing it forgets what its model does not expose
+(array contents past `_size`). (`SortedList`'s `comparer = Comparer;`.)
+
+**R34.25. A chained constructor that throws.** A `throw` in the body of a constructor
+that chains to another (R22.10) drops the object built so far — its arrays and its box —
+as R22.9's open constructor does, rather than closing it: the caller never receives it.
+
 ### Verified (§34)
 
 * `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
@@ -10507,6 +10536,10 @@ stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loo
   are a permutation of the old items followed by the enumerable's, the comparer unchanged
   (all three paths: `CopyTo` then `Heapify`, the enumerating fill then `Heapify`, and the
   `Enqueue` loop).
+* `SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])` (R34.22–R34.25): throws
+  `ArgumentException` only if two of the dictionary's keys compare equal under
+  `comparer ?? Comparer<K>.Default`; otherwise its comparer is that, its count and capacity
+  the dictionary's count, and its key/value pairs a permutation of the dictionary's.
 
 ### Findings (§34)
 
@@ -10530,9 +10563,6 @@ stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loo
 * `SortedSet<T>(IEnumerable<T>, IComparer<T>)` beyond its `[Exactly(SortedSet)]` contract:
   the `as SortedSet<T>` test on an enumerable is not modelled, and the sort-then-dedupe path
   needs a theory of sequences equal modulo the comparer.
-* `SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])`: there is no model of an
-  `IDictionary<K,V>` argument (its `Keys`/`Values` `CopyTo`, the pair sort, the duplicate
-  check).
 
 ### Trusted (§34)
 
@@ -10542,6 +10572,12 @@ stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loo
   and `CopyTo` writes exactly them; nothing else holding the object changes it during the
   call (the caller's lent permission). A user-defined `IEnumerable<T>` with side effects or a
   `Count` that disagrees with its enumeration is outside this model.
+* An `IDictionary<K,V>` argument (R34.22) is pure and terminating as an enumerable is, and
+  its `Count`, its enumeration, and its `Keys.CopyTo` and `Values.CopyTo` all agree with one
+  ghost sequence of pairs `Pal.Contents(d)`: the keys and values are copied in the
+  enumeration's order. A dictionary whose key and value collections disagree with its
+  enumeration is outside this model. That its keys are distinct is not assumed: the
+  constructors that need it check it.
 * A `Comparison<T>` is a lawful total order, as every comparer is (R22.24, R34.16).
 * Whether an argument is an `ICollection<T>` is unknown to the method (R34.4); no assumption
   is made about it.

@@ -29,6 +29,7 @@ module R = Pulse.Lib.Reference
 module I32 = FStar.Int32
 module Seq = FStar.Seq
 module CS = Pulse.Lib.CSharp.Seq
+module KM = Pulse.Lib.CSharp.KeyMap
 module T = FStar.Tactics.V2
 
 val enumerable (t: Type0) : Type0
@@ -60,6 +61,23 @@ fn copy_to (#t: Type0) (e: enumerable t { is_collection e }) (dst: A.array t) (i
   preserves pts_to e #p s
   requires A.pts_to dst d
   ensures A.pts_to dst (CS.copied_at s 0 d (I32.v i) (Seq.length s))
+
+/// R34.22. `d.Keys.CopyTo(dst, i)` on an `IDictionary<K, V>` argument, an enumerable of
+/// its pairs: the keys, in the order the pairs enumerate.
+fn copy_keys (#a #b: Type0) (e: enumerable (a & b)) (dst: A.array a) (i: I32.t)
+  (#p: perm) (#s: Ghost.erased (Seq.seq (a & b)))
+  (#d: Ghost.erased (Seq.seq a) { I32.v i >= 0 /\ I32.v i + Seq.length s <= Seq.length d })
+  preserves pts_to e #p s
+  requires A.pts_to dst d
+  ensures A.pts_to dst (CS.copied_at (KM.keys s) 0 d (I32.v i) (Seq.length s))
+
+/// R34.22. `d.Values.CopyTo(dst, i)`, in the same order.
+fn copy_values (#a #b: Type0) (e: enumerable (a & b)) (dst: A.array b) (i: I32.t)
+  (#p: perm) (#s: Ghost.erased (Seq.seq (a & b)))
+  (#d: Ghost.erased (Seq.seq b) { I32.v i >= 0 /\ I32.v i + Seq.length s <= Seq.length d })
+  preserves pts_to e #p s
+  requires A.pts_to dst d
+  ensures A.pts_to dst (CS.copied_at (KM.values s) 0 d (I32.v i) (Seq.length s))
 
 /// The cursor after one `MoveNext`: one further, unless every item has been yielded.
 let advance (#t: Type0) (s: Seq.seq t) (k: I32.t) : I32.t =

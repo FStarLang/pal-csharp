@@ -309,3 +309,58 @@ public class Tally
         }
     }
 }
+
+[Spec]
+public struct PairsModel
+{
+    public Seq<int> Keys;
+    public Seq<int> Values;
+}
+
+// R34.22-R34.24. An `IDictionary<K,V>` argument, in the style of `SortedList`'s: its
+// count sizes the object through the chained constructor, its keys and values are copied
+// out and sorted together, and a duplicate is reported with the key read for the message.
+[Invariant("_keys.Length == _values.Length")]
+public class Pairs
+{
+    private int[] _keys;
+    private int[] _values;
+    private IComparer<int> _cmp;
+
+    [Model]
+    private PairsModel Model => new PairsModel { Keys = Pal.Contents(_keys), Values = Pal.Contents(_values) };
+
+    [Spec] public Seq<int> Keys => Model.Keys;
+    [Spec] public Seq<int> Values => Model.Values;
+
+    // R34.24. Read in a constructor as the field it returns.
+    private IComparer<int> Cmp { get { return _cmp; } }
+
+    [Requires("n >= 0")]
+    [Ensures("@this.Keys.Length == n")]
+    public Pairs(int n, IComparer<int> cmp)
+    {
+        _keys = new int[n];
+        _values = new int[n];
+        _cmp = cmp;
+    }
+
+    [Throws(typeof(ArgumentException))]
+    [Ensures("@this.Keys.Length == Pal.Contents(d).Length")]
+    [Ensures("@this.Values.Length == Pal.Contents(d).Length")]
+    public Pairs(IDictionary<int, int> d, IComparer<int> cmp)
+        : this(d?.Count ?? throw new ArgumentNullException(nameof(d)), cmp)
+    {
+        int[] keys = _keys;
+        d.Keys.CopyTo(keys, 0);
+        d.Values.CopyTo(_values, 0);
+        IComparer<int> c = Cmp;
+        Array.Sort<int, int>(keys, _values, c);
+        int i = 1;
+        if (keys.Length > 1 && c.Compare(keys[0], keys[i]) == 0)
+        {
+            // R34.23, and the object built so far is discarded.
+            throw new ArgumentException(keys[i].ToString());
+        }
+    }
+}

@@ -550,6 +550,11 @@ public sealed class WellKnown
         i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IEnumerable<T>"
             or "System.Collections.Generic.ICollection<T>";
 
+    /// <summary>R34.22. <c>IDictionary&lt;K, V&gt;</c>.</summary>
+    public static bool IsDictionaryInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IDictionary<TKey, TValue>";
+
     /// <summary>R34.4. <c>ICollection&lt;T&gt;</c>.</summary>
     public static bool IsCollectionInterface(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
@@ -659,6 +664,11 @@ public sealed class WellKnown
             case INamedTypeSymbol named when IsEnumerableInterface(named) &&
                                              MapType(named.TypeArguments[0]) is { } enumerableElement:
                 return new IrEnumerableType(enumerableElement, IsCollectionInterface(named));
+            // R34.22. An `IDictionary<K, V>` argument is the collection of its pairs.
+            case INamedTypeSymbol named when IsDictionaryInterface(named) &&
+                                             MapType(named.TypeArguments[0]) is { } dk && IsPlainValue(dk) &&
+                                             MapType(named.TypeArguments[1]) is { } dv && IsPlainValue(dv):
+                return new IrEnumerableType(new IrUserSpecType("ValueTuple", TupleType, [dk, dv]), true);
             case INamedTypeSymbol named when IsAnySpan(named) &&
                                              MapType(named.TypeArguments[0]) is { } spanElement:
                 return new IrSpanType(spanElement);

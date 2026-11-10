@@ -658,8 +658,9 @@ public static class Normalize
             case IrReturn r: MutatedIn(r.Value, into); return;
             case IrExprStmt e: MutatedIn(e.Expr, into); return;
             case IrArrayOp c:
-                if (c.Written is IrVar dv) into.Add(dv.Name);
-                else if (c.Written is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
+                foreach (var written in c.AllWritten)
+                    if (written is IrVar dv) into.Add(dv.Name);
+                    else if (written is IrField { Receiver: IrVar dr }) into.Add(dr.Name);
                 foreach (var a in c.Args) MutatedIn(a, into);
                 return;
             case IrThrow th: MutatedIn(th.Value, into); return;

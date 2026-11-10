@@ -9,6 +9,7 @@ module R = Pulse.Lib.Reference
 module I32 = FStar.Int32
 module Seq = FStar.Seq
 module CS = Pulse.Lib.CSharp.Seq
+module KM = Pulse.Lib.CSharp.KeyMap
 
 noeq type enumerable (t: Type0) = { items: A.array t; coll: bool }
 
@@ -49,6 +50,66 @@ fn copy_to (#t: Type0) (e: enumerable t { is_collection e }) (dst: A.array t) (i
   unfold (pts_to e #p s);
   let n = CA.length_i32 e.items;
   CA.copy_at e.items 0l dst i n;
+  fold (pts_to e #p s);
+}
+
+fn copy_keys (#a #b: Type0) (e: enumerable (a & b)) (dst: A.array a) (i: I32.t)
+  (#p: perm) (#s: Ghost.erased (Seq.seq (a & b)))
+  (#d: Ghost.erased (Seq.seq a) { I32.v i >= 0 /\ I32.v i + Seq.length s <= Seq.length d })
+  preserves pts_to e #p s
+  requires A.pts_to dst d
+  ensures A.pts_to dst (CS.copied_at (KM.keys s) 0 d (I32.v i) (Seq.length s))
+{
+  unfold (pts_to e #p s);
+  let n = CA.length_i32 e.items;
+  A.pts_to_len dst;
+  let mut k = 0l;
+  while (I32.lt !k n)
+    invariant exists* vk dd.
+      R.pts_to k vk ** A.pts_to dst dd ** A.pts_to e.items #p s **
+      pure (0 <= I32.v vk /\ I32.v vk <= Seq.length s /\ Seq.length dd == Seq.length d /\
+            (forall (j: nat). j < Seq.length d ==>
+               Seq.index dd j == (if I32.v i <= j && j < I32.v i + I32.v vk
+                                  then fst (Seq.index s (j - I32.v i)) else Seq.index d j)))
+    decreases (Seq.length s - I32.v !k)
+  {
+    let vk = !k;
+    let x = CA.read e.items vk;
+    CA.write dst (I32.add i vk) (fst x);
+    k := I32.add vk 1l;
+  };
+  with dd. assert (A.pts_to dst dd);
+  Seq.lemma_eq_intro dd (CS.copied_at (KM.keys s) 0 d (I32.v i) (Seq.length s));
+  fold (pts_to e #p s);
+}
+
+fn copy_values (#a #b: Type0) (e: enumerable (a & b)) (dst: A.array b) (i: I32.t)
+  (#p: perm) (#s: Ghost.erased (Seq.seq (a & b)))
+  (#d: Ghost.erased (Seq.seq b) { I32.v i >= 0 /\ I32.v i + Seq.length s <= Seq.length d })
+  preserves pts_to e #p s
+  requires A.pts_to dst d
+  ensures A.pts_to dst (CS.copied_at (KM.values s) 0 d (I32.v i) (Seq.length s))
+{
+  unfold (pts_to e #p s);
+  let n = CA.length_i32 e.items;
+  A.pts_to_len dst;
+  let mut k = 0l;
+  while (I32.lt !k n)
+    invariant exists* vk dd.
+      R.pts_to k vk ** A.pts_to dst dd ** A.pts_to e.items #p s **
+      pure (0 <= I32.v vk /\ I32.v vk <= Seq.length s /\ Seq.length dd == Seq.length d /\
+            (forall (j: nat). j < Seq.length d ==>
+               Seq.index dd j == (if I32.v i <= j && j < I32.v i + I32.v vk
+                                  then snd (Seq.index s (j - I32.v i)) else Seq.index d j)))
+    decreases (Seq.length s - I32.v !k)
+  {
+    let vk = !k;
+    let x = CA.read e.items vk;
+    CA.write dst (I32.add i vk) (snd x);
+    k := I32.add vk 1l;
+  };
+  with dd. assert (A.pts_to dst dd);
+  Seq.lemma_eq_intro dd (CS.copied_at (KM.values s) 0 d (I32.v i) (Seq.length s));
   fold (pts_to e #p s);
 }
 
