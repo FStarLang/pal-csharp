@@ -26,6 +26,8 @@ namespace System.Collections.Generic
         public SpecInt Slots;
         /// <summary><c>Prefixes[i]</c> is the live elements among the first <c>i</c> entries, for <c>0 &lt;= i &lt;= Slots</c>.</summary>
         public Seq<Seq<T>> Prefixes;
+        /// <summary>The length of the entries array: how many elements fit without a resize.</summary>
+        public SpecInt Capacity;
     }
 
     [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
@@ -36,8 +38,10 @@ namespace System.Collections.Generic
     [Invariant("(_buckets == null) == (_entries == null)")]
     [Invariant("_buckets.Length == _entries.Length")]
     [Invariant("_entries != null || _count == 0")]
+    [Invariant("_entries != null || _entries.Length == 0")]
     [Invariant("_entries == null || _entries.Length > 0")]
     [Invariant("_entries == null || _entries.Length <= Array.MaxLength")]
+    [Invariant("_entries == null || System.Collections.HashHelpers.PrimeSize(_entries.Length)")]
     [Invariant("typeof(T).IsValueType || _comparer != null")]
     [Invariant("_buckets == null || HashSet<T>.Wf(Contents(_buckets), Contents(_entries), _count, _freeList, _freeCount, _comparer)")]
     public class HashSet<T> : ICollection<T>, ISet<T>, IReadOnlyCollection<T>, IReadOnlySet<T>, ISerializable, IDeserializationCallback
@@ -71,7 +75,7 @@ namespace System.Collections.Generic
         private int _count;
         private int _freeList;
         private int _freeCount;
-        private int _version;
+        [Wrapping] private int _version;
         private IEqualityComparer<T>? _comparer;
 
         [Model]
@@ -83,7 +87,11 @@ namespace System.Collections.Generic
             Version = _version,
             Slots = _count,
             Prefixes = PrefixesOf(Pal.Contents(_entries), _count),
+            Capacity = Pal.Contents(_entries).Length,
         };
+
+        [Spec]
+        public SpecInt SpecCapacity => Model.Capacity;
 
         /// <summary>The elements.</summary>
         [Spec]
@@ -120,14 +128,176 @@ namespace System.Collections.Generic
         [Conditional("PAL")]
         private static void ItemsStep(Seq<Entry> entries, SpecInt i) { }
 
+        [Lemma]
+        [Requires("0 <= freeCount && freeCount <= count && (count == 0 || HashSet<T>.Wf(buckets, entries, count, freeList, freeCount, comparer))")]
+        [Ensures("HashSet<T>.ItemsOf(entries, count).Length == count - freeCount")]
+        [PulseBody("HashSetChain.items_count $(buckets) $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void ItemsCount(Seq<int> buckets, Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount, IEqualityComparer<T>? comparer) { }
+
+        [Lemma]
+        [Requires("0 <= i && i <= n && n <= entries.Length")]
+        [Ensures("HashSet<T>.ItemsOf(entries, i).Length <= HashSet<T>.ItemsOf(entries, n).Length")]
+        [Ensures("HashSet<T>.ItemsOf(entries, i) == Pal.Slice(HashSet<T>.ItemsOf(entries, n), 0, HashSet<T>.ItemsOf(entries, i).Length)")]
+        [PulseBody("HashSetChain.items_prefix $(entries) $(i) $(n)")]
+        [Conditional("PAL")]
+        private static void ItemsPrefix(Seq<Entry> entries, SpecInt i, SpecInt n) { }
+
         [Spec]
         [PulseBody("HashSetChain.prefixes $(entries) $(count)")]
         private static Seq<Seq<T>> PrefixesOf(Seq<Entry> entries, SpecInt count) => throw new InvalidOperationException();
+
+        /// <summary><paramref name="prefixes"/> are the prefixes of a walk ending at <paramref name="items"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetChain.walk $(prefixes) $(items)")]
+        internal static bool Walk(Seq<Seq<T>> prefixes, Seq<T> items) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("0 <= count && count <= entries.Length")]
+        [Ensures("HashSet<T>.PrefixesOf(entries, count).Length == count + 1 && HashSet<T>.PrefixesOf(entries, count)[0].Length == 0")]
+        [Ensures("HashSet<T>.Walk(HashSet<T>.PrefixesOf(entries, count), HashSet<T>.ItemsOf(entries, count))")]
+        [PulseBody("HashSetChain.prefixes_walk $(entries) $(count)")]
+        [Conditional("PAL")]
+        private static void PrefixesWalk(Seq<Entry> entries, SpecInt count) { }
+
+        /// <summary>Every element of <paramref name="others"/> is a member of <paramref name="items"/> at <paramref name="comparer"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetChain.all_in $(comparer) $(items) $(others)")]
+        internal static bool AllIn(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Walk(prefixes, whole) && 0 <= i && i < prefixes.Length")]
+        [Requires("!HashSet<T>.AllIn(comparer, items, prefixes[i])")]
+        [Ensures("!HashSet<T>.AllIn(comparer, items, whole)")]
+        [PulseBody("HashSetChain.all_in_walk $(comparer) $(items) $(prefixes) $(whole) $(i)")]
+        [Conditional("PAL")]
+        private static void AllInWalk(IEqualityComparer<T>? comparer, Seq<T> items, Seq<Seq<T>> prefixes, Seq<T> whole, SpecInt i) { }
 
         /// <summary>Some element of <paramref name="items"/> is equal to <paramref name="item"/> at <paramref name="comparer"/>.</summary>
         [Spec]
         [PulseBody("HashSetChain.mem $(comparer) $(items) $(item)")]
         public static bool Mem(IEqualityComparer<T>? comparer, Seq<T> items, T item) => throw new InvalidOperationException();
+
+        
+        // R30.41. Set relations modulo the comparer (pal/HashSet/HashSetSets.fst). `Equiv` and
+        // `Distinct` are hypotheses: the comparer's `Equals` is uninterpreted, and the table's
+        // invariant does not make the elements distinct.
+
+        /// <summary><paramref name="comparer"/>'s <c>Equals</c> is an equivalence.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.equiv $(comparer)")]
+        public static bool Equiv(IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        /// <summary>No two of <paramref name="items"/> are equal at <paramref name="comparer"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.distinct $(comparer) $(items)")]
+        public static bool Distinct(IEqualityComparer<T>? comparer, Seq<T> items) => throw new InvalidOperationException();
+
+        /// <summary><paramref name="items"/> are, modulo <paramref name="comparer"/>, those of <paramref name="before"/> not in <paramref name="others"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.except $(comparer) $(before) $(others) $(items)")]
+        public static bool Except(IEqualityComparer<T>? comparer, Seq<T> before, Seq<T> others, Seq<T> items) => throw new InvalidOperationException();
+
+        /// <summary>Some element of <paramref name="others"/> is a member of <paramref name="items"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.overlaps $(comparer) $(items) $(others)")]
+        public static bool OverlapsSeq(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) => throw new InvalidOperationException();
+
+        /// <summary>None of the first <paramref name="k"/> of <paramref name="others"/> is a member of <paramref name="items"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.no_overlap $(comparer) $(items) $(others) $(k)")]
+        private static bool NoOverlap(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others, SpecInt k) => throw new InvalidOperationException();
+
+        /// <summary>No element of <paramref name="others"/> is a member of <paramref name="items"/>.</summary>
+        [Spec]
+        [PulseBody("HashSetSets.none_in $(comparer) $(items) $(others)")]
+        private static bool NoneIn(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Ensures("HashSet<T>.Except(comparer, items, Pal.Slice(others, 0, 0), items)")]
+        [PulseBody("HashSetSets.except_start $(comparer) $(items) $(others)")]
+        [Conditional("PAL")]
+        private static void ExceptStart(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) { }
+
+        [Lemma]
+        [Requires("0 <= k && k < others.Length")]
+        [Ensures("Pal.Implies(HashSet<T>.Equiv(comparer) && HashSet<T>.Distinct(comparer, items) && HashSet<T>.Except(comparer, before, Pal.Slice(others, 0, k), items) && " +
+            "(HashSet<T>.Removed(comparer, items, after, others[k]) || (!HashSet<T>.Mem(comparer, items, others[k]) && after == items)), " +
+            "HashSet<T>.Distinct(comparer, after) && HashSet<T>.Except(comparer, before, Pal.Slice(others, 0, k + 1), after))")]
+        [PulseBody("HashSetSets.except_step_imp $(comparer) $(before) $(others) $(items) $(after) $(k)")]
+        [Conditional("PAL")]
+        private static void ExceptStep(IEqualityComparer<T>? comparer, Seq<T> before, Seq<T> others, Seq<T> items, Seq<T> after, SpecInt k) { }
+
+        [Lemma]
+        [Ensures("Pal.Implies(HashSet<T>.Except(comparer, before, Pal.Slice(others, 0, others.Length), items), HashSet<T>.Except(comparer, before, others, items))")]
+        [PulseBody("HashSetSets.except_done_imp $(comparer) $(before) $(others) $(items)")]
+        [Conditional("PAL")]
+        private static void ExceptDone(IEqualityComparer<T>? comparer, Seq<T> before, Seq<T> others, Seq<T> items) { }
+
+        [Lemma]
+        [Requires("items.Length == 0")]
+        [Ensures("HashSet<T>.Except(comparer, items, others, items) && HashSet<T>.Distinct(comparer, items)")]
+        [PulseBody("HashSetSets.except_empty $(comparer) $(items) $(others)")]
+        [Conditional("PAL")]
+        private static void ExceptEmpty(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) { }
+
+        [Lemma]
+        [Requires("0 <= k && k < others.Length && HashSet<T>.Mem(comparer, items, others[k])")]
+        [Ensures("HashSet<T>.OverlapsSeq(comparer, items, others)")]
+        [PulseBody("HashSetSets.overlaps_hit $(comparer) $(items) $(others) $(k)")]
+        [Conditional("PAL")]
+        private static void OverlapsHit(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others, SpecInt k) { }
+
+        [Lemma]
+        [Requires("0 <= k && k < others.Length && HashSet<T>.NoOverlap(comparer, items, others, k) && !HashSet<T>.Mem(comparer, items, others[k])")]
+        [Ensures("HashSet<T>.NoOverlap(comparer, items, others, k + 1)")]
+        [PulseBody("HashSetSets.no_overlap_step $(comparer) $(items) $(others) $(k)")]
+        [Conditional("PAL")]
+        private static void NoOverlapStep(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others, SpecInt k) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.NoOverlap(comparer, items, others, others.Length)")]
+        [Ensures("!HashSet<T>.OverlapsSeq(comparer, items, others)")]
+        [PulseBody("HashSetSets.no_overlap_done $(comparer) $(items) $(others)")]
+        [Conditional("PAL")]
+        private static void NoOverlapDone(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.Walk(prefixes, whole) && 0 <= i && i < prefixes.Length && prefixes[i].Length > 0")]
+        [Requires("HashSet<T>.Mem(comparer, items, prefixes[i][prefixes[i].Length - 1])")]
+        [Ensures("HashSet<T>.OverlapsSeq(comparer, items, whole)")]
+        [PulseBody("HashSetSets.overlaps_walk $(comparer) $(items) $(prefixes) $(whole) $(i)")]
+        [Conditional("PAL")]
+        private static void OverlapsWalk(IEqualityComparer<T>? comparer, Seq<T> items, Seq<Seq<T>> prefixes, Seq<T> whole, SpecInt i) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.Walk(prefixes, whole) && HashSet<T>.NoneIn(comparer, items, prefixes[prefixes.Length - 1])")]
+        [Ensures("!HashSet<T>.OverlapsSeq(comparer, items, whole)")]
+        [PulseBody("HashSetSets.none_in_walk $(comparer) $(items) $(prefixes) $(whole)")]
+        [Conditional("PAL")]
+        private static void NoneInWalk(IEqualityComparer<T>? comparer, Seq<T> items, Seq<Seq<T>> prefixes, Seq<T> whole) { }
+
+        [Lemma]
+        [Ensures("Pal.Implies(HashSet<T>.Equiv(comparer), HashSet<T>.AllIn(comparer, items, items))")]
+        [PulseBody("HashSetSets.all_in_refl_imp $(comparer) $(items)")]
+        [Conditional("PAL")]
+        private static void AllInRefl(IEqualityComparer<T>? comparer, Seq<T> items) { }
+
+        [Lemma]
+        [Ensures("Pal.Implies(HashSet<T>.Equiv(comparer) && HashSet<T>.Distinct(comparer, items) && HashSet<T>.AllIn(comparer, before, items) && " +
+            "(HashSet<T>.Removed(comparer, items, after, item) || after == items), " +
+            "HashSet<T>.Distinct(comparer, after) && HashSet<T>.AllIn(comparer, before, after))")]
+        [PulseBody("HashSetSets.remove_where_step_imp $(comparer) $(before) $(items) $(after) $(item)")]
+        [Conditional("PAL")]
+        private static void RemoveWhereStep(IEqualityComparer<T>? comparer, Seq<T> before, Seq<T> items, Seq<T> after, T item) { }
+
+        /// <summary>The pigeonhole principle modulo an equivalence: distinct members of <paramref name="items"/> are no more than its length.</summary>
+        [Lemma]
+        [Requires("HashSet<T>.Equiv(comparer) && HashSet<T>.Distinct(comparer, others) && HashSet<T>.AllIn(comparer, items, others)")]
+        [Ensures("others.Length <= items.Length")]
+        [PulseBody("HashSetSets.pigeonhole $(comparer) $(others) $(items)")]
+        [Conditional("PAL")]
+        private static void PigeonHole(IEqualityComparer<T>? comparer, Seq<T> items, Seq<T> others) { }
 
         [Spec]
         [PulseBody("HashSetChain.bucket $(buckets) $(entries) $(comparer) $(item)")]
@@ -247,14 +417,284 @@ namespace System.Collections.Generic
             SpecInt count, SpecInt freeList, SpecInt freeCount, IEqualityComparer<T>? comparer, T item,
             SpecInt i, SpecInt q, SpecInt last) { }
 
+        // The growth path (pal/HashSet/HashSetChain.fst, Pulse.Lib.CSharp.HashInsert).
+        [Spec]
+        [PulseBody("HashSetChain.zeros $(buckets)")]
+        private static bool Zeros(Seq<int> buckets) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("buckets.Length == entries.Length && HashSet<T>.Zeros(buckets)")]
+        [Ensures("HashSet<T>.Wf(buckets, entries, 0, -1, 0, comparer) && HashSet<T>.ItemsOf(entries, 0) == Pal.EmptySeq<T>()")]
+        [PulseBody("HashSetChain.wf_fresh $(buckets) $(entries) $(comparer)")]
+        [Conditional("PAL")]
+        private static void WfFresh(Seq<int> buckets, Seq<Entry> entries, IEqualityComparer<T>? comparer) { }
+
+        /// <summary><paramref name="after"/> is <paramref name="before"/> with <paramref name="item"/> inserted somewhere.</summary>
+        [Spec]
+        [PulseBody("HashSetChain.added $(before) $(after) $(item)")]
+        public static bool Added(Seq<T> before, Seq<T> after, T item) => throw new InvalidOperationException();
+
+        [Spec]
+        [PulseBody("HashSetChain.fnext $(entries) $(i)")]
+        private static SpecInt FNext(Seq<Entry> entries, SpecInt i) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Wf(buckets, entries, count, freeList, freeCount, comparer) && entries.Length > 0")]
+        [Ensures("0 <= HashSet<T>.Bucket(buckets, entries, comparer, item) && HashSet<T>.Bucket(buckets, entries, comparer, item) <= entries.Length")]
+        [Ensures("Pal.Implies(freeCount > 0, 0 <= freeList && freeList < count && -1 <= HashSet<T>.FNext(entries, freeList) && HashSet<T>.FNext(entries, freeList) < count)")]
+        [Ensures("Pal.Implies(freeCount == 0, freeList == -1) && freeCount <= count")]
+        [PulseBody("HashSetChain.insert_pre $(buckets) $(entries) $(count) $(freeList) $(freeCount) $(comparer) $(item)")]
+        [Conditional("PAL")]
+        private static void InsertPre(Seq<int> buckets, Seq<Entry> entries, SpecInt count, SpecInt freeList,
+            SpecInt freeCount, IEqualityComparer<T>? comparer, T item) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.insert_writes $(buckets) $(buckets1) $(entries) $(entries1) $(comparer) $(item) $(i)")]
+        private static bool InsertWrites(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> entries, Seq<Entry> entries1,
+            IEqualityComparer<T>? comparer, T item, SpecInt i) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.InsertWrites(buckets, buckets1, entries, entries1, comparer, item, i)")]
+        [Requires("(count1 == count && freeCount1 >= 0 && HashSet<T>.Wf(buckets, entries, count, i, freeCount1 + 1, comparer) && freeList1 == HashSet<T>.FNext(entries, i)) || (freeCount1 == 0 && i == count && count1 == count + 1 && HashSet<T>.Wf(buckets, entries, count, freeList1, 0, comparer))")]
+        [Ensures("HashSet<T>.Wf(buckets1, entries1, count1, freeList1, freeCount1, comparer)")]
+        [Ensures("HashSet<T>.Added(HashSet<T>.ItemsOf(entries, count), HashSet<T>.ItemsOf(entries1, count1), item)")]
+        [Ensures("HashSet<T>.ItemsOf(entries1, count1).Length == HashSet<T>.ItemsOf(entries, count).Length + 1")]
+        [PulseBody("HashSetChain.insert_ok $(buckets) $(buckets1) $(entries) $(entries1) $(count) $(count1) $(freeList1) $(freeCount1) $(i) $(comparer) $(item)")]
+        [Conditional("PAL")]
+        private static void InsertOk(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> entries, Seq<Entry> entries1,
+            SpecInt count, SpecInt count1, SpecInt freeList1, SpecInt freeCount1, SpecInt i,
+            IEqualityComparer<T>? comparer, T item) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.same_prefix $(old) $(entries) $(count)")]
+        private static bool SamePrefix(Seq<Entry> old, Seq<Entry> entries, SpecInt count) => throw new InvalidOperationException();
+
+        [Spec]
+        [PulseBody("HashSetChain.pre_wf $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        private static bool PreWf(Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount,
+            IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Wf(buckets, old, count, freeList, freeCount, comparer) && HashSet<T>.SamePrefix(old, entries, count)")]
+        [Ensures("HashSet<T>.PreWf(entries, count, freeList, freeCount, comparer) && HashSet<T>.ItemsOf(entries, count) == HashSet<T>.ItemsOf(old, count)")]
+        [PulseBody("HashSetChain.copy_ok $(buckets) $(old) $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void CopyOk(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt count, SpecInt freeList,
+            SpecInt freeCount, IEqualityComparer<T>? comparer) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.rebuilt $(buckets) $(source) $(entries) $(count) $(i)")]
+        private static bool Rebuilt(Seq<int> buckets, Seq<Entry> source, Seq<Entry> entries, SpecInt count, SpecInt i)
+            => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("0 <= count && count <= source.Length && source.Length > 0 && buckets.Length == source.Length && HashSet<T>.Zeros(buckets)")]
+        [Ensures("HashSet<T>.Rebuilt(buckets, source, source, count, 0)")]
+        [PulseBody("HashSetChain.rebuild_start $(buckets) $(source) $(count)")]
+        [Conditional("PAL")]
+        private static void RebuildStart(Seq<int> buckets, Seq<Entry> source, SpecInt count) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.slot $(buckets) $(entries) $(i)")]
+        private static SpecInt Slot(Seq<int> buckets, Seq<Entry> entries, SpecInt i) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Rebuilt(buckets, source, entries, count, i) && i < count")]
+        [Ensures("0 <= HashSet<T>.Slot(buckets, entries, i) && HashSet<T>.Slot(buckets, entries, i) <= entries.Length")]
+        [PulseBody("HashSetChain.rebuild_bucket $(buckets) $(source) $(entries) $(count) $(i)")]
+        [Conditional("PAL")]
+        private static void RebuildBucket(Seq<int> buckets, Seq<Entry> source, Seq<Entry> entries, SpecInt count, SpecInt i) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.link_writes $(buckets) $(buckets1) $(entries) $(entries1) $(i)")]
+        private static bool LinkWrites(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> entries, Seq<Entry> entries1, SpecInt i)
+            => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Rebuilt(buckets, source, entries, count, i) && i < count && HashSet<T>.LinkWrites(buckets, buckets1, entries, entries1, i)")]
+        [Ensures("HashSet<T>.Rebuilt(buckets1, source, entries1, count, i + 1)")]
+        [PulseBody("HashSetChain.rebuild_step $(buckets) $(buckets1) $(source) $(entries) $(entries1) $(count) $(i)")]
+        [Conditional("PAL")]
+        private static void RebuildStep(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> source, Seq<Entry> entries,
+            Seq<Entry> entries1, SpecInt count, SpecInt i) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.PreWf(source, count, freeList, freeCount, comparer) && HashSet<T>.Rebuilt(buckets, source, entries, count, count)")]
+        [Ensures("HashSet<T>.Wf(buckets, entries, count, freeList, freeCount, comparer) && HashSet<T>.ItemsOf(entries, count) == HashSet<T>.ItemsOf(source, count)")]
+        [PulseBody("HashSetChain.rebuild_done $(buckets) $(source) $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void RebuildDone(Seq<int> buckets, Seq<Entry> source, Seq<Entry> entries, SpecInt count,
+            SpecInt freeList, SpecInt freeCount, IEqualityComparer<T>? comparer) { }
+
+        // Compacting into new arrays (`CopyEntries`, for `TrimExcess`).
+        [Spec]
+        [PulseBody("HashSetChain.compactable $(old) $(count) $(comparer)")]
+        private static bool Compactable(Seq<Entry> old, SpecInt count, IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Wf(buckets, old, count, freeList, freeCount, comparer) && 0 <= freeCount && freeCount <= count")]
+        [Ensures("HashSet<T>.Compactable(old, count, comparer) && HashSet<T>.ItemsOf(old, count).Length == count - freeCount")]
+        [PulseBody("HashSetChain.wf_compactable $(buckets) $(old) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void WfCompactable(Seq<int> buckets, Seq<Entry> old, SpecInt count, SpecInt freeList, SpecInt freeCount, IEqualityComparer<T>? comparer) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.compacted $(buckets) $(old) $(entries) $(count) $(i) $(m) $(comparer)")]
+        private static bool Compacted(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt count, SpecInt i, SpecInt m, IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Compactable(old, count, comparer) && entries.Length > 0 && buckets.Length == entries.Length && HashSet<T>.Zeros(buckets) && HashSet<T>.ItemsOf(old, count).Length <= entries.Length")]
+        [Ensures("HashSet<T>.Compacted(buckets, old, entries, count, 0, 0, comparer)")]
+        [PulseBody("HashSetChain.compact_start $(buckets) $(old) $(entries) $(count) $(comparer)")]
+        [Conditional("PAL")]
+        private static void CompactStart(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt count, IEqualityComparer<T>? comparer) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.old_slot $(buckets) $(old) $(entries) $(i)")]
+        private static SpecInt OldSlot(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt i) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Compacted(buckets, old, entries, count, i, m, comparer) && i < count && old[i].Next >= -1")]
+        [Ensures("0 <= m && m < entries.Length && 0 <= HashSet<T>.OldSlot(buckets, old, entries, i) && HashSet<T>.OldSlot(buckets, old, entries, i) <= entries.Length")]
+        [PulseBody("HashSetChain.compact_room $(buckets) $(old) $(entries) $(count) $(i) $(m) $(comparer)")]
+        [Conditional("PAL")]
+        private static void CompactRoom(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt count, SpecInt i, SpecInt m, IEqualityComparer<T>? comparer) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.compact_writes $(buckets) $(buckets1) $(old) $(entries) $(entries1) $(i) $(m) $(m1)")]
+        private static bool CompactWrites(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> old, Seq<Entry> entries, Seq<Entry> entries1, SpecInt i, SpecInt m, SpecInt m1) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Compacted(buckets, old, entries, count, i, m, comparer) && i < count && HashSet<T>.CompactWrites(buckets, buckets1, old, entries, entries1, i, m, m1)")]
+        [Ensures("HashSet<T>.Compacted(buckets1, old, entries1, count, i + 1, m1, comparer)")]
+        [PulseBody("HashSetChain.compact_step $(buckets) $(buckets1) $(old) $(entries) $(entries1) $(count) $(i) $(m) $(m1) $(comparer)")]
+        [Conditional("PAL")]
+        private static void CompactStep(Seq<int> buckets, Seq<int> buckets1, Seq<Entry> old, Seq<Entry> entries, Seq<Entry> entries1, SpecInt count, SpecInt i, SpecInt m, SpecInt m1, IEqualityComparer<T>? comparer) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.Compacted(buckets, old, entries, count, count, m, comparer)")]
+        [Ensures("HashSet<T>.Wf(buckets, entries, m, -1, 0, comparer) && HashSet<T>.ItemsOf(entries, m) == HashSet<T>.ItemsOf(old, count) && m <= entries.Length && HashSet<T>.ItemsOf(entries, m).Length == m")]
+        [PulseBody("HashSetChain.compact_done $(buckets) $(old) $(entries) $(count) $(m) $(comparer)")]
+        [Conditional("PAL")]
+        private static void CompactDone(Seq<int> buckets, Seq<Entry> old, Seq<Entry> entries, SpecInt count, SpecInt m, IEqualityComparer<T>? comparer) { }
+
+        // The collision path: a string set switches to the randomized comparer and rehashes.
+        [Spec]
+        [PulseBody("HashSetChain.non_randomized $(comparer)")]
+        private static bool NonRandomized(IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        [Spec]
+        [PulseBody("HashSetChain.randomized $(comparer)")]
+        private static IEqualityComparer<T>? Randomized(IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        /// <summary>Whether two comparers deem the same elements equal.</summary>
+        [Spec]
+        [PulseBody("HashSetChain.same_equality $(comparer1) $(comparer2)")]
+        public static bool SameEquality(IEqualityComparer<T>? comparer1, IEqualityComparer<T>? comparer2) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.NonRandomized(comparer)")]
+        [Ensures("HashSet<T>.SameEquality(comparer, HashSet<T>.Randomized(comparer)) && HashSet<T>.Randomized(comparer) != null")]
+        [PulseBody("HashSetChain.randomized_same $(comparer)")]
+        [Conditional("PAL")]
+        private static void RandomizedSame(IEqualityComparer<T>? comparer) { }
+
+        /// <summary>
+        /// Swapping a string set's comparer for what <c>GetStringComparer</c> returned keeps its
+        /// equality.
+        /// </summary>
+        [Spec]
+        [PulseBody("HashSetChain.string_swap_ok $(comparer)")]
+        private static bool StringSwapOk(IEqualityComparer<T>? comparer) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Ensures("HashSet<T>.StringSwapOk(comparer)")]
+        [PulseBody("HashSetChain.string_swap $(comparer)")]
+        [Conditional("PAL")]
+        private static void StringSwap(IEqualityComparer<T>? comparer) { }
+
+        [Lemma]
+        [Ensures("HashSet<T>.SameEquality(comparer, comparer)")]
+        [PulseBody("HashSetChain.same_refl $(comparer)")]
+        [Conditional("PAL")]
+        private static void SameRefl(IEqualityComparer<T>? comparer) { }
+
+        /// <summary>Membership is the same under two comparers with the same equality.</summary>
+        [Lemma]
+        [Requires("HashSet<T>.SameEquality(comparer1, comparer2)")]
+        [Ensures("HashSet<T>.Mem(comparer1, items, item) == HashSet<T>.Mem(comparer2, items, item)")]
+        [PulseBody("HashSetChain.mem_same $(comparer1) $(comparer2) $(items) $(item)")]
+        [Conditional("PAL")]
+        public static void MemSame(IEqualityComparer<T>? comparer1, IEqualityComparer<T>? comparer2, Seq<T> items, T item) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.NonRandomized(comparer) && HashSet<T>.Added(before, after, item)")]
+        [Ensures("HashSet<T>.Mem(comparer, after, item)")]
+        [PulseBody("(HashSetChain.non_randomized_refl $(comparer) $(item); HashSetChain.added_mem $(comparer) $(before) $(after) $(item))")]
+        [Conditional("PAL")]
+        private static void AddedMem(IEqualityComparer<T>? comparer, Seq<T> before, Seq<T> after, T item) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.rehashed $(source) $(entries) $(count) $(i) $(comparer)")]
+        private static bool Rehashed(Seq<Entry> source, Seq<Entry> entries, SpecInt count, SpecInt i, IEqualityComparer<T>? comparer)
+            => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("0 <= count && count <= source.Length")]
+        [Ensures("HashSet<T>.Rehashed(source, source, count, 0, comparer)")]
+        [PulseBody("HashSetChain.rehash_start $(source) $(count) $(comparer)")]
+        [Conditional("PAL")]
+        private static void RehashStart(Seq<Entry> source, SpecInt count, IEqualityComparer<T>? comparer) { }
+
+        [Spec]
+        [PulseBody("HashSetChain.rehash_writes $(entries) $(entries1) $(i) $(comparer)")]
+        private static bool RehashWrites(Seq<Entry> entries, Seq<Entry> entries1, SpecInt i, IEqualityComparer<T>? comparer)
+            => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.Rehashed(source, entries, count, i, comparer) && i < count && HashSet<T>.RehashWrites(entries, entries1, i, comparer)")]
+        [Ensures("HashSet<T>.Rehashed(source, entries1, count, i + 1, comparer)")]
+        [PulseBody("HashSetChain.rehash_step $(source) $(entries) $(entries1) $(count) $(i) $(comparer)")]
+        [Conditional("PAL")]
+        private static void RehashStep(Seq<Entry> source, Seq<Entry> entries, Seq<Entry> entries1, SpecInt count, SpecInt i,
+            IEqualityComparer<T>? comparer) { }
+
+        /// <summary>The field <paramref name="field"/> holds the non-null comparer <paramref name="comparer"/>.</summary>
+        [Spec]
+        [PulseBody("($(field) == Some $(comparer))")]
+        private static bool Holds(IEqualityComparer<T>? field, IEqualityComparer<T> comparer) => throw new InvalidOperationException();
+
+        [Spec]
+        [PulseBody("HashSetChain.pre_free $(entries) $(count) $(freeList) $(freeCount)")]
+        private static bool PreFree(Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount) => throw new InvalidOperationException();
+
+        [Lemma]
+        [Requires("HashSet<T>.PreWf(entries, count, freeList, freeCount, comparer)")]
+        [Ensures("HashSet<T>.PreFree(entries, count, freeList, freeCount)")]
+        [PulseBody("HashSetChain.pre_free_of $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void PreFreeOf(Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount, IEqualityComparer<T>? comparer) { }
+
+        [Lemma]
+        [Requires("HashSet<T>.PreFree(source, count, freeList, freeCount) && HashSet<T>.Rehashed(source, entries, count, count, comparer)")]
+        [Ensures("HashSet<T>.PreWf(entries, count, freeList, freeCount, comparer) && HashSet<T>.ItemsOf(entries, count) == HashSet<T>.ItemsOf(source, count)")]
+        [PulseBody("HashSetChain.rehash_done $(source) $(entries) $(count) $(freeList) $(freeCount) $(comparer)")]
+        [Conditional("PAL")]
+        private static void RehashDone(Seq<Entry> source, Seq<Entry> entries, SpecInt count, SpecInt freeList, SpecInt freeCount,
+            IEqualityComparer<T>? comparer) { }
+
         /// <summary>The number of elements.</summary>
         [Spec]
         public SpecInt SpecCount => Model.Count;
 
         #region Constructors
 
+        [Ensures("@this.SpecCount == 0 && @this.SpecItems == Pal.EmptySeq<T>() && @this.SpecSlots == 0 && @this.SpecVersion == 0")]
+        [Ensures("HashSet<T>.SameEquality(null, @this.SpecComparer)")]
         public HashSet() : this((IEqualityComparer<T>?)null) { }
 
+        [Ensures("@this.SpecCount == 0 && @this.SpecItems == Pal.EmptySeq<T>() && @this.SpecSlots == 0 && @this.SpecVersion == 0")]
+        [Ensures("HashSet<T>.SameEquality(comparer, @this.SpecComparer)")]
         public HashSet(IEqualityComparer<T>? comparer)
         {
             // For reference types, we always want to store a comparer instance, either
@@ -274,6 +714,7 @@ namespace System.Collections.Generic
                 if (typeof(T) == typeof(string) &&
                     NonRandomizedStringEqualityComparer.GetStringComparer(_comparer) is IEqualityComparer<string> stringComparer)
                 {
+                    StringSwap(_comparer);
                     _comparer = (IEqualityComparer<T>)stringComparer;
                 }
             }
@@ -284,6 +725,10 @@ namespace System.Collections.Generic
             }
         }
 
+        [Requires("capacity <= 0x7FFFFFC3")]
+        [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+        [Ensures("@this.SpecCount == 0 && @this.SpecItems == Pal.EmptySeq<T>() && @this.SpecSlots == 0 && @this.SpecVersion == 0")]
+        [Ensures("capacity <= @this.SpecCapacity && HashSet<T>.SameEquality(null, @this.SpecComparer)")]
         public HashSet(int capacity) : this(capacity, null) { }
 
         public HashSet(IEnumerable<T> collection) : this(collection, null) { }
@@ -321,6 +766,10 @@ namespace System.Collections.Generic
             }
         }
 
+        [Requires("capacity <= 0x7FFFFFC3")]
+        [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+        [Ensures("@this.SpecCount == 0 && @this.SpecItems == Pal.EmptySeq<T>() && @this.SpecSlots == 0 && @this.SpecVersion == 0")]
+        [Ensures("capacity <= @this.SpecCapacity && HashSet<T>.SameEquality(comparer, @this.SpecComparer)")]
         public HashSet(int capacity, IEqualityComparer<T>? comparer) : this(comparer)
         {
             if (capacity < 0)
@@ -385,6 +834,9 @@ namespace System.Collections.Generic
 
         #region ICollection<T> methods
 
+        [Requires("@this.SpecSlots < 0x7FFFFFC3")]
+        [Ensures("(HashSet<T>.Added(Old(@this.SpecItems), @this.SpecItems, item) && @this.SpecCount == Old(@this.SpecCount) + 1) || (@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, item))")]
+        [Ensures("HashSet<T>.SameEquality(Old(@this.SpecComparer), @this.SpecComparer)")]
         void ICollection<T>.Add(T item) => AddIfNotPresent(item, out _);
 
         /// <summary>Removes all elements from the <see cref="HashSet{T}"/> object.</summary>
@@ -413,9 +865,10 @@ namespace System.Collections.Generic
         public bool Contains(T item) => FindItemIndex(item) >= 0;
 
         /// <summary>Gets the index of the item in <see cref="_entries"/>, or -1 if it's not in the set.</summary>
-        [Ensures("Result >= -1")]
+        [Ensures("Result >= -1 && Result < @this.SpecCapacity")]
         [Ensures("Implies(Result >= 0, HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, item))")]
         [Ensures("Implies(Result < 0, !HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, item))")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && @this.SpecComparer == Old(@this.SpecComparer)")]
         private int FindItemIndex(T item)
         {
             int[]? buckets = _buckets;
@@ -438,7 +891,7 @@ namespace System.Collections.Generic
                     {
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
                         Pal.Invariant(Search(Pal.Contents(buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, item, i, collisionCount));
-                        Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), item)));
+                        Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && Pal.Result<int>() < entries.Length && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), item)));
                         Pal.Decreases((uint)entries.Length - collisionCount);
                         ref Entry entry = ref entries[i];
                         if (entry.HashCode == hashCode && EqualityComparer<T>.Default.Equals(entry.Value, item))
@@ -468,7 +921,7 @@ namespace System.Collections.Generic
                     {
                         Pal.Invariant(collisionCount <= (uint)entries.Length);
                         Pal.Invariant(Search(Pal.Contents(buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, item, i, collisionCount));
-                        Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), item)));
+                        Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.Result<int>() >= 0 && Pal.Result<int>() < entries.Length && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), item)));
                         Pal.Decreases((uint)entries.Length - collisionCount);
                         ref Entry entry = ref entries[i];
                         if (entry.HashCode == hashCode && comparer.Equals(entry.Value, item))
@@ -594,14 +1047,16 @@ namespace System.Collections.Generic
         }
 
         /// <summary>Gets the number of elements that are contained in the set.</summary>
-        [Ensures("Result == @this.SpecCount")]
+        [Ensures("Result == @this.SpecCount && Result >= 0")]
         public int Count => _count - _freeCount;
 
         /// <summary>
         /// Gets the total numbers of elements the internal data structure can hold without resizing.
         /// </summary>
+        [Ensures("Result == @this.SpecCapacity")]
         public int Capacity => _entries?.Length ?? 0;
 
+        [Ensures("!Result")]
         bool ICollection<T>.IsReadOnly => false;
 
         #endregion
@@ -926,6 +1381,7 @@ namespace System.Collections.Generic
         #region IEnumerable methods
 
         [Ensures("ReferenceEquals(Result._hashSet, @this) && Result._version == @this.SpecVersion && Result._index == 0")]
+        [Ensures("@this.SpecSlots >= 0")]
         public Enumerator GetEnumerator() => new Enumerator(this);
 
         [Ensures("Pal.Implies(@this.SpecCount != 0, Pal.Exists((HashSet<T>.Enumerator e) => Pal.Boxes(Result, e) && " +
@@ -1017,6 +1473,12 @@ namespace System.Collections.Generic
         /// <summary>Adds the specified element to the <see cref="HashSet{T}"/>.</summary>
         /// <param name="item">The element to add to the set.</param>
         /// <returns>true if the element is added to the <see cref="HashSet{T}"/> object; false if the element is already present.</returns>
+        [Requires("@this.SpecSlots < 0x7FFFFFC3")]
+        [Ensures("Implies(Result, HashSet<T>.Added(Old(@this.SpecItems), @this.SpecItems, item) && @this.SpecCount == Old(@this.SpecCount) + 1)")]
+        [Ensures("Implies(Result, !HashSet<T>.Mem(Old(@this.SpecComparer), Old(@this.SpecItems), item))")]
+        [Ensures("Implies(!Result, @this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount))")]
+        [Ensures("Implies(!Result, HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, item))")]
+        [Ensures("HashSet<T>.SameEquality(Old(@this.SpecComparer), @this.SpecComparer)")]
         public bool Add(T item) => AddIfNotPresent(item, out _);
 
         /// <summary>Searches the set for a given value and returns the equal value it finds, if any.</summary>
@@ -1029,6 +1491,8 @@ namespace System.Collections.Generic
         /// a value that has more complete data than the value you currently have, although their
         /// comparer functions indicate they are equal.
         /// </remarks>
+        [Ensures("Result == HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, equalValue)")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && @this.SpecComparer == Old(@this.SpecComparer)")]
         public bool TryGetValue(T equalValue, [MaybeNullWhen(false)] out T actualValue)
         {
             if (_buckets != null)
@@ -1107,6 +1571,10 @@ namespace System.Collections.Generic
 
         /// <summary>Removes all elements in the specified collection from the current <see cref="HashSet{T}"/> object.</summary>
         /// <param name="other">The collection to compare to the current <see cref="HashSet{T}"/> object.</param>
+        [Ensures("@this.SpecComparer == Old(@this.SpecComparer)")]
+        [Ensures("Pal.Implies(HashSet<T>.Equiv(@this.SpecComparer) && HashSet<T>.Distinct(@this.SpecComparer, Old(@this.SpecItems)), " +
+            "HashSet<T>.Distinct(@this.SpecComparer, @this.SpecItems) && HashSet<T>.Except(@this.SpecComparer, Old(@this.SpecItems), Pal.Contents(other), @this.SpecItems))")]
+        [OpaqueSpecs("Except", "Distinct", "Equiv")]
         public void ExceptWith(IEnumerable<T> other)
         {
             if (other == null)
@@ -1117,6 +1585,8 @@ namespace System.Collections.Generic
             // This is already the empty set; return.
             if (Count == 0)
             {
+                ItemsCount(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer);
+                ExceptEmpty(_comparer, this.SpecItems, Pal.Contents(other));
                 return;
             }
 
@@ -1128,10 +1598,27 @@ namespace System.Collections.Generic
             }
 
             // Remove every element in other from this.
+            Ghost<Seq<T>> items0 = this.SpecItems;
+            ExceptStart(_comparer, this.SpecItems, Pal.Contents(other));
             foreach (T element in other)
             {
+                Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= _entries.Length);
+                Pal.Invariant((_buckets == null) == (_entries == null) && _buckets.Length == _entries.Length);
+                Pal.Invariant((_entries != null || _count == 0) && (_entries != null || _entries.Length == 0));
+                Pal.Invariant(_entries == null || (_entries.Length > 0 && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length)));
+                Pal.Invariant(typeof(T).IsValueType || _comparer != null);
+                Pal.Invariant(_buckets == null || HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer));
+                Pal.Invariant(_comparer == Pal.Old(this.SpecComparer) &&
+                              0 <= Pal.Index(element) && Pal.Index(element) <= Pal.Contents(other).Length &&
+                              Pal.Implies(HashSet<T>.Equiv(_comparer) && HashSet<T>.Distinct(_comparer, items0.Value),
+                                  HashSet<T>.Distinct(_comparer, ItemsOf(Pal.Contents(_entries), _count)) &&
+                                  HashSet<T>.Except(_comparer, items0.Value, Pal.Slice(Pal.Contents(other), 0, Pal.Index(element)),
+                                      ItemsOf(Pal.Contents(_entries), _count))));
+                Ghost<Seq<T>> before = ItemsOf(Pal.Contents(_entries), _count);
                 Remove(element);
+                ExceptStep(_comparer, items0.Value, Pal.Contents(other), before.Value, ItemsOf(Pal.Contents(_entries), _count), Pal.Index(element) - 1);
             }
+            ExceptDone(_comparer, items0.Value, Pal.Contents(other), ItemsOf(Pal.Contents(_entries), _count));
         }
 
         /// <summary>Modifies the current <see cref="HashSet{T}"/> object to contain only elements that are present either in that object or in the specified collection, but not both.</summary>
@@ -1371,29 +1858,54 @@ namespace System.Collections.Generic
             return OverlapsEnumerableImpl(other);
         }
 
+        [Ensures("Pal.Implies(Result, HashSet<T>.OverlapsSeq(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
+        [Ensures("Pal.Implies(!Result, !HashSet<T>.OverlapsSeq(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         private bool OverlapsEnumerableImpl(IEnumerable<T> other)
         {
             foreach (T element in other)
             {
+                Pal.Invariant(0 <= Pal.Index(element) && Pal.Index(element) <= Pal.Contents(other).Length &&
+                              (Pal.Returned()
+                                  ? Pal.ReturnValue<bool>() && HashSet<T>.OverlapsSeq(this.SpecComparer, this.SpecItems, Pal.Contents(other))
+                                  : HashSet<T>.NoOverlap(this.SpecComparer, this.SpecItems, Pal.Contents(other), Pal.Index(element))));
                 if (Contains(element))
                 {
+                    OverlapsHit(this.SpecComparer, this.SpecItems, Pal.Contents(other), Pal.Index(element) - 1);
                     return true;
                 }
+                NoOverlapStep(this.SpecComparer, this.SpecItems, Pal.Contents(other), Pal.Index(element) - 1);
             }
 
+            NoOverlapDone(this.SpecComparer, this.SpecItems, Pal.Contents(other));
             return false;
         }
 
+        // R30.41. A static walk over `smaller`'s prefixes, as in `IsSubsetOfHashSetWithSameComparer`.
+        [Ensures("Pal.Implies(Result, HashSet<T>.OverlapsSeq(larger.SpecComparer, larger.SpecItems, smaller.SpecItems))")]
+        [Ensures("Pal.Implies(!Result, !HashSet<T>.OverlapsSeq(larger.SpecComparer, larger.SpecItems, smaller.SpecItems))")]
         private static bool OverlapsHashSetImpl(HashSet<T> smaller, HashSet<T> larger)
         {
             foreach (T element in smaller)
             {
+                Pal.Invariant(Pal.Enumerator<Enumerator>(element).SpecFresh &&
+                              0 <= Pal.Enumerator<Enumerator>(element).SpecIndex &&
+                              Pal.Enumerator<Enumerator>(element).SpecIndex <= smaller.SpecSlots &&
+                              (Pal.Returned()
+                                  ? Pal.ReturnValue<bool>() && HashSet<T>.OverlapsSeq(larger.SpecComparer, larger.SpecItems, smaller.SpecItems)
+                                  : Pal.Implies(Pal.Enumerator<Enumerator>(element).SpecIndex != 0,
+                                        smaller.SpecPrefixes.Length == smaller.SpecSlots + 1 &&
+                                        HashSet<T>.NoneIn(larger.SpecComparer, larger.SpecItems,
+                                            smaller.SpecPrefixes[Pal.Enumerator<Enumerator>(element).SpecIndex]))));
+                Pal.Decreases(smaller.SpecSlots - Pal.Enumerator<Enumerator>(element).SpecIndex);
                 if (larger.Contains(element))
                 {
+                    OverlapsWalk(larger.SpecComparer, larger.SpecItems, smaller.SpecPrefixes, smaller.SpecItems,
+                        Pal.Enumerator<Enumerator>(element).SpecIndex);
                     return true;
                 }
             }
 
+            NoneInWalk(larger.SpecComparer, larger.SpecItems, smaller.SpecPrefixes, smaller.SpecItems);
             return false;
         }
 
@@ -1447,13 +1959,32 @@ namespace System.Collections.Generic
             return uniqueCount == Count && unfoundCount == 0;
         }
 
+        [Requires("array != null")]
+        [Throws(typeof(ArgumentException), "@this.SpecCount > Pal.Contents(array).Length")]
+        [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems) && @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecVersion == Pal.Old(@this.SpecVersion)")]
+        [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+        [Ensures("@this.SpecItems.Length == @this.SpecCount")]
+        [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), 0, @this.SpecItems.Length, @this.SpecItems)")]
         public void CopyTo(T[] array) => CopyTo(array, 0, Count);
 
         /// <summary>Copies the elements of a <see cref="HashSet{T}"/> object to an array, starting at the specified array index.</summary>
         /// <param name="array">The destination array.</param>
         /// <param name="arrayIndex">The zero-based index in array at which copying begins.</param>
+        [Requires("array != null && arrayIndex >= 0")]
+        [Throws(typeof(ArgumentException), "arrayIndex > Pal.Contents(array).Length || @this.SpecCount > Pal.Contents(array).Length - arrayIndex")]
+        [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems) && @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecVersion == Pal.Old(@this.SpecVersion)")]
+        [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+        [Ensures("@this.SpecItems.Length == @this.SpecCount")]
+        [Ensures("Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), arrayIndex, arrayIndex + @this.SpecItems.Length, @this.SpecItems)")]
         public void CopyTo(T[] array, int arrayIndex) => CopyTo(array, arrayIndex, Count);
 
+        [Requires("array != null && arrayIndex >= 0 && count >= 0")]
+        [Throws(typeof(ArgumentException), "arrayIndex > Pal.Contents(array).Length || count > Pal.Contents(array).Length - arrayIndex")]
+        [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems) && @this.SpecCount == Pal.Old(@this.SpecCount) && @this.SpecVersion == Pal.Old(@this.SpecVersion)")]
+        [Ensures("@this.SpecItems.Length == @this.SpecCount")]
+        [Ensures("Pal.Contents(array).Length == Pal.Old(Pal.Contents(array)).Length")]
+        [Ensures("Pal.Implies(count <= @this.SpecItems.Length, Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), arrayIndex, arrayIndex + count, Pal.Slice(@this.SpecItems, 0, count)))")]
+        [Ensures("Pal.Implies(@this.SpecItems.Length < count, Pal.Contents(array) == Pal.Splice(Pal.Old(Pal.Contents(array)), arrayIndex, arrayIndex + @this.SpecItems.Length, @this.SpecItems))")]
         public void CopyTo(T[] array, int arrayIndex, int count)
         {
             if (array == null)
@@ -1472,19 +2003,39 @@ namespace System.Collections.Generic
                 ThrowHelper.ThrowArgumentException(ExceptionResource.Arg_ArrayPlusOffTooSmall);
             }
 
+            ItemsCount(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer);
             Entry[]? entries = _entries;
+            Ghost<Seq<T>> array0 = Pal.Contents(array);
+            Ghost<int> arrayIndex0 = arrayIndex;
+            Ghost<int> count0 = count;
             for (int i = 0; i < _count && count != 0; i++)
             {
+                Pal.Invariant(0 <= i && i <= _count && (entries != null || _count == 0));
+                Pal.Invariant(arrayIndex == arrayIndex0.Value + ItemsOf(Pal.Contents(entries), i).Length);
+                Pal.Invariant(count == count0.Value - ItemsOf(Pal.Contents(entries), i).Length);
+                Pal.Invariant(count >= 0 && arrayIndex0.Value + count0.Value <= array0.Value.Length);
+                Pal.Invariant(Pal.Contents(array).Length == array0.Value.Length);
+                Pal.Invariant(Pal.Contents(array) == Pal.Splice(array0.Value, arrayIndex0.Value, arrayIndex, ItemsOf(Pal.Contents(entries), i)));
+                Pal.Invariant(ItemsOf(Pal.Contents(entries), i).Length <= ItemsOf(Pal.Contents(entries), _count).Length);
+                Pal.Invariant(ItemsOf(Pal.Contents(entries), i) == Pal.Slice(ItemsOf(Pal.Contents(entries), _count), 0, ItemsOf(Pal.Contents(entries), i).Length));
+                ItemsStep(Pal.Contents(entries), i);
                 ref Entry entry = ref entries![i];
                 if (entry.Next >= -1)
                 {
                     array[arrayIndex++] = entry.Value;
                     count--;
                 }
+                ItemsPrefix(Pal.Contents(entries), i + 1, _count);
             }
         }
 
         /// <summary>Removes all elements that match the conditions defined by the specified predicate from a <see cref="HashSet{T}"/> collection.</summary>
+        [Ensures("@this.SpecComparer == Old(@this.SpecComparer)")]
+        [Throws(typeof(ArgumentNullException), "match == null")]
+        [Ensures("0 <= Result && Result == Old(@this.SpecItems).Length - @this.SpecItems.Length")]
+        [Ensures("Pal.Implies(HashSet<T>.Equiv(@this.SpecComparer) && HashSet<T>.Distinct(@this.SpecComparer, Old(@this.SpecItems)), " +
+            "HashSet<T>.Distinct(@this.SpecComparer, @this.SpecItems) && HashSet<T>.AllIn(@this.SpecComparer, Old(@this.SpecItems), @this.SpecItems))")]
+        [OpaqueSpecs("Distinct", "Equiv", "AllIn")]
         public int RemoveWhere(Predicate<T> match)
         {
             if (match == null)
@@ -1494,8 +2045,23 @@ namespace System.Collections.Generic
 
             Entry[]? entries = _entries;
             int numRemoved = 0;
+            ItemsCount(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer);
+            Ghost<Seq<T>> items0 = this.SpecItems;
+            AllInRefl(_comparer, items0.Value);
             for (int i = 0; i < _count; i++)
             {
+                Pal.Invariant(0 <= _freeCount && _freeCount <= _count && _count <= _entries.Length);
+                Pal.Invariant((_buckets == null) == (_entries == null) && _buckets.Length == _entries.Length);
+                Pal.Invariant((_entries != null || _count == 0) && (_entries != null || _entries.Length == 0));
+                Pal.Invariant(_entries == null || (_entries.Length > 0 && _entries.Length <= Array.MaxLength && System.Collections.HashHelpers.PrimeSize(_entries.Length)));
+                Pal.Invariant(typeof(T).IsValueType || _comparer != null);
+                Pal.Invariant(_buckets == null || HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, _comparer));
+                Pal.Invariant(0 <= i && Pal.Old(this.SpecItems).Length <= Array.MaxLength);
+                Pal.Invariant(_comparer == Pal.Old(this.SpecComparer));
+                Pal.Invariant(0 <= numRemoved && numRemoved == Pal.Old(this.SpecItems).Length - ItemsOf(Pal.Contents(_entries), _count).Length);
+                Pal.Invariant(Pal.Implies(HashSet<T>.Equiv(_comparer) && HashSet<T>.Distinct(_comparer, items0.Value),
+                    HashSet<T>.Distinct(_comparer, ItemsOf(Pal.Contents(_entries), _count)) &&
+                    HashSet<T>.AllIn(_comparer, items0.Value, ItemsOf(Pal.Contents(_entries), _count))));
                 ref Entry entry = ref entries![i];
                 if (entry.Next >= -1)
                 {
@@ -1503,11 +2069,13 @@ namespace System.Collections.Generic
                     T value = entry.Value;
                     if (match(value))
                     {
+                        Ghost<Seq<T>> before = ItemsOf(Pal.Contents(_entries), _count);
                         // Check again that remove actually removed it.
                         if (Remove(value))
                         {
                             numRemoved++;
                         }
+                        RemoveWhereStep(_comparer, items0.Value, before.Value, ItemsOf(Pal.Contents(_entries), _count), value);
                     }
                 }
             }
@@ -1516,6 +2084,7 @@ namespace System.Collections.Generic
         }
 
         /// <summary>Gets the <see cref="IEqualityComparer"/> object that is used to determine equality for the values in the set.</summary>
+        [Ensures("HashSet<T>.SameEquality(Result, @this.SpecComparer)")]
         public IEqualityComparer<T> Comparer
         {
             get
@@ -1535,9 +2104,14 @@ namespace System.Collections.Generic
         /// <summary>
         /// Similar to <see cref="Comparer"/> but surfaces the actual comparer being used to hash entries.
         /// </summary>
+        [Ensures("HashSet<T>.SameEquality(Result, @this.SpecComparer)")]
         internal IEqualityComparer<T> EffectiveComparer => _comparer ?? EqualityComparer<T>.Default;
 
         /// <summary>Ensures that this hash set can hold the specified number of elements without growing.</summary>
+        [Requires("capacity <= 0x7FFFFFC3")]
+        [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+        [Ensures("capacity <= Result && Result == @this.SpecCapacity")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && @this.SpecComparer == Old(@this.SpecComparer)")]
         public int EnsureCapacity(int capacity)
         {
             if (capacity < 0)
@@ -1561,8 +2135,17 @@ namespace System.Collections.Generic
             return newSize;
         }
 
+        [Requires("0 < @this.SpecCapacity && @this.SpecCapacity <= @this.SpecSlots && @this.SpecSlots < 0x7FFFFFC3")]
+        [Ensures("@this.SpecCapacity > Old(@this.SpecSlots) && @this.SpecSlots == Old(@this.SpecSlots) && @this.SpecCount == Old(@this.SpecCount)")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecVersion == Old(@this.SpecVersion) && @this.SpecComparer == Old(@this.SpecComparer)")]
         private void Resize() => Resize(HashHelpers.ExpandPrime(_count), forceNewHashCodes: false);
 
+        [Requires("Pal.Implies(forceNewHashCodes, !typeof(T).IsValueType && HashSet<T>.NonRandomized(@this.SpecComparer))")]
+        [Requires("0 < @this.SpecCapacity && @this.SpecCapacity <= newSize && newSize <= 0x7FFFFFC7 && System.Collections.HashHelpers.PrimeSize(newSize)")]
+        [Ensures("@this.SpecCapacity == newSize && @this.SpecSlots == Old(@this.SpecSlots) && @this.SpecCount == Old(@this.SpecCount)")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecVersion == Old(@this.SpecVersion)")]
+        [Ensures("Pal.Implies(!forceNewHashCodes, @this.SpecComparer == Old(@this.SpecComparer))")]
+        [Ensures("HashSet<T>.SameEquality(Old(@this.SpecComparer), @this.SpecComparer)")]
         private void Resize(int newSize, bool forceNewHashCodes)
         {
             // Value types never rehash
@@ -1574,21 +2157,32 @@ namespace System.Collections.Generic
             var entries = new Entry[newSize];
 
             int count = _count;
+            Ghost<Seq<Entry>> old0 = Pal.Contents(_entries);
             Array.Copy(_entries, entries, count);
+            CopyOk(Pal.Contents(_buckets), old0.Value, Pal.Contents(entries), count, _freeList, _freeCount, _comparer);
 
             if (!typeof(T).IsValueType && forceNewHashCodes)
             {
                 Debug.Assert(_comparer is NonRandomizedStringEqualityComparer);
+                RandomizedSame(_comparer);
+                PreFreeOf(Pal.Contents(entries), count, _freeList, _freeCount, _comparer);
+                Ghost<Seq<Entry>> copied = Pal.Contents(entries);
                 IEqualityComparer<T> comparer = _comparer = (IEqualityComparer<T>)((NonRandomizedStringEqualityComparer)_comparer).GetRandomizedEqualityComparer();
 
+                RehashStart(copied.Value, count, _comparer);
                 for (int i = 0; i < count; i++)
                 {
+                    Pal.Invariant(0 <= i && entries.Length == newSize && Holds(_comparer, comparer));
+                    Pal.Invariant(HashSet<T>.Rehashed(copied.Value, Pal.Contents(entries), count, i, _comparer));
+                    Ghost<Seq<Entry>> before = Pal.Contents(entries);
                     ref Entry entry = ref entries[i];
                     if (entry.Next >= -1)
                     {
                         entry.HashCode = entry.Value != null ? comparer.GetHashCode(entry.Value) : 0;
                     }
+                    RehashStep(copied.Value, before.Value, Pal.Contents(entries), count, i, _comparer);
                 }
+                RehashDone(copied.Value, Pal.Contents(entries), count, _freeList, _freeCount, _comparer);
             }
 
             // Assign member variables after both arrays allocated to guard against corruption from OOM if second fails
@@ -1596,31 +2190,60 @@ namespace System.Collections.Generic
 #if TARGET_64BIT
             _fastModMultiplier = HashHelpers.GetFastModMultiplier((uint)newSize);
 #endif
+            Ghost<Seq<Entry>> source = Pal.Contents(entries);
+            RebuildStart(Pal.Contents(_buckets), source.Value, count);
             for (int i = 0; i < count; i++)
             {
+                Pal.Invariant(_buckets != null && _buckets.Length == newSize && entries.Length == newSize);
+                Pal.Invariant(Rebuilt(Pal.Contents(_buckets), source.Value, Pal.Contents(entries), count, i));
                 ref Entry entry = ref entries[i];
+                Ghost<Seq<int>> buckets0 = Pal.Contents(_buckets);
+                Ghost<Seq<Entry>> entries0 = Pal.Contents(entries);
                 if (entry.Next >= -1)
                 {
+                    RebuildBucket(Pal.Contents(_buckets), source.Value, Pal.Contents(entries), count, i);
                     ref int bucket = ref GetBucketRef(entry.HashCode);
                     entry.Next = bucket - 1; // Value in _buckets is 1-based
                     bucket = i + 1;
                 }
+                RebuildStep(buckets0.Value, Pal.Contents(_buckets), source.Value, entries0.Value, Pal.Contents(entries), count, i);
             }
 
             _entries = entries;
+            RebuildDone(Pal.Contents(_buckets), source.Value, Pal.Contents(_entries), count, _freeList, _freeCount, _comparer);
         }
 
+        // [Open] (R27.23): `TrimExcess` calls it with the new, empty arrays in place and the old
+        // entries in hand, where the invariant does not hold.
+        [Open]
+        [Requires("@this._entries != null && @this._buckets != null && 0 <= count && count <= entries.Length && @this._freeList == -1")]
+        [Requires("Pal.Contents(@this._entries).Length > 0 && Pal.Contents(@this._buckets).Length == Pal.Contents(@this._entries).Length && HashSet<T>.Zeros(Pal.Contents(@this._buckets))")]
+        [Requires("HashSet<T>.Compactable(Pal.Contents(entries), count, @this._comparer) && HashSet<T>.ItemsOf(Pal.Contents(entries), count).Length <= Pal.Contents(@this._entries).Length")]
+        [Ensures("@this._entries != null && @this._buckets != null && @this._freeList == -1 && @this._freeCount == 0")]
+        [Ensures("Pal.Contents(@this._entries).Length == Old(Pal.Contents(@this._entries).Length) && Pal.Contents(@this._buckets).Length == Pal.Contents(@this._entries).Length")]
+        [Ensures("@this._comparer == Old(@this._comparer) && @this._version == Old(@this._version)")]
+        [Ensures("Pal.Contents(entries) == Old(Pal.Contents(entries)) && HashSet<T>.ItemsOf(Pal.Contents(@this._entries), @this._count).Length == @this._count")]
+        [Ensures("HashSet<T>.Wf(Pal.Contents(@this._buckets), Pal.Contents(@this._entries), @this._count, @this._freeList, @this._freeCount, @this._comparer)")]
+        [Ensures("HashSet<T>.ItemsOf(Pal.Contents(@this._entries), @this._count) == HashSet<T>.ItemsOf(Pal.Contents(entries), count)")]
         private void CopyEntries(Entry[] entries, int count)
         {
             Debug.Assert(_entries is not null);
 
             Entry[] newEntries = _entries;
             int newCount = 0;
+            Ghost<int> length0 = newEntries.Length;
+            CompactStart(Pal.Contents(_buckets), Pal.Contents(entries), Pal.Contents(newEntries), count, _comparer);
             for (int i = 0; i < count; i++)
             {
+                Pal.Invariant(0 <= i && i <= count && newEntries.Length == length0.Value && _buckets != null && _buckets.Length == length0.Value);
+                Pal.Invariant(HashSet<T>.Compacted(Pal.Contents(_buckets), Pal.Contents(entries), Pal.Contents(newEntries), count, i, newCount, _comparer));
+                Ghost<Seq<int>> buckets0 = Pal.Contents(_buckets);
+                Ghost<Seq<Entry>> entries0 = Pal.Contents(newEntries);
+                Ghost<int> m0 = newCount;
                 int hashCode = entries[i].HashCode;
                 if (entries[i].Next >= -1)
                 {
+                    CompactRoom(Pal.Contents(_buckets), Pal.Contents(entries), Pal.Contents(newEntries), count, i, newCount, _comparer);
                     ref Entry entry = ref newEntries[newCount];
                     entry = entries[i];
                     ref int bucket = ref GetBucketRef(hashCode);
@@ -1628,8 +2251,10 @@ namespace System.Collections.Generic
                     bucket = newCount + 1;
                     newCount++;
                 }
+                CompactStep(buckets0.Value, Pal.Contents(_buckets), Pal.Contents(entries), entries0.Value, Pal.Contents(newEntries), count, i, m0.Value, newCount, _comparer);
             }
 
+            CompactDone(Pal.Contents(_buckets), Pal.Contents(entries), Pal.Contents(newEntries), count, newCount, _comparer);
             _count = newCount;
             _freeCount = 0;
         }
@@ -1638,6 +2263,8 @@ namespace System.Collections.Generic
         /// Sets the capacity of a <see cref="HashSet{T}"/> object to the actual number of elements it contains,
         /// rounded up to a nearby, implementation-specific value.
         /// </summary>
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && @this.SpecComparer == Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCapacity <= Old(@this.SpecCapacity)")]
         public void TrimExcess() => TrimExcess(Count);
 
         /// <summary>
@@ -1646,6 +2273,9 @@ namespace System.Collections.Generic
         /// </summary>
         /// <param name="capacity">The new capacity.</param>
         /// <exception cref="ArgumentOutOfRangeException">Passed capacity is lower than entries count.</exception>
+        [Throws(typeof(ArgumentOutOfRangeException), "capacity < @this.SpecCount")]
+        [Ensures("@this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount) && @this.SpecComparer == Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCapacity <= Old(@this.SpecCapacity)")]
         public void TrimExcess(int capacity)
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(capacity, Count);
@@ -1665,6 +2295,7 @@ namespace System.Collections.Generic
             var buckets = new int[newSize];
             var entries = new Entry[newSize];
 
+            WfCompactable(Pal.Contents(_buckets), Pal.Contents(oldEntries), _count, _freeList, _freeCount, _comparer);
             // Assign member variables after both arrays are allocated to guard against corruption from OOM if second fails.
             _freeList = -1;
             _buckets = buckets;
@@ -1687,11 +2318,16 @@ namespace System.Collections.Generic
         /// Initializes buckets and slots arrays. Uses suggested capacity by finding next prime
         /// greater than or equal to capacity.
         /// </summary>
+        [Requires("0 <= capacity && capacity <= 0x7FFFFFC3 && @this.SpecSlots == 0")]
+        [Ensures("capacity <= Result && 0 < Result && Result == @this.SpecCapacity")]
+        [Ensures("@this.SpecSlots == 0 && @this.SpecCount == 0 && @this.SpecItems == Pal.EmptySeq<T>()")]
+        [Ensures("@this.SpecComparer == Old(@this.SpecComparer) && @this.SpecVersion == Old(@this.SpecVersion)")]
         private int Initialize(int capacity)
         {
             int size = HashHelpers.GetPrime(capacity);
             var buckets = new int[size];
             var entries = new Entry[size];
+            WfFresh(Pal.Contents(buckets), Pal.Contents(entries), _comparer);
 
             // Assign member variables after both arrays are allocated to guard against corruption from OOM if second fails.
             _freeList = -1;
@@ -1708,8 +2344,16 @@ namespace System.Collections.Generic
         /// <param name="value">The element to add to the set.</param>
         /// <param name="location">The index into <see cref="_entries"/> of the element.</param>
         /// <returns>true if the element is added to the <see cref="HashSet{T}"/> object; false if the element is already present.</returns>
+        [Requires("@this.SpecSlots < 0x7FFFFFC3")]
+        [Ensures("Implies(Result, HashSet<T>.Added(Old(@this.SpecItems), @this.SpecItems, value) && @this.SpecCount == Old(@this.SpecCount) + 1)")]
+        [Ensures("Implies(Result, !HashSet<T>.Mem(Old(@this.SpecComparer), Old(@this.SpecItems), value))")]
+        [Ensures("Implies(!Result, @this.SpecItems == Old(@this.SpecItems) && @this.SpecCount == Old(@this.SpecCount))")]
+        [Ensures("Implies(!Result, HashSet<T>.Mem(@this.SpecComparer, @this.SpecItems, value))")]
+        [Ensures("HashSet<T>.SameEquality(Old(@this.SpecComparer), @this.SpecComparer)")]
+        [Rlimit(2)]
         private bool AddIfNotPresent(T value, out int location)
         {
+            Ghost<int> liveIn = _count - _freeCount;
             if (_buckets == null)
             {
                 Initialize(0);
@@ -1729,6 +2373,7 @@ namespace System.Collections.Generic
                 comparer == null)
             {
                 hashCode = value!.GetHashCode();
+                SearchStart(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value);
                 bucket = ref GetBucketRef(hashCode);
                 int i = bucket - 1; // Value in _buckets is 1-based
 
@@ -1736,13 +2381,17 @@ namespace System.Collections.Generic
                 while ((uint)i < (uint)entries.Length)
                 {
                     Pal.Invariant(collisionCount <= (uint)entries.Length);
+                    Pal.Invariant(Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, value, i, collisionCount));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), value)));
                     Pal.Decreases((uint)entries.Length - collisionCount);
                     ref Entry entry = ref entries[i];
                     if (entry.HashCode == hashCode && EqualityComparer<T>.Default.Equals(entry.Value, value))
                     {
+                        SearchHit(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
                         location = i;
                         return false;
                     }
+                    SearchStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
                     i = entry.Next;
 
                     collisionCount++;
@@ -1752,23 +2401,29 @@ namespace System.Collections.Generic
                         ThrowHelper.ThrowInvalidOperationException_ConcurrentOperationsNotSupported();
                     }
                 }
+                SearchAbsent(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
             }
             else
             {
                 Debug.Assert(comparer is not null);
                 hashCode = value != null ? comparer.GetHashCode(value) : 0;
+                SearchStart(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value);
                 bucket = ref GetBucketRef(hashCode);
                 int i = bucket - 1; // Value in _buckets is 1-based
                 while ((uint)i < (uint)entries.Length)
                 {
                     Pal.Invariant(collisionCount <= (uint)entries.Length);
+                    Pal.Invariant(Search(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, _comparer, value, i, collisionCount));
+                    Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && Mem(_comparer, ItemsOf(Pal.Contents(entries), _count), value)));
                     Pal.Decreases((uint)entries.Length - collisionCount);
                     ref Entry entry = ref entries[i];
                     if (entry.HashCode == hashCode && comparer.Equals(entry.Value, value))
                     {
+                        SearchHit(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
                         location = i;
                         return false;
                     }
+                    SearchStep(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
                     i = entry.Next;
 
                     collisionCount++;
@@ -1778,8 +2433,14 @@ namespace System.Collections.Generic
                         ThrowHelper.ThrowInvalidOperationException_ConcurrentOperationsNotSupported();
                     }
                 }
+                SearchAbsent(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value, i, collisionCount);
             }
 
+            Ghost<Seq<T>> items0 = ItemsOf(Pal.Contents(entries), _count);
+            Ghost<int> count0 = _count;
+            Ghost<int> live0 = _count - _freeCount;
+            Pal.Assert(live0.Value == liveIn.Value);
+            InsertPre(Pal.Contents(_buckets), Pal.Contents(entries), _count, _freeList, _freeCount, comparer, value);
             int index;
             if (_freeCount > 0)
             {
@@ -1787,6 +2448,8 @@ namespace System.Collections.Generic
                 _freeCount--;
                 Debug.Assert((StartOfFreeList - entries[_freeList].Next) >= -1, "shouldn't overflow because `next` cannot underflow");
                 _freeList = StartOfFreeList - entries[_freeList].Next;
+                Pal.Assert(_count == count0.Value && _freeCount >= 0 && HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), count0.Value, index, _freeCount + 1, comparer) && _freeList == HashSet<T>.FNext(Pal.Contents(entries), index));
+                Pal.Assert(0 <= index && index < entries.Length);
             }
             else
             {
@@ -1795,12 +2458,17 @@ namespace System.Collections.Generic
                 {
                     Resize();
                     bucket = ref GetBucketRef(hashCode);
+                    InsertPre(Pal.Contents(_buckets), Pal.Contents(_entries), _count, _freeList, _freeCount, comparer, value);
                 }
                 index = count;
                 _count = count + 1;
                 entries = _entries;
+                Pal.Assert(_freeCount == 0 && index == count0.Value && _count == count0.Value + 1 && HashSet<T>.Wf(Pal.Contents(_buckets), Pal.Contents(entries), count0.Value, _freeList, 0, comparer));
+                Pal.Assert(0 <= index && index < entries.Length);
             }
 
+            Ghost<Seq<int>> buckets0 = Pal.Contents(_buckets);
+            Ghost<Seq<Entry>> entries0 = Pal.Contents(entries);
             {
                 ref Entry entry = ref entries![index];
                 entry.HashCode = hashCode;
@@ -1810,16 +2478,28 @@ namespace System.Collections.Generic
                 _version++;
                 location = index;
             }
+            InsertOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), count0.Value, _count, _freeList, _freeCount, index, comparer, value);
+            Pal.Assert(HashSet<T>.Added(items0.Value, ItemsOf(Pal.Contents(_entries), _count), value));
+            Pal.Assert(_comparer == comparer && _count - _freeCount == live0.Value + 1);
 
+            SameRefl(comparer);
             // Value types never rehash
             if (!typeof(T).IsValueType && collisionCount > HashHelpers.HashCollisionThreshold && comparer is NonRandomizedStringEqualityComparer)
             {
                 // If we hit the collision threshold we'll need to switch to the comparer which is using randomized string hashing
                 // i.e. EqualityComparer<string>.Default.
+                AddedMem(comparer, items0.Value, ItemsOf(Pal.Contents(entries), _count), value);
                 Resize(entries.Length, forceNewHashCodes: true);
+                Pal.Assert(HashSet<T>.Added(items0.Value, ItemsOf(Pal.Contents(_entries), _count), value) && HashSet<T>.SameEquality(comparer, _comparer) && _count - _freeCount == live0.Value + 1);
+                MemSame(comparer, _comparer, ItemsOf(Pal.Contents(_entries), _count), value);
+                Pal.Assert(HashSet<T>.Mem(_comparer, ItemsOf(Pal.Contents(_entries), _count), value));
                 location = FindItemIndex(value);
                 Debug.Assert(location >= 0);
+                Pal.Assert(location >= 0);
+                Pal.Assert(HashSet<T>.Added(items0.Value, ItemsOf(Pal.Contents(_entries), _count), value) && HashSet<T>.SameEquality(comparer, _comparer) && _count - _freeCount == live0.Value + 1);
             }
+            Pal.Assert(HashSet<T>.Added(items0.Value, ItemsOf(Pal.Contents(_entries), _count), value));
+            Pal.Assert(HashSet<T>.SameEquality(comparer, _comparer) && _count - _freeCount == live0.Value + 1);
 
             return true;
         }
@@ -1834,12 +2514,27 @@ namespace System.Collections.Generic
         ///
         /// If callers are concerned about whether this is a proper subset, they take care of that.
         /// </summary>
+        // R30.35. A walk over this set's prefixes (`MoveNext` states the walk); `HashSetChain.all_in_snoc` is a pattern.
+        [Ensures("Pal.Implies(Result, HashSet<T>.AllIn(other.SpecComparer, other.SpecItems, @this.SpecItems))")]
+        [Ensures("Pal.Implies(!Result, !HashSet<T>.AllIn(other.SpecComparer, other.SpecItems, @this.SpecItems))")]
         internal bool IsSubsetOfHashSetWithSameComparer(HashSet<T> other)
         {
             foreach (T item in this)
             {
+                Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecFresh &&
+                              0 <= Pal.Enumerator<Enumerator>(item).SpecIndex &&
+                              Pal.Enumerator<Enumerator>(item).SpecIndex <= this.SpecSlots &&
+                              (Pal.Returned()
+                                  ? !Pal.ReturnValue<bool>() && !HashSet<T>.AllIn(other.SpecComparer, other.SpecItems, this.SpecItems)
+                                  : Pal.Implies(Pal.Enumerator<Enumerator>(item).SpecIndex != 0,
+                                        this.SpecPrefixes.Length == this.SpecSlots + 1 &&
+                                        HashSet<T>.AllIn(other.SpecComparer, other.SpecItems,
+                                            this.SpecPrefixes[Pal.Enumerator<Enumerator>(item).SpecIndex]))));
+                Pal.Decreases(this.SpecSlots - Pal.Enumerator<Enumerator>(item).SpecIndex);
                 if (!other.Contains(item))
                 {
+                    AllInWalk(other.SpecComparer, other.SpecItems, this.SpecPrefixes, this.SpecItems,
+                        Pal.Enumerator<Enumerator>(item).SpecIndex);
                     return false;
                 }
             }
@@ -2106,7 +2801,11 @@ namespace System.Collections.Generic
             private int _index;
             private T _current;
 
+            [Spec] internal SpecInt SpecIndex => _index;
+            [Spec] internal bool SpecFresh => _version == _hashSet.SpecVersion;
+
             [Ensures("ReferenceEquals(@this._hashSet, hashSet) && @this._version == hashSet.SpecVersion && @this._index == 0")]
+            [Ensures("hashSet.SpecSlots >= 0")]
             internal Enumerator(HashSet<T> hashSet)
             {
                 _hashSet = hashSet;
@@ -2125,12 +2824,15 @@ namespace System.Collections.Generic
             [Ensures("Pal.Implies(!Result, @this._index == @this._hashSet.SpecSlots + 1)")]
             [Ensures("Pal.Implies(!Result && Pal.Old(@this._index) <= @this._hashSet.SpecSlots, " +
                 "@this._hashSet.SpecPrefixes[@this._hashSet.SpecSlots] == @this._hashSet.SpecPrefixes[Pal.Old(@this._index)])")]
+            [Ensures("HashSet<T>.Walk(@this._hashSet.SpecPrefixes, @this._hashSet.SpecItems) && @this._hashSet.SpecPrefixes[0].Length == 0")]
             public bool MoveNext()
             {
                 if (_version != _hashSet._version)
                 {
                     ThrowHelper.ThrowInvalidOperationException_InvalidOperation_EnumFailedVersion();
                 }
+
+                PrefixesWalk(Pal.Contents(_hashSet._entries), _hashSet._count);
 
                 Ghost<int> index0 = _index;
                 Ghost<Seq<T>> before = ItemsOf(Pal.Contents(_hashSet._entries), Math.Min(_index, _hashSet._count));

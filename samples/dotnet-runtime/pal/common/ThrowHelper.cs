@@ -126,6 +126,8 @@ internal static class ThrowHelper
     internal static void ThrowWrongKeyTypeArgumentException<T>(T key, Type targetType) => throw new ArgumentException();
 
     [DoesNotReturn]
+    [Throws(typeof(NotSupportedException))]
+    [Ensures("false")]
     internal static void ThrowNotSupportedException(ExceptionResource resource) => throw new NotSupportedException();
 
     [DoesNotReturn]
