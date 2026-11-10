@@ -727,6 +727,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             scope.Bind(p.Name, new Term(name, kind, p.Type));
         }
 
+        // R30.31. A lemma of no arguments is a function of `unit`: an F* `Lemma` (or a
+        // `ghost fn`) must be a function.
+        if (binders.Count == 0) binders.Add("()");
+
         // R12.7. A lemma whose contract mentions ownership is a *ghost function*, not an
         // F* `Lemma`. The two are told apart by exactly the test R12.2 already applies to
         // a method's clauses — an `SlProp` clause is a resource — so nothing new is

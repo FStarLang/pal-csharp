@@ -557,6 +557,8 @@ public static class Check
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],
             IrRaise ra => [ra.Exception],
+            // R30.34. `Some?.v _comparer` reads the field as well.
+            IrOptionOp oo => [oo.Operand],
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],
             IrQuantifier q => [q.Body],

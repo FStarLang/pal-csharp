@@ -662,6 +662,39 @@ public sealed partial class ExprLowerer
     }
 
     /// <summary>
+    /// R30.32. <c>if (p == null) { throw …; }</c> (or <c>p is null</c>, the arm a block of
+    /// throws and <c>[DoesNotReturn]</c> calls), with no <c>else</c>, where <c>p</c> is a
+    /// parameter of a non-nullable class type: such a reference is not null (R10.2, R32.1).
+    /// </summary>
+    private bool IsDeadNullGuard(IfStatementSyntax s)
+    {
+        if (s.Else is not null) return false;
+        ExpressionSyntax? tested = s.Condition switch
+        {
+            BinaryExpressionSyntax b when b.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.EqualsExpression) =>
+                b.Right.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) ? b.Left
+                : b.Left.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) ? b.Right : null,
+            IsPatternExpressionSyntax { Pattern: ConstantPatternSyntax cp } ip
+                when cp.Expression.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) => ip.Expression,
+            _ => null,
+        };
+        if (tested is not IdentifierNameSyntax ||
+            model.GetSymbolInfo(tested).Symbol is not IParameterSymbol { RefKind: RefKind.None } p ||
+            p.Type is not { TypeKind: TypeKind.Class } pt || pt.NullableAnnotation == NullableAnnotation.Annotated ||
+            p.NullableAnnotation == NullableAnnotation.Annotated)
+            return false;
+        IEnumerable<StatementSyntax> arm = s.Statement is BlockSyntax blk ? blk.Statements : [s.Statement];
+        return arm.Any() && arm.All(st => st switch
+        {
+            ThrowStatementSyntax => true,
+            ExpressionStatementSyntax { Expression: InvocationExpressionSyntax inv } =>
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol m &&
+                m.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute"),
+            _ => false,
+        });
+    }
+
+    /// <summary>
     /// R28.5. The body of a borrowing struct's constructor, which must assign each field it
     /// sets once from the parameters and the borrowed object: the struct value it builds.
     /// R27.37. With an owned field, it may also call methods (of the borrowed or an owned
@@ -726,6 +759,10 @@ public sealed partial class ExprLowerer
                 model.GetTypeInfo(ga.Expression) is { Type: { TypeKind: TypeKind.Class } } gt &&
                 gt.Nullability.FlowState == NullableFlowState.NotNull &&
                 gt.Type!.NullableAnnotation != NullableAnnotation.Annotated)
+                continue;
+            // R30.32. So does its spelled-out form, `if (p == null) { ThrowHelper.Throw…(…); }`,
+            // at a non-nullable class-typed parameter: the arm is dead.
+            if (node is IfStatementSyntax nullGuard && IsDeadNullGuard(nullGuard))
                 continue;
             if (extended && expr is InvocationExpressionSyntax call &&
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol callee)

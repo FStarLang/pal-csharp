@@ -631,6 +631,13 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     public bool Immutable { get; init; }
 
     /// <summary>
+    /// R30.33. The local takes the array the field <see cref="Init"/> names, from the
+    /// assignment that immediately follows and replaces it: that assignment hands the old
+    /// array's ownership to the local instead of discarding it.
+    /// </summary>
+    public bool TakesField { get; init; }
+
+    /// <summary>
     /// R27.41. A borrowing struct held in a local: for each object it owns, the field that
     /// holds it, the local the object is held in, and its class.
     /// </summary>

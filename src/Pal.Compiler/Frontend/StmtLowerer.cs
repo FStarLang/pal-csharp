@@ -923,6 +923,12 @@ public sealed class StmtLowerer(
             _fieldAliases[symbol] = field;
             return (_code.Lower(init), _spec.Lower(init));
         }
+        // R30.33. Otherwise, a local that keeps the array the field's one replacement discards.
+        if (rebinds.Count == 0 && KeptAt(v, symbol, field, scope, Names) is { } keeper)
+        {
+            _keepers[keeper] = symbol;
+            return (_code.Lower(init), _spec.Lower(init));
+        }
         // R30.2. Otherwise the flow check: the local is rebound wherever the field may have changed.
         if (rebinds.Count == 0) return null;
         var flow = new AliasFlow(model, known, symbol, new HashSet<ISymbol>(SymbolEqualityComparer.Default) { field },
@@ -930,6 +936,51 @@ public sealed class StmtLowerer(
         if (!flow.Check(scope, node, current: true)) { StaleAlias(symbol, flow); return null; }
         _fieldRebinds.Add(symbol);
         return (_code.Lower(init), _spec.Lower(init));
+    }
+
+    /// <summary>
+    /// R30.33. <c>T[]? a = _f;</c>, never written, where the first thing after it that may
+    /// replace <c>_f</c> is a statement <c>_f = e;</c> of the declaration's own block (with
+    /// <c>e</c> not <c>a</c>), and <c>a</c> is not null wherever it is used after that
+    /// statement: up to the statement <c>a</c> is the field (R24.19); the statement hands
+    /// the old array to <c>a</c>, which owns it from then on, as a fresh array local does
+    /// (R6.11a). The statement, or <c>null</c>.
+    /// </summary>
+    private ExpressionStatementSyntax? KeptAt(VariableDeclaratorSyntax v, ILocalSymbol symbol, IFieldSymbol field,
+        SyntaxNode scope, Func<ExpressionSyntax?, bool> names)
+    {
+        if (v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax block }) return null;
+        var first = scope.DescendantNodes().Where(n => n.SpanStart > v.SpanStart && Replaces(n, field))
+            .OrderBy(n => n.SpanStart).FirstOrDefault();
+        if (first is not AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } a ||
+            a.Parent is not ExpressionStatementSyntax stmt || stmt.Parent != block || names(a.Right) ||
+            a.Left is not (IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }))
+            return null;
+        var uses = scope.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => id.SpanStart > stmt.Span.End &&
+                         SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol))
+            .ToList();
+        if (uses.Count == 0 || uses.Any(id => model.GetTypeInfo(id).Nullability.FlowState != NullableFlowState.NotNull))
+            return null;
+        return stmt;
+    }
+
+    /// <summary>R30.33. The statement that hands a replaced field's array to each keeping local.</summary>
+    private readonly Dictionary<SyntaxNode, ILocalSymbol> _keepers = [];
+
+    /// <summary>
+    /// R30.33. <c>_f = e;</c> for a local that keeps <c>_f</c>'s array: the local, declared
+    /// from the field, then the assignment, after which the name is the local.
+    /// </summary>
+    private IrStmt KeepAndReplace(ExpressionStatementSyntax node, ILocalSymbol kept, IrLoc loc)
+    {
+        var a = (AssignmentExpressionSyntax)node.Expression;
+        var type = known.MapType(kept.Type)!;
+        var decl = new IrLocalDecl(loc, kept.Name, type, _code.Lower(a.Left)) { TakesField = true };
+        var store = LowerSideEffect(node.Expression, loc);
+        _code.Alias(kept, new IrVar(loc, kept.Name) { Type = type });
+        _spec.Alias(kept, new IrVar(loc, kept.Name) { Type = type });
+        return new IrBlock(loc, [decl, store]) { Splice = true };
     }
 
     /// <summary>R30.29. The <c>option</c> type of each snapshot <c>ref</c> local.</summary>
@@ -1417,6 +1468,8 @@ public sealed class StmtLowerer(
     {
         // R33.17. `a = _field;` re-reading a field alias: `a` already is the field.
         if (_resyncs.Contains(node)) return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
+        // R30.33. The replacement of a field whose old array a local keeps.
+        if (_keepers.TryGetValue(node, out var kept)) return KeepAndReplace(node, kept, loc);
         // R33.18. A call of a method that does nothing.
         if (node.Expression is InvocationExpressionSyntax call && DoesNothing(call))
             return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);

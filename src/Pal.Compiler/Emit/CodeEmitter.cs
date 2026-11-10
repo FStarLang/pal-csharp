@@ -1232,6 +1232,12 @@ public sealed class CodeEmitter(
             if (receiver.PreModel is { } pm)
                 measureScope.Bind(receiver.Name, new Term($"(reveal {pm})", TermKind.Math, receiver.Type));
         }
+        // R30.35. A receiver the method leaves at its model, held open by the loop, is read
+        // by a measure at that model too, whatever its fields.
+        else if (unchanged && receiver.PreModel is { } pm0 && receiver.ViewBase is null)
+        {
+            measureScope.Bind(receiver.Name, new Term($"(reveal {pm0})", TermKind.Math, receiver.Type));
+        }
         // R27.52. A loop that changes the receiver through calls on it, and reads its fields
         // in between, holds it open at a record its invariant abstracts at some model; the
         // invariant names the receiver's specs at that model.
@@ -2576,6 +2582,10 @@ public sealed class CodeEmitter(
                 ArrayLocal(d);
                 return;
 
+            case IrLocalDecl { TakesField: true, Init: IrField } d:
+                KeptLocal(d);
+                return;
+
             // R32.14. So is a view of another object of the class, which owns nothing.
             case IrLocalDecl { Owned.IsDefaultOrEmpty: false } or IrLocalDecl { HeldOwner: not null }:
                 HeldStruct((IrLocalDecl)stmt);
@@ -2761,6 +2771,20 @@ public sealed class CodeEmitter(
         // by the time the block closes; Scoped checks that it was.
         if (_closingBlocks > 0) _nestedArrays[local] = d.Loc;
     }
+
+    /// <summary>
+    /// R30.33. A local that takes the array its field holds from the assignment that
+    /// follows: bound immutably to the reference now; the assignment hands it the array.
+    /// </summary>
+    private void KeptLocal(IrLocalDecl d)
+    {
+        var binder = Names.Local(d.Name);
+        Line($"let {binder} = {Expr(d.Init!)};");
+        _keeping = (((IrField)d.Init!).Field, new Slot(d.Name, d.Type, SlotKind.Array, binder));
+    }
+
+    /// <summary>R30.33. The field whose next replacement hands its array to a local, and that local.</summary>
+    private (string Field, Slot Local)? _keeping;
 
     /// <summary>R5.2. Every C# local is a Pulse <c>ref</c> cell.</summary>
     private void LocalDeclaration(IrLocalDecl d)
@@ -3030,7 +3054,17 @@ public sealed class CodeEmitter(
                     var projection = $"{current}.{Names.ClassProjection(oc.Name, field.Field)}";
                     var old = FreshValue(field.Field);
                     Line($"with {old}. assert ({pts} {projection} {old});");
-                    Line($"drop_ ({pts} {projection} {old});");
+                    if (_keeping is { } keep && keep.Field == field.Field)
+                    {
+                        // R30.33. The old array goes to the local that keeps it, not away.
+                        _keeping = null;
+                        if (fdecl.IsNullableArray) Line($"NA.elim {projection};");
+                        Line($"rewrite (A.pts_to {projection} {old}) as ({keep.Local.Resource(old)});");
+                        _slots[keep.Local.Name] = keep.Local;
+                        _objectLocals.Add(keep.Local);
+                    }
+                    else
+                        Line($"drop_ ({pts} {projection} {old});");
                     if (a.Value is IrVar moved)
                     {
                         _objectLocals.RemoveAll(l => l.Name == moved.Name && l.Kind == SlotKind.Array);
@@ -4471,12 +4505,17 @@ public sealed class CodeEmitter(
                 Line($"{spec.Emit(lemma, scope).Text};");
                 return;
             case GhostKind.LemmaCall when g.Prop is IrCall call:
+            {
                 // R14.5. A generic [Lemma] is applied to its type arguments first.
+                var lemmaArgs = call.TypeArguments.Select(Types.Atom)
+                    .Concat(call.Args.Select((a, i) => SpecArgument(a, SpecEmitter.ParamType(call, i), scope)))
+                    .ToList();
+                // R30.31: a lemma of no arguments takes `()`.
+                if (lemmaArgs.Count == 0) lemmaArgs.Add("()");
                 Line($"{Names.SpecModule(call.Callee)}.{Names.Lemma(call.Callee)} " +
-                     string.Join(" ", call.TypeArguments.Select(Types.Atom)
-                         .Concat(call.Args.Select((a, i) =>
-                             SpecArgument(a, SpecEmitter.ParamType(call, i), scope)))) + ";");
+                     string.Join(" ", lemmaArgs) + ";");
                 return;
+            }
             default:
                 return;
         }

@@ -9594,12 +9594,123 @@ not null, `Maps(comparer, keys, values, key, Result)`; its callers (`ContainsKey
 (`collisionCount <= (uint)entries.Length`) never fails, by `SearchStep`, so it is left only
 by a jump to a label, which is a return.
 
+### R30.30 A non-null reference for a nullable parameter, in a specification
+
+In a contract, an argument that is a non-nullable reference passed for a parameter of a
+nullable reference type is `Some` of it (`SameEquality(Result, SpecComparer)`, where
+`Result` is an `IEqualityComparer<TKey>` and the spec method's parameter is
+`IEqualityComparer<TKey>?`). A postcondition's `Result` is typed by the method's declared
+return type, since the shim's `Result` parameter is nullable-oblivious.
+
+### R30.31 A lemma of no arguments
+
+A `[Lemma]` method with no parameters (and no type parameters) is translated as a function
+of `unit`, `let lemma_M () : Lemma ...`; a call passes `()`. F* refuses a `Lemma` (or a
+ghost function) that is not a function. `HashHelpers.MaxPrimeIsPrime()` is the first: with
+`Debug.Assert` erased, `ExpandPrime`'s `return MaxPrimeArrayLength;` needs that
+`MaxPrimeArrayLength` is a table size (prime), which the assertion
+`MaxPrimeArrayLength == GetPrime(MaxPrimeArrayLength)` used to establish. The lemma it
+calls, `HashSize.max_prime_is_prime`, is proved from `get_prime`'s contract (`get_prime`
+returns a prime at least its argument and at most `max_prime`); it is not a new assumption,
+though it changes the pinned interface.
+
+### R30.32 A borrowing constructor's `if (p == null)` throw
+
+R32.1's skipped guard is extended to its spelled-out form: `if (p == null) { ... }` (or
+`p is null`) with no `else`, whose arm is only `throw`s and `[DoesNotReturn]` calls, where
+`p` is a by-value parameter of a non-nullable class type. Such a reference is not null
+(R10.2), so the arm is dead. `Dictionary<TKey,TValue>.KeyCollection(dictionary)` and
+`ValueCollection(dictionary)` check `dictionary == null` and call
+`ThrowHelper.ThrowArgumentNullException`; both constructors are verified, and `Keys` /
+`Values` ensure `ReferenceEquals(Result._dictionary, @this)` (R29.3b).
+
+### R30.33 An array local keeps the array its field's replacement discards
+
+`TrimExcess` reads `Entry[]? oldEntries = _entries;`, replaces `_entries` with a new array,
+and passes `oldEntries` to `CopyEntries`. R30.2's alias would name the field, which no
+longer holds the old array; R33.17 refuses the declaration. Such a local now *takes* the
+array from the field, when
+
+* the first statement after the declaration that may replace the field is a plain
+  assignment `_f = e;` in the same block, with `e` not the local; and
+* every use of the local after that assignment is one where it is known not to be null
+  (C#'s flow state), so the field's `NA.pts_to` is `A.pts_to` there.
+
+Before the assignment the local is the field (R30.2's alias, so `oldEntries is null` and
+`oldEntries.Length` read the field). At the assignment, instead of dropping the field's
+old contents, the emitter binds `let var_oldEntries = this._entries;`, eliminates the
+nullable permission (`NA.elim`) and rewrites it to `A.pts_to var_oldEntries s`: the local
+owns the old array from then on, with the contents the field had, and is dropped at the
+end of the method like any other array local. A later use names the local.
+
+`CopyEntries` is `[Open]` (R27.23): it is called with `_buckets` and `_entries` new and
+empty, which the invariant does not describe. Its contract states the new table is
+well formed (`Wf`, with `_freeList == -1` and `_freeCount == 0`), holds the old live keys and
+values in order (`KeysOf`/`ValuesOf`, `ItemsOf` for `HashSet`), and leaves `entries`
+unchanged; `TrimExcess` folds the invariant back from that. The loop is
+`HashInsert.compact_*` (proved), wrapped as `Compacted`/`CompactStart`/`CompactRoom`/
+`CompactStep`/`CompactDone` in `DictionaryChain.fst` and `HashSetChain.fst`.
+
+### R30.34 `Comparer`
+
+`Dictionary<TKey,TValue>.Comparer` and `HashSet<T>.Comparer` return, for a string-keyed
+collection, `IInternalStringEqualityComparer.GetUnderlyingEqualityComparer(_comparer)`: the
+public comparer in place of the non-randomized one the constructor swapped in (R30.18).
+Otherwise they return `_comparer ?? EqualityComparer<T>.Default`. Both ensure
+`SameEquality(Result, SpecComparer)` (with R30.30's `Some`).
+`GetUnderlyingEqualityComparer` is bound (R21.5) to
+`Pulse.Lib.CSharp.StringUnderlying.underlying`, trusted to have its argument's equality; the
+cast `(IEqualityComparer<string?>)_comparer` is `Some?.v`, whose obligation is the
+invariant's `typeof(T).IsValueType || _comparer != null` with the trusted fact that
+`string` is not a value type (`string_not_value_type`, an `SMTPat` lemma on
+`is_value_type (type_of t)` when `type_of t == type_of string`).
+
+The emitter's scan for field accesses (R4.10c) did not look under `Some?.v`/`Some?`
+(`IrOptionOp`), so a body whose only field reads were the nullable `_comparer` was emitted
+without opening the receiver; it now does.
+
+### R30.35 `foreach` over a hash set; `IsSubsetOfHashSetWithSameComparer`
+
+`IsSubsetOfHashSetWithSameComparer(other)` is a `foreach` over `this` that asks
+`other.Contains` of each element. R27.51 lowers it over `HashSet<T>.Enumerator`, whose
+`MoveNext` (R28) walks the prefixes of the live elements (`SpecPrefixes`, one per entry
+index). The enumerator gains two `[Spec]` members for the loop invariant: `SpecIndex`
+(`_index`) and `SpecFresh` (`_version == _hashSet.SpecVersion`). The contract is
+`Result <==> AllIn(other.SpecComparer, other.SpecItems, SpecItems)`, where `AllIn c s xs`
+(`HashSetChain.all_in`) is that every element of `xs` is a `Mem` of `s` at `c`.
+
+* **The walk is stated by `MoveNext`.** A loop that reads none of the receiver's fields
+  keeps the receiver closed at its model. A method that does read one (a lemma call naming
+  `Pal.Contents(_entries)`) holds it open, and for a class with array fields the loop
+  invariant then knows nothing that relates the open record to the model, so the receiver
+  cannot be folded again around `MoveNext`. So the facts the loop needs are in `MoveNext`'s
+  contract: `Walk(SpecPrefixes, SpecItems)` (each prefix is a prefix of the items, and the
+  last is all of them; `HashSetChain.walk`, from `prefixes_walk`) and that the first prefix
+  is empty. The enumerator's constructor ensures `SpecSlots >= 0`, for `MoveNext`'s
+  precondition on the first call.
+* **Lemmas.** `all_in_snoc` (a pattern) carries the invariant over a step;
+  `all_in_walk` turns a failing prefix into a failing whole on the `return false`.
+* **A measure reads a read-only receiver at its model.** `Pal.Decreases(SpecSlots - …)`
+  named the receiver's spec at the receiver itself (an ill-typed term) when the receiver's
+  class has array fields; R27.50's binding of the receiver in the measure's scope applied
+  only to classes without them. A receiver the method leaves unchanged is now bound at its
+  model in any case.
+
+`OverlapsHashSetImpl` is the same walk, but it is `static` (its sets are parameters), and
+R27.51 lowers `foreach` only in instance methods. The public set operations that call these
+helpers take `IEnumerable<T>`; with `[Exactly(typeof(HashSet<>))]` they would still need
+`EqualityComparersAreEqual`, which is `IEqualityComparer<T>.Equals(object)` (unmodeled,
+unlike R27.47's comparer identity), and `IsSubsetOf`'s `Count > other.Count` shortcut
+needs a counting argument over two comparers. They are not done.
+
 ### Trusted assumptions
 
 * `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
 * `Pulse.Lib.CSharp.StringComparers`: all four `val`s (R30.6).
 * `Pulse.Lib.CSharp.StringComparerOf`: `string_comparer` and `string_comparer_equals`
   (R30.18).
+* `Pulse.Lib.CSharp.StringUnderlying`: `underlying`, `underlying_equals` and
+  `string_not_value_type` (R30.34).
 * The harness's `ThrowHelper` stand-ins (`pal/common/ThrowHelper.cs`): each is
   `[DoesNotReturn]`, throws its exception and ensures `false`.
   `ThrowNotSupportedException(ExceptionResource)` gained that contract here (the key and
@@ -9657,16 +9768,23 @@ the sequences before and after.
   R30.28 opens `Initialize` and rebinds the empty table's invariant to the final comparer.
 * **Boxing.** `GetStringComparer(_comparer!)` boxes the comparer, not the nullable field;
   `Obj.box_some` relates the two.
-* **Broken invariant across calls.** `TrimExcess` / `CopyEntries` call instance methods
-  while the table is half rebuilt; `RemoveWhere`
-  holds an alias of `_entries` across calls to `Remove`, which may replace it. Neither is
-  expressible.
+* **Broken invariant across calls.** `TrimExcess` calls `CopyEntries` while the table is
+  half rebuilt; with `CopyEntries` `[Open]` and R30.33 both are verified, for `Dictionary`
+  and `HashSet`. `TrimExcess` sets `_freeList = -1` before the new arrays are installed, so
+  the fact that the old table was well formed (`WfCompactable`) has to be taken before
+  that write. `RemoveWhere` holds an alias of `_entries` across calls to `Remove`, which
+  may replace it; that is not expressible.
 * **Collections' constructors.** `KeyCollection(dictionary)` and `ValueCollection` check the
-  argument for `null` before storing it; a borrowing struct's constructor may only assign
-  its fields (PALCS0730), so they are not verified. Their other members are.
+  argument for `null` before storing it; R30.32 reads the check as dead, and they are
+  verified.
+* **`ExpandPrime` without its assertion.** `ExpandPrime` returns `MaxPrimeArrayLength`
+  when doubling would pass it, relying on `Debug.Assert(MaxPrimeArrayLength ==
+  GetPrime(MaxPrimeArrayLength))` for that being a valid table size. With the assertion
+  erased, the fact is the lemma `MaxPrimeIsPrime` (R30.31), proved.
 * **Out of reach.** `ICollection.CopyTo(Array, int)` (type tests and `try`/`catch` over
   `Array`), `SyncRoot`, the non-generic `IEnumerable.GetEnumerator`s (interface dispatch),
-  serialization, and `HashSet`'s set operations (`IEnumerable<T>` arguments, `foreach`).
+  serialization, and `HashSet`'s public set operations (`IEnumerable<T>` arguments; see
+  R30.35). Of their helpers only `IsSubsetOfHashSetWithSameComparer` is verified.
 * **Write sets.** The write-set scan over-approximated calls to bound members (R30.26),
   which made `ContainsValue` look like it wrote the dictionary.
 

@@ -30,3 +30,8 @@ val get_prime_at_least (min: I32.t{I32.v min >= 0})
 /// A table size: at least 3 and prime.
 let prime_size (n: int) : prop =
   3 <= n /\ n <= 0x7FFFFFFF /\ is_prime (I32.int_to_t n)
+
+/// `MaxPrimeArrayLength` is a table size: `get_prime` of it can only return it. Proved from
+/// `get_prime`'s contract; `ExpandPrime` relies on it now that its `Debug.Assert` is erased.
+let max_prime_is_prime () : Lemma (prime_size max_prime) =
+  let _ = get_prime (I32.int_to_t max_prime) in ()
