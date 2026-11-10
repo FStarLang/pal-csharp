@@ -34,3 +34,7 @@ val is_null_box (#a: Type0) (x: a)
 
 /// The null `object`.
 val null_obj : o: obj { N.is_null o }
+
+/// R35.12. The value of a cast `(T)o` that did not raise: `o`'s value when it is a `T`,
+/// else `T`'s default (a null `o` at a nullable `T`). A definition, not an assumption.
+let unbox_or (a: Type0) (o: obj) (d: a) : a = if is_a a o then unbox a o else d

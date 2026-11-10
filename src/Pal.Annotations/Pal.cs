@@ -170,6 +170,12 @@ public static class Pal
     /// </summary>
     public static bool Returned() => throw Ghost();
 
+    /// <summary>
+    /// In a <c>try</c>'s invariant (R19.5): whether control is leaving the body by a raise
+    /// rather than at its end (R35.13).
+    /// </summary>
+    public static bool Raised() => throw Ghost();
+
     /// <summary>Logical implication.</summary>
     public static bool Implies(bool antecedent, bool consequent) => throw Ghost();
 

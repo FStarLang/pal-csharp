@@ -5704,7 +5704,8 @@ try states them the way a loop does: `Pal.Invariant(INV)` at the head of the `tr
 `INV` must hold wherever control leaves the body, at its end and at every raise that
 reaches the handler, and at the end of every handler. It is stated over the slots' values
 at that point, and it is what a statement after the `try` may rely on. A
-`Pal.Decreases` there is refused (PALCS0614): a `try` runs once.
+`Pal.Decreases` there is refused (PALCS0614): a `try` runs once. R35.13's `Pal.Raised()` lets `INV` say
+which of the two exits it describes.
 
 ---
 
@@ -10390,7 +10391,7 @@ when the target is a type parameter or `KeyValuePair<K, V>` (a `tuple2`):
 * `o is T t` binds `t` to `unbox T o`;
 * `(T)o` is `is_a T o ? unbox T o : (is_null o ? default : raise InvalidCastException)`. A
   null `o` casts to `default(T)` when that is null, and raises `NullReferenceException`
-  otherwise.
+  otherwise (emitted as R35.12 describes).
 
 `o is null` and `ThrowIfNull(o)` at `object` use R25.4's `is_null`, and the `null` literal
 at `object` is `TypeTest.null_obj`. Contracts use `Pal.IsA<T>(o)` and `Pal.Unbox<T>(o)`. A
@@ -10418,6 +10419,35 @@ reference non-null. That does not hold at `object`, which R35.7 lets be null: th
 members take `object key` from callers that NRT does not constrain. So at `object`, the guard
 is R25.7's test, `if (is_null x) throw`. Before this rule, the guard was silently dropped, and
 a member's `[Throws(ArgumentNullException)]` was vacuous.
+
+**R35.12. A cast is a guard and a pure value.** R35.7's `(T)o` is emitted in two parts:
+* a guard statement before the expression: `if (not (is_a T o))`, raise
+  `NullReferenceException` when `o` is null (at a value type, or at a type parameter whose
+  `default` is not null) and `InvalidCastException` when it is not;
+* the value `TypeTest.unbox_or T o (default_of T)`, which is `unbox T o` where `is_a T o`
+  holds and the default elsewhere.
+
+Before this rule the cast was one `let t = if ... { ... } else { ... }`, and Pulse forgets an
+`if`'s branch facts at such a `let`, so nothing was known of `t`. Now `t == unbox T o` follows
+from `is_a T o`, at the binding and after it. `unbox_or` is a definition in the trusted
+interface, not an assumption.
+
+**R35.13. `Pal.Raised()` in a `try`'s invariant.** R19.5's invariant holds both when the body
+ends normally and when it raises, so it cannot say which. `Pal.Raised()` is a `bool` that
+may appear only in a `try`'s invariant (PALCS0880 elsewhere). It is `false` in the `try`'s
+`ensures` and `true` in its `raises`: the invariant is emitted once for each. So a try can
+keep the method's postcondition for its normal end, and a handler that turns the raise into
+another exception can prove that exception's `[Throws]` condition:
+
+```csharp
+try
+{
+    Pal.Invariant(Pal.Implies(Pal.Raised(), !Pal.IsNull(o) && !Pal.IsA<T>(o)) &&
+                  Pal.Implies(!Pal.Raised() && Pal.IsA<T>(o), Pal.Same(t, Pal.Unbox<T>(o))));
+    t = (T)o!;
+}
+catch (InvalidCastException) { throw new ArgumentException(); }
+```
 
 ### The model (R35.7)
 
@@ -10463,14 +10493,10 @@ All of the following verify in the runtime tree's harnesses (`pal/OrderedDiction
 | `Keys`/`Values` through `IDictionary<,>`, `IReadOnlyDictionary<,>`, `IDictionary` | `Boxes(Result, c)` of the view of this dictionary (R35.6) |
 | `IsCompatibleKey` | `Pal.IsA<TKey>(key)`; throws on a null key |
 | `IDictionary.Contains`, `IDictionary.Remove`, `IDictionary.this[object]` get | as `ContainsKey`/`Remove`/`TryGetValue` on the unboxed key |
+| `IDictionary.Add(object, object)`, `IDictionary.this[object]` set | as `Add`/`this[TKey]` on the unboxed key and value; `ArgumentNullException` for a null key (or a null value where `TValue`'s default is not null), `ArgumentException` for a key or value of the wrong type (R35.12, R35.13) |
 
 ### Not verified (§35)
 
-* `SortedDictionary`'s `IDictionary.Add(object, object)` and `IDictionary.this[object]` set.
-  They cast inside `try { ... } catch (InvalidCastException)`. A Pulse `try`'s `ensures`
-  keeps no pure facts, and the cast's value is bound by a `let` of an `if`, which forgets the
-  branch's refinement. So `Add`'s precondition `~(is_null tempKey)` cannot be proved. Their
-  contracts were written (with `Requires` for the key's absence) and failed only there.
 * `ICollection.CopyTo(Array, int)` and `SyncRoot` (all three types): see §32.
 * `SortedDictionary`'s and `SortedSet`'s enumerator constructors and `GetEnumerator`s: the
   `TreeSet` enumerator core owns a `Stack<Node>`, which R35.3 refuses (§32, R32.12).
@@ -10499,4 +10525,5 @@ All of the following verify in the runtime tree's harnesses (`pal/OrderedDiction
 ### Trusted (§35)
 
 `Pulse.Lib.CSharp.TypeTest` (above) is new: `is_a`, `unbox`, `null_obj` and the three
-lemmas. Its consistency argument is in the interface's comment.
+lemmas. Its consistency argument is in the interface's comment. It also holds `unbox_or`
+(R35.12), which is a definition from `is_a` and `unbox`, so it adds no assumption.

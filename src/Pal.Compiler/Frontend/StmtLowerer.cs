@@ -311,6 +311,7 @@ public sealed class StmtLowerer(
     // -----------------------------------------------------------------------
 
     public const string ReturnedFlag = "__pal_returned";
+    public const string RaisedFlag = "__pal_raised";
     public const string ReturnedValue = "__pal_result";
     /// <summary>R26.10. What <c>Pal.Broke()</c> names: the innermost loop's break flag.</summary>
     public const string BrokeFlag = "__pal_broke";

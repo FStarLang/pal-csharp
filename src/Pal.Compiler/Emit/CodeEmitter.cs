@@ -3952,7 +3952,15 @@ public sealed class CodeEmitter(
         }
         // R19.5. The invariant is stated over the same names, so that what is assigned is
         // spoken of at whatever value it has when control leaves.
-        var invariant = tr.Invariants.Select(i => spec.AsProp(spec.Emit(i, scope))).ToImmutableArray();
+        // R35.13. `Pal.Raised()` is false in the `ensures` and true in the `raises`.
+        ImmutableArray<string> Invariant(bool raised)
+        {
+            var at = new SpecScope(scope) { Pre = plan.PreScope };
+            at.Bind(Frontend.StmtLowerer.RaisedFlag, new Term(raised ? "true" : "false", MethodPlan.KindOf(IrPrim.Bool), IrPrim.Bool));
+            return tr.Invariants.Select(i => spec.AsProp(spec.Emit(i, at))).ToImmutableArray();
+        }
+        var invariant = Invariant(false);
+        var raisedInvariant = Invariant(true);
         // R5.10's flags of an enclosing loop are live too, though no C# names them.
         foreach (var cell in new[] { _escape?.Break, _escape?.Continue })
         {
@@ -3982,7 +3990,7 @@ public sealed class CodeEmitter(
         Line("try");
         _indent++;
         Line("ensures " + MethodPlan.Clause(owned, invariant, bound));
-        Line($"raises (fun ({ex}: exn) -> " + MethodPlan.Clause(owned, [.. invariant, Raised(ex)], bound) + ")");
+        Line($"raises (fun ({ex}: exn) -> " + MethodPlan.Clause(owned, [.. raisedInvariant, Raised(ex)], bound) + ")");
         _indent--;
         Line("{");
         _indent++;

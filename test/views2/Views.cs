@@ -103,6 +103,39 @@ public class Shelf<T> : IEnumerable<T>
     [Ensures("Pal.Same(Result, Pal.Unbox<T>(o))")]
     public static T Cast(object o) => (T)o;
 
+    // R35.12. A cast's value is known after it is bound to a local.
+    [Throws(typeof(InvalidCastException), "!Pal.IsNull(o) && !Pal.IsA<T>(o)")]
+    [Throws(typeof(NullReferenceException), "Pal.IsNull(o) && !Pal.IsNull(default(T))")]
+    [Ensures("Pal.Implies(Pal.IsA<T>(o), Pal.Same(Result, Pal.Unbox<T>(o)))")]
+    public static T CastBound(object o)
+    {
+        T t = (T)o;
+        return t;
+    }
+
+    // R35.13. `Pal.Raised()` tells a try's raise from its normal end.
+    [Throws(typeof(ArgumentException), "!Pal.IsNull(o) && !Pal.IsA<T>(o)")]
+    [Throws(typeof(NullReferenceException), "Pal.IsNull(o) && !Pal.IsNull(default(T))")]
+    [Ensures("Pal.Implies(Pal.IsA<T>(o), Pal.Same(Result, Pal.Unbox<T>(o)))")]
+    public static T Convert(object o)
+    {
+        if (o is null && default(T) is not null)
+        {
+            throw new NullReferenceException();
+        }
+        T t = default!;
+        try
+        {
+            Pal.Invariant(Pal.Implies(Pal.Raised(), !Pal.IsNull(o) && !Pal.IsA<T>(o)) && Pal.Implies(!Pal.Raised() && Pal.IsA<T>(o), Pal.Same(t, Pal.Unbox<T>(o))));
+            t = (T)o!;
+        }
+        catch (InvalidCastException)
+        {
+            throw new ArgumentException();
+        }
+        return t;
+    }
+
     // A box of a non-null value is a value of its type.
     [Requires("!Pal.IsNull(x)")]
     [Ensures("Result")]

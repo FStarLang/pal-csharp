@@ -31,6 +31,10 @@ public static class TypeTests
     public static IrExpr Unbox(IrLoc loc, IrType target, IrExpr o) =>
         new IrSpecOp(loc, Module + ".unbox", [o]) { TypeArgs = [target], Type = target };
 
+    /// <summary>R35.12. <c>is_a T o ? unbox T o : d</c>, as one well-typed term.</summary>
+    public static IrExpr UnboxOr(IrLoc loc, IrType target, IrExpr o, IrExpr d) =>
+        new IrSpecOp(loc, Module + ".unbox_or", [o, d]) { TypeArgs = [target], Type = target };
+
     /// <summary>The null <c>object</c>.</summary>
     public static IrExpr Null(IrLoc loc, IrType obj) =>
         new IrSpecOp(loc, Module + ".null_obj", []) { Type = obj };

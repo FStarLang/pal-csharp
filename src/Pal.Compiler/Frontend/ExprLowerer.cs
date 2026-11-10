@@ -328,19 +328,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private IrExpr Unboxing(CastExpressionSyntax c, IrType target, IrLoc loc)
     {
         var type = model.GetTypeInfo(c.Type).Type!;
-        IrExpr Raise(string exn) => new IrRaise(loc, LibraryException(loc, exn)) { Type = target };
-        IrExpr onNull;
-        if (type.IsValueType)
-            onNull = Raise("System.NullReferenceException");
-        else if (type is ITypeParameterSymbol && DefaultValue(type, loc) is { } dflt)
-            onNull = new IrConditional(loc, Sorted.IsNull(loc, dflt), dflt, Raise("System.NullReferenceException")) { Type = target };
-        else
+        IrStmt Throw(string exn) => new IrThrow(loc, LibraryException(loc, exn));
+        if (DefaultValue(type, loc) is not { } dflt || !type.IsValueType && type is not ITypeParameterSymbol)
             return Unsupported(c, loc);
         var prelude = ImmutableArray.CreateBuilder<IrStmt>();
         var o = PatternSubject(c.Expression, prelude).Value!;
-        var result = new IrConditional(loc, TypeTests.IsA(loc, target, o), TypeTests.Unbox(loc, target, o),
-            new IrConditional(loc, Sorted.IsNull(loc, o), onNull, Raise("System.InvalidCastException")) { Type = target })
-            { Type = target };
+        // R35.12. The cast's failures are a guard before it, and its value a pure
+        // conditional, so what a caller knows of the value survives the `let` that binds it.
+        IrStmt onNull = type.IsValueType
+            ? Throw("System.NullReferenceException")
+            : new IrIf(loc, new IrUnary(loc, UnOp.Not, Sorted.IsNull(loc, dflt)) { Type = IrPrim.Bool },
+                Throw("System.NullReferenceException"), null);
+        prelude.Add(new IrIf(loc, new IrUnary(loc, UnOp.Not, TypeTests.IsA(loc, target, o)) { Type = IrPrim.Bool },
+            new IrIf(loc, Sorted.IsNull(loc, o), onNull, Throw("System.InvalidCastException")), null));
+        var result = TypeTests.UnboxOr(loc, target, o, dflt);
         return WithPrelude(loc, prelude, result);
     }
 
@@ -3112,6 +3113,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             case nameof(PalLang.Pal.Returned):
                 diagnostics.Error("PALCS0645", loc,
                     "`Pal.Returned()` names whether a loop's `return` has run, so it may appear only inside a loop.");
+                return new IrLiteral(loc, false) { Type = IrPrim.Bool };
+            // R35.13. In a try's invariant, whether the body is being left by a raise.
+            case nameof(PalLang.Pal.Raised) when node.Ancestors().Any(a => a is TryStatementSyntax):
+                return new IrVar(loc, StmtLowerer.RaisedFlag) { Type = IrPrim.Bool };
+            case nameof(PalLang.Pal.Raised):
+                diagnostics.Error("PALCS0880", loc,
+                    "`Pal.Raised()` names whether a `try`'s body is left by a raise, so it may appear only in a `try`'s invariant (doc/translation.md R35.13).");
                 return new IrLiteral(loc, false) { Type = IrPrim.Bool };
             case nameof(PalLang.Pal.Live): return new IrLive(loc, Arg(0));
             case nameof(PalLang.Pal.Implies): return new IrBinary(loc, BinOp.Implies, Arg(0), Arg(1));
