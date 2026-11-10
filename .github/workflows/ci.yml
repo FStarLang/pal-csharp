@@ -219,10 +219,12 @@ jobs:
       - name: Build the Pulse support library
         run: make lib
 
+      # Three F* processes on a 4-core, 16 GB runner: with `o=20` no module needs more than
+      # about 4.5 GB (Dictionary.TryInsert), so three of the largest still fit.
       - name: Verify ${{ matrix.harness }}
         env:
           OCAMLRUNPARAM: o=20
-        run: make -C samples/dotnet-runtime/pal/${{ matrix.harness }} -j2
+        run: make -C samples/dotnet-runtime/pal/${{ matrix.harness }} -j3
 
   # `make test` already runs this, as the seventh lint. It is repeated here as its own job
   # because it needs no F* at all: an analyzer regression is reported in about three
