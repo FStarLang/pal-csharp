@@ -1,0 +1,27 @@
+@page
+@model StaffModel
+@{ ViewData["Title"] = "Staff"; }
+<h1>Staff: deliveries and audit</h1>
+<p>
+    The audit checks, against the live tables, the invariant the verified core maintains:
+    for every pet, <code>stock ≥ 0</code> and <code>stock + sold = received</code>.
+    Overall: @if (Model.Audit.All(a => a.Ok)) { <strong class="ok">OK</strong> } else { <strong class="bad">VIOLATED</strong> }
+</p>
+<table>
+    <tr><th>Pet</th><th>Stock</th><th>Sold</th><th>Received</th><th>Invariant</th><th>Deliver</th></tr>
+    @foreach (var a in Model.Audit)
+    {
+        <tr>
+            <td>@a.Name</td><td>@a.Stock</td><td>@a.Sold</td><td>@a.Received</td>
+            <td class="@(a.Ok ? "ok" : "bad")">@(a.Ok ? "✓" : "✗")</td>
+            <td>
+                <form method="post" asp-page-handler="Restock">
+                    <input type="hidden" name="product" value="@a.Id" />
+                    <input type="number" name="n" value="5" min="1" />
+                    <button type="submit" class="secondary">Restock</button>
+                </form>
+            </td>
+        </tr>
+    }
+</table>
+<p class="muted">All orders: @Model.OrderCount</p>

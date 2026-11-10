@@ -1,0 +1,22 @@
+body { font-family: system-ui, sans-serif; margin: 0; color: #222; background: #fafaf7; }
+header nav { display: flex; gap: 1.5rem; align-items: center; padding: .8rem 2rem; background: #2b5d4a; }
+header nav a { color: #fff; text-decoration: none; }
+header nav .brand { font-weight: 700; font-size: 1.2rem; margin-right: auto; }
+main { max-width: 960px; margin: 1.5rem auto; padding: 0 1rem; }
+footer { max-width: 960px; margin: 2rem auto; padding: 0 1rem; font-size: .8rem; color: #777; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem; }
+.card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1rem; }
+.card h3 { margin: 0 0 .3rem; }
+.price { font-weight: 600; }
+.muted { color: #777; font-size: .9rem; }
+.out { color: #b33; font-weight: 600; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { border-bottom: 1px solid #eee; padding: .5rem; text-align: left; }
+input[type=number] { width: 4.5rem; }
+button { background: #2b5d4a; color: #fff; border: 0; border-radius: 4px; padding: .35rem .8rem; cursor: pointer; }
+button.secondary { background: #888; }
+.flash { padding: .7rem 1rem; border-radius: 6px; }
+.flash.info { background: #e6f0fa; }
+.flash.ok { background: #e3f4e6; }
+.flash.error { background: #fbe6e6; }
+.ok { color: #2a7d3b; } .bad { color: #b33; }
