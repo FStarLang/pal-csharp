@@ -1634,6 +1634,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             model.GetTypeInfo(ea.Expression).Type is { TypeKind: TypeKind.Class } &&
             model.GetSymbolInfo(ea).Symbol is IPropertySymbol { IsIndexer: true, SetMethod: { } itemSetter } &&
             known.SpecOpName((IPropertySymbol)model.GetSymbolInfo(ea).Symbol!) is null &&
+            !Declarations.Has(model.GetSymbolInfo(ea).Symbol!, known.SpecAttribute) &&
+            !Declarations.Has(model.GetSymbolInfo(ea).Symbol!, known.ModelAttribute) &&
             Declarations.KindOf(itemSetter, known) is not null && !Borrowing.IsMember(itemSetter, known))
         {
             IrExpr ixReceiver = ea.Expression is ThisExpressionSyntax

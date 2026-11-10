@@ -72,7 +72,7 @@ EOF
     fi
 }
 
-# The set the harness itself uses (test/verify.mk, test/probe_insertion_sort/Makefile).
+# The set the harness itself uses (test/verify.mk).
 TEST_CACHED='Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore'
 # The support library is what defines Pulse.Lib.CSharp.*, so it cannot assume it cached.
 PULSE_CACHED='Prims,FStar,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore'
@@ -99,7 +99,7 @@ for dir in "$ROOT"/test/*/ "$ROOT"/examples/*/; do
     rel=${dir#"$ROOT"/}
     includes=()
 
-    # Hand-written F* at the directory root (the probe, the fact pins, the smoke test).
+    # Hand-written F* at the directory root (fact pins, interop modules, smoke test).
     if compgen -G "$dir/*.fst" > /dev/null || compgen -G "$dir/*.fsti" > /dev/null; then
         includes+=(.)
     fi
