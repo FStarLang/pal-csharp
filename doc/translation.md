@@ -9882,6 +9882,27 @@ does not establish fails as an ordinary proof failure.
 `test/join_cond` (`Children`) joins `r.Left != null` and `r.Right != null && IsRedNode(r.Right)`.
 `test/diagnostics/cases/JoinNullLocal.cs` pins the refusal of a local's null test.
 
+### R30.44 `[Fuel(f, i)]`: start the solver with less unfolding
+
+F* gives every query the encoding of recursive definitions and inductive types with some
+*fuel*: how many times the solver may unfold a recursive function (`--initial_fuel`, 2 by
+default) and invert an inductive type (`--initial_ifuel`, 1). A query that fails is retried
+with more, up to `--max_fuel` and `--max_ifuel`. In a long method whose context holds class
+invariants over recursive structures (a red-black tree's `black_height`, `keys`, `rb`), the
+default fuel lets the solver unfold every one of them in every query, including the many
+that only check that an index is in bounds. `SortedSet.UnionWith` spent most of its 169 s of
+solver time doing so.
+
+On a method, `[Fuel(f, i)]` checks its module with
+`#set-options "--initial_fuel f --initial_ifuel i"`. The setting covers the functions R30.39
+outlines from the method. A query that needs more unfolding still gets it on retry, so this
+is sound in the same way `[Rlimit]` is: it changes the order in which the solver is tried,
+not what is proved. A negative count is refused (PALCS0757).
+
+`SortedSet.UnionWith` and `IntersectWith` are `[Fuel(0, 0)]`: their few queries that need
+to unfold a definition are retried, and the rest are much faster. `test/join_if` (`Halve`)
+uses it; `test/diagnostics/cases/FuelNegative.cs` pins the refusal.
+
 ### Trusted assumptions
 
 * `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).

@@ -2008,6 +2008,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"#set-options \"--z3rlimit_factor {factor}\"");
             sb.AppendLine();
         }
+        if (method.InitialFuel is var (fuel, ifuel))
+        {
+            sb.AppendLine($"#set-options \"--initial_fuel {fuel} --initial_ifuel {ifuel}\"");
+            sb.AppendLine();
+        }
         if (!method.OpaqueSpecs.IsEmpty)
         {
             sb.AppendLine($"#set-options \"--using_facts_from '* {string.Join(" ", method.OpaqueSpecs.Select(m => "-" + m))}'\"");
