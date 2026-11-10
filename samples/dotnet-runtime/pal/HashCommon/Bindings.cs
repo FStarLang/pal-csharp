@@ -13,11 +13,6 @@ using PalLang;
 [assembly: SpecBinding("T:System.Type", "Pulse.Lib.CSharp.Equality.type_handle")]
 [assembly: SpecBinding("P:System.Type.IsValueType", "Pulse.Lib.CSharp.Equality.is_value_type")]
 
-// R30.5. The table sizes (Pulse.Lib.CSharp.HashSize): trusted contracts, not verified bodies.
-[assembly: SpecBinding("M:System.Collections.HashHelpers.GetPrime(System.Int32)", "Pulse.Lib.CSharp.HashSize.get_prime")]
-[assembly: SpecBinding("M:System.Collections.HashHelpers.GetPrimeAtLeast(System.Int32)", "Pulse.Lib.CSharp.HashSize.get_prime_at_least")]
-[assembly: SpecBinding("M:System.Collections.HashHelpers.IsPrime(System.Int32)", "Pulse.Lib.CSharp.HashSize.is_prime")]
-
 // R30.6. The string comparer CoreLib picks for a string-keyed set or dictionary
 // (Pulse.Lib.CSharp.StringComparers): a test for it, and its randomized counterpart, which
 // has the same equality.
