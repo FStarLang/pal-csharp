@@ -10449,6 +10449,43 @@ try
 catch (InvalidCastException) { throw new ArgumentException(); }
 ```
 
+**R35.14. `SpecRangeWalk`: the view's walks.** `TreeSubSet`'s `InOrderTreeWalk` and
+`BreadthFirstTreeWalk` are R27.35's and R27.40's walks over a `Stack<Node>`/`Queue<Node>` of
+pointers into the set's region, pruned to the view's range. The region stays with the set
+(the view's `_underlying`); the stack or queue owns only its sequence of pointers, and the
+walk reads nodes through the region while it holds the stack. `SpecRangeWalk` binds
+`pulse/Pulse.Lib.CSharp.RangeWalk.fst`, which is proved, not trusted:
+
+| Member | Meaning |
+|---|---|
+| `Filter(c, lo, hi, la, ua, s)` | the items of `s` within the active bounds, in order |
+| `RootFilter(c, nodes, ...)` | lemma: the view's root (`range_root`) holds the in-range keys of the set |
+| `Walkable(h, c, ..., stack)` | every pointer on the stack holds an in-range key over a sorted subtree |
+| `Empty`, `Push`, `PopAt` | the stack's ghost invariant: the left spine of the unvisited in-range part |
+| `SkipRight`, `SkipLeft` | lemmas: a node below (above) the range and its left (right) side hold no in-range key |
+| `Queue(h, c, queue)` | every queued pointer is over a sorted subtree |
+| `BfNext(h, c, ..., queue)` | the queue after a round: the rest, then the children the range may reach |
+| `BfStart`, `BfDequeue` | lemmas: R27.40's `BfStart`/`BfDequeue`, for the in-range keys only |
+
+The walks ensure `SpecWalk.Walked`/`BfWalked` of `Filter(... SpecItems)`: the callback is
+called on the view's items, in order (breadth first), until it returns false. Their loop
+invariants also keep the view's coherence (`SpecCoherent`, `version`, `SpecRootOk`) and
+`_min`/`_max`: the view's record is re-bound at every loop head.
+
+**R35.15. A short-circuit test that calls a method is a nest of tests.** `if (a && b) T else E`,
+where `b` calls a method, is emitted as `if (a) { if (b) T else E } else E`, and
+`if (a || b) T else E` as `if (a) T else { if (b) T else E }`. Emitted as one test, the call's
+statements make the condition a bound `bool` (`let t = if a { ...; b } else { false }`) whose
+meaning Pulse forgets at the join, so neither arm would know its condition. The duplicated
+arm must not hold a loop. An `else if` chain is split link by link. A call of a `[Callback]`
+parameter counts as a method call.
+
+**R35.16. An arm that calls a callback takes what follows.** An `if` one of whose arms, after
+R35.15, calls a `[Callback]` parameter is not joined: what follows it in the block goes into
+both arms (an arm that ends in a jump keeps none of it), as R24.24 and R27.31 do for other
+joins. The trace the arm leaves names the callback's result, which the arm bound; Pulse
+would join the trace as a `match` on the condition, from which nothing later can read it.
+
 ### The model (R35.7)
 
 `pulse/Pulse.Lib.CSharp.TypeTest.fsti` declares:

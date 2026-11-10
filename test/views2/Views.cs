@@ -258,3 +258,23 @@ internal static class Helpers
     internal static void Reset<E>(ref E enumerator) where E : IEnumerator => enumerator.Reset();
     internal static IEnumerator<T> Empty<T>() => ((IEnumerable<T>)Array.Empty<T>()).GetEnumerator();
 }
+
+public static class Tests
+{
+    [Ensures("Result == x")]
+    public static int Id(int x) => x;
+
+    // R35.15. A test `a && b` whose `b` calls a method is a nest of tests, so the arm knows both.
+    [Ensures("true")]
+    public static void Both(bool b, int x)
+    {
+        if (b && Id(x) > 0)
+        {
+            Pal.Assert(b && x > 0);
+        }
+        else if (!b || Id(x) <= 0)
+        {
+            Pal.Assert(!b || x <= 0);
+        }
+    }
+}

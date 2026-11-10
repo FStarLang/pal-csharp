@@ -337,6 +337,7 @@ public sealed class CodeEmitter(
 
     private void TailCore(IrStmt stmt, IrMethod method, MethodPlan plan)
     {
+        if (stmt is IrIf branch && SplitCondition(branch) is { } nested) stmt = nested;
         switch (stmt)
         {
             case IrReturn { Value: null }:
@@ -812,7 +813,19 @@ public sealed class CodeEmitter(
         MutatesClosedReceiver(i) || MovesRegion(i) || BreaksLoop(i) || PassesLambda(i) ||
         // R32.14. A view's member called with the record by reference rebinds the record.
         Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf) ||
-        WritesOpenRecord(i);
+        WritesOpenRecord(i) || CallsCallbackInArm(i);
+
+    /// <summary>
+    /// R35.16. An arm that calls a <c>[Callback]</c> parameter: the trace it leaves names the
+    /// callback's result, bound in the arm, and Pulse's join keeps the trace under the
+    /// branch condition as a <c>match</c>, from which nothing later can read it.
+    /// </summary>
+    private bool CallsCallbackInArm(IrIf i) =>
+        (SplitCondition(i) ?? i) is var nest && (CallsCallback(nest.Then) || nest.Else is { } e && CallsCallback(e));
+
+    private static bool CallsCallback(IrStmt s) =>
+        Check.Statements(s).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
+            .OfType<IrCall>().Any(c => c.Kind is CalleeKind.Callback);
 
     /// <summary>
     /// R32.6. An arm that passes a lambda to a <c>[Callback]</c> parameter (R27.39): what the
@@ -892,6 +905,8 @@ public sealed class CodeEmitter(
     {
         if (s is IrIf { Else: null, Cond: IrBinary { Op: BinOp.Or } or } guard && IsThrowBlock(guard.Then))
             return SplitGuard(guard, or);
+        if (s is IrIf branch && SplitCondition(branch) is { } nested)
+            return nested;
         var value = s switch
         {
             IrReturn r => r.Value, IrLocalDecl d => d.Init,
@@ -924,6 +939,39 @@ public sealed class CodeEmitter(
             _ => s,
         };
         return new IrIf(s.Loc, a.Cond, With(a.Then), With(a.Else));
+    }
+
+    /// <summary>
+    /// R35.15. An <c>if</c> whose condition is <c>a &amp;&amp; b</c> or <c>a || b</c>, where
+    /// <c>b</c> calls a method, is the nest of <c>if</c>s it abbreviates:
+    /// <c>if (a) { if (b) T else E } else E</c>, and <c>if (a) T else { if (b) T else E }</c>.
+    /// Emitted as one <c>if</c>, the call's statements make the condition a bound <c>bool</c>
+    /// (<c>let t = if a { ...; b } else { false }</c>), and Pulse forgets at that join what
+    /// <c>t</c> means, so neither arm would know its condition. Nested, each arm is entered
+    /// under the tests that lead to it. The duplicated arm must not hold a loop, so that the
+    /// copy costs no more than its straight-line proof. An <c>else if</c> chain is split
+    /// link by link.
+    /// </summary>
+    private IrIf? SplitCondition(IrIf branch)
+    {
+        var els = branch.Else is IrIf chained && SplitCondition(chained) is { } inner ? inner : branch.Else;
+        if (branch.Cond is IrBinary { Op: BinOp.And or BinOp.Or } c && CallsMethod(c.Right))
+        {
+            var copied = c.Op == BinOp.And ? els : branch.Then;
+            if (copied is null || !HasLoop(copied))
+            {
+                var second = new IrIf(c.Right.Loc, c.Right, branch.Then, els);
+                var rest = SplitCondition(second) ?? second;
+                return c.Op == BinOp.And
+                    ? SplitCondition(new IrIf(branch.Loc, c.Left, rest, els)) ?? new IrIf(branch.Loc, c.Left, rest, els)
+                    : SplitCondition(new IrIf(branch.Loc, c.Left, branch.Then, rest)) ?? new IrIf(branch.Loc, c.Left, branch.Then, rest);
+            }
+        }
+        return ReferenceEquals(els, branch.Else) ? null : branch with { Else = els };
+
+        static bool CallsMethod(IrExpr e) =>
+            Passes.Check.Subexpressions(e).OfType<IrCall>().Any(call => call.Kind is CalleeKind.Method or CalleeKind.Callback);
+        static bool HasLoop(IrStmt st) => Passes.Check.Statements(st).Any(x => x is IrWhile or IrFor);
     }
 
     /// <summary>
@@ -2548,7 +2596,7 @@ public sealed class CodeEmitter(
                 return;
 
             case IrIf i:
-                If(i, plan);
+                If(SplitCondition(i) ?? i, plan);
                 return;
 
             case IrWhile w:
@@ -4089,6 +4137,19 @@ public sealed class CodeEmitter(
             // is a fresh existential at the join, and what the arm proved about it is lost.
             // R27.40. And so, in a loop that may escape, does one that calls a method on a local
             // object without escaping (R26.5's split, which only a non-escaping loop gets).
+            // R35.16. And so does one an arm of which calls a callback, once its condition
+            // is taken apart (R35.15): a call in the condition is bound before the `if`.
+            if (statements[k] is IrIf cb && CallsCallbackInArm(cb) && NullTest(cb.Cond) is null)
+            {
+                var nest = SplitCondition(cb) ?? cb;
+                IrBlock Arm(IrStmt? arm, IrLoc loc)
+                {
+                    ImmutableArray<IrStmt> own = arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm];
+                    return new(loc, own is [.., IrBreak or IrContinue or IrThrow or IrReturn] ? own : [.. own, .. rest]);
+                }
+                UnitTail(nest with { Then = Arm(nest.Then, nest.Then.Loc), Else = Arm(nest.Else, nest.Else?.Loc ?? nest.Loc) }, plan);
+                return;
+            }
             if (statements[k] is IrIf i &&
                 (WritesRecordInArm(i) || _escape is null && MovesRegion(i) ||
                  _escape is not null && !MayEscape(i) && CallsLocalObject(i)) &&
@@ -4161,6 +4222,7 @@ public sealed class CodeEmitter(
 
     private void UnitTail(IrStmt stmt, MethodPlan plan)
     {
+        if (stmt is IrIf branch && SplitCondition(branch) is { } nested) stmt = nested;
         switch (stmt)
         {
             case IrBlock { Statements.IsEmpty: true }:
