@@ -20,9 +20,88 @@ public sealed class MethodPlan
     /// invariant back, and the caller stops owning it, and a rule read differently at the
     /// two ends is a resource that is owned twice or not at all.
     /// </summary>
-    public static bool Consumed(IrMethod method, IrParam p) =>
+    public static bool Consumed(IrMethod method, IrParam p, IReadOnlyDictionary<string, IrMethod>? methods = null) =>
         p.Type is IrClassType &&
-        (p.Consumes || (method.IsConstructor && p.Name != Names.This));
+        (p.Consumes || (method.IsConstructor && p.Name != Names.This && Stored(method, p.Name, methods, [])));
+
+    /// <summary>
+    /// R27.45. Whether a constructor body may store the parameter: it uses the reference as
+    /// a value, other than as the receiver of a field read or a method call, an argument of
+    /// a method that consumes none of its arguments or of a constructor that hands it back,
+    /// or in a null test. A constructor that only reads from an object it is given (a copy constructor)
+    /// hands it back.
+    /// </summary>
+    /// <summary>
+    /// R33.15. The receiver's fields an `[Open]` body assigns, or <c>null</c> if it hands the
+    /// receiver or a field by reference to a callee, which might assign any of them.
+    /// </summary>
+    /// An `[Open]` callee on the receiver assigns what its own body assigns.
+    internal static HashSet<string>? OpenAssigned(IrStmt body, IReadOnlyDictionary<string, IrMethod>? methods,
+        HashSet<string> visiting)
+    {
+        var assigned = new HashSet<string>();
+        foreach (var stmt in Passes.Check.Statements(body))
+        {
+            if (stmt is IrAssign { Target: IrField { Receiver: IrVar { Name: Names.This }, Field: var f } })
+                assigned.Add(f);
+            foreach (var e in Passes.Check.Expressions(stmt).SelectMany(Passes.Check.Subexpressions))
+            {
+                if (e is IrCall { HasReceiver: true, Args: [IrVar { Name: Names.This }, ..] } call)
+                {
+                    if (methods is null || !methods.TryGetValue(call.Callee, out var callee) ||
+                        !callee.Open || callee.Body is null)
+                        return null;
+                    if (!visiting.Add(call.Callee)) continue;
+                    var inner = OpenAssigned(callee.Body, methods, visiting);
+                    if (inner is null) return null;
+                    assigned.UnionWith(inner);
+                }
+                else if (e is IrRefArg { Operand: IrField { Receiver: IrVar { Name: Names.This } } })
+                    return null;
+            }
+        }
+        return assigned;
+    }
+
+    private static bool Stored(IrMethod method, string name, IReadOnlyDictionary<string, IrMethod>? methods,
+        ImmutableHashSet<string> visiting)
+    {
+        if (method.Body is null || visiting.Contains(method.Name)) return true;
+        visiting = visiting.Add(method.Name);
+        var uses = Passes.Check.Statements(method.Body)
+            .Where(s => s is not IrGhostStmt)
+            .SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions).ToList();
+        var benign = new HashSet<IrExpr>(ByReference.Instance);
+        foreach (var e in uses)
+        {
+            switch (e)
+            {
+                case IrField f: benign.Add(f.Receiver); break;
+                case IrCall { KeepsArguments: true } c: foreach (var a in c.Args) benign.Add(a); break;
+                // A constructor that hands an argument back (this rule, at the callee).
+                case IrCall { HasReceiver: false } c when methods is not null &&
+                    methods.TryGetValue(c.Callee, out var callee) && callee.IsConstructor &&
+                    callee.Parameters.Length == c.Args.Length:
+                    for (var i = 0; i < c.Args.Length; i++)
+                        if (callee.Parameters[i] is { Consumes: false } cp && cp.Type is IrClassType &&
+                            !Stored(callee, cp.Name, methods, visiting))
+                            benign.Add(c.Args[i]);
+                    break;
+                case IrCall { HasReceiver: true, Args.Length: > 0 } c: benign.Add(c.Args[0]); break;
+                case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when b.Left is IrNull || b.Right is IrNull:
+                    benign.Add(b.Left); benign.Add(b.Right); break;
+            }
+        }
+        return uses.Any(e => e is IrVar v && v.Name == name && !benign.Contains(e));
+    }
+
+    private sealed class ByReference : IEqualityComparer<IrExpr>
+    {
+        public static readonly ByReference Instance = new();
+        public bool Equals(IrExpr? x, IrExpr? y) => ReferenceEquals(x, y);
+        public int GetHashCode(IrExpr obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
+    }
 
     private readonly SpecEmitter _spec;
 
@@ -32,7 +111,8 @@ public sealed class MethodPlan
     public MethodPlan(IrMethod method, SpecEmitter spec, DiagnosticBag diagnostics,
         ImmutableArray<IrClassType> heaps = default, ImmutableArray<RegionUse> held = default,
         ImmutableArray<IrFieldDecl> openFields = default, ImmutableArray<IrFieldDecl> resultOwned = default,
-        bool heapsKept = false)
+        bool heapsKept = false, IReadOnlyDictionary<string, IrMethod>? methods = null,
+        OwnerBorrow? ownerBorrow = null)
     {
         _spec = spec;
         Held = held.IsDefault ? [] : held;
@@ -135,9 +215,17 @@ public sealed class MethodPlan
                 var trace = Frontend.ExprLowerer.TraceName(p.Name);
                 var postTrace = "post_" + Names.Local(trace);
                 binders.Add($"({protocol}: Seq.seq {e} -> slprop)");
+                // R32.11. A bounded parameter takes the caller's bound on the calls before it.
+                var boundName = Frontend.ExprLowerer.CallBoundName(p.Name);
+                var bound = cb.Bounded ? "n_" + name : "Pulse.Lib.CSharp.Callback.max_bound";
+                if (cb.Bounded) binders.Add($"({bound}: erased int)");
                 binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
                             $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
-                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol})");
+                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
+                var boundTerm = new Term($"(reveal {bound})", TermKind.Math, IrPrim.SpecIntType);
+                pre.Bind(boundName, boundTerm);
+                post.Bind(boundName, boundTerm);
+                slots[boundName] = new Slot(boundName, IrPrim.SpecIntType, SlotKind.Value, bound);
                 preResources.Add($"{protocol} (Seq.empty #{e})");
                 postResources.Add($"{protocol} {postTrace}");
                 postExistentials.Add(postTrace);
@@ -199,7 +287,7 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
-                    binders.Add($"({name}: S.slice {Types.Atom(span.Element)})");
+                    binders.Add($"({name}: Span.span {Types.Atom(span.Element)})");
                     ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(span.Element)}))");
 
                     var perm = p.Fraction is null ? "" : $"#{p.Fraction} ";
@@ -288,9 +376,34 @@ public sealed class MethodPlan
                             pre.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {hPre})", TermKind.Other));
                             post.Bind(Frontend.Region.HeapName(k.Name), new Term(hPost, TermKind.Other));
                         }
+                        // R33.15. A field the body never assigns, with no other `[Open]`
+                        // call that might, is where it was: an array field's reference above
+                        // all, which the caller's invariant needs back.
+                        var openAssigned = method.Body is null ? null : OpenAssigned(method.Body, methods, [method.Name]);
                         foreach (var f in openFields)
                         {
                             var proj = Names.ClassProjection(klass.Name, f.Name);
+                            if (openAssigned is not null && !openAssigned.Contains(f.Name))
+                                postResources.Add($"pure (post_{p.Name}.{proj} == (reveal pre_{p.Name}).{proj})");
+                            // R33.15. An array field is held as the invariant holds it, by its
+                            // own `pts_to` at the contents, which the field then denotes
+                            // (R3.10a); `Pal.Contents`'s reference is the record's field.
+                            if (f.Type is IrArrayType at)
+                            {
+                                var cPre = $"pre_{p.Name}_{Names.Contents(f.Name)}";
+                                var cPost = $"post_{p.Name}_{Names.Contents(f.Name)}";
+                                ghostBinders.Add($"(#{cPre}: erased (Seq.seq {Types.Atom(at.Element)}))");
+                                preResources.Add($"{PulseEmitter.ArrayPts(f)} (reveal pre_{p.Name}).{proj} {cPre}");
+                                postResources.Add($"{PulseEmitter.ArrayPts(f)} post_{p.Name}.{proj} {cPost}");
+                                postExistentials.Add(cPost);
+                                pre.Bind($"{Names.This}.{f.Name}", new Term($"(reveal {cPre})", TermKind.Seq, f.Type));
+                                post.Bind($"{Names.This}.{f.Name}", new Term(cPost, TermKind.Seq, f.Type));
+                                pre.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                                    new Term($"(reveal pre_{p.Name}).{proj}", TermKind.Other, f.Type));
+                                post.Bind(SpecEmitter.ArrayRefKey($"{Names.This}.{f.Name}"),
+                                    new Term($"post_{p.Name}.{proj}", TermKind.Other, f.Type));
+                                continue;
+                            }
                             pre.Bind($"{Names.This}.{f.Name}",
                                 new Term($"(reveal pre_{p.Name}).{proj}", KindOf(f.Type), f.Type));
                             post.Bind($"{Names.This}.{f.Name}",
@@ -398,7 +511,7 @@ public sealed class MethodPlan
                     // author said `[Consumes]`: a body that may only assign fields (R4.12)
                     // has nowhere else to put one. Keeping the invariant in the
                     // postcondition would ask the caller to own the same object twice.
-                    var consumed = Consumed(method, p);
+                    var consumed = Consumed(method, p, methods);
                     if (consumed)
                     {
                         post.Bind(p.Name, new Term($"(reveal {preModel})", TermKind.Math, seen));
@@ -472,7 +585,11 @@ public sealed class MethodPlan
                     var isCell = assigned.Contains(p.Name) && !p.IsContext;
                     var binder = isCell ? Names.Argument(p.Name) : name;
                     binders.Add($"({binder}: {Types.Render(p.Type)})");
-                    if (isCell) prologue.Add((name, binder));
+                    // R32.4. A tuple's universe is inferred, and `let mut` needs it to be zero
+                    // (as a local's cell, CodeEmitter's declaration).
+                    if (isCell)
+                        prologue.Add((p.Type is IrUserSpecType { FStar: Frontend.WellKnown.TupleType }
+                            ? $"{name} : {Types.Render(p.Type)}" : name, binder));
                     var term = new Term(binder, KindOf(p.Type), p.Type);
                     pre.Bind(p.Name, term);
                     post.Bind(p.Name, term);
@@ -519,6 +636,28 @@ public sealed class MethodPlan
                 postResources.Add(PulseEmitter.RegionAt(k, perm, heap));
                 post.Bind(Frontend.Region.HeapName(k.Name), new Term($"(reveal {heap})", TermKind.Other));
             }
+        }
+
+        // R31.11. A ring node's member that reads its owner is given the owner's box, which
+        // the node's back pointer must be, at some permission; it gives it back unchanged.
+        if (ownerBorrow is { } ob)
+        {
+            var oraw = PulseEmitter.RegionRaw(ob.Owner);
+            var at = -1;
+            for (var i = 0; i < binders.Count; i++)
+                if (binders[i].StartsWith($"({Names.Local(Names.This)}:", StringComparison.Ordinal)) at = i;
+            binders.Insert(at + 1, $"({OwnerBorrow.Binder}: erased (B.box ({oraw})))");
+            ghostBinders.Add($"(#{OwnerBorrow.Perm}: perm)");
+            ghostBinders.Add($"(#{OwnerBorrow.Rep}: erased ({oraw}))");
+            var pts = $"B.pts_to (reveal {OwnerBorrow.Binder}) #{OwnerBorrow.Perm} {OwnerBorrow.Rep}";
+            var view = $"{Names.ClassModule(ob.Node.Name)}.{Frontend.Region.ViewOf(ob.Node.Name)}";
+            preResources.Add(pts);
+            preResources.Add($"pure (Pulse.Lib.CSharp.RegionRing.owner_at {view} " +
+                             $"(reveal {Frontend.Region.HeapBinder(ob.Node.Name)}) {Names.Local(Names.This)} == reveal {OwnerBorrow.Binder})");
+            postResources.Add(pts);
+            var rep = new Term($"(reveal {OwnerBorrow.Rep})", TermKind.Other, ob.Owner);
+            pre.Bind(OwnerBorrow.Key(ob.Field), rep);
+            post.Bind(OwnerBorrow.Key(ob.Field), rep);
         }
 
         // R19.3. What an exception leaves the caller owning: every parameter, as the

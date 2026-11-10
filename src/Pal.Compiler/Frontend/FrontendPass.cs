@@ -52,6 +52,35 @@ public static partial class FrontendPass
                 declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor }));
         }
 
+        // R27.57. The replicas the bodies asked for, each a base body verified again at a
+        // representation-sharing subclass; a replica's own calls may ask for more.
+        Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
+        while (known.ReplicaDemand.Count > 0)
+        {
+            var request = known.ReplicaDemand.Dequeue();
+            var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
+            if (source is null)
+            {
+                diagnostics.Error("PALCS0715", Locations.From(request.At.Locations.FirstOrDefault() ?? Location.None),
+                    $"`{request.Source}` would have to be verified again at `{request.At.Name}`, whose override it " +
+                    "reaches, but it is not translated (doc/translation.md R27.57).");
+                continue;
+            }
+            var model = compilation.GetSemanticModel(source.Syntax.SyntaxTree);
+            var lifted = new List<IrMethod>();
+            known.Replica = request;
+            var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
+            known.Replica = null;
+            if (decl is not IrMethod replica) continue;
+            declarations.Add(replica with
+            {
+                Name = request.Name,
+                Throws = [.. replica.Throws, .. replica.AtThrows.Where(t => t.At == request.At.Name).Select(t => t.Throws)],
+                AtThrows = [],
+            });
+            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor }));
+        }
+
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
             declarations.Add(include);
 
@@ -89,10 +118,10 @@ public static partial class FrontendPass
                     foreach (var tp in callee.DefaultedTypeParameters)
                     {
                         var k = callee.TypeParameters.IndexOf(tp);
-                        if (k >= 0 && k < call.TypeArguments.Length &&
-                            call.TypeArguments[k] is IrTypeParamType { Name: var name } &&
-                            m.TypeParameters.Contains(name))
-                            needed.Add(name);
+                        if (k >= 0 && k < call.TypeArguments.Length)
+                            foreach (var name in DefaultedIn(call.TypeArguments[k]))
+                                if (m.TypeParameters.Contains(name))
+                                    needed.Add(name);
                     }
                 }
                 if (needed.Count == m.DefaultedTypeParameters.Length) continue;
@@ -104,6 +133,17 @@ public static partial class FrontendPass
             }
         } while (changed);
     }
+
+    // R22.22. The type parameters a `has_default` instance at `t` is resolved from: `t`
+    // itself, or those of a tuple's or a struct's arguments (their instances are built
+    // from their components').
+    private static IEnumerable<string> DefaultedIn(IrType t) => t switch
+    {
+        IrTypeParamType p => [p.Name],
+        IrUserSpecType u => u.Args.SelectMany(DefaultedIn),
+        IrNamedType n => n.TypeArguments.SelectMany(DefaultedIn),
+        _ => [],
+    };
 
     /// <summary>
     /// R9.7. A virtual method's contract is written once, on the <c>abstract</c>
@@ -207,6 +247,7 @@ public static partial class FrontendPass
             MethodDeclarationSyntax m => m.Identifier,
             ConstructorDeclarationSyntax c => c.Identifier,
             PropertyDeclarationSyntax p => p.Identifier,
+            IndexerDeclarationSyntax ix => ix.ThisKeyword,
             AccessorDeclarationSyntax { Parent.Parent: IndexerDeclarationSyntax ix } => ix.ThisKeyword,
             AccessorDeclarationSyntax { Parent.Parent: PropertyDeclarationSyntax p } => p.Identifier,
             _ => Syntax.GetFirstToken(),
@@ -219,6 +260,7 @@ public static partial class FrontendPass
             // `T P => e;` and `T P { get => e; }` are the same declaration with the same
             // body; the accessor form is where an attribute could never have gone.
             PropertyDeclarationSyntax p => p.ExpressionBody ?? Getter(p)?.ExpressionBody,
+            IndexerDeclarationSyntax ix => ix.ExpressionBody,
             AccessorDeclarationSyntax a => a.ExpressionBody,
             _ => null,
         };
@@ -227,7 +269,8 @@ public static partial class FrontendPass
         /// method itself — which for a property is its getter when the attributes are
         /// written on the <c>get</c>.</summary>
         public ISymbol Declaration => ContractOverride ??
-            (Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
+            (Syntax is IndexerDeclarationSyntax && Symbol.AssociatedSymbol is { } ixp ? ixp :
+            Syntax is PropertyDeclarationSyntax pd && Symbol.AssociatedSymbol is { } p &&
             !(Getter(pd) is { } g && g.AttributeLists.SelectMany(l => l.Attributes).Any(IsContractAttribute)) ? p : Symbol);
 
         /// <summary>R27.12. The `get` accessor, when the contract was written there.</summary>
@@ -323,6 +366,16 @@ public static partial class FrontendPass
             // could not say which one it meant.
             foreach (var ix in tree.GetRoot().DescendantNodes().OfType<IndexerDeclarationSyntax>())
             {
+                // R33.13. `T this[int i] => e;` has no accessor to write the contract on, so
+                // it is written on the indexer, as R9.20 has it for `T P => e;`.
+                if (ix is { AccessorList: null, ExpressionBody: not null })
+                {
+                    if (model.GetDeclaredSymbol(ix) is not IPropertySymbol { GetMethod: { } g } ip) continue;
+                    if (known.IsSpecTypeDeclaration(ip.ContainingType)) continue;
+                    if (Declarations.KindOf(g, known) is not { } gk) continue;
+                    result.Add(new Candidate(ix, g, gk));
+                    continue;
+                }
                 if (ix.AccessorList is null) continue;
                 foreach (var accessor in ix.AccessorList.Accessors)
                 {
@@ -561,7 +614,9 @@ public static partial class FrontendPass
                         _ => null,
                     });
 
-                    if (known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
+                    // R27.58. A nested class bound by R21.5 is a type, not an operation.
+                    if (member is not ITypeSymbol &&
+                        known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
                         !isPredicate && !producesObject &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
@@ -620,6 +675,7 @@ public static partial class FrontendPass
                 // R22.6. A `[Spec]` struct is an erased record, never copied or stored at run
                 // time, so R15.1's reason for refusing a generic struct does not apply to it.
                 if (!(Declarations.Has(symbol, known.SpecAttribute) && symbol.TypeParameters.All(WellKnown.Unconstrained))
+                    && !Borrowing.IsView(symbol, known)   // R32.13
                     && RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R3.9a. `[Spec]` on a struct declares a *spec-only* type: it is erased,
@@ -634,7 +690,8 @@ public static partial class FrontendPass
                 var fields = ImmutableArray.CreateBuilder<StructField>();
                 var ok = true;
 
-                foreach (var member in symbol.GetMembers())
+                // R32.13. A view's record also holds the state it inherits.
+                foreach (var member in symbol.GetMembers().Concat(Borrowing.InheritedState(symbol, known)))
                 {
                     var (name, type) = member switch
                     {
@@ -660,6 +717,11 @@ public static partial class FrontendPass
                     borrowed |= mapped is IrClassType && Borrowing.IsBorrowing(symbol, known) &&
                         (known.IsRegionClass(type) ||
                          member is IFieldSymbol of && Borrowing.OwnedFields(symbol, known).Contains(of, SymbolEqualityComparer.Default));
+                    // R32.10. A spec-only struct may hold a pointer into a region: a value
+                    // that owns nothing, which names nodes of the region's heap.
+                    borrowed |= specOnly && mapped is IrClassType && known.IsRegionClass(type);
+                    // R32.13. A view holds its base's comparer, a pure value (R27.47).
+                    borrowed |= mapped is not null && Sorted.IsComparer(mapped) && Borrowing.IsView(symbol, known);
                     if (mapped is null || !(borrowed || (specOnly ? IsSpecField(mapped) : IsValueField(mapped))))
                     {
                         // R3.4: a field owning a resource would need the fold/unfold
@@ -710,7 +772,7 @@ public static partial class FrontendPass
                (known.HasModel(owner) || known.IsRegionClass(owner))
             // R28.2. A borrowing struct's getter is a member of the borrowed object's class.
             // R29.4. An explicit one (`object IEnumerator.Current`) when it carries a contract.
-            || Borrowing.IsBorrowing(p.ContainingType, known) &&
+            || (Borrowing.IsBorrowing(p.ContainingType, known) || Borrowing.IsWrapping(p.ContainingType, known)) &&
                (p.ExplicitInterfaceImplementations.IsEmpty || Declarations.IsAnnotated(p, known)));
 
     private static bool IsAuto(IPropertySymbol p) =>
@@ -864,6 +926,7 @@ public static partial class FrontendPass
 
         /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>
         public bool IsRegion { get; init; }
+        public bool IsCyclic { get; init; }
 
         /// <summary>R9.6. The <c>override</c> of the base's <c>[Model]</c> — the forgetting function.</summary>
         public ExpressionSyntax? ForgetBody { get; init; }
@@ -917,6 +980,10 @@ public static partial class FrontendPass
                 // hierarchy the translator has to encode: the base is verified at its exact
                 // type (see `ExactType`).
                 if (UntranslatedSubclass(symbol, known)) continue;
+                // R27.57. A representation-sharing subclass is its base's class.
+                if (Subclasses.IsAlias(symbol, known)) continue;
+                // R32.13. A view is the record of its state, collected with the structs.
+                if (Borrowing.IsView(symbol, known)) continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R18.1. Every class the collector *looks at* is one it has spoken about:
@@ -957,6 +1024,8 @@ public static partial class FrontendPass
                     }
                     if (CollectPlainFields(symbol, known, diagnostics) is not { } regionFields)
                         continue;
+                    var cyclic = Declarations.Find(symbol, known.RegionAttribute) is { } regionData &&
+                                 Declarations.NamedFlag(regionData, "Cyclic");
                     var children = regionFields.Count(f =>
                         f.Mapped is IrClassType { Nullable: true } ct && ct.Name == symbol.Name);
                     if (children != 2)
@@ -991,6 +1060,7 @@ public static partial class FrontendPass
                     {
                         IsPlain = true,
                         IsRegion = true,
+                        IsCyclic = cyclic,
                     });
                     continue;
                 }
@@ -1105,13 +1175,16 @@ public static partial class FrontendPass
     /// <c>C</c>, and every virtual call on it binds to <c>C</c>'s own body.
     /// </summary>
     private static bool ExactType(INamedTypeSymbol symbol, WellKnown known) =>
-        known.AnnotatedOnly && !symbol.IsAbstract && !symbol.IsSealed &&
+        !symbol.IsAbstract && !symbol.IsSealed &&
         symbol.TypeParameters.Length > 0 &&
         known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
             .OfType<INamedTypeSymbol>()
             .Where(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition))
             .ToList() is { Count: > 0 } subs &&
-        subs.All(t => UntranslatedSubclass(t, known));
+        // R27.57. A subclass sharing the representation is verified at its own exact type.
+        subs.All(t => UntranslatedSubclass(t, known) || Subclasses.IsAlias(t, known) ||
+                      // R32.13. A view's objects are records, never objects of the base.
+                      Borrowing.IsView(t, known));
 
     /// <summary>
     /// R22.5. Under <c>[TranslateAnnotatedOnly]</c>, a class that is not <c>sealed</c> but
@@ -1119,7 +1192,64 @@ public static partial class FrontendPass
     /// from, is a leaf: a subclass elsewhere can add state but cannot change what any of
     /// this class's methods do, so there is no vtable for R9.21 to split off.
     /// </summary>
-    private static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+    /// <summary>
+    /// R27.46. The class an <c>[Exactly]</c> parameter is an object of, when it is one whose
+    /// translated objects all have it as their dynamic type (R27.1) and which converts to the
+    /// parameter's type by an implicit reference conversion.
+    /// </summary>
+    internal static INamedTypeSymbol? ExactParameter(IParameterSymbol p, Compilation compilation, WellKnown known) =>
+        known.ExactClass(p) is { TypeKind: TypeKind.Class, IsAbstract: false } c && known.HasModel(c) &&
+        (c.IsSealed || EffectivelySealed(c.OriginalDefinition, known)) &&
+        compilation.ClassifyCommonConversion(c, p.Type) is { IsImplicit: true, IsReference: true }
+            ? c : null;
+
+    /// <summary>
+    /// R32.13. The view a method's <c>[return: Exactly(typeof(C&lt;&gt;.V))]</c> names, as a
+    /// member of the method's containing class (so at its type arguments).
+    /// </summary>
+    /// <summary>
+    /// R32.13. A method returning a view of its receiver says so: a call holds the view it
+    /// returns as borrowing the call's receiver, and this is what makes that sound.
+    /// </summary>
+    private static IEnumerable<IrExpr> ViewOwnerEnsures(IMethodSymbol method, IrType returnType, WellKnown known, IrLoc loc)
+    {
+        if (method.IsStatic || ExactReturn(method, known) is not { } view ||
+            Borrowing.OwnerField(view, known) is not { } owner ||
+            known.MapType(owner.Type) is not { } ownerType)
+            yield break;
+        yield return new IrBinary(loc, BinOp.Eq,
+            new IrField(loc, new IrResult(loc) { Type = returnType }, owner.Name) { Type = ownerType },
+            new IrRefOf(loc, Names.This) { Type = ownerType }) { Type = IrPrim.Bool };
+    }
+
+    internal static INamedTypeSymbol? ExactReturn(IMethodSymbol method, WellKnown known)
+    {
+        var attr = method.OriginalDefinition.GetReturnTypeAttributes()
+            .FirstOrDefault(a => a.AttributeClass?.Name == "ExactlyAttribute");
+        if (attr is not { ConstructorArguments: [{ Value: INamedTypeSymbol named }] }) return null;
+        foreach (var t in method.ContainingType.GetTypeMembers(named.Name))
+            if (Borrowing.IsView(t, known)) return t;
+        return null;
+    }
+
+    internal static bool EffectivelySealed(INamedTypeSymbol symbol, WellKnown known) =>
+        EffectivelySealedIn(Canonical(symbol, known), known);
+
+    /// <summary>
+    /// The symbol for <paramref name="symbol"/> in <c>known</c>'s compilation. A body is
+    /// bound in a compilation of its own, whose symbols are not equal to the original's.
+    /// </summary>
+    private static INamedTypeSymbol Canonical(INamedTypeSymbol symbol, WellKnown known)
+    {
+        if (SymbolEqualityComparer.Default.Equals(symbol.ContainingAssembly, known.Compilation.Assembly)) return symbol;
+        var name = symbol.MetadataName;
+        for (var outer = symbol.ContainingType; outer is not null; outer = outer.ContainingType)
+            name = outer.MetadataName + "+" + name;
+        if (symbol.ContainingNamespace is { IsGlobalNamespace: false } ns) name = ns.ToDisplayString() + "." + name;
+        return known.Compilation.GetTypeByMetadataName(name) ?? symbol;
+    }
+
+    private static bool EffectivelySealedIn(INamedTypeSymbol symbol, WellKnown known) =>
         ExactType(symbol, known) ||
         known.AnnotatedOnly &&
         // R24.4. An unannotated virtual has no module, so no translated body can call it
@@ -1743,7 +1873,9 @@ public static partial class FrontendPass
         var sites = ImmutableArray.CreateBuilder<SpecSite>();
         foreach (var c in classes)
         {
-            var fieldParams = c.Fields.Select(f => new SpecParam(f.Name, f.Type)).ToImmutableArray();
+            // R31.3. An invariant may name the object itself, as `@this`.
+            var fieldParams = c.Fields.Select(f => new SpecParam(f.Name, f.Type))
+                .Append(new SpecParam(Names.This, c.Symbol)).ToImmutableArray();
             var index = 0;
             foreach (var (text, location) in ClassInvariants(c))
                 sites.Add(new SpecSite(
@@ -1863,6 +1995,7 @@ public static partial class FrontendPass
             {
                 IsPlain = true,
                 IsRegion = c.IsRegion,
+                IsCyclic = c.IsCyclic,
                 TypeParameters = c.IsRegion
                     ? [.. WellKnown.OuterAndOwnTypeParameters(c.Symbol).Select(t => t.Name)]
                     : [.. c.Symbol.TypeParameters.Select(t => t.Name)],
@@ -2175,16 +2308,20 @@ public static partial class FrontendPass
             {
                 var text = Declarations.StringArgument(attribute);
                 if (text is null) continue;
+                // R32.13. A clause for the replica at a view is over the view.
+                var atView = AtView(attribute, candidate.Symbol, known);
                 sites.Add(new SpecSite(
                     Key: $"{Naming.Of(candidate.Symbol)}_{index}",
                     Text: text,
                     Location: Declarations.ArgumentLocation(attribute),
-                    Parameters: ShimParameters(candidate.Symbol, compilation, known, wantsResult),
+                    Parameters: ShimParameters(candidate.Symbol, compilation, known, wantsResult, atView),
                     Usings: usings)
                 {
-                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    TypeParameters = atView is null ? SiteTypeParameters(candidate.Symbol, known)
+                        : [.. WellKnown.AllTypeParameters(atView).Select(t => t.Name), .. candidate.Symbol.TypeParameters.Select(t => t.Name)],
                     // R28.3. A contract about a borrowing struct names its private state.
                     Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              atView is not null ||
                               Borrowing.IsMember(candidate.Symbol, known) ||
                               Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known) ||
                               // R29.4. A boxed result is described by the state of what it boxes.
@@ -2448,8 +2585,23 @@ public static partial class FrontendPass
     /// (a spec talks about values, not storage), ghost parameters unwrapped from
     /// <c>Ghost&lt;T&gt;</c>, and — in a postcondition — <c>Result</c>.
     /// </summary>
+    /// <summary>
+    /// R32.13. The view a contract attribute's <c>At</c> names, as a member of the class
+    /// <paramref name="symbol"/> is declared in; <c>null</c> when it names none.
+    /// </summary>
+    internal static INamedTypeSymbol? AtView(AttributeData attribute, IMethodSymbol symbol, WellKnown known)
+    {
+        if (attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value is not INamedTypeSymbol at)
+            return null;
+        var holder = symbol.ContainingType;
+        var view = holder?.GetTypeMembers(at.Name).FirstOrDefault(t =>
+            SymbolEqualityComparer.Default.Equals(t.OriginalDefinition, at.OriginalDefinition));
+        return view is not null && Borrowing.IsView(view, known) ? view : null;
+    }
+
     private static ImmutableArray<SpecParam> ShimParameters(
-        IMethodSymbol symbol, Compilation compilation, WellKnown known, bool wantsResult)
+        IMethodSymbol symbol, Compilation compilation, WellKnown known, bool wantsResult,
+        INamedTypeSymbol? atView = null)
     {
         var result = ImmutableArray.CreateBuilder<SpecParam>();
 
@@ -2465,11 +2617,13 @@ public static partial class FrontendPass
                                     or MethodKind.PropertyGet or MethodKind.PropertySet
                                     or MethodKind.ExplicitInterfaceImplementation } ||
             Borrowing.IsMember(symbol, known))
-            result.Add(new SpecParam(Names.This, symbol.ContainingType));
+            result.Add(new SpecParam(Names.This, atView ?? symbol.ContainingType));
 
         foreach (var p in symbol.Parameters)
         {
             var type = known.IsGhost(p.Type) ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
+            // R27.46. An `[Exactly]` parameter is an object of its class in the contract too.
+            if (ExactParameter(p, compilation, known) is { } exact) type = exact;
             result.Add(new SpecParam(p.Name, type));
         }
         // R20.12. A receiver-free method's contract may name the receiver's readonly fields
@@ -2478,7 +2632,7 @@ public static partial class FrontendPass
             result.Add(new SpecParam(f.Name, Declarations.ContextType(f)));
 
         if (wantsResult && !symbol.ReturnsVoid)
-            result.Add(new SpecParam(SpecBinder.ResultParameter, symbol.ReturnType));
+            result.Add(new SpecParam(SpecBinder.ResultParameter, ExactReturn(symbol, known) ?? symbol.ReturnType));
 
         return result.ToImmutable();
     }
@@ -2503,7 +2657,10 @@ public static partial class FrontendPass
             Declarations.Has(bsp, known.SpecAttribute))
             return null;
         if (Borrowing.IsMember(symbol, known))
-            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc);
+            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc, lifted);
+        // R32.13. A base member verified again at a view is a member of the view.
+        if (known.Replica is { At: var replicaAt } && Borrowing.IsView(replicaAt, known))
+            return LowerBorrowingMember(candidate, model, known, bound, diagnostics, loc, lifted, replicaAt);
 
         var specs = ReadSpecs(symbol, candidate.Declaration, known, bound, diagnostics);
         var parameters = LowerParameters(symbol, model, known, diagnostics);
@@ -2535,7 +2692,8 @@ public static partial class FrontendPass
         var returnType = symbol.MethodKind == MethodKind.Constructor
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
-            : known.MapType(symbol.ReturnType);
+            // R32.13. A method returning a view exactly returns its record.
+            : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -2543,7 +2701,7 @@ public static partial class FrontendPass
         }
 
         var declaringClass = symbol is { IsStatic: false, ContainingType: { } owner } && known.HasModel(owner)
-            ? owner.Name
+            ? Subclasses.AliasBase(owner, known)?.Name ?? owner.Name
             : null;
 
         var objectFields = symbol.ContainingType is not { } holder ? ImmutableHashSet<string>.Empty
@@ -2563,7 +2721,7 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        lowerer.Expressions.LiftPrefix = Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Replica?.Name ?? Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
         if (iterated is not null) lowerer.Iterate(iterated);
 
@@ -2572,19 +2730,34 @@ public static partial class FrontendPass
         // something the translation does not depend on. That is what lets a trusted method
         // call code that is not translated at all -- the reason to admit it.
         var admitted = Declarations.Has(symbol, known.AdmitAttribute);
+        // R20.14. An `[Implements]` method's translation is the verified Pulse it names; its
+        // C# body is the trusted run-time counterpart, so it is not read either.
+        var implementsAttr = Declarations.Find(symbol, known.ImplementsAttribute);
+        if (implementsAttr is not null &&
+            (admitted || Declarations.Has(symbol, known.PulseBodyAttribute) ||
+             Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute)))
+        {
+            diagnostics.Error("PALCS0503", loc,
+                $"`{symbol.Name}` is `[Implements]` and also `[Admit]`, `[PulseBody]`, `[Spec]` or " +
+                "`[Lemma]`. `[Implements]` is for a code method whose translation is a verified " +
+                "Pulse function; it cannot be combined with another account of the body.");
+            return null;
+        }
+        var implemented = implementsAttr is not null;
         // R24.17. A `[Spec]` (or `[Lemma]`) function's `[PulseBody]` replaces its C# body,
         // which is then never looked at: it has `=> throw …` or `{ }` for C# to compile.
         // On any other method both are kept, and the pair is refused (PALCS0503).
         var verbatim = Declarations.Has(symbol, known.PulseBodyAttribute) &&
                        (Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute));
-        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer);
+        var body = admitted || verbatim || implemented ? null : LowerBody(candidate.Syntax, lowerer);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
         var (bodyRequires, bodyEnsures, trimmed) =
-            ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
+            ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted && !implemented);
 
-        var pulseBody = Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
+        var pulseBody = implementsAttr is not null ? Declarations.StringArgument(implementsAttr)
+            : Declarations.Find(symbol, known.PulseBodyAttribute) is { } pb
             ? Declarations.StringArgument(pb) : null;
 
         // R14.1. A constraint is a typeclass obligation the scheme does not carry, so a
@@ -2607,9 +2780,9 @@ public static partial class FrontendPass
         return new IrMethod(
             loc, Naming.Of(symbol), parameters, returnType,
             [.. specs.Requires, .. bodyRequires],
-            [.. specs.Ensures, .. bodyEnsures],
+            [.. specs.Ensures, .. bodyEnsures, .. ViewOwnerEnsures(symbol, returnType, known, loc)],
             specs.Decreases,
-            admitted || verbatim ? null
+            admitted || verbatim || implemented ? null
             : iterated is not null && (trimmed ?? body) is { } iteratorBody ? lowerer.WrapIterator(iteratorBody)
             : trimmed ?? body)
         {
@@ -2617,11 +2790,13 @@ public static partial class FrontendPass
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,
             Admit = admitted,
+            Implements = implemented,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
             Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
             Throws = specs.Throws,
+            AtThrows = specs.AtThrows,
             DeclaringClass = declaringClass,
             IsConstructor = symbol.MethodKind == MethodKind.Constructor,
             // R4.11b derives this from the write set. R9.7: an abstract method has no
@@ -2639,7 +2814,8 @@ public static partial class FrontendPass
             // parameter, so the signature that mentions it is refused first.
             TypeParameters = MethodTypeParameters(symbol),
             DefaultedTypeParameters = [.. MethodTypeParameters(symbol).Where(lowerer.Defaulted)],
-            Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName }
+            Overrides = symbol is { IsOverride: true, ContainingType.BaseType.Name: { } baseName } &&
+                        !Subclasses.IsAlias(symbol.ContainingType, known)
                 ? baseName
                 : null,
         };
@@ -2731,6 +2907,7 @@ public static partial class FrontendPass
     {
         BaseMethodDeclarationSyntax m => m.ExpressionBody,
         PropertyDeclarationSyntax p => p.ExpressionBody ?? Candidate.Getter(p)?.ExpressionBody,
+        IndexerDeclarationSyntax ix => ix.ExpressionBody,
         AccessorDeclarationSyntax a => a.ExpressionBody,
         _ => null,
     };
@@ -2749,13 +2926,19 @@ public static partial class FrontendPass
             if (c.Initializer is { } chained)
                 stmts.Add(new IrExprStmt(Locations.From(chained),
                     lowerer.Expressions.LowerConstructorInitializer(chained)));
+            else if (lowerer.Expressions.ImplicitBaseConstructor(c) is { } implicitBase)
+                // R27.57. A representation-sharing subclass's constructor without an
+                // initializer runs `: base()`, which builds the object.
+                stmts.Add(new IrExprStmt(Locations.From(c), implicitBase));
             else
                 // R4.12d. A field initialiser is the assignment C# would run here, and it
                 // runs in *this* constructor precisely when this constructor does not chain
                 // to another of its own class -- which is C#'s own rule, not a choice.
                 stmts.AddRange(FieldInitialisers(c, lowerer));
 
-            var rest = c.Body is { } body ? lowerer.Lower(body) : null;
+            // R33.13. `C(T v) => _f = v;` is the body `{ _f = v; }`.
+            var rest = c.Body is { } body ? lowerer.Lower(body)
+                : c.ExpressionBody is { } ctorArrow ? lowerer.LowerArrow(ctorArrow) : null;
             if (rest is IrBlock inner) stmts.AddRange(inner.Statements);
             else if (rest is not null) stmts.Add(rest);
             return new IrBlock(Locations.From(c), stmts.ToImmutable());
@@ -2808,12 +2991,18 @@ public static partial class FrontendPass
         IrExpr? Decreases)
     {
         public ImmutableArray<IrThrows> Throws { get; init; } = [];
+        public ImmutableArray<(string At, IrThrows Throws)> AtThrows { get; init; } = [];
     }
+
+    // R32.13. The view a clause is `At`, and the one a replica is lowered at, may be symbols
+    // of different compilations (a body is bound in one of its own).
+    private static bool SameView(INamedTypeSymbol a, INamedTypeSymbol b) =>
+        a.OriginalDefinition.ToDisplayString() == b.OriginalDefinition.ToDisplayString();
 
     private static Specs ReadSpecs(
         IMethodSymbol symbol, ISymbol declaration, WellKnown known,
         ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
-        BorrowContext? borrow = null)
+        BorrowContext? borrow = null, INamedTypeSymbol? atView = null)
     {
         var requires = ImmutableArray.CreateBuilder<IrExpr>();
         var ensures = ImmutableArray.CreateBuilder<IrExpr>();
@@ -2823,6 +3012,12 @@ public static partial class FrontendPass
         foreach (var (attribute, index, _) in SpecAttributes(declaration, known))
         {
             var key = $"{Naming.Of(symbol)}_{index}";
+            // R32.13. A member's own contract is its clauses without `At`; its replica at a
+            // view has exactly the clauses `At` that view.
+            var clauseAt = attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value as INamedTypeSymbol;
+            if (atView is null ? clauseAt is not null
+                : clauseAt is null || !SameView(clauseAt, atView))
+                continue;
             if (!bound.TryGetValue(key, out var spec)) continue;
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
@@ -2839,6 +3034,7 @@ public static partial class FrontendPass
         }
 
         var throws = ImmutableArray.CreateBuilder<IrThrows>();
+        var atThrows = ImmutableArray.CreateBuilder<(string, IrThrows)>();
         var throwsIndex = 0;
         foreach (var attribute in declaration.GetAttributes())
         {
@@ -2858,12 +3054,25 @@ public static partial class FrontendPass
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
                 { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow }
                 .Lower(spec.Expression);
-            throws.Add(new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when));
+            var clause = new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when);
+            // R27.57. A clause for the replica at a subclass is not the member's own.
+            var throwsAt = attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value as INamedTypeSymbol;
+            // R32.13. At a view, only the clauses `At` it are the replica's.
+            if (atView is not null)
+            {
+                if (throwsAt is not null && SameView(throwsAt, atView))
+                    throws.Add(clause);
+            }
+            else if (throwsAt is not null)
+                atThrows.Add((throwsAt.Name, clause));
+            else
+                throws.Add(clause);
         }
 
         return new Specs(requires.ToImmutable(), ensures.ToImmutable(), preserves.ToImmutable(), decreases)
         {
             Throws = throws.ToImmutable(),
+            AtThrows = atThrows.ToImmutable(),
         };
     }
 
@@ -2902,6 +3111,17 @@ public static partial class FrontendPass
             var loc = p.Locations.Length > 0 ? Locations.From(p.Locations[0]) : IrLoc.None;
             var isGhost = known.IsGhost(p.Type);
             var declared = isGhost ? ((INamedTypeSymbol)p.Type).TypeArguments[0] : p.Type;
+            if (Declarations.Has(p, known.ExactlyAttribute))
+            {
+                if (ExactParameter(p, model.Compilation, known) is not { } exact)
+                {
+                    diagnostics.Error("PALCS0713", loc,
+                        $"`[Exactly]` on `{p.Name}` names no class translated at its exact type (R27.1) " +
+                        $"that converts to `{p.Type}` (doc/translation.md R27.46).");
+                    continue;
+                }
+                declared = exact;
+            }
             var type = known.MapType(declared);
             if (type is null)
             {

@@ -21,7 +21,7 @@ open Pulse
 open FStar.Ghost
 
 module CA = Pulse.Lib.CSharp.Array
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module I32 = FStar.Int32
 module Seq = FStar.Seq
 

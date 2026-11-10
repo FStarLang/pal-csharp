@@ -38,6 +38,7 @@ public sealed class WellKnown
         PreservesValueAttribute = Type("PreservesValueAttribute");
         DecreasesAttribute = Type("DecreasesAttribute");
         ConsumesAttribute = Type("ConsumesAttribute");
+        ExactlyAttribute = Type("ExactlyAttribute");
         CallbackAttribute = Type("CallbackAttribute");
         PlainAttribute = Type("PlainAttribute");
         RegionAttribute = Type("RegionAttribute");
@@ -52,6 +53,7 @@ public sealed class WellKnown
         LemmaAttribute = Type("LemmaAttribute");
         PulseBodyAttribute = Type("PulseBodyAttribute");
         AdmitAttribute = Type("AdmitAttribute");
+        ImplementsAttribute = Type("ImplementsAttribute");
         RlimitAttribute = Type("RlimitAttribute");
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
@@ -110,6 +112,16 @@ public sealed class WellKnown
     /// annotated declarations of the compilation are translated.
     /// </summary>
     public bool AnnotatedOnly { get; }
+
+    /// <summary>R27.57. A replica the lowering has asked for: <c>Source</c> verified again at <c>At</c>.</summary>
+    public sealed record ReplicaRequest(string Source, INamedTypeSymbol At, string Name);
+
+    /// <summary>R27.57. The replica being lowered, while one is.</summary>
+    public ReplicaRequest? Replica { get; set; }
+
+    /// <summary>R27.57. Replicas asked for and not yet lowered.</summary>
+    public Queue<ReplicaRequest> ReplicaDemand { get; } = new();
+    public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
     public INamedTypeSymbol? Exception { get; }
 
     /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
@@ -143,6 +155,7 @@ public sealed class WellKnown
     public INamedTypeSymbol PreservesValueAttribute { get; }
     public INamedTypeSymbol DecreasesAttribute { get; }
     public INamedTypeSymbol ConsumesAttribute { get; }
+    public INamedTypeSymbol ExactlyAttribute { get; }
     /// <summary>R27.39. <c>[Callback]</c>: a delegate parameter called with region pointers.</summary>
     public INamedTypeSymbol CallbackAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
@@ -162,6 +175,23 @@ public sealed class WellKnown
     public bool IsRegionClass(ITypeSymbol? type) =>
         type is INamedTypeSymbol { TypeKind: TypeKind.Class } n && Declarations.Has(n.OriginalDefinition, RegionAttribute);
 
+    /// <summary>R31.1. A <c>[Region(Cyclic = true)]</c> class.</summary>
+    public bool IsCyclicRegionClass(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class } n &&
+        Declarations.Find(n.OriginalDefinition, RegionAttribute) is { } data && Declarations.NamedFlag(data, "Cyclic");
+
+    /// <summary>
+    /// R31.2. The owner of a cyclic region: a class with a field of a cyclic region class
+    /// that has a field of it in turn. A node's pointer to it is an identity, not ownership,
+    /// so it is plain data wherever a region pointer is.
+    /// </summary>
+    public bool IsRingOwner(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class } c &&
+        c.OriginalDefinition.GetMembers().OfType<IFieldSymbol>().Any(f =>
+            IsCyclicRegionClass(f.Type) &&
+            ((INamedTypeSymbol)f.Type).OriginalDefinition.GetMembers().OfType<IFieldSymbol>().Any(g =>
+                SymbolEqualityComparer.Default.Equals(g.Type.OriginalDefinition, c.OriginalDefinition)));
+
     /// <summary>
     /// R27.3. The type arguments a class type carries: those of every enclosing type, then
     /// its own. A class nested in a generic class is generic in the outer parameters too.
@@ -180,6 +210,7 @@ public sealed class WellKnown
     public INamedTypeSymbol LemmaAttribute { get; }
     public INamedTypeSymbol PulseBodyAttribute { get; }
     public INamedTypeSymbol AdmitAttribute { get; }
+    public INamedTypeSymbol ImplementsAttribute { get; }
     public INamedTypeSymbol RlimitAttribute { get; }
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
@@ -384,6 +415,33 @@ public sealed class WellKnown
     /// at an `abstract` or `sealed` base: an abstract class's model is abstract, so R9.6
     /// makes every subclass supply its own, and a sealed one cannot be derived from.
     /// </summary>
+    /// <summary>
+    /// R27.46. The class an <c>[Exactly(typeof(C))]</c> parameter is an object of. An open
+    /// generic is constructed by matching the interface it implements against the
+    /// parameter's type: <c>C&lt;U&gt; : I&lt;U&gt;</c> at a parameter of type
+    /// <c>I&lt;T&gt;</c> is <c>C&lt;T&gt;</c>. <c>null</c> when there is no attribute, or
+    /// no such construction.
+    /// </summary>
+    public INamedTypeSymbol? ExactClass(IParameterSymbol p)
+    {
+        var attr = p.GetAttributes().FirstOrDefault(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, ExactlyAttribute));
+        if (attr is null) return null;
+        if (attr.ConstructorArguments is not [{ Value: INamedTypeSymbol named }]) return null;
+        if (!named.IsUnboundGenericType) return named;
+        var def = named.OriginalDefinition;
+        if (p.Type is not INamedTypeSymbol param) return null;
+        foreach (var i in def.AllInterfaces.Append(def.BaseType).OfType<INamedTypeSymbol>())
+        {
+            if (!SymbolEqualityComparer.Default.Equals(i.OriginalDefinition, param.OriginalDefinition)) continue;
+            var args = new ITypeSymbol?[def.TypeParameters.Length];
+            for (var k = 0; k < i.TypeArguments.Length; k++)
+                if (i.TypeArguments[k] is ITypeParameterSymbol tp && SymbolEqualityComparer.Default.Equals(tp.ContainingSymbol, def))
+                    args[tp.Ordinal] = param.TypeArguments[k];
+            if (args.All(a => a is not null)) return def.Construct(args!);
+        }
+        return null;
+    }
+
     public bool HasModel(INamedTypeSymbol type)
     {
         // R27.3. A `[Region]` class's `[Model]` is the view of one node, not an object
@@ -435,6 +493,10 @@ public sealed class WellKnown
     /// </summary>
     private IrType RegionArgument(ITypeSymbol argument, IrType mapped) =>
         mapped is IrClassType { Nullable: false } k && IsRegionClass(argument) ? k with { Nullable = true } : mapped;
+
+    /// <summary>R31.2. A pair's component: a region pointer or a ring owner is the nullable pointer.</summary>
+    private IrType PairComponent(ITypeSymbol argument, IrType mapped) =>
+        mapped is IrClassType { Nullable: false } k && IsRingOwner(argument) ? k with { Nullable = true } : RegionArgument(argument, mapped);
 
     /// <summary>
     /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
@@ -571,11 +633,11 @@ public sealed class WellKnown
             // like a type argument, it is the nullable pointer, so the pair has C#'s default.
             case INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } tuple
                 when MapType(tuple.TupleElements[0].Type) is { } t1 &&
-                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type)) &&
+                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type) || IsRingOwner(tuple.TupleElements[0].Type)) &&
                      MapType(tuple.TupleElements[1].Type) is { } t2 &&
-                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type)):
+                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type) || IsRingOwner(tuple.TupleElements[1].Type)):
                 return new IrUserSpecType("ValueTuple", TupleType,
-                    [RegionArgument(tuple.TupleElements[0].Type, t1), RegionArgument(tuple.TupleElements[1].Type, t2)]);
+                    [PairComponent(tuple.TupleElements[0].Type, t1), PairComponent(tuple.TupleElements[1].Type, t2)]);
             // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
             case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
                      MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&
@@ -629,7 +691,12 @@ public sealed class WellKnown
             case INamedTypeSymbol named when SpecTypeName(named) is { } fstar:
             {
                 var args = ImmutableArray.CreateBuilder<IrType>();
-                foreach (var a in named.TypeArguments)
+                // R27.58. A bound class nested in a generic class is applied to the type
+                // arguments of the classes it is nested in, then its own (R24.6).
+                var applied = Binding(named) is not null
+                    ? AllTypeArguments(named)
+                    : named.TypeArguments;
+                foreach (var a in applied)
                 {
                     if (MapType(a) is not { } mapped) return null;
                     args.Add(mapped);
@@ -653,6 +720,11 @@ public sealed class WellKnown
             // R29.3. A class that borrows its owner is the record of its fields.
             case INamedTypeSymbol { TypeKind: TypeKind.Class } borrowing when Borrowing.IsBorrowingClass(borrowing, this):
                 return NamedStruct(borrowing);
+            // R27.57. A representation-sharing subclass is its base's type.
+            case INamedTypeSymbol { TypeKind: TypeKind.Class } alias when Subclasses.AliasBase(alias, this) is { } aliased:
+                return MapType(aliased) is IrClassType ak
+                    ? ak with { Nullable = alias.NullableAnnotation == NullableAnnotation.Annotated }
+                    : null;
             case INamedTypeSymbol { TypeKind: TypeKind.Class } named
                 when HasModel(named) || IsPlainLike(named.OriginalDefinition):
             {

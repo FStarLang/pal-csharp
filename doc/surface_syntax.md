@@ -573,11 +573,9 @@ operate on it. A static mutable field is rejected too
 **Overloads and several constructors work.** A class may declare `Temperature(int, int)`,
 `Temperature(int)` and `Temperature()`, and a convenience constructor may chain to the
 general one with `: this(...)`; its postcondition is then discharged from the chained
-constructor's contract rather than re-proved from the fields. Methods overload too. The
-only shape refused is a constructor that chains *and then does more work*
-(`PALCS0598`) — the chained constructor hands the object back with its invariant already
-established, so a later assignment would have to reopen it. Chain to a constructor that
-does the work, or assign every field directly. `: base(...)` waits on a base class that
+constructor's contract rather than re-proved from the fields. Methods overload too. A
+constructor may also chain *and then* do more work: the body runs over the object the
+chained constructor returned, starting from what that constructor ensures. `: base(...)` waits on a base class that
 may have fields at all.
 
 The generated module name grows a suffix only where it must: `Func_Temperature_Get` when
@@ -588,6 +586,22 @@ Two things a class gets for free, and neither costs an annotation. A freshly con
 object is automatically distinct from every object that already existed. And nothing is
 ever freed — the CLR's garbage collector means pal-csharp inherits none of PAL's
 deallocation obligations.
+
+A parameter typed at an interface or `object` that every verified caller fills with one
+sealed class can say so with `[Exactly(typeof(C))]` (R27.46):
+
+```csharp
+[Ensures("Result == source.SpecValue")]
+public static int Read([Exactly(typeof(Cell))] object source)
+{
+    Cell? cell = source as Cell;          // the identity: `source` is a Cell
+    return cell == null ? -1 : cell.Get();
+}
+```
+
+Inside, the parameter is a `C`, contracts can name its spec members, and `as`/`is` on it
+are decided by `C`'s type. Each caller must pass a non-null expression of static type `C`
+(PALCS0713 otherwise).
 
 ### Recursive classes
 
@@ -920,6 +934,7 @@ Escape hatches, in increasing order of bluntness.
 | `Pal.InlinePulse("…")` | a verbatim Pulse expression, in specification position |
 | `Pal.GhostStmt("…")` | a verbatim Pulse statement |
 | `[PulseBody("…")]` | a verbatim body for a `[Lemma]` or `[Spec]` |
+| `[Implements("…")]` on a code method | proves its contract of the Pulse term instead of its C# body, which is trusted to agree (PALCS0904) |
 | `[PulseType("…")]` on a struct | maps the C# type onto a Pulse type |
 | `[assembly: IncludePulse("M", "…")]` | a whole verbatim module `M.fst` |
 | `[assembly: IncludePulseFile("M.fst")]` | the same, read from a file beside the source |
@@ -1300,6 +1315,46 @@ private void InsertionBalance(Node current, ref Node parent, Node grandParent,
 loop invariant `Inv` and measure `Measure`, the ghost steps (`Start`, `AtCur`, `Look`,
 `Split`, `AfterBalance`, …) and `Inserted(c, s, k)`, the set `s` with `k` added at its lower
 bound (R27.26).
+
+#### Rings: `[Region(Cyclic = true)]` and `SpecRing`
+
+A circular doubly-linked list keeps its nodes in a cyclic region:
+
+```csharp
+[Invariant("SpecRing.Ring<LinkedListNode<T>, LinkedList<T>>(Pal.Heap<LinkedListNode<T>>(), head, count, @this)")]
+public class LinkedList<T>
+{
+    internal LinkedListNode<T>? head;
+    internal int count;
+    ...
+}
+
+[Region(Cyclic = true)]
+public sealed class LinkedListNode<T>
+{
+    internal LinkedList<T>? list;
+    internal LinkedListNode<T>? next;
+    internal LinkedListNode<T>? prev;
+    internal T item;
+
+    [Model]
+    private (T, LinkedList<T>?) View => (item, list);
+}
+```
+
+* The two self-typed fields are the ring's `next` and `prev` links. The view is a pair:
+  the item, and the owner every node points back to.
+* The owner's invariant may name `@this`.
+* `Pal.Tree` and the other tree intrinsics are refused (PALCS0780).
+* `PalLang.SpecRing` states the shape:
+  * `Ring`, `Shape`, `Nodes`, `Items`, `Item` and `Owner`;
+  * `Pos`, `InsertAt` and `RemoveAt` over sequences;
+  * searches (`IndexOf`, `LastIndexOf`, `IndexFrom`, `LastFrom`);
+  * lemmas called as ghost statements (`Neighbours`, `Ends`, `Member`, `Removed`,
+    `Adopted`, `FindStep`, …).
+
+A method that walks the ring calls `Neighbours` on the current node, to learn its links'
+positions, and `Ends`, to learn that the walk comes back to `head`. See doc/translation.md §31.
 
 ## 10. Generics
 

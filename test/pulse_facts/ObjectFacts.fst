@@ -15,7 +15,7 @@ module ObjectFacts
 open Pulse
 open Pulse.Lib.CSharp.Array
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module B = Pulse.Lib.Box
 open Pulse.Lib.Box { box, (!), (:=) }
 module CA = Pulse.Lib.CSharp.Array

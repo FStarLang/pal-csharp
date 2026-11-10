@@ -11,6 +11,11 @@ val comparer (t: Type) : Type0
 /// `Comparer<T>.Default`.
 val default_comparer (t: Type) : comparer t
 
+/// `Comparer<T>.Default` is never the null reference (R27.56).
+val default_comparer_not_null (t: Type)
+  : Lemma (not (Pulse.Lib.CSharp.Null.is_null (default_comparer t)))
+          [SMTPat (default_comparer t)]
+
 /// `c.Compare(x, y)`, up to sign.
 val compare (#t: Type) (c: comparer t) (x y: t) : int
 

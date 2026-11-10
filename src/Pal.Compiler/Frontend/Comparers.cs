@@ -15,6 +15,9 @@ public static class Sorted
     public const string Order = "Pulse.Lib.CSharp.Order";
     public const string ComparerType = Order + ".comparer";
 
+    /// <summary>R27.47. Reference equality and <c>Equals</c> on comparers.</summary>
+    public const string Identity = "Pulse.Lib.CSharp.ComparerIdentity";
+
     /// <summary><c>System.Collections.Generic.IComparer&lt;T&gt;</c> or <c>Comparer&lt;T&gt;</c>.</summary>
     public static bool IsComparerSymbol(ITypeSymbol? type) =>
         type is INamedTypeSymbol { Name: "IComparer" or "Comparer", Arity: 1 } named &&

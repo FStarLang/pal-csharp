@@ -4,6 +4,12 @@ using System.Collections.Generic;
 // A modeling axiom: the call has no effect and does not throw.
 [assembly: PalLang.SpecBinding("M:System.Collections.Generic.EnumerableHelpers.GetEmptyEnumerator``1", "Pulse.Lib.CSharp.Obj.empty_enumerator")]
 
+// `EqualityComparer<TValue>.Default.Equals` (the explicit `ICollection<KeyValuePair<,>>`
+// members) is the pure `Equality.equals` at the default comparer (doc/translation.md R24.20).
+[assembly: PalLang.SpecBinding("T:System.Collections.Generic.EqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
+[assembly: PalLang.SpecBinding("P:System.Collections.Generic.EqualityComparer`1.Default", "Pulse.Lib.CSharp.Equality.default_comparer")]
+[assembly: PalLang.SpecBinding("M:System.Collections.Generic.EqualityComparer`1.Equals(`0,`0)", "Pulse.Lib.CSharp.Equality.equals")]
+
 namespace System
 {
     // Stands in for System.Collections' generated resource class. Messages are not

@@ -496,3 +496,48 @@ let range_hit_any (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a
           [SMTPat (range_hit c t lo hi la ua); SMTPat (S.strictly_sorted c (keys t))]
   = range_hit_keys c t lo hi la ua;
     any_in_range_from_exists c (keys t) lo hi la ua 0
+
+(* ---------------------------------------------------------------------------------- *)
+(* R32.14. A view's root: the subtree `FindRange` returns.                              *)
+
+/// The subtree rooted at the node the top-down range search stops at (a leaf if none).
+let rec range_root (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Tot (T.tree (a & b)) (decreases t)
+  = match t with
+    | T.Leaf -> T.Leaf
+    | T.Branch l (v, _) r ->
+      if la && O.compare c lo v > 0 then range_root c r lo hi la ua
+      else if ua && O.compare c hi v < 0 then range_root c l lo hi la ua
+      else t
+
+/// The search for an item within the bounds takes the path the range search took: it finds
+/// the item in the view's subtree exactly when it finds it in the whole tree.
+let rec range_root_contains (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool) (x: a)
+  : Lemma (requires in_range c lo hi la ua x)
+          (ensures contains c (range_root c t lo hi la ua) x == contains c t x)
+          (decreases t)
+          [SMTPat (contains c (range_root c t lo hi la ua) x)]
+  = match t with
+    | T.Leaf -> ()
+    | T.Branch l (v, _) r ->
+      if la && O.compare c lo v > 0 then begin
+        O.compare_trans c v lo x;
+        range_root_contains c r lo hi la ua x
+      end
+      else if ua && O.compare c hi v < 0 then begin
+        O.compare_trans c x hi v;
+        range_root_contains c l lo hi la ua x
+      end
+      else ()
+
+/// The range search stops at a node exactly when the view's subtree is not empty.
+let rec range_root_hit (#a #b: Type0) (c: O.comparer a) (t: T.tree (a & b)) (lo hi: a) (la ua: bool)
+  : Lemma (ensures range_hit c t lo hi la ua == T.Branch? (range_root c t lo hi la ua))
+          (decreases t)
+          [SMTPat (range_root c t lo hi la ua)]
+  = match t with
+    | T.Leaf -> ()
+    | T.Branch l (v, _) r ->
+      if la && O.compare c lo v > 0 then range_root_hit c r lo hi la ua
+      else if ua && O.compare c hi v < 0 then range_root_hit c l lo hi la ua
+      else ()

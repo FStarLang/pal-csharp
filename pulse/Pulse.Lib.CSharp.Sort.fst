@@ -8,7 +8,7 @@ module Pulse.Lib.CSharp.Sort
 open Pulse
 open Pulse.Lib.CSharp.Array
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module R = Pulse.Lib.Reference
 module I32 = FStar.Int32
 module Seq = FStar.Seq

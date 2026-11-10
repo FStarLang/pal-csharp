@@ -23,6 +23,13 @@ namespace PalLang;
 public sealed class RequiresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -34,6 +41,13 @@ public sealed class RequiresAttribute(string predicate) : Attribute
 public sealed class EnsuresAttribute(string predicate) : Attribute
 {
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R32.13. When set to a view class (a sealed subclass nested in this member's class),
+    /// the clause belongs to the replica of this member verified at the view, where
+    /// <c>@this</c> is the view, and not to the member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>
@@ -49,6 +63,13 @@ public sealed class ThrowsAttribute(Type exception, string predicate = "true") :
 {
     public Type Exception { get; } = exception;
     public string Predicate { get; } = predicate;
+
+    /// <summary>
+    /// R27.57. When set, the clause belongs to the replica of this inherited member that is
+    /// verified at the subclass <c>At</c> (whose override the body reaches), not to the
+    /// member itself.
+    /// </summary>
+    public Type? At { get; set; }
 }
 
 /// <summary>Shorthand for <c>[Requires(p)] [Ensures(p)]</c>.</summary>
@@ -80,6 +101,24 @@ public sealed class DecreasesAttribute(string measure) : Attribute
 /// <summary>Ownership is taken and not returned.</summary>
 [AttributeUsage(AttributeTargets.Parameter)]
 public sealed class ConsumesAttribute : Attribute;
+
+/// <summary>
+/// R27.46. The argument is not null and its dynamic type is exactly <paramref name="type"/>,
+/// a translated class implementing the parameter's interface type. An open generic
+/// (<c>typeof(C&lt;&gt;)</c>) is constructed at the parameter type's arguments. Every caller
+/// passes an expression whose static type is that class; inside the method, the parameter
+/// is an object of it, and its contracts may name the class's members on it.
+/// </summary>
+/// <remarks>
+/// R32.13. On a method's return value, it names a view (a sealed nested subclass the
+/// containing class borrows into): the method returns an object of exactly that class, and
+/// its result is the view's record.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Parameter | AttributeTargets.ReturnValue)]
+public sealed class ExactlyAttribute(Type type) : Attribute
+{
+    public Type Type { get; } = type;
+}
 
 /// <summary>
 /// Carry <em>no derived ownership</em>.
@@ -119,7 +158,19 @@ public sealed class PlainAttribute : Attribute;
 /// which <c>Pal.Tree</c> maps over the tree a pointer reaches.
 /// </summary>
 [AttributeUsage(AttributeTargets.Class)]
-public sealed class RegionAttribute : Attribute;
+public sealed class RegionAttribute : Attribute
+{
+    /// <summary>
+    /// R31.1. The nodes form rings rather than trees: the two self-typed fields are the
+    /// <em>next</em> and <em>previous</em> links of a circular doubly-linked list
+    /// (<c>LinkedListNode&lt;T&gt;</c>). The owner's invariant does not require its pointers
+    /// to be unshared trees, a read requires only that the node is in the region, and the
+    /// tree intrinsics (<c>Pal.Tree</c>, <c>Pal.WellFormed</c>, <c>Pal.Unshared</c>,
+    /// <c>Pal.Reshaped</c>) are refused (PALCS0780). The shape is the user's to state, through
+    /// <c>SpecRing</c>.
+    /// </summary>
+    public bool Cyclic { get; set; }
+}
 
 /// <summary>
 /// R22.14. Arithmetic that writes this integer field -- or, on a method or constructor, all the integer
@@ -288,6 +339,24 @@ public sealed class RlimitAttribute(int factor) : Attribute
 /// <summary>Admit this method's contract without proof. Reported as a diagnostic.</summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AdmitAttribute : Attribute;
+
+/// <summary>
+/// R20.14. This method is the run-time implementation of a verified Pulse function: its
+/// translation is the given Pulse body (typically one call, <c>$(x)</c> naming the
+/// parameter <c>x</c>), and its contract is checked against it. The C# body is not
+/// translated; it is trusted to behave as the Pulse body does. Reported as a diagnostic.
+/// </summary>
+/// <remarks>
+/// This is how a binder to an external system (a SQL statement, a system call) is tied to
+/// a model of that system: the model function is verified in F*/Pulse, the binder's C#
+/// contract is checked to follow from the model function's, and what remains trusted is
+/// only that the C# body does what the model function does.
+/// </remarks>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class ImplementsAttribute(string body) : Attribute
+{
+    public string Body { get; } = body;
+}
 
 /// <summary>Declare an extra erased parameter, for ghost types with no C# surface.</summary>
 [AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
@@ -463,5 +532,14 @@ public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
 /// <c>Pal.Trace</c>. An argument at this position is a lambda whose first statement is
 /// <c>Pal.Protocol</c>, the invariant it keeps over the trace.
 /// </summary>
+/// <remarks>
+/// R32.11. With <c>Bounded = true</c> the callee takes a bound from the caller,
+/// <c>Pal.CallBound(action)</c>, and calls the delegate fewer times than it. Its contract
+/// requires what it needs of the bound; the lambda passed states the bound in
+/// <c>Pal.Protocol(tr => …, maxCalls)</c> and may assume it.
+/// </remarks>
 [AttributeUsage(AttributeTargets.Parameter)]
-public sealed class CallbackAttribute : Attribute;
+public sealed class CallbackAttribute : Attribute
+{
+    public bool Bounded { get; set; }
+}

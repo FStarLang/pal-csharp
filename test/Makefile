@@ -18,6 +18,7 @@ all: $(TESTS) lint
 # contributor sees when they open the file.
 .PHONY: lint
 lint: $(TESTS)
+	@python3 trust-boundary.py
 	@bash no-example-names.sh
 	@bash diagnostic-ids.sh
 	@bash provenance-lint.sh
@@ -37,6 +38,8 @@ configs:
 .PHONY: $(TESTS)
 $(TESTS):
 	@$(MAKE) -C $@
+
+runtime_comparison: shape_hierarchy
 
 clean:
 	@for d in $(TESTS); do $(MAKE) -C $$d clean; done

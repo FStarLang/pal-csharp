@@ -45,6 +45,7 @@ public static class Names
     /// <summary>R27.39. A lifted lambda's protocol predicate, and its callback.</summary>
     public static string LambdaProtocol(string name) => "protocol_" + name;
     public static string LambdaCallback(string name) => "callback_" + name;
+    public static string LambdaBound(string name) => "bound_" + name;
     public static string SpecModule(string name) => "Let_" + name;
 
     // R3.4. A struct's field names are prefixed and always used module-qualified, so a
@@ -97,8 +98,13 @@ public static class Names
 
     /// <summary>R27.38. The pure half of a class's invariant: a record, its heaps, its model.</summary>
     public static string ClassAbs(string name) => "class_" + name + "__abs";
+    public static string ClassAbsRep(string name) => "class_" + name + "__abs_rep";
+    public static string ClassAbsModel(string name) => "class_" + name + "__abs_model";
     public static string ClassToHeap(string name) => "class_" + name + "__to_heap";
     public static string ClassOfHeap(string name) => "class_" + name + "__of_heap";
+
+    /// <summary>R27.50. Two objects held whole at once are distinct.</summary>
+    public static string ClassDistinct(string name) => "class_" + name + "__distinct";
 
     // R3.10d. The three ghost lemmas that make an object shareable. They are per class,
     // not once in the support library, because their proofs recurse into the class's own
@@ -453,7 +459,7 @@ public static class Types
         // R17.1. A span is a `Pulse.Lib.Slice.slice`, which is a first-class value
         // with a length and a `pts_to` -- an array-shaped slot that need not be a
         // whole array.
-        IrSpanType s => $"S.slice {Atom(s.Element)}",
+        IrSpanType s => $"Span.span {Atom(s.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments),
@@ -504,7 +510,7 @@ public static class Types
     /// A nullary application is left bare, so every pre-M9 emission is unchanged.
     /// </summary>
     public static string Applied(string head, ImmutableArray<IrType> args) =>
-        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Render))})";
+        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Atom))})";
 
     /// <summary>The literal syntax for a value of a machine-integer type.</summary>
     /// <summary>R20.3. An F* string literal. F* strings are UTF-8; only the escapes it reads are used.</summary>

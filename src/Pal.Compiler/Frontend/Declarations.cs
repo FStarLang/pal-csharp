@@ -117,7 +117,17 @@ public static class Declarations
     // in place is verified member by member, and an unannotated member is outside the scope.
     private static bool InAnnotatedScope(IMethodSymbol method, WellKnown known) =>
         IsAnnotated(method, known)
-        || method.AssociatedSymbol is { } property && IsAnnotated(property, known);
+        || method.AssociatedSymbol is { } property && IsAnnotated(property, known)
+        // R32.13. A view's override of a member of its base with a contract at the view
+        // (`At`) is checked against it.
+        || method.IsOverride && Borrowing.ViewBase(method.ContainingType, known) is not null &&
+           method.OverriddenMethod is { } o && HasViewContract(o, method.ContainingType);
+
+    /// <summary>R32.13. Whether <paramref name="method"/> (or its property) has a contract clause <c>At</c> <paramref name="view"/>.</summary>
+    private static bool HasViewContract(IMethodSymbol method, INamedTypeSymbol view) =>
+        method.GetAttributes().Concat(method.AssociatedSymbol?.GetAttributes() ?? [])
+            .Any(a => a.NamedArguments.Any(n => n.Key == "At" && n.Value.Value is INamedTypeSymbol at &&
+                SymbolEqualityComparer.Default.Equals(at.OriginalDefinition, view.OriginalDefinition)));
 
     /// <summary>
     /// R4.11. Whether a method leaves its receiver's model unchanged, decided from the
@@ -150,6 +160,11 @@ public static class Declarations
         // virtual method read-only — including the mutating ones.
         if (method.IsAbstract)
             return method.GetAttributes().Any(a => a.AttributeClass?.Name == "FracAttribute");
+        // R32.2. So does it on a method with a body, as the method's own signature has it
+        // (FrontendPass): R4.11c has F* check that body read-only.
+        if (method.MethodKind == MethodKind.Ordinary &&
+            method.OriginalDefinition.GetAttributes().Any(a => a.AttributeClass?.Name == "FracAttribute"))
+            return true;
 
         // A method already on the stack is one this analysis cannot finish, and an
         // unfinished answer is a mutating one.
@@ -203,6 +218,21 @@ public static class Declarations
                 model.GetSymbolInfo(RootOf(target)).Symbol is IFieldSymbol { IsStatic: false })
                 return true;
 
+            // R33.10. An element written through a local array may be one of a field's
+            // (R24.19's `T[] nodes = _nodes;`), unless every value the local takes is fresh.
+            if (target is ElementAccessExpressionSyntax &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { Type: IArrayTypeSymbol } arrayLocal &&
+                !AlwaysFresh(arrayLocal, syntax, model))
+                return true;
+
+            // R33.14. A write through a `ref` local writes what it aliases, which may be an
+            // element of a field's array (R24.8, `ref int bucket = ref GetBucket(h)`).
+            // Rebinding it (`entry = ref entries[i]`) writes nothing.
+            if (target is not null &&
+                node is not AssignmentExpressionSyntax { Right: RefExpressionSyntax } &&
+                model.GetSymbolInfo(RootOf(target)).Symbol is ILocalSymbol { RefKind: RefKind.Ref })
+                return true;
+
             // R27.16. An auto-property of a class is a field (R27.3), however it is written.
             if (target is not null &&
                 model.GetSymbolInfo(RootOf(target)).Symbol is IPropertySymbol
@@ -224,10 +254,19 @@ public static class Declarations
                 if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol held &&
                     Borrowing.IsMember(held, known) &&
                     call.Expression is MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax heldLocal } &&
-                    model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol)
+                    model.GetSymbolInfo(heldLocal).Symbol is ILocalSymbol &&
+                    // R32.13. Unless it is a view's member that writes the object it borrows.
+                    !(Borrowing.IsView(held.ContainingType, known) &&
+                      held.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } heldBody &&
+                      Borrowing.WritesOwner(heldBody, model.Compilation.GetSemanticModel(heldBody.SyntaxTree),
+                          held.ContainingType.OriginalDefinition, known)))
                     continue;
+                // R33.14. A `[SpecBinding]`-bound library method (a comparer's `Equals`) is an
+                // F* term, which cannot reach this object's state except through an array
+                // argument, checked below.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
                         { IsStatic: false, MethodKind: MethodKind.Ordinary } callee &&
+                    known?.Binding(callee) is null &&
                     !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 
@@ -242,13 +281,55 @@ public static class Declarations
                         ContainingType: { Name: "Array", ContainingNamespace.Name: "System" },
                     })
                     continue;
+                // R33.14. A specification intrinsic (`Pal.Contents(_a)`), and a `[Spec]` or
+                // `[Lemma]` member, is ghost: it reads the array it is handed.
+                if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol ghost &&
+                    (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
+                     Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
+                    continue;
                 foreach (var argument in call.ArgumentList.Arguments)
+                {
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
                         return true;
+                    // R33.24. A `ref` argument the callee may write through: a `ref` local
+                    // (R33.16's `ref entry` into a field's array) or a field itself.
+                    if (argument.RefKindKeyword.RawKind is (int)SyntaxKind.RefKeyword or (int)SyntaxKind.OutKeyword &&
+                        model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is ILocalSymbol { RefKind: RefKind.Ref } or IFieldSymbol { IsStatic: false })
+                        return true;
+                }
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// R33.10. Whether every value <paramref name="local"/> takes in <paramref name="body"/>
+    /// is a newly created array, so that writing its elements writes no object's field.
+    /// </summary>
+    private static bool AlwaysFresh(ILocalSymbol local, SyntaxNode body, SemanticModel model)
+    {
+        static bool Fresh(ExpressionSyntax? e) =>
+            e is ArrayCreationExpressionSyntax or ImplicitArrayCreationExpressionSyntax or CollectionExpressionSyntax;
+        if (local.DeclaringSyntaxReferences is not [var decl] || decl.GetSyntax() is not VariableDeclaratorSyntax ||
+            local.IsRef)
+            return false;
+        foreach (var node in body.DescendantNodes())
+        {
+            if (node is VariableDeclaratorSyntax v &&
+                SymbolEqualityComparer.Default.Equals(model.GetDeclaredSymbol(v), local) &&
+                !Fresh(v.Initializer?.Value))
+                return false;
+            if (node is AssignmentExpressionSyntax a &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, local) &&
+                !(a.IsKind(SyntaxKind.SimpleAssignmentExpression) && Fresh(a.Right)))
+                return false;
+            if (node is ArgumentSyntax { RefKindKeyword.RawKind: not 0 } arg &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(arg.Expression).Symbol, local))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -348,7 +429,7 @@ public static class Declarations
         var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         foreach (var m in owner.GetMembers().OfType<IMethodSymbol>())
         {
-            if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || Has(m, known.AdmitAttribute))
+            if (!IsReceiverFree(m, known) || !IsAnnotated(m, known) || BodyUntranslated(m, known))
                 continue;
             foreach (var reference in m.DeclaringSyntaxReferences)
             {
@@ -412,7 +493,7 @@ public static class Declarations
     {
         if (p.RefKind != RefKind.None || known.SpecTypeName(p.Type) is null ||
             p.ContainingSymbol is not IMethodSymbol method ||
-            !IsAnnotated(method, known) || Has(method, known.AdmitAttribute))
+            !IsAnnotated(method, known) || BodyUntranslated(method, known))
             return false;
         if (written.TryGetValue(p, out var box)) return box.Value;
 
@@ -466,6 +547,13 @@ public static class Declarations
         IsWritten(target, model.Compilation, known)
             ? target
             : null;
+
+    /// <summary>
+    /// R20.2, R20.14. Whether a method's C# body is never translated: an <c>[Admit]</c>ted
+    /// method's, and an <c>[Implements]</c> method's, whose translation is its Pulse body.
+    /// </summary>
+    public static bool BodyUntranslated(ISymbol method, WellKnown known) =>
+        Has(method, known.AdmitAttribute) || Has(method, known.ImplementsAttribute);
 
     public static bool IsAnnotated(ISymbol symbol, WellKnown known) =>
         symbol.GetAttributes().Any(a =>

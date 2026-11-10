@@ -38,7 +38,7 @@ open Pulse
 open Pulse.Lib.ForEvery
 open Pulse.Lib.ForEvery.Range
 
-module A = Pulse.Lib.Array
+module A = Pulse.Lib.CSharp.Array
 module B = Pulse.Lib.Box
 module CA = Pulse.Lib.CSharp.Array
 module Dn = FStar.Dyn

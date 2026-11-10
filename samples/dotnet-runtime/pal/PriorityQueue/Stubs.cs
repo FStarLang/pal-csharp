@@ -2,6 +2,10 @@
 // A modeling axiom: the call has no effect and does not throw.
 [assembly: PalLang.SpecBinding("M:System.Collections.Generic.EnumerableHelpers.GetEmptyEnumerator``1", "Pulse.Lib.CSharp.Obj.empty_enumerator")]
 
+// `typeof(TPriority).IsValueType` (InitializeComparer) and the equality comparers (FindIndex) are bound in ../HashCommon/Bindings.cs.
+
+[assembly: PalLang.IncludePulseFile("PriorityQueueRemove.fst")]
+
 namespace System
 {
     // Stands in for System.Collections' resource strings.

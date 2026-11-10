@@ -26,6 +26,29 @@ public sealed partial class ExprLowerer
 
     private static bool IsTrue(IrExpr e) => e is IrLiteral { Value: true };
 
+    private static IrExpr False(IrLoc loc) => new IrLiteral(loc, false) { Type = Bool };
+
+    private static bool IsFalse(IrExpr e) => e is IrLiteral { Value: false };
+
+    /// <summary>R27.1. A translated class all of whose translated objects are of it exactly.</summary>
+    private INamedTypeSymbol? ExactClassType(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Class, IsAbstract: false } c && known.HasModel(c) &&
+        (c.IsSealed || FrontendPass.EffectivelySealed(c.OriginalDefinition, known))
+            ? c : null;
+
+    /// <summary>
+    /// R27.46. <c>e is D</c> with a type on the right. It is the type pattern <c>e is D</c>
+    /// written without the pattern syntax.
+    /// </summary>
+    private IrExpr LowerIsType(BinaryExpressionSyntax node, IrLoc loc)
+    {
+        if (model.GetTypeInfo(node.Right).Type is not { } target) return Unsupported(node, loc);
+        var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        var subject = PatternSubject(node.Left, prelude);
+        var cond = TypeTest(node, target, subject, out _);
+        return WithPrelude(loc, prelude, cond with { Type = Bool });
+    }
+
     private static IrExpr Conj(IrLoc loc, IrExpr a, IrExpr b) =>
         IsTrue(a) ? b : IsTrue(b) ? a : new IrBinary(loc, BinOp.And, a, b) { Type = Bool };
 
@@ -48,6 +71,10 @@ public sealed partial class ExprLowerer
 
         var value = Lower(node);
         var type = model.GetTypeInfo(node).Type;
+        // R27.46. An `[Exactly]` parameter is an object of its class.
+        if (model.GetSymbolInfo(node).Symbol is IParameterSymbol ep &&
+            FrontendPass.ExactParameter(ep, model.Compilation, known) is { } exact)
+            type = exact;
         if (SpecPosition || !HasEffect(value)) return Subject.Of(value, type);
 
         var loc = value.Loc;
@@ -112,12 +139,26 @@ public sealed partial class ExprLowerer
     /// <summary>R21.6. <c>e as C</c>: <c>e</c> when it is a <c>C</c>, and <c>null</c> otherwise.</summary>
     private IrExpr LowerAs(BinaryExpressionSyntax node, IrLoc loc)
     {
-        if (model.GetTypeInfo(node.Right).Type is not { } target ||
-            known.MapType(model.GetTypeInfo(node).Type) is not IrOptionType result)
-            return Unsupported(node, loc);
+        if (model.GetTypeInfo(node.Right).Type is not { } target) return Unsupported(node, loc);
+        var mapped = known.MapType(model.GetTypeInfo(node).Type);
         var prelude = ImmutableArray.CreateBuilder<IrStmt>();
+        // R27.46. On an object of a class translated at its exact type, `as` is decided
+        // statically: the object, or `null`.
+        if (mapped is IrClassType { Nullable: true } nullableClass)
+        {
+            var exactSubject = PatternSubject(node.Left, prelude);
+            if (ExactClassType(exactSubject.Type) is null) return Unsupported(node, loc);
+            var test = TypeTest(node, target, exactSubject, out var same);
+            return WithPrelude(loc, prelude, IsFalse(test)
+                ? new IrNull(loc) { Type = nullableClass }
+                : same with { Type = nullableClass });
+        }
+        if (mapped is not IrOptionType result) return Unsupported(node, loc);
         var subject = PatternSubject(node.Left, prelude);
         var cond = TypeTest(node, target, subject, out var narrowed);
+        if (IsFalse(cond)) return WithPrelude(loc, prelude, new IrNull(loc) { Type = result });
+        if (IsTrue(cond) && narrowed.Type is not IrOptionType && result.Inner.Equals(narrowed.Type))
+            return WithPrelude(loc, prelude, new IrOptionOp(loc, OptionOpKind.Some, narrowed) { Type = result });
         var conditional = new IrConditional(loc, cond,
             new IrOptionOp(loc, OptionOpKind.Some, narrowed) { Type = result },
             new IrNull(loc) { Type = result }) { Type = result };
@@ -278,6 +319,9 @@ public sealed partial class ExprLowerer
                 ? new IrUnary(loc, UnOp.Not, new IrOptionOp(loc, OptionOpKind.HasValue, value) { Type = Bool }) { Type = Bool }
                 // R25.4, R24.23. A type parameter may be instantiated at a reference type.
                 : Sorted.HasOpaqueNull(value.Type) ? Sorted.IsNull(loc, value)
+                // R33.6. `a is null` on an array is R24.7's `a == null`.
+                : value.Type is IrArrayType
+                ? new IrBinary(loc, BinOp.Eq, value, new IrNull(loc) { Type = value.Type }) { Type = Bool }
                 : new IrLiteral(loc, false) { Type = Bool };
 
         // R21.8. A constant of a `[SpecType]` enum is a constructor: its discriminator.
@@ -308,6 +352,13 @@ public sealed partial class ExprLowerer
 
         if (known.CaseConstructor(target) is { } ctor)
             return Conj(loc, cond, new IrSpecOp(loc, ctor + "?", [narrowed]) { Type = Bool });
+
+        // R27.46. A translated class whose objects all have it as their dynamic type (R27.1)
+        // is a `D` exactly when the class converts to `D`; the test is then the null test.
+        if (ExactClassType(subject.Type) is { } exact)
+            return model.Compilation.ClassifyCommonConversion(exact, target) is { IsImplicit: true, IsReference: true } or { IsIdentity: true }
+                ? cond
+                : False(loc);
 
         diagnostics.Error("PALCS0627", loc,
             $"A test that a `{subject.Type}` is a `{target}`. A type pattern translates when " +

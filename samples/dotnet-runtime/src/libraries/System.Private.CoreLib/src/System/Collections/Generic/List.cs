@@ -437,6 +437,9 @@ namespace System.Collections.Generic
             return false;
         }
 
+        [Throws(typeof(ArgumentNullException), "converter == null")]
+        [Ensures("@this.Items == Pal.Old(@this.Items)")]
+        [Ensures("Result.Items == Pal.ConvertAll(@this.Items, converter)")]
         public List<TOutput> ConvertAll<TOutput>(Converter<T, TOutput> converter)
         {
             if (converter == null)
@@ -447,6 +450,11 @@ namespace System.Collections.Generic
             List<TOutput> list = new List<TOutput>(_size);
             for (int i = 0; i < _size; i++)
             {
+                Pal.Invariant(0 <= i && i <= _size && _size <= _items.Length && _size <= list.SpecCapacity);
+                Pal.Invariant(Pal.Slice(Pal.Contents(_items), 0, _size) == Pal.Old(this.Items));
+                Pal.Invariant(list.SpecStore.Length == list.SpecCapacity);
+                Pal.Invariant(Pal.Forall((SpecInt k) =>
+                    Pal.Implies(0 <= k && k < i, Pal.Same(list.SpecStore[k], converter(Pal.Contents(_items)[k])))));
                 list._items[i] = converter(_items[i]);
             }
             list._size = _size;
@@ -862,6 +870,10 @@ namespace System.Collections.Generic
 
         IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<T>)this).GetEnumerator();
 
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || count < 0")]
+        [Throws(typeof(ArgumentException), "@this.SpecCount - index < count")]
+        [Ensures("0 <= index && 0 <= count && index + count <= @this.SpecCount")]
+        [Ensures("Result.Items == Pal.Slice(@this.Items, index, index + count)")]
         public List<T> GetRange(int index, int count)
         {
             if (index < 0)
@@ -897,6 +909,10 @@ namespace System.Collections.Generic
         /// <paramref name="length" /> is less than 0.
         /// </exception>
         /// <exception cref="ArgumentException"><paramref name="start" /> and <paramref name="length" /> do not denote a valid range of elements in the <see cref="List{T}" />.</exception>
+        [Throws(typeof(ArgumentOutOfRangeException), "start < 0 || length < 0")]
+        [Throws(typeof(ArgumentException), "@this.SpecCount - start < length")]
+        [Ensures("0 <= start && 0 <= length && start + length <= @this.SpecCount")]
+        [Ensures("Result.Items == Pal.Slice(@this.Items, start, start + length)")]
         public List<T> Slice(int start, int length) => GetRange(start, length);
 
         // Returns the index of the first occurrence of a given value in a range of

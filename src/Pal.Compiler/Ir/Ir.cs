@@ -282,6 +282,16 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// <summary>R27.17. The operation is a constant of a <c>[SpecType]</c> enum (R21.8).</summary>
     public bool EnumCase { get; init; }
 
+    /// <summary>R27.22. The operation is a <c>[RegionOp]</c>, over a region's heap.</summary>
+    public bool Region { get; init; }
+
+    /// <summary>
+    /// R33.4. The operation is a bound static member of a machine-integer type
+    /// (<c>IntPtr.Size</c>): its value is a machine integer, which a contract reads through
+    /// <c>.v</c>.
+    /// </summary>
+    public bool MachineValue { get; init; }
+
     /// <summary>
     /// R20.10. The operation models a BCL member over program values, so its arguments
     /// are at their machine types in a contract too -- `set.Contains(i)` asks about the
@@ -352,7 +362,11 @@ public sealed record IrSpanCreate(
     IrExpr? Length) : IrExpr(Loc);
 
 /// <summary><c>x.f</c> on a struct.</summary>
-public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc);
+public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc)
+{
+    /// <summary>R27.44. A field of another object of the method's own class.</summary>
+    public bool Peer { get; init; }
+}
 
 /// <summary>
 /// R3.9c. A <c>[Spec]</c> member of a class read off an object: <c>@this.Count</c>.
@@ -419,6 +433,12 @@ public sealed record IrCall(IrLoc Loc, string Callee, ImmutableArray<IrExpr> Arg
     /// </summary>
     public bool HasReceiver { get; init; }
 
+    /// <summary>
+    /// R27.45. The callee is a method (not a constructor) none of whose parameters is
+    /// <c>[Consumes]</c>: every object argument's invariant comes back from the call.
+    /// </summary>
+    public bool KeepsArguments { get; init; }
+
     /// <summary>Resolved by Collect; tells Emit which module the callee lives in.</summary>
     public CalleeKind Kind { get; init; } = CalleeKind.Method;
 
@@ -470,19 +490,30 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 {
     public ImmutableArray<IrType> TypeArguments { get; init; } = [];
     public IrCallback Callback { get; init; } = null!;
+
+    /// <summary>R32.11. Whether the lambda's protocol states a bound on its calls.</summary>
+    public bool Bounded { get; init; }
 }
 
 /// <summary>
 /// R27.39. What a <c>[Callback]</c> delegate is called with and returns: a pointer into
 /// <c>Region</c>, recorded in the trace by its <c>[Model]</c> view <c>View</c>.
 /// </summary>
-public sealed record IrCallback(IrClassType Region, IrType View, IrType Result);
+public sealed record IrCallback(IrClassType Region, IrType View, IrType Result)
+{
+    /// <summary>R32.11. <c>[Callback(Bounded = true)]</c>: the caller passes a bound on the calls.</summary>
+    public bool Bounded { get; init; }
+}
 
 /// <summary>
 /// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
 /// first clause of its contract each way is the protocol.
 /// </summary>
-public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback);
+public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback)
+{
+    /// <summary>R32.11. The bound on the calls the protocol states, over the read-only captures.</summary>
+    public IrExpr? Bound { get; init; }
+}
 
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);
@@ -604,6 +635,9 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     /// holds it, the local the object is held in, and its class.
     /// </summary>
     public ImmutableArray<(string Field, string Local, IrClassType Type)> Owned { get; init; } = [];
+
+    /// <summary>R27.49. For a borrowing struct held of another object of the class: that object's parameter.</summary>
+    public string? HeldOwner { get; init; }
 }
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
@@ -727,8 +761,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-/// <summary><c>DebugAssert</c> is R22.19's <c>Debug.Assert(c)</c>: <c>Prop</c> is an executable expression.</summary>
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, DebugAssert, Let }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
@@ -818,6 +851,11 @@ public sealed record IrMethod(
     /// <summary>R27.39. Set on a lambda lifted from a <c>[Callback]</c> argument.</summary>
     public IrLambdaInfo? Lambda { get; init; }
     public string? PulseBody { get; init; }
+    /// <summary>
+    /// R20.14. <see cref="PulseBody"/> came from <c>[Implements]</c>: it is the method's
+    /// translation, and the C# body (not lowered) is trusted to behave as it does.
+    /// </summary>
+    public bool Implements { get; init; }
 
     /// <summary>
     /// R19.2. The method's <c>[Throws]</c> clauses. Empty means it must not throw: no
@@ -825,6 +863,12 @@ public sealed record IrMethod(
     /// could propagate to be proved impossible.
     /// </summary>
     public ImmutableArray<IrThrows> Throws { get; init; } = [];
+
+    /// <summary>
+    /// R27.57. <c>[Throws(..., At = typeof(S))]</c> clauses: each belongs to the replica of
+    /// this method verified at the representation-sharing subclass <c>S</c>, by class name.
+    /// </summary>
+    public ImmutableArray<(string At, IrThrows Throws)> AtThrows { get; init; } = [];
 
     /// <summary>
     /// R14.2. The method's type parameters, in declaration order. They become explicit
@@ -1048,6 +1092,12 @@ public sealed record IrClass(
     /// first two nullable fields of the class's own type are the children.
     /// </summary>
     public bool IsRegion { get; init; }
+
+    /// <summary>
+    /// R31.1. <c>[Region(Cyclic = true)]</c>: the two self-typed fields are ring links, not
+    /// children, so no tree shape is derived for the region.
+    /// </summary>
+    public bool IsCyclic { get; init; }
 
     /// <summary>
     /// R9.1. The translated class this one derives from, if any. Non-null and

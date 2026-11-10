@@ -14,6 +14,14 @@ public static class Region
     /// <summary>The spec-scope name of the heap a method holds for a region class.</summary>
     public static string HeapName(string regionClass) => "$heap_" + regionClass;
 
+    /// <summary>
+    /// R27.49. The spec-scope name of the heap of another owner <paramref name="owner"/>, held
+    /// at its heaps because the method holds a borrowing struct of it; <see cref="HeapName"/>
+    /// for the receiver.
+    /// </summary>
+    public static string HeapNameOf(string regionClass, string owner) =>
+        owner == "this" ? HeapName(regionClass) : HeapName(regionClass) + "$" + owner;
+
     /// <summary>The F* binder an owner's invariant gives that heap.</summary>
     public static string HeapBinder(string regionClass) => "heap_" + regionClass;
 

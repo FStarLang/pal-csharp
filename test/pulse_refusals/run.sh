@@ -69,9 +69,10 @@ run_case() {
     fi
 
     # Translation must be clean. A case that `palcs` refuses belongs in test/diagnostics,
-    # and one that translates with a warning is not demonstrating what it claims to.
+    # and one that translates with a warning is not demonstrating what it claims to. The
+    # exception is PALCS0904, the trust notice every `[Implements]` method carries (R20.14).
     translated=$("$PALCS" -o "$work/out" "$work/src/$name.cs" 2>&1)
-    if printf '%s' "$translated" | grep -qE "PALCS[0-9]{4}"; then
+    if printf '%s' "$translated" | grep -E "PALCS[0-9]{4}" | grep -qv "PALCS0904"; then
         echo "pulse-refusals: $name was refused by palcs; it is a test/diagnostics case"
         printf '%s\n' "$translated" | sed 's/^/  /'
         return 1

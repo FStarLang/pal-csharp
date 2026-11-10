@@ -5,7 +5,7 @@ namespace PalLang;
 
 /// <summary>
 /// R27.30. Top-down red-black removal over the heap of a region whose class
-/// <typeparamref name="K"/> (each method's first type argument) is a node of a red-black tree
+/// <c>K</c> (each method's first type argument) is a node of a red-black tree
 /// viewed as <c>(T, bool)</c>: the loop invariant of <c>SortedSet&lt;T&gt;.DoRemove</c>, what
 /// <c>ReplaceNode</c> does, and the ghost steps between them.
 /// <c>Pulse.Lib.CSharp.TopDownRemoveHeap</c>; every member is a <see cref="RegionOpAttribute"/>
