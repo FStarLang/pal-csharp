@@ -9889,6 +9889,24 @@ the sequences before and after.
   search loops (R30.39) to 9:54 and 10.8 GB; a second split before the loops, with
   `Search`, `Wf`, `Mem` and `Overwritten` opaque (R30.40), to 7:22 and 10.6 GB at the
   default rlimit (`[Rlimit(8)]` dropped; `/usr/bin/time -v`, one module, `-j2`).
+  CI (16 GB) runs F* with `OCAMLRUNPARAM=o=20`, a smaller GC space overhead, under which
+  `TryInsert` takes 6:50 and 4.5 GB. Three members were still beyond that.
+  `HashSet.AddIfNotPresent` was 12 copies of its insertion tail (2216 lines; 9:11 and
+  18.1 GB, 12:08 and 8.2 GB at `o=20`). It now has `TryInsert`'s shape: joins after
+  `Initialize`, the search, `Resize` and the free-list `if`, a split after the search,
+  `[OpaqueSpecs("Search", "Wf", "Mem")]`, and a `HashCodeOf` spec naming the stored hash
+  code. It is 683 lines, 1:55 and 2.5 GB (2:11 and 1.2 GB at `o=20`). Each
+  `Dictionary.Remove` took over 30 minutes and 29 GB. They are now
+  `[OpaqueSpecs("SearchLast", "Wf", "Mem", "RemovedAny", "Removed")]`, with `Wf` an
+  invariant of their loops and `SearchNext` ensuring the bound on `last` that unfolding
+  `SearchLast` used to supply. A join after the hit `if` of each loop stops the loop's
+  tail from being checked a second time under the `return`'s guard; that copy alone took
+  over ten minutes. A join stating `RemoveWrites` after each
+  `IsReferenceOrContainsReferences` `if` stops the rest of the hit arm from being checked
+  once per combination of arms, which was two thirds of what remained. `Remove(key)` is
+  now 5:55 and 4.0 GB (6:30 and 2.5 GB at `o=20`), and `Remove(key, out value)` 6:45 and
+  4.6 GB (7:25 and 2.9 GB at `o=20`). With `Mem` opaque, the `_buckets == null` path
+  calls `NotMemNone`: no key is a member when there are no slots.
 * **Long division.** `(uint)hashCode % buckets.Length` is computed in `long`; that the
   quotient fits is nonlinear, so `TryInsert` calls a `DivFits` lemma (proved in
   `DictionaryChain.div_fits` with `FStar.Math.Lemmas`) before the bucket lookup after `Resize`.
