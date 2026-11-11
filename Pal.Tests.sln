@@ -140,6 +140,10 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "tree_cursor", "test/tree_cu
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "type_param", "test/type_param/type_param.csproj", "{1A1C2898-C84D-F044-659D-C170D9A2C260}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "unit_client", "test/unit_client/unit_client.csproj", "{767DF8F3-23F0-CD22-F712-65EAB341BBB5}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "unit_lib", "test/unit_lib/unit_lib.csproj", "{680B60AE-29C2-7413-152A-427D45F1EE4E}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "user_spec_type", "test/user_spec_type/user_spec_type.csproj", "{DE7EBD40-1022-A133-E06C-5AE48AA5610A}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "views2", "test/views2/views2.csproj", "{42F65293-E082-BE5E-2A24-9DB2C399C611}"
@@ -434,6 +438,14 @@ Global
 		{1A1C2898-C84D-F044-659D-C170D9A2C260}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1A1C2898-C84D-F044-659D-C170D9A2C260}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{1A1C2898-C84D-F044-659D-C170D9A2C260}.Release|Any CPU.Build.0 = Release|Any CPU
+		{767DF8F3-23F0-CD22-F712-65EAB341BBB5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{767DF8F3-23F0-CD22-F712-65EAB341BBB5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{767DF8F3-23F0-CD22-F712-65EAB341BBB5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{767DF8F3-23F0-CD22-F712-65EAB341BBB5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{680B60AE-29C2-7413-152A-427D45F1EE4E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{680B60AE-29C2-7413-152A-427D45F1EE4E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{680B60AE-29C2-7413-152A-427D45F1EE4E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{680B60AE-29C2-7413-152A-427D45F1EE4E}.Release|Any CPU.Build.0 = Release|Any CPU
 		{DE7EBD40-1022-A133-E06C-5AE48AA5610A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{DE7EBD40-1022-A133-E06C-5AE48AA5610A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DE7EBD40-1022-A133-E06C-5AE48AA5610A}.Release|Any CPU.ActiveCfg = Release|Any CPU
