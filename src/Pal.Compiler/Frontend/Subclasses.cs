@@ -117,8 +117,8 @@ internal static class Subclasses
         if (m.AssociatedSymbol is { } a) refs = refs.Concat(a.DeclaringSyntaxReferences);
         foreach (var r in refs)
         {
-            if (!compilation.ContainsSyntaxTree(r.SyntaxTree)) continue;
-            var model = compilation.GetSemanticModel(r.SyntaxTree);
+            if (!compilation.Owns(r.SyntaxTree)) continue;
+            var model = compilation.Model(r.SyntaxTree);
             foreach (var node in r.GetSyntax().DescendantNodesAndSelf())
             {
                 foreach (var s in Named(node, model))
@@ -132,7 +132,7 @@ internal static class Subclasses
     {
         switch (node)
         {
-            case ForEachStatementSyntax fe:
+            case CommonForEachStatementSyntax fe:
                 var info = model.GetForEachStatementInfo(fe);
                 if (info.GetEnumeratorMethod is { } ge) yield return ge;
                 if (info.MoveNextMethod is { } mn) yield return mn;
@@ -227,8 +227,8 @@ internal static class Subclasses
 
         foreach (var (body, symbol) in translated)
         {
-            if (!compilation.ContainsSyntaxTree(body.SyntaxTree)) continue;
-            var model = compilation.GetSemanticModel(body.SyntaxTree);
+            if (!compilation.Owns(body.SyntaxTree)) continue;
+            var model = compilation.Model(body.SyntaxTree);
             if (IsAlias(symbol.ContainingType, known) && !symbol.IsStatic)
                 Runs(symbol, symbol.ContainingType);
             foreach (var node in body.DescendantNodesAndSelf())
@@ -277,8 +277,8 @@ internal static class Subclasses
             var (m, s) = work.Pop();
             foreach (var r in m.DeclaringSyntaxReferences.Concat(m.AssociatedSymbol?.DeclaringSyntaxReferences ?? []))
             {
-                if (!compilation.ContainsSyntaxTree(r.SyntaxTree)) continue;
-                var model = compilation.GetSemanticModel(r.SyntaxTree);
+                if (!compilation.Owns(r.SyntaxTree)) continue;
+                var model = compilation.Model(r.SyntaxTree);
                 foreach (var node in r.GetSyntax().DescendantNodesAndSelf())
                 {
                     if (node is InvocationExpressionSyntax inv && model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false } c &&

@@ -126,6 +126,8 @@ internal static class ThrowHelper
     internal static void ThrowWrongKeyTypeArgumentException<T>(T key, Type targetType) => throw new ArgumentException();
 
     [DoesNotReturn]
+    [Throws(typeof(NotSupportedException))]
+    [Ensures("false")]
     internal static void ThrowNotSupportedException(ExceptionResource resource) => throw new NotSupportedException();
 
     [DoesNotReturn]
@@ -149,6 +151,6 @@ internal enum ExceptionResource
     Arg_ArrayPlusOffTooSmall, Arg_NonZeroLowerBound, InvalidOperation_IncompatibleComparer,
     NotSupported_KeyCollectionSet, NotSupported_ValueCollectionSet, Serialization_MissingKeys,
     Serialization_NullKey,
-    // sortedset family (Queue<T> in the SortedSet harness)
+    // Queue<T>
     ArgumentOutOfRange_IndexMustBeLessOrEqual,
 }

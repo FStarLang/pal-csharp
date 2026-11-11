@@ -117,6 +117,7 @@ Both forms lower to the same thing. Mix them freely.
 | `ConvertAll(s, f)` | `s` mapped through the `Converter<T, TOutput>` `f` (R26.3) |
 | `Permutation(s, t)` | `t` is a rearrangement of `s`, by an explicit bijection (R26.7) |
 | `SortedRange(s0, s1, i, n, c)` | `s1` is `s0` with `[i, i+n)` sorted under `c ?? Comparer<T>.Default`: what `Array.Sort(a, i, n, c)` does (R26.7) |
+| `SortedRangeBy(s0, s1, i, n, comparison)` | `SortedRange` with a `Comparison<T>` (R34.16) |
 | `IsHeap(s, c)`, `HeapMin(s, x, c)` | `s` of `(element, priority)` pairs is a 4-ary min-heap under `c`; no node of `s` is below `x` (R26.10) |
 | `HeapUp`, `HeapDown`, `HeapUpStop`, `HeapDownStop`, `HeapMinChild` | sift-up/sift-down loop invariants and exit conditions (R26.10) |
 | `Tree<V>(x)`, `WellFormed(x)` | the `SpecTree<V>` of views a `[Region]` pointer reaches; every path from it ends at `null` (R27.7) |
@@ -156,6 +157,8 @@ while (lo < hi && !found)
 | `Pal.Decreases(m)` | the termination measure |
 | `Pal.Broke()` | in an invariant: a `break` out of this loop was taken (R26.10) |
 | `Pal.Returned()`, `Pal.ReturnValue<T>()` | in an invariant: a `return` inside this loop was taken, and its value (R26.2) |
+| `Pal.Join(p)` | directly after an `if`: its arms meet here holding `p`, rather than each continuing with its own copy of what follows (R30.36); repeatable, and `Pal.Returned()`/`Pal.Result<T>()` may appear in `p` |
+| `Pal.Split()` | directly after the `Pal.Join`s of an `if` in a method's body: the rest of the method is checked as a function of its own, assuming only the join (R30.39) |
 | `Pal.Assert(p)` | a proof step |
 | `Pal.Assume(p)` | assume without proof — **unsound**, reported as a warning |
 
@@ -298,6 +301,28 @@ foreach (var band in schedule)
 ```
 
 doc/translation.md §20 has the rules, and the library assumptions such a proof trusts.
+
+An `IEnumerable<T>` or `ICollection<T>` parameter is a read-only argument whose items, in
+order, are `Pal.Contents(e)`. An enumerator declared by `using` over it is a cursor, and
+`Pal.Index(en)` is how many items it has moved past:
+
+```csharp
+[Ensures("Result == Pal.Contents(items).Length")]
+public static int CountAll(IEnumerable<int> items)
+{
+    int n = 0;
+    using IEnumerator<int> en = items.GetEnumerator();
+    while (en.MoveNext())
+    {
+        Pal.Invariant(n == Pal.Index(en));
+        n++;
+    }
+    return n;
+}
+```
+
+`items is ICollection<int> c` is a test whose outcome the method cannot know, so both
+branches are verified. doc/translation.md §34 has the rules and what they trust.
 
 ## 3. Ownership
 
@@ -863,6 +888,8 @@ admitted lemma is assumed rather than proved.
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
 | `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
+| `[Fuel(f, i)]` | start the method's queries at `f` unfoldings of recursive definitions and `i` of inductive types, retrying with more (R30.44) |
+| `[OpaqueSpecs("S", ...)]` | the solver does not unfold the declaring type's `[Spec]`s `S`, ... while checking the method (R30.40) |
 | `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
 
 Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**

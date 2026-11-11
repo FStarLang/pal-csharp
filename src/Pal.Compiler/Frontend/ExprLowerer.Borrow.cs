@@ -116,10 +116,15 @@ public sealed partial class ExprLowerer
             : SelfOf(Borrow, loc);
 
     /// <summary>R32.12. The struct <paramref name="held"/> is of, read through its wrapped fields.</summary>
-    private IrExpr SelfOf(BorrowContext held, IrLoc loc) =>
-        held.SelfIsResult ? new IrResult(loc) { Type = held.StructType } :
-        held.SelfPath.Aggregate((IrExpr)new IrVar(loc, held.SelfName) { Type = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType) },
-            (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+    private IrExpr SelfOf(BorrowContext held, IrLoc loc)
+    {
+        var rootType = held.SelfPath.IsEmpty ? held.StructType : known.MapType(held.SelfPath[0].ContainingType);
+        // R35.3. The struct a wrapping constructor builds is its result, read through its wrapped field.
+        IrExpr root = held.SelfIsResult
+            ? new IrResult(loc) { Type = rootType }
+            : new IrVar(loc, held.SelfName) { Type = rootType };
+        return held.SelfPath.Aggregate(root, (v, f) => new IrField(loc, v, f.Name) { Type = known.MapType(f.Type) });
+    }
 
     /// <summary>
     /// R32.12. The context of the struct a wrapping struct wraps, read through the wrapped
@@ -136,6 +141,7 @@ public sealed partial class ExprLowerer
             CorePath = path,
             SelfName = outer.SelfName,
             SelfPath = outer.SelfPath.Add(field),
+            SelfIsResult = outer.SelfIsResult || outer.Constructor,
             OwnerName = outer.OwnerName,
             OwnedNames = outer.OwnedNames,
         };
@@ -264,12 +270,54 @@ public sealed partial class ExprLowerer
             ResultView(rp.ContainingType) is { } rv)
             return InlineSpec(rv, rp, loc);
         if (symbol is IMethodSymbol || HeldContext(node.Expression) is not { } held) return null;
+        // R35.5. A held struct's auto-property is its backing field (R33.26).
+        if (Borrowing.IsAutoProperty(symbol, held.Struct) && symbol is IPropertySymbol autoProp)
+            return new IrField(loc, SelfOf(held, loc), autoProp.Name) { Type = known.MapType(autoProp.Type) };
         if (symbol is IPropertySymbol sp && SpecPosition && Declarations.Has(sp, known.SpecAttribute))
             return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
         if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
             (Borrowing.IsMember(getter, known) || held.ViewBase is not null))
             return WithHeld(held, () => HeldCall(held, getter, [], loc, node));
         return HeldRefused(node, loc);
+    }
+
+    /// <summary>
+    /// R35.4. <c>H.M(ref e)</c>, for a static generic helper whose body is one call of an
+    /// interface member on its <c>ref</c> parameter (<c>Reset&lt;T&gt;(ref T e) where T :
+    /// IEnumerator =&gt; e.Reset()</c>), and a held struct <c>e</c>: the struct's
+    /// implementation of that member called on <c>e</c>, as the helper's body is at it.
+    /// </summary>
+    internal IrExpr? ForwardedToHeld(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc)
+    {
+        if (SpecPosition || !method.IsStatic || method.TypeArguments.Length != 1 ||
+            method.OriginalDefinition.Parameters is not [{ RefKind: RefKind.Ref, Type: ITypeParameterSymbol tp } param] ||
+            !SymbolEqualityComparer.Default.Equals(tp, method.OriginalDefinition.TypeParameters[0]) ||
+            node.ArgumentList.Arguments is not [{ RefKindKeyword.RawKind: (int)Microsoft.CodeAnalysis.CSharp.SyntaxKind.RefKeyword } arg] ||
+            method.TypeArguments[0] is not INamedTypeSymbol { TypeKind: TypeKind.Struct } structType ||
+            HeldContext(arg.Expression) is not { } held ||
+            !SymbolEqualityComparer.Default.Equals(held.Struct.OriginalDefinition, structType.OriginalDefinition))
+            return null;
+        var decl = method.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() as MethodDeclarationSyntax;
+        var body = decl switch
+        {
+            { ExpressionBody.Expression: var e } => e,
+            { Body.Statements: [ExpressionStatementSyntax { Expression: var e }] } => e,
+            _ => null,
+        };
+        if (body is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv },
+                ArgumentList.Arguments.Count: 0,
+            } inner ||
+            recv.Identifier.ValueText != param.Name)
+            return null;
+        var helperModel = model.Compilation.Model(body.SyntaxTree);
+        if (helperModel.GetSymbolInfo(inner).Symbol is not IMethodSymbol { IsStatic: false } im ||
+            im.ContainingType.TypeKind != TypeKind.Interface ||
+            structType.FindImplementationForInterfaceMember(im) is not IMethodSymbol impl ||
+            !Borrowing.IsMember(impl, known))
+            return null;
+        return WithHeld(held, () => HeldCall(held, impl, [], loc, node));
     }
 
     private IrExpr HeldRefused(ExpressionSyntax node, IrLoc loc)
@@ -299,7 +347,7 @@ public sealed partial class ExprLowerer
         if (decl?.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
         var writes = decl is not null &&
-                     Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct);
+                     Borrowing.WritesState(decl, model.Compilation.Model(decl.SyntaxTree), held.Struct);
         var local = SelfOf(held, loc);
         if (!writes) return BorrowingCall(callee, local, args, loc);
         if (held.SelfPath.IsEmpty) return BorrowingCall(callee, new IrRefArg(loc, local), args, loc);
@@ -350,7 +398,7 @@ public sealed partial class ExprLowerer
             _ => null,
         };
         if (body is null || _inlineDepth > 16) return null;
-        var nested = new ExprLowerer(model.Compilation.GetSemanticModel(body.SyntaxTree), known, diagnostics, specPosition: true)
+        var nested = new ExprLowerer(model.Compilation.Model(body.SyntaxTree), known, diagnostics, specPosition: true)
         {
             Borrow = held,
             ObjectFields = ObjectFields,
@@ -392,7 +440,8 @@ public sealed partial class ExprLowerer
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
             // R33.26. The struct's auto-property is its backing field.
-            case IPropertySymbol ap when !SpecPosition && !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
+            // R35.5. So it is in a contract, where a `[Spec]` property reads it.
+            case IPropertySymbol ap when !bw.Constructor && Borrowing.IsAutoProperty(ap, bw.Struct):
                 return new IrField(loc, SelfExpr(loc), ap.Name) { Type = known.MapType(ap.Type) };
             case IFieldSymbol f when bw.IsState(f):
                 if (bw.Constructor && !SpecPosition && _ctorGiven.TryGetValue(f.Name, out var givenValue))
@@ -516,7 +565,7 @@ public sealed partial class ExprLowerer
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
         // R27.37. A member that writes the struct is passed the caller's own `ref`; the
         // caller writes it too (Borrowing.WritesState counts the call).
-        var self = Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), bw.Struct)
+        var self = Borrowing.WritesState(decl, model.Compilation.Model(decl.SyntaxTree), bw.Struct)
             ? new IrRefArg(loc, new IrVar(loc, BorrowContext.Self) { Type = bw.StructType })
             : SelfExpr(loc);
         return BorrowingCall(callee, self, args.Select(Lower), loc);
@@ -554,7 +603,72 @@ public sealed partial class ExprLowerer
         if (callee is { IsStatic: true } or { MethodKind: MethodKind.Constructor }) return null;
         if (ViewTarget(bw.Struct, callee, viaBase) is not { } name) return null;
         var self = new IrRefArg(loc, new IrVar(loc, bw.SelfName) { Type = bw.StructType });
-        return ViewCall(bw, name, callee, self, args.Select(Lower), loc);
+        // R35.19. A lambda at a `[Callback]` parameter is lifted, as at any other call.
+        var lowered = args.Select((a, i) =>
+            a.Parent is ArgumentSyntax { NameColon: null } arg && i < callee.Parameters.Length &&
+            CallbackOf(callee.Parameters[i], known, diagnostics) is { } cb
+                ? AtViewCall(() => LowerCallbackArgument(arg, cb, Locations.From(arg)))
+                : Lower(a)).ToList();
+        return WithFieldCaptures(ViewCall(bw, name, callee, self, lowered, loc), args, loc);
+    }
+
+    /// <summary>
+    /// R35.19. A call passing a lambda that captures fields of the view: each field is copied
+    /// to its cell before the call, and each the lambda writes is copied back after it. The
+    /// callee holds the view's record, so the lambda cannot reach it; the copies are the
+    /// same program because the callee neither writes the fields nor reads them once it has
+    /// called back (checked on the translation, PALCS0882). A raise skips the copy back, as
+    /// R32.12's does, and is refused inside a <c>try</c> for the same reason.
+    /// </summary>
+    private bool _atViewCall;
+
+    /// <summary>R35.19. The cells of field captures, declared at the start of the member's body.</summary>
+    public Dictionary<string, IrLocalDecl> HoistedCells { get; } = new(StringComparer.Ordinal);
+
+    private IrExpr AtViewCall(Func<IrExpr> lower)
+    {
+        var outer = _atViewCall;
+        _atViewCall = true;
+        try { return lower(); }
+        finally { _atViewCall = outer; }
+    }
+
+    private IrExpr WithFieldCaptures(IrCall call, IReadOnlyList<ExpressionSyntax> args, IrLoc loc)
+    {
+        if (PendingFieldCaptures.Count == 0) return call;
+        var pending = PendingFieldCaptures.ToList();
+        PendingFieldCaptures.Clear();
+        if (args.Any(a => a.Ancestors().Any(n => n is TryStatementSyntax)))
+        {
+            diagnostics.Error("PALCS0882", loc,
+                "A lambda capturing fields of the view is passed inside a `try`: the fields are copied back " +
+                "when the call returns, so a handler could see them before it (doc/translation.md R35.19).");
+            return new IrLiteral(loc, null);
+        }
+        // The cells are declared where the member's body begins: a Pulse `let mut` inside a
+        // branch needs an annotated postcondition (R5.8d).
+        var stmts = ImmutableArray.CreateBuilder<IrStmt>();
+        foreach (var (cell, field, _) in pending)
+        {
+            HoistedCells[cell.Name] = new IrLocalDecl(loc, cell.Name, cell.Type!,
+                new IrLiteral(loc, cell.Type is IrPrim { Kind: PrimKind.Bool } ? false : 0) { Type = cell.Type });
+            stmts.Add(new IrAssign(loc, cell, field));
+        }
+        IrExpr value;
+        if (call.ResultType is null or IrPrim { Kind: PrimKind.Void })
+        {
+            stmts.Add(new IrExprStmt(loc, call));
+            value = new IrLiteral(loc, null) { Type = call.ResultType };
+        }
+        else
+        {
+            var result = Fresh("capResult");
+            stmts.Add(new IrLocalDecl(loc, result, call.ResultType, call) { Immutable = true });
+            value = new IrVar(loc, result) { Type = call.ResultType };
+        }
+        foreach (var (cell, field, writes) in pending)
+            if (writes) stmts.Add(new IrAssign(loc, field, cell));
+        return new IrStmtExpr(loc, stmts.ToImmutable(), value) { Type = value.Type };
     }
 
     private IrCall ViewCall(BorrowContext bw, string name, IMethodSymbol callee, IrExpr self, IEnumerable<IrExpr> args, IrLoc loc)
@@ -566,6 +680,7 @@ public sealed partial class ExprLowerer
             if (callee.Parameters[k] is { HasExplicitDefaultValue: true, ExplicitDefaultValue: bool or int } dp &&
                 known.MapType(dp.Type) is { } dt)
                 given.Add(new IrLiteral(loc, dp.ExplicitDefaultValue) { Type = dt });
+        name = Specialized(bw, name, callee, given, loc);
         return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. given])
         {
             Kind = CalleeKind.Method,
@@ -577,9 +692,44 @@ public sealed partial class ExprLowerer
         };
     }
 
+    /// <summary>
+    /// R35.18. A call of a view member with <c>[Specialize]</c> parameters calls its
+    /// translation at the constants passed (asked for, as a replica is); an argument there
+    /// that is not a literal is refused.
+    /// </summary>
+    private string Specialized(BorrowContext bw, string name, IMethodSymbol callee, List<IrExpr> given, IrLoc loc)
+    {
+        var target = SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition)
+            ? callee : Subclasses.OverrideOf(bw.Struct, callee) ?? callee;
+        if (Naming.Of(target.OriginalDefinition) != name || !known.IsSpecialized(target)) return name;
+        var values = ImmutableDictionary.CreateBuilder<string, bool>(StringComparer.Ordinal);
+        foreach (var p in target.Parameters)
+        {
+            if (!Declarations.Has(p, known.SpecializeAttribute)) continue;
+            // A `[Specialize]` parameter of the specialization being lowered is its constant.
+            if (p.Ordinal < given.Count && given[p.Ordinal] is IrVar fwd &&
+                known.Specialization?.Values.TryGetValue(fwd.Name, out var fixedValue) == true)
+                given[p.Ordinal] = new IrLiteral(loc, fixedValue) { Type = IrPrim.Bool };
+            if (p.Type.SpecialType != SpecialType.System_Boolean || p.Ordinal >= given.Count ||
+                given[p.Ordinal] is not IrLiteral { Value: bool v })
+            {
+                diagnostics.Error("PALCS0881", loc,
+                    $"`{target.Name}` is translated at each constant of its `[Specialize]` parameter `{p.Name}`, " +
+                    "so a call passes a `bool` literal there (doc/translation.md R35.18).");
+                return name;
+            }
+            values[p.Name] = v;
+        }
+        var specialized = name + string.Concat(values.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => $"__{kv.Key}_{(kv.Value ? "true" : "false")}"));
+        if (known.SpecializationSeen.Add(specialized))
+            known.SpecializationDemand.Enqueue(new WellKnown.SpecializationRequest(name, specialized, values.ToImmutable()) { At = loc });
+        return specialized;
+    }
+
     /// <summary>R32.13. A member's result type, or the view its <c>[return: Exactly]</c> names.</summary>
     internal IrType? ViewResultType(IMethodSymbol callee) =>
-        FrontendPass.ExactReturn(callee, known) is { } exact ? known.MapType(exact) : known.MapType(callee.ReturnType);
+        FrontendPass.ExactReturn(callee, known) is { } exact ? known.MapReturnType(exact) : known.MapReturnType(callee.ReturnType);
 
     /// <summary>
     /// R28.2/R27.37. A call of a borrowing member's translation: the borrowed object, the
@@ -594,7 +744,7 @@ public sealed partial class ExprLowerer
         return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), self, .. owned, .. args])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(callee.ReturnType),
+            ResultType = known.MapReturnType(callee.ReturnType),
             HasReceiver = true,
             ParamTypes = [null, null, .. owned.Select(o => o.Type), .. callee.Parameters.Select(p => known.MapType(p.Type))],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
@@ -610,7 +760,8 @@ public sealed partial class ExprLowerer
     private IrExpr BorrowingConstruction(
         BaseObjectCreationExpressionSyntax node, IMethodSymbol ctor, INamedTypeSymbol named, IrLoc loc)
     {
-        var owner = Borrowing.OwnerField(named, known)!;
+        // R35.3. A wrapping struct's is its core's.
+        var owner = Borrowing.OwnerField(Borrowing.Innermost(named, known).Core, known)!;
         if (Borrowing.OwnerParameter(ctor, owner, known.Compilation) is not { } op || node.ArgumentList is null ||
             node.Initializer is not null)
         {
@@ -662,6 +813,39 @@ public sealed partial class ExprLowerer
     }
 
     /// <summary>
+    /// R30.32. <c>if (p == null) { throw …; }</c> (or <c>p is null</c>, the arm a block of
+    /// throws and <c>[DoesNotReturn]</c> calls), with no <c>else</c>, where <c>p</c> is a
+    /// parameter of a non-nullable class type: such a reference is not null (R10.2, R32.1).
+    /// </summary>
+    private bool IsDeadNullGuard(IfStatementSyntax s)
+    {
+        if (s.Else is not null) return false;
+        ExpressionSyntax? tested = s.Condition switch
+        {
+            BinaryExpressionSyntax b when b.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.EqualsExpression) =>
+                b.Right.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) ? b.Left
+                : b.Left.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) ? b.Right : null,
+            IsPatternExpressionSyntax { Pattern: ConstantPatternSyntax cp } ip
+                when cp.Expression.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.NullLiteralExpression) => ip.Expression,
+            _ => null,
+        };
+        if (tested is not IdentifierNameSyntax ||
+            model.GetSymbolInfo(tested).Symbol is not IParameterSymbol { RefKind: RefKind.None } p ||
+            p.Type is not { TypeKind: TypeKind.Class } pt || pt.NullableAnnotation == NullableAnnotation.Annotated ||
+            p.NullableAnnotation == NullableAnnotation.Annotated)
+            return false;
+        IEnumerable<StatementSyntax> arm = s.Statement is BlockSyntax blk ? blk.Statements : [s.Statement];
+        return arm.Any() && arm.All(st => st switch
+        {
+            ThrowStatementSyntax => true,
+            ExpressionStatementSyntax { Expression: InvocationExpressionSyntax inv } =>
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol m &&
+                m.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute"),
+            _ => false,
+        });
+    }
+
+    /// <summary>
     /// R28.5. The body of a borrowing struct's constructor, which must assign each field it
     /// sets once from the parameters and the borrowed object: the struct value it builds.
     /// R27.37. With an owned field, it may also call methods (of the borrowed or an owned
@@ -673,7 +857,7 @@ public sealed partial class ExprLowerer
     {
         var bw = Borrow!;
         var given = new List<IrFieldInit>();
-        var extended = !bw.Owned.IsEmpty || bw.ViewBase is not null;
+        var extended = !bw.Owned.IsEmpty || bw.ViewBase is not null || bw.Wrapping;
         var prefix = new List<IrStmt>();
         // R32.13. A view's constructor runs its base's first: each argument is a local, and
         // each field the base's constructor assigns is given its value over those locals.
@@ -727,6 +911,10 @@ public sealed partial class ExprLowerer
                 gt.Nullability.FlowState == NullableFlowState.NotNull &&
                 gt.Type!.NullableAnnotation != NullableAnnotation.Annotated)
                 continue;
+            // R30.32. So does its spelled-out form, `if (p == null) { ThrowHelper.Throw…(…); }`,
+            // at a non-nullable class-typed parameter: the arm is dead.
+            if (node is IfStatementSyntax nullGuard && IsDeadNullGuard(nullGuard))
+                continue;
             if (extended && expr is InvocationExpressionSyntax call &&
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol callee)
             {
@@ -773,14 +961,14 @@ public sealed partial class ExprLowerer
         if (!ArgumentsInOrder(init.ArgumentList)) return false;
         if (model.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
             target.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl ||
-            !model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) || decl.Initializer is not null)
+            !model.Compilation.Owns(decl.SyntaxTree) || decl.Initializer is not null)
         {
             diagnostics.Error("PALCS0804", loc,
                 $"`{init}`. A view's constructor may call a constructor of its base that is declared in the " +
                 "program and calls no other (doc/translation.md R32.13).");
             return false;
         }
-        var tmodel = model.Compilation.GetSemanticModel(decl.SyntaxTree);
+        var tmodel = model.Compilation.Model(decl.SyntaxTree);
         var nested = new ExprLowerer(tmodel, known, diagnostics, specPosition: false) { Borrow = bw };
         foreach (var a in init.ArgumentList.Arguments)
         {

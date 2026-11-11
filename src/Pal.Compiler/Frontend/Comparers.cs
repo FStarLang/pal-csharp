@@ -23,9 +23,17 @@ public static class Sorted
         type is INamedTypeSymbol { Name: "IComparer" or "Comparer", Arity: 1 } named &&
         named.ContainingNamespace?.ToDisplayString() == "System.Collections.Generic";
 
+    /// <summary>
+    /// R34.16. <c>System.Comparison&lt;T&gt;</c>, a comparer by another name: what it decides is
+    /// R22.24's order, under the same trusted assumption as an <c>IComparer&lt;T&gt;</c>.
+    /// </summary>
+    public static bool IsComparisonSymbol(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { Name: "Comparison", Arity: 1 } named &&
+        named.ContainingNamespace?.ToDisplayString() == "System";
+
     /// <summary>R25.1. The comparer types, or null.</summary>
     public static IrType? MapType(INamedTypeSymbol type, Func<ITypeSymbol, IrType?> map) =>
-        IsComparerSymbol(type) && map(type.TypeArguments[0]) is { } element
+        (IsComparerSymbol(type) || IsComparisonSymbol(type)) && map(type.TypeArguments[0]) is { } element
             ? new IrUserSpecType("Comparer", ComparerType, [element])
             : null;
 
@@ -39,7 +47,8 @@ public static class Sorted
     /// R25.4. The types whose null the model cannot see: a type parameter, and a comparer.
     /// Whether a value of one is null is <c>is_null</c>.
     /// </summary>
-    public static bool HasOpaqueNull(IrType? type) => type is IrTypeParamType || IsComparer(type);
+    // R35.7. An `object` may be null too; `ThrowIfNull(o)` and `o is null` test it.
+    public static bool HasOpaqueNull(IrType? type) => type is IrTypeParamType || IsComparer(type) || WellKnown.IsObj(type);
 
     public static IrExpr IsNull(IrLoc loc, IrExpr value) =>
         new IrSpecOp(loc, Module + ".is_null", [value]) { Type = IrPrim.Bool, MachineArgs = true };

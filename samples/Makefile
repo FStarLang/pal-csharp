@@ -6,6 +6,9 @@
 SAMPLES := $(shell find . -mindepth 1 -maxdepth 1 -type d \
 	! -name '_*' ! -name '.*' | sort | sed 's|^\./||')
 
+# `SKIP_SAMPLES=dotnet-runtime` leaves a sample out; CI verifies that one in its own jobs.
+SAMPLES := $(filter-out $(SKIP_SAMPLES),$(SAMPLES))
+
 all: $(SAMPLES)
 
 .PHONY: $(SAMPLES)

@@ -99,6 +99,7 @@ namespace System.Collections.Generic
 
         // Fills a Queue with the elements of an ICollection.  Uses the enumerator
         // to get each of the elements.
+        [Ensures("@this.Items == Pal.Contents(collection)")]
         public Queue(IEnumerable<T> collection)
         {
             ArgumentNullException.ThrowIfNull(collection);
@@ -446,6 +447,8 @@ namespace System.Collections.Generic
             throw new InvalidOperationException(SR.InvalidOperation_EmptyQueue);
         }
 
+        [Ensures("@this.Items == Pal.Old(@this.Items)")]
+        [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity) || @this.SpecCapacity == @this.SpecCount")]
         public void TrimExcess()
         {
             int threshold = (int)(_array.Length * 0.9);

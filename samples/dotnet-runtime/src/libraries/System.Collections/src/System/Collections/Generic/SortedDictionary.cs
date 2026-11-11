@@ -215,6 +215,7 @@ namespace System.Collections.Generic
         [Ensures("ReferenceEquals(Result._dictionary, @this)")]
         public KeyCollection Keys => _keys ??= new KeyCollection(this);
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection<TKey> IDictionary<TKey, TValue>.Keys
         {
             get
@@ -223,6 +224,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         IEnumerable<TKey> IReadOnlyDictionary<TKey, TValue>.Keys
         {
             get
@@ -234,6 +236,7 @@ namespace System.Collections.Generic
         [Ensures("ReferenceEquals(Result._dictionary, @this)")]
         public ValueCollection Values => _values ??= new ValueCollection(this);
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection<TValue> IDictionary<TKey, TValue>.Values
         {
             get
@@ -242,6 +245,7 @@ namespace System.Collections.Generic
             }
         }
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         IEnumerable<TValue> IReadOnlyDictionary<TKey, TValue>.Values
         {
             get
@@ -377,11 +381,13 @@ namespace System.Collections.Generic
             get { return false; }
         }
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.KeyCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection IDictionary.Keys
         {
             get { return Keys; }
         }
 
+        [Ensures("Pal.Exists((SortedDictionary<TKey, TValue>.ValueCollection c) => Pal.Boxes(Result, c) && ReferenceEquals(c._dictionary, @this))")]
         ICollection IDictionary.Values
         {
             get { return Values; }
@@ -389,6 +395,10 @@ namespace System.Collections.Generic
 
         object? IDictionary.this[object key]
         {
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+            [Ensures("Pal.Implies(!(Pal.IsA<TKey>(key) && Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)) >= 0), Pal.IsNull(Result))")]
+            [Ensures("Pal.Implies(Pal.IsA<TKey>(key) && Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)) >= 0, Pal.Boxes(Result, @this.SpecPairs[Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, Pal.Unbox<TKey>(key))].Value))")]
+            [Ensures("@this.SpecPairs == Pal.Old(@this.SpecPairs)")]
             get
             {
                 if (IsCompatibleKey(key))
@@ -402,6 +412,11 @@ namespace System.Collections.Generic
 
                 return null;
             }
+            [Requires("@this.SpecPairs.Length < int.MaxValue")]
+            [Throws(typeof(ArgumentNullException), "Pal.IsNull(key) || (Pal.IsNull(value) && !Pal.IsNull(default(TValue)))")]
+            [Throws(typeof(ArgumentException), "!Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))")]
+            [Ensures("Pal.IsA<TKey>(key) && @this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
+            [Ensures("(Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), Pal.Unbox<TKey>(key)) < 0 ? @this.SpecPairs == SpecTopDown.Inserted(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))) : @this.SpecPairs == Pal.SetAt(Pal.Old(@this.SpecPairs), Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), Pal.Unbox<TKey>(key)), new KeyValuePair<TKey, TValue>(Pal.Old(@this.SpecKeys)[Pal.KeyIndex(Pal.Old(@this.SpecKeyComparer), Pal.Old(@this.SpecKeys), Pal.Unbox<TKey>(key))], (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))))")]
             set
             {
                 ArgumentNullException.ThrowIfNull(key);
@@ -412,9 +427,11 @@ namespace System.Collections.Generic
 
                 try
                 {
+                    Pal.Invariant(Pal.Implies(Pal.Raised(), !Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))) && Pal.Implies(!Pal.Raised(), Pal.IsA<TKey>(key) && (Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key)) < 0 ? this.SpecPairs == SpecTopDown.Inserted(Pal.Old(this.SpecPairComparer), Pal.Old(this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))) : this.SpecPairs == Pal.SetAt(Pal.Old(this.SpecPairs), Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key)), new KeyValuePair<TKey, TValue>(Pal.Old(this.SpecKeys)[Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key))], (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!)))) && this.SpecKeyComparer == Pal.Old(this.SpecKeyComparer)));
                     TKey tempKey = (TKey)key;
                     try
                     {
+                        Pal.Invariant(Pal.Implies(Pal.Raised(), (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))) && Pal.Implies(!Pal.Raised(), Pal.IsA<TKey>(key) && (Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key)) < 0 ? this.SpecPairs == SpecTopDown.Inserted(Pal.Old(this.SpecPairComparer), Pal.Old(this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))) : this.SpecPairs == Pal.SetAt(Pal.Old(this.SpecPairs), Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key)), new KeyValuePair<TKey, TValue>(Pal.Old(this.SpecKeys)[Pal.KeyIndex(Pal.Old(this.SpecKeyComparer), Pal.Old(this.SpecKeys), Pal.Unbox<TKey>(key))], (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!)))) && this.SpecKeyComparer == Pal.Old(this.SpecKeyComparer)));
                         this[tempKey] = (TValue)value!;
                     }
                     catch (InvalidCastException)
@@ -429,6 +446,12 @@ namespace System.Collections.Generic
             }
         }
 
+        [Requires("@this.SpecPairs.Length < int.MaxValue")]
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key) || (Pal.IsNull(value) && !Pal.IsNull(default(TValue)))")]
+        [Throws(typeof(ArgumentException), "!Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))")]
+        [Ensures("Pal.IsA<TKey>(key) && @this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
+        [Requires("!Pal.IsA<TKey>(key) || Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)) < 0")]
+        [Ensures("@this.SpecPairs == SpecTopDown.Inserted(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!)))")]
         void IDictionary.Add(object key, object? value)
         {
             ArgumentNullException.ThrowIfNull(key);
@@ -440,10 +463,12 @@ namespace System.Collections.Generic
 
             try
             {
+                Pal.Invariant(Pal.Implies(Pal.Raised(), !Pal.IsA<TKey>(key) || (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))) && Pal.Implies(!Pal.Raised(), Pal.IsA<TKey>(key) && this.SpecPairs == SpecTopDown.Inserted(Pal.Old(this.SpecPairComparer), Pal.Old(this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))) && this.SpecKeyComparer == Pal.Old(this.SpecKeyComparer)));
                 TKey tempKey = (TKey)key;
 
                 try
                 {
+                    Pal.Invariant(Pal.Implies(Pal.Raised(), (!Pal.IsNull(value) && !Pal.IsA<TValue>(value))) && Pal.Implies(!Pal.Raised(), Pal.IsA<TKey>(key) && this.SpecPairs == SpecTopDown.Inserted(Pal.Old(this.SpecPairComparer), Pal.Old(this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), (Pal.IsA<TValue>(value) ? Pal.Unbox<TValue>(value) : default(TValue)!))) && this.SpecKeyComparer == Pal.Old(this.SpecKeyComparer)));
                     Add(tempKey, (TValue)value!);
                 }
                 catch (InvalidCastException)
@@ -457,6 +482,8 @@ namespace System.Collections.Generic
             }
         }
 
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+        [Ensures("Result == (Pal.IsA<TKey>(key) && Pal.KeyIndex(@this.SpecKeyComparer, @this.SpecKeys, Pal.Unbox<TKey>(key)) >= 0)")]
         bool IDictionary.Contains(object key)
         {
             if (IsCompatibleKey(key))
@@ -466,6 +493,8 @@ namespace System.Collections.Generic
             return false;
         }
 
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+        [Ensures("Result == Pal.IsA<TKey>(key)")]
         private static bool IsCompatibleKey(object key)
         {
             ArgumentNullException.ThrowIfNull(key);
@@ -475,6 +504,10 @@ namespace System.Collections.Generic
 
         IDictionaryEnumerator IDictionary.GetEnumerator() => new Enumerator(this, Enumerator.DictEntry);
 
+        [Throws(typeof(ArgumentNullException), "Pal.IsNull(key)")]
+        [Ensures("Pal.Implies(Pal.IsA<TKey>(key), @this.SpecPairs == SpecTopDownRemove.Removed(Pal.Old(@this.SpecPairComparer), Pal.Old(@this.SpecPairs), new KeyValuePair<TKey, TValue>(Pal.Unbox<TKey>(key), default(TValue)!)))")]
+        [Ensures("Pal.Implies(!Pal.IsA<TKey>(key), @this.SpecPairs == Pal.Old(@this.SpecPairs))")]
+        [Ensures("@this.SpecKeyComparer == Pal.Old(@this.SpecKeyComparer)")]
         void IDictionary.Remove(object key)
         {
             if (IsCompatibleKey(key))
@@ -575,6 +608,10 @@ namespace System.Collections.Generic
                 _treeEnum.Reset();
             }
 
+            [Requires("@this._treeEnum.SpecCurrentOk")]
+            [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded && Pal.Exists((KeyValuePair<TKey, TValue> p) => Pal.Same(p, SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, p)) && " +
+                "(@this._getEnumeratorRetType == SortedDictionary<TKey, TValue>.Enumerator.DictEntry ? Pal.Boxes(Result, new System.Collections.DictionaryEntry(p.Key, p.Value)) : Pal.Boxes(Result, p)))")]
             object? IEnumerator.Current
             {
                 get
@@ -595,7 +632,7 @@ namespace System.Collections.Generic
 
             [Requires("@this._treeEnum.SpecCurrentOk")]
             [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
-            [Ensures("!@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded && Pal.Exists((KeyValuePair<TKey, TValue> p) => Pal.Same(p, SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, p)) && Pal.Boxes(Result, p.Key))")]
             object IDictionaryEnumerator.Key
             {
                 get
@@ -611,7 +648,7 @@ namespace System.Collections.Generic
 
             [Requires("@this._treeEnum.SpecCurrentOk")]
             [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
-            [Ensures("!@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded && Pal.Exists((KeyValuePair<TKey, TValue> p) => Pal.Same(p, SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, p)) && Pal.Boxes(Result, p.Value))")]
             object? IDictionaryEnumerator.Value
             {
                 get
@@ -625,6 +662,9 @@ namespace System.Collections.Generic
                 }
             }
 
+            [Requires("@this._treeEnum.SpecCurrentOk")]
+            [Throws(typeof(InvalidOperationException), "@this._treeEnum.SpecEnded")]
+            [Ensures("!@this._treeEnum.SpecEnded && Pal.Exists((KeyValuePair<TKey, TValue> p) => Pal.Same(p, SpecSearchTree.RootKey(@this._treeEnum.SpecCurrentTree, p)) && Pal.Boxes(Result.Key, p.Key) && Pal.Boxes(Result.Value, p.Value))")]
             DictionaryEntry IDictionaryEnumerator.Entry
             {
                 get

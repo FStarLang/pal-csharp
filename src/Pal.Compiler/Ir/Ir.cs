@@ -102,6 +102,18 @@ public sealed record IrSpanType(IrType Element) : IrType
     protected override string Describe() => $"Span<{Element}>";
 }
 
+/// <summary>
+/// R34.1. An <c>IEnumerable&lt;T&gt;</c>, <c>ICollection&lt;T&gt;</c> or
+/// <c>IReadOnlyCollection&lt;T&gt;</c> argument: a read-only resource the caller lends,
+/// <c>Pulse.Lib.CSharp.Enumerable.pts_to</c>, whose items a specification names with
+/// <c>Pal.Contents</c>. <see cref="Collection"/> is set when the static type is
+/// <c>ICollection&lt;T&gt;</c>, which the precondition then says the object is.
+/// </summary>
+public sealed record IrEnumerableType(IrType Element, bool Collection) : IrType
+{
+    protected override string Describe() => Collection ? $"ICollection<{Element}>" : $"IEnumerable<{Element}>";
+}
+
 /// <summary>The spec-only ghost box <c>Ghost&lt;T&gt;</c>.</summary>
 public sealed record IrGhostType(IrType Inner) : IrType
 {
@@ -493,6 +505,12 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 
     /// <summary>R32.11. Whether the lambda's protocol states a bound on its calls.</summary>
     public bool Bounded { get; init; }
+
+    /// <summary>
+    /// R35.19. The fields of the caller's view the lambda captures: copied to cells around
+    /// the call, which the callee must neither write nor read once it calls back.
+    /// </summary>
+    public ImmutableArray<string> FieldCaptures { get; init; } = [];
 }
 
 /// <summary>
@@ -631,6 +649,13 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     public bool Immutable { get; init; }
 
     /// <summary>
+    /// R30.33. The local takes the array the field <see cref="Init"/> names, from the
+    /// assignment that immediately follows and replaces it: that assignment hands the old
+    /// array's ownership to the local instead of discarding it.
+    /// </summary>
+    public bool TakesField { get; init; }
+
+    /// <summary>
     /// R27.41. A borrowing struct held in a local: for each object it owns, the field that
     /// holds it, the local the object is held in, and its class.
     /// </summary>
@@ -642,7 +667,24 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
 
 public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
 
-public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc);
+public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc)
+{
+    /// <summary>
+    /// R30.36. The facts of the <c>Pal.Join</c>s that follow the <c>if</c>; default when
+    /// none does. A joined <c>if</c> is one statement whose arms meet again, holding these
+    /// facts and the frame <see cref="Live"/> and <see cref="Unassigned"/> describe as a
+    /// loop's do (R5.8, R5.8b).
+    /// </summary>
+    public ImmutableArray<IrExpr> JoinFacts { get; init; }
+
+    public bool Joined => !JoinFacts.IsDefault;
+
+    /// <summary>R30.39. What follows this joined <c>if</c> is verified as a function of its own.</summary>
+    public bool SplitAfter { get; init; }
+
+    public ImmutableArray<string> Live { get; init; } = [];
+    public ImmutableArray<string> Unassigned { get; init; } = [];
+}
 
 public sealed record CountedFor(string Counter, bool Increasing);
 
@@ -725,18 +767,25 @@ public sealed record IrExprStmt(IrLoc Loc, IrExpr Expr) : IrStmt(Loc);
 /// <item><c>Move</c>: <c>a, si, di, len</c> -- the same, within one array.</item>
 /// <item><c>Clear</c>, <c>Reverse</c>: <c>a, i, n</c>.</item>
 /// <item><c>Sort</c>: <c>a, i, n, comparer</c> (R26.7).</item>
+/// <item><c>CopyFrom</c>: <c>e, a, i</c> -- <c>((ICollection&lt;T&gt;)e).CopyTo(a, i)</c> (R34.5).</item>
+/// <item><c>CopyKeys</c>, <c>CopyValues</c>: <c>e, a, i</c> -- <c>d.Keys.CopyTo(a, i)</c> (R34.22).</item>
+/// <item><c>SortPairs</c>: <c>keys, values, comparer</c> (R34.22).</item>
 /// </list>
-public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort }
+public enum ArrayOpKind { Copy, CopyAt, Move, Clear, Reverse, Sort, CopyFrom, CopyKeys, CopyValues, SortPairs }
 
 public sealed record IrArrayOp(IrLoc Loc, ArrayOpKind Op, ImmutableArray<IrExpr> Args) : IrStmt(Loc)
 {
     /// <summary>The array the operation writes.</summary>
     public IrExpr Written => Op switch
     {
-        ArrayOpKind.Copy => Args[1],
+        ArrayOpKind.Copy or ArrayOpKind.CopyFrom or ArrayOpKind.CopyKeys or ArrayOpKind.CopyValues => Args[1],
         ArrayOpKind.CopyAt => Args[2],
         _ => Args[0],
     };
+
+    /// <summary>Every array the operation writes.</summary>
+    public IEnumerable<IrExpr> AllWritten =>
+        Op == ArrayOpKind.SortPairs ? [Args[0], Args[1]] : [Written];
 }
 
 /// <summary>
@@ -753,6 +802,20 @@ public sealed record IrArraySearch(IrLoc Loc, bool Last, IrExpr Array, IrExpr It
 public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, IrExpr Count, IrExpr Item, IrExpr Comparer)
     : IrExpr(Loc);
 
+/// <summary>
+/// R34.3–R34.6. An operation on an enumerable argument (<see cref="IrEnumerableType"/>).
+/// <list type="bullet">
+/// <item><c>Count</c>: <c>((ICollection&lt;T&gt;)e).Count</c>.</item>
+/// <item><c>Start</c>: <c>e.GetEnumerator()</c>, a cursor that has yielded nothing.</item>
+/// <item><c>MoveNext</c>, <c>Current</c>: on the enumerator whose cursor local is <c>Args[0]</c>.</item>
+/// <item><c>Lend</c> (R34.26): the array <c>Source</c>, lent as an enumerable argument for the
+/// statement's call (an <see cref="IrEnumerableType"/> of the node's type), and taken back after it.</item>
+/// </list>
+/// </summary>
+public enum EnumOpKind { Count, Start, MoveNext, Current, Lend }
+
+public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 {
     /// <summary>R26.2. The <c>break</c> a <c>return</c> inside a loop was rewritten to.</summary>
@@ -761,7 +824,7 @@ public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 
 public sealed record IrContinue(IrLoc Loc) : IrStmt(Loc);
 
-public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable }
+public enum GhostKind { Assert, Assume, Raw, LemmaCall, Share, Gather, Restore, Let, Unreachable, Join, Split }
 
 /// <summary>R19.3. <c>throw e;</c>, or <c>throw;</c> (a rethrow) when <see cref="Value"/> is null.</summary>
 public sealed record IrThrow(IrLoc Loc, IrExpr? Value) : IrStmt(Loc);
@@ -884,6 +947,11 @@ public sealed record IrMethod(
     public bool Admit { get; init; }
     /// <summary>R22.31. The method's `[Rlimit]` factor, if any.</summary>
     public int? RlimitFactor { get; init; }
+    /// <summary>R30.44. The method's `[Fuel]` initial fuel and ifuel, if any.</summary>
+    public (int Fuel, int Ifuel)? InitialFuel { get; init; }
+
+    /// <summary>R30.40. The modules of the <c>[Spec]</c> members hidden from the SMT solver.</summary>
+    public ImmutableArray<string> OpaqueSpecs { get; init; } = [];
     /// <summary>R27.23. <c>[Open]</c>: the receiver is held as its record and heaps, not its invariant.</summary>
     public bool Open { get; init; }
     /// <summary>Expressions this method preserves (<c>[Preserves]</c>).</summary>

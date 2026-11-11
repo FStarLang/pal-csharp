@@ -138,16 +138,25 @@ namespace System.Collections.Generic
         }
 
 
-        [Requires("collection.SpecComparer == Comparer<T>.Default")]
-        [Ensures("@this.SpecItems == collection.SpecItems")]
-        [Ensures("@this.SpecComparer == collection.SpecComparer")]
+        [Requires("Comparer<T>.Default == collection.SpecComparer || !SpecSortDedupe.ComparerEquals(Comparer<T>.Default, collection.SpecComparer)")]
+        [Requires("Pal.Implies(Comparer<T>.Default != collection.SpecComparer, 2 * collection.SpecItems.Length + 2 <= 1073741824)")]
+        [Ensures("@this.SpecComparer == Comparer<T>.Default")]
+        [Ensures("SpecSortDedupe.SetOf(@this.SpecComparer, @this.SpecItems, collection.SpecItems)")]
+        [Ensures("Pal.Implies(@this.SpecComparer == collection.SpecComparer, @this.SpecItems == collection.SpecItems)")]
         [Ensures("collection.SpecItems == Pal.Old(collection.SpecItems)")]
         [Ensures("collection.SpecComparer == Pal.Old(collection.SpecComparer)")]
         public SortedSet([Exactly(typeof(SortedSet<>))] IEnumerable<T> collection) : this(collection, Comparer<T>.Default) { }
 
-        [Requires("(comparer == null ? Comparer<T>.Default : comparer) == collection.SpecComparer")]
-        [Ensures("@this.SpecItems == collection.SpecItems")]
-        [Ensures("@this.SpecComparer == collection.SpecComparer")]
+        // A set whose comparer is not this one's but `Equals` it is copied as it stands, its
+        // tree in the other comparer's order: the contract excludes that case (R27.47,
+        // R34.27). With another comparer, the items are sorted and deduplicated, which
+        // ConstructRootFromSortedArray bounds (R34.27's deviation).
+        [Requires("(comparer == null ? Comparer<T>.Default : comparer) == collection.SpecComparer || " +
+                  "!SpecSortDedupe.ComparerEquals(comparer == null ? Comparer<T>.Default : comparer, collection.SpecComparer)")]
+        [Requires("Pal.Implies((comparer == null ? Comparer<T>.Default : comparer) != collection.SpecComparer, 2 * collection.SpecItems.Length + 2 <= 1073741824)")]
+        [Ensures("@this.SpecComparer == (comparer == null ? Comparer<T>.Default : comparer)")]
+        [Ensures("SpecSortDedupe.SetOf(@this.SpecComparer, @this.SpecItems, collection.SpecItems)")]
+        [Ensures("Pal.Implies(@this.SpecComparer == collection.SpecComparer, @this.SpecItems == collection.SpecItems)")]
         [Ensures("collection.SpecItems == Pal.Old(collection.SpecItems)")]
         [Ensures("collection.SpecComparer == Pal.Old(collection.SpecComparer)")]
         public SortedSet([Exactly(typeof(SortedSet<>))] IEnumerable<T> collection, IComparer<T>? comparer)
@@ -166,12 +175,9 @@ namespace System.Collections.Generic
                     this.count = sortedSet.count;
                     root = sortedSet.root.DeepClone(this.count);
                 }
+                SetOfSelf(((SortedSet<T>)collection).SpecComparer, ((SortedSet<T>)collection).SpecItems);
                 return;
             }
-
-            // The contract requires `collection` to be a SortedSet<T> with this set's comparer,
-            // so the branch above was taken (doc/translation.md R27.46-R27.48).
-            Pal.Unreachable();
 
             int count;
             T[] elements = EnumerableHelpers.ToArray(collection, out count);
@@ -181,23 +187,61 @@ namespace System.Collections.Generic
                 // Array.Sort handles null comparers, but we need this later when we use `comparer.Compare` directly.
                 comparer = this.comparer;
                 Array.Sort(elements, 0, count, comparer);
+                DedupeInit(comparer, ((SortedSet<T>)collection).SpecItems, Pal.Contents(elements), count);
 
                 // Overwrite duplicates while shifting the distinct elements towards
                 // the front of the array.
                 int index = 1;
                 for (int i = 1; i < count; i++)
                 {
+                    Pal.Invariant(comparer == this.comparer && count <= elements.Length && elements.Length <= 1073741824);
+                    Pal.Invariant(SpecSortDedupe.DedupeInv(comparer, ((SortedSet<T>)collection).SpecItems, Pal.Contents(elements), i, index, count));
+                    DedupeStep(comparer, ((SortedSet<T>)collection).SpecItems, Pal.Contents(elements), i, index, count);
                     if (comparer.Compare(elements[i], elements[i - 1]) != 0)
                     {
                         elements[index++] = elements[i];
                     }
                 }
 
+                DedupeDone(comparer, ((SortedSet<T>)collection).SpecItems, Pal.Contents(elements), index, count);
                 count = index;
                 root = ConstructRootFromSortedArray(elements, 0, count - 1, null);
+                Pal.Assert(SpecSortDedupe.SetOf(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)), ((SortedSet<T>)collection).SpecItems));
+                Pal.Assert(Pal.StrictlySorted(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root))) && count == SpecSearchTree.Keys(Pal.Tree<(T, bool)>(root)).Length);
+                Pal.Assert(SpecSearchTree.IsRedBlack(Pal.Tree<(T, bool)>(root)) && Pal.Unshared(root));
+                Pal.Assert(this.comparer != null);
                 this.count = count;
             }
         }
+
+        [Lemma]
+        [Requires("Pal.StrictlySorted(c, s)")]
+        [Ensures("SpecSortDedupe.SetOf(c, s, s)")]
+        [PulseBody("Pulse.Lib.CSharp.SortDedupe.set_of_self $(c) $(s)")]
+        [Conditional("PAL")]
+        private static void SetOfSelf(IComparer<T> c, Seq<T> s) { }
+
+        [Lemma]
+        [Requires("1 <= n && n <= a.Length && Pal.Permutation(src, Pal.Slice(a, 0, n)) && SpecSortDedupe.SortedIn(c, a, 0, n)")]
+        [Ensures("SpecSortDedupe.DedupeInv(c, src, a, 1, 1, n)")]
+        [PulseBody("Pulse.Lib.CSharp.SortDedupe.dedupe_init $(c) $(src) $(a) $(n)")]
+        [Conditional("PAL")]
+        private static void DedupeInit(IComparer<T> c, Seq<T> src, Seq<T> a, SpecInt n) { }
+
+        [Lemma]
+        [Requires("SpecSortDedupe.DedupeInv(c, src, a, i, index, n) && i < n")]
+        [Ensures("Pal.Implies(Pal.Compare(c, a[i], a[i - 1]) != 0, SpecSortDedupe.DedupeInv(c, src, SpecSortDedupe.Update(a, index, a[i]), i + 1, index + 1, n))")]
+        [Ensures("Pal.Implies(Pal.Compare(c, a[i], a[i - 1]) == 0, SpecSortDedupe.DedupeInv(c, src, a, i + 1, index, n))")]
+        [PulseBody("Pulse.Lib.CSharp.SortDedupe.dedupe_step $(c) $(src) $(a) $(i) $(index) $(n)")]
+        [Conditional("PAL")]
+        private static void DedupeStep(IComparer<T> c, Seq<T> src, Seq<T> a, SpecInt i, SpecInt index, SpecInt n) { }
+
+        [Lemma]
+        [Requires("SpecSortDedupe.DedupeInv(c, src, a, n, index, n)")]
+        [Ensures("SpecSortDedupe.SetOf(c, Pal.Slice(a, 0, index), src)")]
+        [PulseBody("Pulse.Lib.CSharp.SortDedupe.dedupe_done $(c) $(src) $(a) $(index) $(n)")]
+        [Conditional("PAL")]
+        private static void DedupeDone(IComparer<T> c, Seq<T> src, Seq<T> a, SpecInt index, SpecInt n) { }
 
         [Obsolete(Obsoletions.LegacyFormatterImplMessage, DiagnosticId = Obsoletions.LegacyFormatterImplDiagId, UrlFormat = Obsoletions.SharedUrlFormat)]
         [EditorBrowsable(EditorBrowsableState.Never)]
@@ -429,6 +473,10 @@ namespace System.Collections.Generic
         [Ensures("Result == @this.SpecItems.Length")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Requires("@this.SpecCoherent && @this.SpecCountOk", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Result == SpecRangeWalk.Filter(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems).Length", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("@this.SpecCoherent && @this.SpecCountOk && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk && @this._countVersion == @this._underlying.SpecVersion", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
         public int Count
         {
             get
@@ -458,9 +506,11 @@ namespace System.Collections.Generic
         // Virtual function for TreeSubSet, which may need to update its count.
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
-        [Requires("!updateCount && @this.SpecCoherent", At = typeof(SortedSet<>.TreeSubSet))]
+        [Requires("@this.SpecCoherent && Pal.Implies(updateCount, @this.SpecCountOk)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("@this.SpecCoherent && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Implies(updateCount, @this.count == SpecRangeWalk.Filter(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems).Length && @this._countVersion == @this._underlying.SpecVersion)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Implies(!updateCount, @this.count == Pal.Old(@this.count) && @this._countVersion == Pal.Old(@this._countVersion))", At = typeof(SortedSet<>.TreeSubSet))]
         internal virtual void VersionCheck(bool updateCount = false) { }
         // Virtual function for TreeSubSet, which may need the count variable of the parent set.
         [Ensures("Result == @this.SpecItems.Length")]
@@ -704,6 +754,10 @@ namespace System.Collections.Generic
                             SpecTopDownRemove.MidPre<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
                             sibling = parent.GetSibling(current);
                         }
+                        Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
+                        Pal.Join(SpecTopDownRemove.RMid<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value));
+                        Pal.Join(current != null && parent != null && sibling != null);
+                        Pal.Join(Pal.Implies(current == Pal.LeftOf(parent), sibling == Pal.RightOf(parent)) && Pal.Implies(current != Pal.LeftOf(parent), sibling == Pal.LeftOf(parent)));
 
                         SpecTopDownRemove.AtMid<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, grandParent, match, parentOfMatch, sibling, foundMatch, m0.Value);
                         Debug.Assert(Node.IsNonNullBlack(sibling));
@@ -742,6 +796,9 @@ namespace System.Collections.Generic
                         }
                     }
                 }
+                Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
+                Pal.Join(current != null);
+                Pal.Join(SpecTopDownRemove.RFx<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, match, parentOfMatch, foundMatch, m0.Value));
 
                 SpecTopDownRemove.AtFx<Node, T>(comparer, k0.Value, item, Pal.Heap<Node>(), root, current, parent, match, parentOfMatch, foundMatch, m0.Value);
                 // We don't need to compare after we find the match.
@@ -1244,6 +1301,7 @@ namespace System.Collections.Generic
         /// <param name="other">The other <see cref="SortedSet{T}"/>.</param>
         /// <returns>A value indicating whether both sets have the same comparer.</returns>
         [Ensures("Pal.Implies(@this.SpecComparer == other.SpecComparer, Result)")]
+        [Ensures("Result == (@this.SpecComparer == other.SpecComparer || SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Ensures("other.SpecNodes == Pal.Old(other.SpecNodes)")]
@@ -1270,6 +1328,7 @@ namespace System.Collections.Generic
                  ": SpecSetOps.AddAll(Pal.Old(@this.SpecComparer), Pal.Old(@this.SpecItems), Pal.Old(other.SpecItems)))")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer) && other.SpecItems == Pal.Old(other.SpecItems) && other.SpecComparer == Pal.Old(other.SpecComparer)")]
         [Rlimit(30)]
+        [Fuel(0, 0)]
         public void UnionWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
@@ -1278,7 +1337,11 @@ namespace System.Collections.Generic
             TreeSubSet? treeSubset = this as TreeSubSet;
 
             if (treeSubset != null)
+            {
+                // The contract makes `this` a SortedSet<T> itself (R27.1), not a view.
+                Pal.Unreachable();
                 VersionCheck();
+            }
 
             if (asSorted != null && treeSubset == null && Count == 0)
             {
@@ -1296,9 +1359,14 @@ namespace System.Collections.Generic
                 Pal.Assert(asSorted.SpecItems.Length > this.SpecItems.Length / 2);
                 // First do a merge sort to an array.
                 T[] merged = new T[asSorted.Count + this.Count];
+                Pal.Assert(merged.Length == this.SpecItems.Length + asSorted.SpecItems.Length);
                 int c = 0;
                 Enumerator mine = this.GetEnumerator();
                 Enumerator theirs = asSorted.GetEnumerator();
+                SortedSetMerge.Whole(this.SpecItems);
+                SortedSetMerge.Whole(asSorted.SpecItems);
+                SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
+                SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                 bool mineEnded = !mine.MoveNext(), theirsEnded = !theirs.MoveNext();
                 SpecSetOps.UnionWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 SpecSetOps.UnionSorted(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
@@ -1307,8 +1375,7 @@ namespace System.Collections.Generic
                     Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
                                   Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
                                   Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
-                                  mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
-                                  theirs.SpecPending == Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length) &&
+                                  SortedSetMerge.Suffix(this.SpecItems, mine.SpecPending) && SortedSetMerge.Suffix(asSorted.SpecItems, theirs.SpecPending) &&
                                   Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
                                       Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
                                                this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
@@ -1318,10 +1385,10 @@ namespace System.Collections.Generic
                                   merged.Length == this.SpecItems.Length + asSorted.SpecItems.Length && 0 <= c &&
                                   c <= this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1) +
                                        asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1) &&
-                                  Pal.Concat(Pal.Slice(Pal.Contents(merged), 0, c),
+                                  Pal.Concat(SortedSetMerge.Take(Pal.Contents(merged), c),
                                       SpecSetOps.Union(this.SpecComparer,
-                                          Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1), this.SpecItems.Length),
-                                          Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1), asSorted.SpecItems.Length))) ==
+                                          SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1)),
+                                          SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1)))) ==
                                   SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
                     Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1) + theirs.SpecPending.Length + (theirsEnded ? 0 : 1));
                     SpecSetOps.UnionStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
@@ -1331,28 +1398,32 @@ namespace System.Collections.Generic
                     {
                         SpecSetOps.PushPrefix(Pal.Contents(merged), c, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1],
                             SpecSetOps.Union(this.SpecComparer,
-                                Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length),
-                                Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1, asSorted.SpecItems.Length)));
+                                SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
+                                SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1)));
                         merged[c++] = mine.Current;
+                        SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
                         mineEnded = !mine.MoveNext();
                     }
                     else if (comp == 0)
                     {
                         SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
                             SpecSetOps.Union(this.SpecComparer,
-                                Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length),
-                                Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length)));
+                                SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
+                                SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
                         merged[c++] = theirs.Current;
+                        SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
                         mineEnded = !mine.MoveNext();
+                        SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                         theirsEnded = !theirs.MoveNext();
                     }
                     else
                     {
                         SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
                             SpecSetOps.Union(this.SpecComparer,
-                                Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - 1, this.SpecItems.Length),
-                                Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length)));
+                                SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - 1),
+                                SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
                         merged[c++] = theirs.Current;
+                        SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                         theirsEnded = !theirs.MoveNext();
                     }
                 }
@@ -1366,9 +1437,7 @@ namespace System.Collections.Generic
                     do
                     {
                         Pal.Invariant(remaining.SpecReady &&
-                                      remaining.SpecPending == (mineEnded
-                                          ? Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - remaining.SpecPending.Length, asSorted.SpecItems.Length)
-                                          : Pal.Slice(this.SpecItems, this.SpecItems.Length - remaining.SpecPending.Length, this.SpecItems.Length)) &&
+                                      SortedSetMerge.Suffix(mineEnded ? asSorted.SpecItems : this.SpecItems, remaining.SpecPending) &&
                                       Pal.Implies(!Pal.Broke(), remaining.SpecCurrentIn &&
                                           remaining.SpecPending.Length < (mineEnded ? asSorted.SpecItems.Length : this.SpecItems.Length) &&
                                           (mineEnded
@@ -1379,21 +1448,22 @@ namespace System.Collections.Generic
                                       Pal.Implies(Pal.Broke(), remaining.SpecPending.Length == 0) &&
                                       merged.Length == this.SpecItems.Length + asSorted.SpecItems.Length && 0 <= c &&
                                       c + remaining.SpecPending.Length + (Pal.Broke() ? 0 : 1) <= merged.Length &&
-                                      Pal.Concat(Pal.Slice(Pal.Contents(merged), 0, c),
+                                      Pal.Concat(SortedSetMerge.Take(Pal.Contents(merged), c),
                                           mineEnded
-                                              ? Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - remaining.SpecPending.Length - (Pal.Broke() ? 0 : 1), asSorted.SpecItems.Length)
-                                              : Pal.Slice(this.SpecItems, this.SpecItems.Length - remaining.SpecPending.Length - (Pal.Broke() ? 0 : 1), this.SpecItems.Length)) ==
+                                              ? SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - remaining.SpecPending.Length - (Pal.Broke() ? 0 : 1))
+                                              : SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - remaining.SpecPending.Length - (Pal.Broke() ? 0 : 1))) ==
                                       SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
                         Pal.Decreases(remaining.SpecPending.Length);
                         SpecSetOps.PushRest(Pal.Contents(merged), c, mineEnded ? asSorted.SpecItems : this.SpecItems,
                             (mineEnded ? asSorted.SpecItems.Length : this.SpecItems.Length) - remaining.SpecPending.Length - 1);
                         merged[c++] = remaining.Current;
+                        SortedSetMerge.PendingNext(mineEnded ? asSorted.SpecItems : this.SpecItems, remaining.SpecPending);
                     }
                     while (remaining.MoveNext());
                 }
-                SpecSetOps.RestDone(Pal.Slice(Pal.Contents(merged), 0, c), mineEnded ? asSorted.SpecItems : this.SpecItems);
+                SpecSetOps.RestDone(SortedSetMerge.Take(Pal.Contents(merged), c), mineEnded ? asSorted.SpecItems : this.SpecItems);
                 Pal.Assert(c <= merged.Length &&
-                           Pal.Slice(Pal.Contents(merged), 0, c) == SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
+                           SortedSetMerge.Take(Pal.Contents(merged), c) == SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
 
                 // now merged has all c elements
 
@@ -1507,6 +1577,7 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecItems == SpecSetInter.Inter(@this.SpecComparer, Pal.Old(@this.SpecItems), Pal.Old(other.SpecItems))")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer) && other.SpecItems == Pal.Old(other.SpecItems) && other.SpecComparer == Pal.Old(other.SpecComparer)")]
         [Rlimit(30)]
+        [Fuel(0, 0)]
         public virtual void IntersectWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
@@ -1525,7 +1596,11 @@ namespace System.Collections.Generic
             TreeSubSet? treeSubset = this as TreeSubSet;
 
             if (treeSubset != null)
+            {
+                // The contract makes `this` a SortedSet<T> itself (R27.1), not a view.
+                Pal.Unreachable();
                 VersionCheck();
+            }
 
             if (asSorted != null && treeSubset == null && HasEqualComparer(asSorted))
             {
@@ -1534,6 +1609,10 @@ namespace System.Collections.Generic
                 int c = 0;
                 Enumerator mine = this.GetEnumerator();
                 Enumerator theirs = asSorted.GetEnumerator();
+                SortedSetMerge.Whole(this.SpecItems);
+                SortedSetMerge.Whole(asSorted.SpecItems);
+                SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
+                SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                 bool mineEnded = !mine.MoveNext(), theirsEnded = !theirs.MoveNext();
                 T? max = Max;
                 SpecSetInter.InterWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
@@ -1543,8 +1622,7 @@ namespace System.Collections.Generic
                     Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
                                   Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
                                   Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
-                                  mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
-                                  theirs.SpecPending == Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length) &&
+                                  SortedSetMerge.Suffix(this.SpecItems, mine.SpecPending) && SortedSetMerge.Suffix(asSorted.SpecItems, theirs.SpecPending) &&
                                   Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
                                       Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
                                                this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
@@ -1554,10 +1632,10 @@ namespace System.Collections.Generic
                                   this.SpecItems.Length > 0 && Pal.Same(max, this.SpecItems[this.SpecItems.Length - 1]) &&
                                   merged.Length == this.SpecItems.Length && 0 <= c &&
                                   c <= this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1) &&
-                                  Pal.Concat(Pal.Slice(Pal.Contents(merged), 0, c),
+                                  Pal.Concat(SortedSetMerge.Take(Pal.Contents(merged), c),
                                       SpecSetInter.Inter(this.SpecComparer,
-                                          Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1), this.SpecItems.Length),
-                                          Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1), asSorted.SpecItems.Length))) ==
+                                          SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1)),
+                                          SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1)))) ==
                                   SpecSetInter.Inter(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
                     Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1) + theirs.SpecPending.Length + (theirsEnded ? 0 : 1));
                     SpecSetInter.InterStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
@@ -1565,20 +1643,24 @@ namespace System.Collections.Generic
                     int comp = Comparer.Compare(mine.Current, theirs.Current);
                     if (comp < 0)
                     {
+                        SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
                         mineEnded = !mine.MoveNext();
                     }
                     else if (comp == 0)
                     {
                         SpecSetInter.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
                             SpecSetInter.Inter(this.SpecComparer,
-                                Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length),
-                                Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length)));
+                                SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
+                                SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
                         merged[c++] = theirs.Current;
+                        SortedSetMerge.PendingNext(this.SpecItems, mine.SpecPending);
                         mineEnded = !mine.MoveNext();
+                        SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                         theirsEnded = !theirs.MoveNext();
                     }
                     else
                     {
+                        SortedSetMerge.PendingNext(asSorted.SpecItems, theirs.SpecPending);
                         theirsEnded = !theirs.MoveNext();
                     }
                 }
@@ -1587,7 +1669,7 @@ namespace System.Collections.Generic
                 SpecSetInter.InterFinish(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
                     this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1),
                     asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1),
-                    Pal.Slice(Pal.Contents(merged), 0, c));
+                    SortedSetMerge.Take(Pal.Contents(merged), c));
                 SpecSetInter.InterSorted(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
 
                 // safe to gc the root, we  have all the elements

@@ -16,9 +16,15 @@ namespace Pal.Compiler.Frontend;
 /// </summary>
 public static partial class FrontendPass
 {
-    public static IrProgram Run(CSharpCompilation compilation, DiagnosticBag diagnostics)
+    /// <param name="context">R36.3. The declarations of the units this one references:
+    /// read, as a callee's or a base's are, and never emitted.</param>
+    public static IrProgram Run(CSharpCompilation compilation, DiagnosticBag diagnostics,
+        ImmutableArray<IrDecl> context = default)
     {
+        context = context.IsDefault ? [] : context;
         var known = WellKnown.For(compilation);
+        known.ReferencedExceptions.UnionWith(context.OfType<IrException>().Select(e => e.Name));
+        CheckUnit(compilation, known, diagnostics);
         ValidateSpecTypes(compilation, known, diagnostics);
         var candidates = Collect(compilation, known, diagnostics);
         var structs = CollectStructs(compilation, known, diagnostics);
@@ -38,25 +44,33 @@ public static partial class FrontendPass
 
         foreach (var c in classes)
             declarations.Add(LowerClass(
-                c, known, bound, compilation.GetSemanticModel(c.Syntax.SyntaxTree), diagnostics));
+                c, known, bound, compilation.Model(c.Syntax.SyntaxTree), diagnostics));
 
         foreach (var candidate in candidates)
         {
+            // R35.18. A method with a `[Specialize]` parameter is translated only at the
+            // constants its callers pass.
+            if (known.IsSpecialized(candidate.Symbol)) continue;
             // The semantic model must be re-fetched: adding the shim trees produced a
             // new compilation, and models are not portable across compilations.
-            var model = compilation.GetSemanticModel(candidate.Syntax.SyntaxTree);
+            var model = compilation.Model(candidate.Syntax.SyntaxTree);
             var lifted = new List<IrMethod>();
             var decl = LowerDeclaration(candidate, model, known, bound, diagnostics, lifted);
             if (decl is not null) declarations.Add(decl);
             if (decl is IrMethod enclosing)
-                declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor }));
+                declarations.AddRange(lifted.Select(l => l with { RlimitFactor = enclosing.RlimitFactor, InitialFuel = enclosing.InitialFuel }));
         }
 
         // R27.57. The replicas the bodies asked for, each a base body verified again at a
         // representation-sharing subclass; a replica's own calls may ask for more.
         Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
-        while (known.ReplicaDemand.Count > 0)
+        while (known.ReplicaDemand.Count > 0 || known.SpecializationDemand.Count > 0)
         {
+            if (known.SpecializationDemand.Count > 0)
+            {
+                LowerSpecialization(known.SpecializationDemand.Dequeue(), candidates, compilation, known, bound, diagnostics, declarations);
+                continue;
+            }
             var request = known.ReplicaDemand.Dequeue();
             var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
             if (source is null)
@@ -66,7 +80,7 @@ public static partial class FrontendPass
                     "reaches, but it is not translated (doc/translation.md R27.57).");
                 continue;
             }
-            var model = compilation.GetSemanticModel(source.Syntax.SyntaxTree);
+            var model = compilation.Model(source.Syntax.SyntaxTree);
             var lifted = new List<IrMethod>();
             known.Replica = request;
             var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
@@ -78,7 +92,7 @@ public static partial class FrontendPass
                 Throws = [.. replica.Throws, .. replica.AtThrows.Where(t => t.At == request.At.Name).Select(t => t.Throws)],
                 AtThrows = [],
             });
-            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor }));
+            declarations.AddRange(lifted.Select(l => l with { RlimitFactor = replica.RlimitFactor, InitialFuel = replica.InitialFuel }));
         }
 
         foreach (var include in CollectIncludes(compilation, known, diagnostics))
@@ -88,9 +102,101 @@ public static partial class FrontendPass
         // declaration it creates is the one `InheritContracts` reads the contract from —
         // exactly as if the user had written the two halves out.
         OpenClasses.Desugar(declarations);
-        InheritContracts(declarations, diagnostics);
-        PropagateDefaults(declarations);
+        InheritContracts(declarations, diagnostics, context);
+        PropagateDefaults(declarations, context);
         return new IrProgram(declarations.ToImmutable());
+    }
+
+    /// <summary>
+    /// §36. What a unit may not do to the units it references, because each of them was
+    /// translated, and verified, without it: derive from one of their classes (R36.7), bind
+    /// a member they bind to something else (R36.6), or be translated under a different
+    /// <c>[TranslateAnnotatedOnly]</c> than they were (R36.5).
+    /// </summary>
+    private static void CheckUnit(CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        var referenced = Units.WithReferences(compilation).Where(c => c != compilation).ToList();
+        if (referenced.Count == 0) return;
+
+        foreach (var r in referenced)
+            if (Declarations.Has(r.Assembly, known.TranslateAnnotatedOnlyAttribute) != known.AnnotatedOnly)
+                diagnostics.Error("PALCS0761", IrLoc.None,
+                    $"This unit is translated {(known.AnnotatedOnly ? "with" : "without")} " +
+                    $"`[assembly: TranslateAnnotatedOnly]`, and the unit it references, `{r.AssemblyName}`, " +
+                    $"{(known.AnnotatedOnly ? "without" : "with")} it. Which of a referenced unit's " +
+                    "declarations are translated is decided once, by that unit; a client that decided it " +
+                    "differently would name modules that do not exist (doc/translation.md R36.5).");
+
+        var bound = new Dictionary<string, (string Term, string Unit)>(StringComparer.Ordinal);
+        foreach (var r in referenced)
+            foreach (var data in Declarations.All(r.Assembly, known.SpecBindingAttribute))
+                if (Declarations.StringArgument(data, 0) is { } member && Declarations.StringArgument(data, 1) is { } term)
+                {
+                    if (bound.TryGetValue(member, out var prior) && prior.Term != term)
+                        diagnostics.Error("PALCS0760", IrLoc.None,
+                            $"`{member}` is bound to `{prior.Term}` by the referenced unit `{prior.Unit}` and to " +
+                            $"`{term}` by the referenced unit `{r.AssemblyName}`. A binding is a trusted " +
+                            "axiom about the member, and two units stating two of them are not checked " +
+                            "against each other (doc/translation.md R36.6).");
+                    else bound[member] = (term, r.AssemblyName ?? "");
+                }
+        foreach (var data in Declarations.All(compilation.Assembly, known.SpecBindingAttribute))
+            if (Declarations.StringArgument(data, 0) is { } member && Declarations.StringArgument(data, 1) is { } term &&
+                bound.TryGetValue(member, out var prior) && prior.Term != term)
+                diagnostics.Error("PALCS0760", Locations.From(Declarations.ArgumentLocation(data)),
+                    $"`{member}` is bound here to `{term}`, but the referenced unit `{prior.Unit}` binds it to " +
+                    $"`{prior.Term}`. A binding is a trusted axiom about the member, and a unit's verified " +
+                    "modules were proved under its own; restate that unit's binding or remove this one " +
+                    "(doc/translation.md R36.6).");
+
+        foreach (var tree in compilation.SyntaxTrees)
+        {
+            var model = compilation.Model(tree);
+            foreach (var decl in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
+            {
+                if (model.GetDeclaredSymbol(decl) is not INamedTypeSymbol type) continue;
+                for (var b = type.BaseType; b is not null; b = b.BaseType)
+                {
+                    if (!compilation.IsReferenced(b.OriginalDefinition)) continue;
+                    diagnostics.Error("PALCS0759", Locations.From(decl.Identifier),
+                        $"`{type.Name}` derives from `{b.Name}`, which is declared in a referenced unit. That " +
+                        "unit was translated without this class: what it concluded from the subclasses " +
+                        "it could see (a leaf, a class verified at its exact type, a closed set of " +
+                        "overrides) would not hold of this one (doc/translation.md R36.7). Translate the " +
+                        "two classes in one unit.");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// R35.18. A method lowered at constant values of its <c>[Specialize]</c> parameters: its
+    /// body with each <c>if</c> those decide folded to the branch taken, under the name the
+    /// callers were redirected to, requiring that each parameter is its constant.
+    /// </summary>
+    private static void LowerSpecialization(WellKnown.SpecializationRequest request, ImmutableArray<Candidate> candidates,
+        CSharpCompilation compilation, WellKnown known, ImmutableDictionary<string, BoundSpec> bound, DiagnosticBag diagnostics,
+        ImmutableArray<IrDecl>.Builder declarations)
+    {
+        var source = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == request.Source);
+        // A specialization of a referenced unit's method is never asked for here: R35.18 only
+        // specializes calls on the view itself, from its own class, and R36.7 keeps a client
+        // out of that class's hierarchy.
+        if (source is null) return;
+        var model = compilation.Model(source.Syntax.SyntaxTree);
+        var lifted = new List<IrMethod>();
+        var outer = known.Specialization;
+        known.Specialization = request;
+        var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
+        known.Specialization = outer;
+        if (decl is not IrMethod m) return;
+        var loc = m.Loc;
+        var pins = request.Values.Select(kv => (IrExpr)new IrBinary(loc, BinOp.Eq,
+            new IrVar(loc, kv.Key) { Type = IrPrim.Bool }, new IrLiteral(loc, kv.Value) { Type = IrPrim.Bool })
+            { Type = IrPrim.Bool });
+        declarations.Add(m with { Name = request.Name, Requires = [.. pins, .. m.Requires] });
+        declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor, InitialFuel = m.InitialFuel }));
     }
 
     /// <summary>
@@ -99,20 +205,19 @@ public static partial class FrontendPass
     /// instance is resolved at the call, from the caller's binders. Iterated to a fixed
     /// point, because the need travels up any chain of calls.
     /// </summary>
-    private static void PropagateDefaults(ImmutableArray<IrDecl>.Builder declarations)
+    private static void PropagateDefaults(ImmutableArray<IrDecl>.Builder declarations, ImmutableArray<IrDecl> context)
     {
         bool changed;
         do
         {
             changed = false;
-            var byName = declarations.OfType<IrMethod>().GroupBy(m => m.Name)
+            var byName = declarations.OfType<IrMethod>().Concat(context.OfType<IrMethod>()).GroupBy(m => m.Name)
                 .ToDictionary(g => g.Key, g => g.First());
             for (var i = 0; i < declarations.Count; i++)
             {
                 if (declarations[i] is not IrMethod { Body: { } body } m) continue;
                 var needed = new HashSet<string>(m.DefaultedTypeParameters);
-                foreach (var call in Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
-                             .SelectMany(Passes.Check.Subexpressions).OfType<IrCall>())
+                foreach (var call in CallsIn(body))
                 {
                     if (!byName.TryGetValue(call.Callee, out var callee)) continue;
                     foreach (var tp in callee.DefaultedTypeParameters)
@@ -134,6 +239,14 @@ public static partial class FrontendPass
         } while (changed);
     }
 
+    // The calls of a body, with those in a statement expression's prelude (R32.12's write-back).
+    private static IEnumerable<IrCall> CallsIn(IrStmt body) =>
+        Passes.Check.Statements(body).SelectMany(Passes.Check.Expressions)
+            .SelectMany(Passes.Check.Subexpressions)
+            .SelectMany(e => e is IrStmtExpr se
+                ? se.Prelude.SelectMany(CallsIn)
+                : e is IrCall c ? [c] : Enumerable.Empty<IrCall>());
+
     // R22.22. The type parameters a `has_default` instance at `t` is resolved from: `t`
     // itself, or those of a tuple's or a struct's arguments (their instances are built
     // from their components').
@@ -153,11 +266,11 @@ public static partial class FrontendPass
     /// there is no way for a subclass to weaken what its callers were promised.
     /// </summary>
     private static void InheritContracts(
-        ImmutableArray<IrDecl>.Builder declarations, DiagnosticBag diagnostics)
+        ImmutableArray<IrDecl>.Builder declarations, DiagnosticBag diagnostics, ImmutableArray<IrDecl> context)
     {
         // Grouped, not added: see SpecBinder. A duplicate here is R2.1a's to prevent and
         // PALCS0501's to report, and neither is served by throwing.
-        var byName = declarations.OfType<IrMethod>()
+        var byName = declarations.OfType<IrMethod>().Concat(context.OfType<IrMethod>())
             .Where(m => m.IsAbstract && m.DeclaringClass is not null)
             .GroupBy(m => m.Name)
             .ToDictionary(g => g.Key, g => g.First());
@@ -167,7 +280,7 @@ public static partial class FrontendPass
         // `Quadrilateral`, which declares no `GetArea` of its own. So the contract is
         // looked up by walking, and the two questions — whose model, and whose contract —
         // are answered separately, which is what they always were.
-        var bases = declarations.OfType<IrClass>()
+        var bases = declarations.OfType<IrClass>().Concat(context.OfType<IrClass>())
             .Where(c => c.BaseClass is not null)
             .GroupBy(c => c.Name)
             .ToDictionary(g => g.Key, g => g.First().BaseClass!);
@@ -312,7 +425,7 @@ public static partial class FrontendPass
         var result = ImmutableArray.CreateBuilder<Candidate>();
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var method in tree.GetRoot().DescendantNodes().OfType<BaseMethodDeclarationSyntax>())
             {
                 if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
@@ -412,7 +525,7 @@ public static partial class FrontendPass
 
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var syntax in tree.GetRoot().DescendantNodes())
             {
                 var symbol = syntax switch
@@ -572,7 +685,7 @@ public static partial class FrontendPass
     {
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } type) continue;
@@ -606,7 +719,7 @@ public static partial class FrontendPass
 
                     // R29.4. Nor does a static one producing an `object`: it reads no
                     // specification type, and an `obj` is no type's to own.
-                    var producesObject = member.IsStatic && WellKnown.IsObjectLike(member switch
+                    var producesObject = member.IsStatic && WellKnown.IsObjectLikeReturn(member switch
                     {
                         IMethodSymbol om => om.ReturnType,
                         IPropertySymbol op => op.Type,
@@ -614,10 +727,16 @@ public static partial class FrontendPass
                         _ => null,
                     });
 
+                    // R30.5. Nor does a static method of a static class bound by R21.5: a
+                    // helper such as `HashHelpers.GetPrime` reads nothing but its arguments,
+                    // like a method of a class outside the sources (`BitOperations.Log2`).
+                    var staticHelper = member is IMethodSymbol { IsStatic: true } && type.IsStatic &&
+                        known.SpecTypeName(type) is null;
+
                     // R27.58. A nested class bound by R21.5 is a type, not an operation.
                     if (member is not ITypeSymbol &&
                         known.SpecOpName(member) is not null && known.SpecTypeName(type) is null &&
-                        !isPredicate && !producesObject &&
+                        !isPredicate && !producesObject && !staticHelper &&
                         !(member.IsStatic && type.GetMembers().Any(m => known.SpecCtorName(m) is not null)))
                         diagnostics.Error("PALCS0571", MemberLocation(member, syntax),
                             $"`[SpecOp]` on `{type.Name}.{member.Name}`, but `{type.Name}` is not a " +
@@ -652,7 +771,7 @@ public static partial class FrontendPass
         var result = ImmutableArray.CreateBuilder<StructCandidate>();
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
                 if (syntax is not (StructDeclarationSyntax or ClassDeclarationSyntax)) continue;
@@ -969,7 +1088,7 @@ public static partial class FrontendPass
         var result = ImmutableArray.CreateBuilder<ClassCandidate>();
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var syntax in tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
             {
                 if (model.GetDeclaredSymbol(syntax) is not { } symbol) continue;
@@ -1177,8 +1296,7 @@ public static partial class FrontendPass
     private static bool ExactType(INamedTypeSymbol symbol, WellKnown known) =>
         !symbol.IsAbstract && !symbol.IsSealed &&
         symbol.TypeParameters.Length > 0 &&
-        known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
-            .OfType<INamedTypeSymbol>()
+        Units.SourceTypes(known.Compilation)
             .Where(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition))
             .ToList() is { Count: > 0 } subs &&
         // R27.57. A subclass sharing the representation is verified at its own exact type.
@@ -1257,8 +1375,7 @@ public static partial class FrontendPass
         !symbol.GetMembers().Any(m => (m.IsVirtual || m.IsAbstract || m.IsOverride) &&
             (Declarations.IsAnnotated(m, known) ||
              m is IMethodSymbol { AssociatedSymbol: { } a } && Declarations.IsAnnotated(a, known))) &&
-        !known.Compilation.GetSymbolsWithName(_ => true, SymbolFilter.Type)
-            .OfType<INamedTypeSymbol>()
+        !Units.SourceTypes(known.Compilation)
             .Any(t => SymbolEqualityComparer.Default.Equals(t.BaseType?.OriginalDefinition, symbol.OriginalDefinition));
 
     /// <summary>
@@ -1789,7 +1906,7 @@ public static partial class FrontendPass
 
     /// <summary>The semantic model for a node's own tree, which may not be the class's.</summary>
     private static SemanticModel In(SemanticModel model, SyntaxNode node) =>
-        node.SyntaxTree == model.SyntaxTree ? model : model.Compilation.GetSemanticModel(node.SyntaxTree);
+        node.SyntaxTree == model.SyntaxTree ? model : model.Compilation.Model(node.SyntaxTree);
 
     /// <summary>
     /// R9.21b. The class's own members, preceded by the representation it inherits from
@@ -1940,6 +2057,7 @@ public static partial class FrontendPass
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); if (na.Source is { } nas) Walk(nas); return;
                 case IrContents ct: Walk(ct.Array); return;
+                case IrEnumOp eo: Walk(eo.Source); foreach (var a in eo.Args) Walk(a); return;
                 case IrQuantifier q: Walk(q.Body); return;
                 case IrCall call: foreach (var a in call.Args) Walk(a); return;
                 case IrSeqOp so: foreach (var a in so.Args) Walk(a); return;
@@ -2324,8 +2442,10 @@ public static partial class FrontendPass
                               atView is not null ||
                               Borrowing.IsMember(candidate.Symbol, known) ||
                               Borrowing.IsBorrowing(candidate.Symbol.ReturnType, known) ||
+                              // R35.3. So does one about a wrapping struct it creates.
+                              Borrowing.IsWrapping(candidate.Symbol.ReturnType, known) ||
                               // R29.4. A boxed result is described by the state of what it boxes.
-                              WellKnown.IsObjectLike(candidate.Symbol.ReturnType),
+                              WellKnown.IsObjectLikeReturn(candidate.Symbol.ReturnType),
                 });
             }
 
@@ -2641,6 +2761,39 @@ public static partial class FrontendPass
     // Lower
     // -----------------------------------------------------------------------
 
+    /// <summary>R30.44. The initial fuel and ifuel <c>[Fuel]</c> sets.</summary>
+    private static (int, int)? InitialFuel(IMethodSymbol symbol, WellKnown known, IrLoc loc, DiagnosticBag diagnostics)
+    {
+        if (Declarations.Find(symbol, known.FuelAttribute) is not { ConstructorArguments: [{ Value: int fuel }, { Value: int ifuel }] })
+            return null;
+        if (fuel < 0 || ifuel < 0)
+        {
+            diagnostics.Error("PALCS0757", loc, $"`[Fuel({fuel}, {ifuel})]`: fuel and ifuel must not be negative (R30.44).");
+            return null;
+        }
+        return (fuel, ifuel);
+    }
+
+    /// <summary>R30.40. The modules of the <c>[Spec]</c> members <c>[OpaqueSpecs]</c> names.</summary>
+    private static ImmutableArray<string> OpaqueSpecs(IMethodSymbol symbol, WellKnown known, IrLoc loc, DiagnosticBag diagnostics)
+    {
+        if (Declarations.Find(symbol, known.OpaqueSpecsAttribute) is not { ConstructorArguments: [{ } names] }) return [];
+        var modules = ImmutableArray.CreateBuilder<string>();
+        foreach (var name in names.Values.Select(v => v.Value as string))
+        {
+            var spec = symbol.ContainingType.GetMembers(name ?? "").OfType<IMethodSymbol>()
+                .FirstOrDefault(m => Declarations.Has(m, known.SpecAttribute));
+            if (spec is null)
+            {
+                diagnostics.Error("PALCS0756", loc,
+                    $"`[OpaqueSpecs]` names `{name}`, which is not a `[Spec]` method of `{symbol.ContainingType.Name}` (R30.40).");
+                continue;
+            }
+            modules.Add(Emit.Names.SpecModule(Naming.Of(spec)));
+        }
+        return modules.ToImmutable();
+    }
+
     private static IrDecl? LowerDeclaration(
         Candidate candidate,
         SemanticModel model,
@@ -2692,8 +2845,11 @@ public static partial class FrontendPass
         var returnType = symbol.MethodKind == MethodKind.Constructor
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
+            // R30.29. A lookup returning a reference that may be null returns an `option`.
+            : RefSnapshots.IsSnapshot(symbol, model.Compilation) && known.MapType(symbol.ReturnType) is { } snapshotOf
+                ? new IrOptionType(snapshotOf)
             // R32.13. A method returning a view exactly returns its record.
-            : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+            : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -2721,7 +2877,7 @@ public static partial class FrontendPass
                 .ToImmutableHashSet();
 
         var lowerer = new StmtLowerer(model, known, diagnostics, objectFields);
-        lowerer.Expressions.LiftPrefix = known.Replica?.Name ?? Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ?? known.Replica?.Name ?? Naming.Of(symbol);
         lowerer.Expressions.LiftTypeParameters = MethodTypeParameters(symbol);
         if (iterated is not null) lowerer.Iterate(iterated);
 
@@ -2793,6 +2949,8 @@ public static partial class FrontendPass
             Implements = implemented,
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
+            InitialFuel = InitialFuel(symbol, known, loc, diagnostics),
+            OpaqueSpecs = OpaqueSpecs(symbol, known, loc, diagnostics),
             Open = Declarations.Has(symbol, known.OpenAttribute),
             Preserves = specs.Preserves,
             Throws = specs.Throws,
@@ -2849,7 +3007,7 @@ public static partial class FrontendPass
         Candidate candidate, SemanticModel model, WellKnown known, DiagnosticBag diagnostics,
         IrLoc loc, ImmutableArray<IrParam> parameters, Specs specs)
     {
-        var returnType = known.MapType(candidate.Symbol.ReturnType);
+        var returnType = known.MapReturnType(candidate.Symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The [Spec] return type `{candidate.Symbol.ReturnType}`");
@@ -3022,7 +3180,10 @@ public static partial class FrontendPass
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
                 { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow,
-                  OpenFields = OpenFields(symbol, known) };
+                  OpenFields = OpenFields(symbol, known),
+                  SnapshotResult = RefSnapshots.IsSnapshot(symbol, spec.Model.Compilation) &&
+                                   known.MapType(symbol.ReturnType) is { } resultOf ? new IrOptionType(resultOf) : null,
+                  DeclaredResult = symbol.ReturnsVoid ? null : known.MapReturnType(symbol.ReturnType) };
             var expr = lowerer.Lower(spec.Expression);
 
             var cls = attribute.AttributeClass;

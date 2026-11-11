@@ -62,6 +62,8 @@ public static class Report
             try { message = JsonDocument.Parse(trimmed).RootElement; }
             catch (JsonException) { Console.Out.WriteLine(line); continue; }
 
+            if (IsCastDeprecation(message)) continue;
+
             if (Locate(message, modules) is not { } located)
             {
                 // Not about anything this translation produced, or deliberately dropped
@@ -150,6 +152,16 @@ public static class Report
 
         return null;
     }
+
+    /// <summary>
+    /// F*'s warning 288 on an <c>FStar.Int.Cast</c> conversion: those are deprecated because
+    /// the result is implementation-defined in C, but R13.1 emits them on purpose for C#'s
+    /// explicit casts, whose modular result C# defines. Dropped, not passed through.
+    /// </summary>
+    private static bool IsCastDeprecation(JsonElement message) =>
+        message.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number && n.GetInt32() == 288 &&
+        message.TryGetProperty("msg", out var msg) && msg.ValueKind == JsonValueKind.Array && msg.GetArrayLength() > 0 &&
+        msg[0].GetString() is { } first && first.StartsWith("FStar.Int.Cast.", StringComparison.Ordinal);
 
     /// <summary>
     /// An unmapped message, rendered at the location F* gave it. Purely informational

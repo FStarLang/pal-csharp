@@ -336,6 +336,33 @@ public sealed class RlimitAttribute(int factor) : Attribute
     public int Factor { get; } = factor;
 }
 
+/// <summary>
+/// R30.44. Check this method's proof starting from <paramref name="fuel"/> unfoldings of
+/// recursive definitions and <paramref name="ifuel"/> of inductive types (F*'s
+/// <c>--initial_fuel</c> and <c>--initial_ifuel</c>). A query that fails is retried with more,
+/// up to the usual maximum. Like <see cref="RlimitAttribute"/> it changes how the proof is
+/// found, not what is proved.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class FuelAttribute(int fuel, int ifuel) : Attribute
+{
+    public int Fuel { get; } = fuel;
+    public int Ifuel { get; } = ifuel;
+}
+
+/// <summary>
+/// R30.40. The named <c>[Spec]</c> members of the declaring type are opaque to the SMT solver
+/// while this method is checked (F*'s <c>--using_facts_from</c>): their definitions are not
+/// unfolded, so what the proof knows of them comes from lemmas and from facts stated in
+/// their terms. Like <see cref="RlimitAttribute"/> it changes how the proof is found, not
+/// what is proved: hiding a definition can only make a proof fail.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class OpaqueSpecsAttribute(params string[] specs) : Attribute
+{
+    public string[] Specs { get; } = specs;
+}
+
 /// <summary>Admit this method's contract without proof. Reported as a diagnostic.</summary>
 [AttributeUsage(AttributeTargets.Method)]
 public sealed class AdmitAttribute : Attribute;
@@ -543,3 +570,13 @@ public sealed class CallbackAttribute : Attribute
 {
     public bool Bounded { get; set; }
 }
+
+/// <summary>
+/// R35.18. A <c>bool</c> parameter the method is translated at each constant value of,
+/// instead of once: every call passes a literal (or omits the argument, passing the
+/// default), and calls the translation at that value, in which an <c>if</c> the value
+/// decides is the branch it takes. A method calling itself through the other value then
+/// calls a different translation.
+/// </summary>
+[AttributeUsage(AttributeTargets.Parameter)]
+public sealed class SpecializeAttribute : Attribute;

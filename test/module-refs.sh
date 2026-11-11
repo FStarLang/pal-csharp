@@ -44,6 +44,23 @@ for root in (out, dirname):
         if ext in (".fst", ".fsti"):
             emitted.add(stem)
 
+# R36.3. A unit's modules may name the modules of the units it references, which their
+# manifests list (transitively).
+def referenced(d, seen):
+    path = os.path.join(d, "unit.json")
+    if d in seen or not os.path.isfile(path):
+        return
+    seen.add(d)
+    import json
+    with open(path) as f:
+        manifest = json.load(f)
+    if d != os.path.abspath(out):
+        emitted.update(manifest["modules"])
+    for r in manifest["references"]:
+        referenced(r, seen)
+
+referenced(os.path.abspath(out), set())
+
 # Modules that come from outside the directory: the F* and Pulse standard libraries, and
 # pal-csharp's own support library. A reference into these resolves through --include, and
 # whether the module exists is F*'s business, not the lint's.

@@ -460,6 +460,8 @@ public static class Types
         // with a length and a `pts_to` -- an array-shaped slot that need not be a
         // whole array.
         IrSpanType s => $"Span.span {Atom(s.Element)}",
+        // R34.1. An enumerable argument is the abstract `enumerable`, lent read-only.
+        IrEnumerableType e => $"Pulse.Lib.CSharp.Enumerable.enumerable {Atom(e.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
         IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments),

@@ -44,8 +44,15 @@ public sealed class StmtLowerer(
         return node switch
         {
             BlockSyntax b => LowerBlock(b),
+            LocalDeclarationStatementSyntax d when EnumeratorDeclaration(d.UsingKeyword.IsKind(SyntaxKind.UsingKeyword)
+                ? d.Declaration : null, loc) is { } enumerator => enumerator,
+            UsingStatementSyntax u when EnumeratorDeclaration(u.Declaration, loc) is { } enumerator =>
+                new IrBlock(loc, [enumerator, Lower(u.Statement)]),
             LocalDeclarationStatementSyntax d => LowerLocalDeclaration(d, loc),
             ExpressionStatementSyntax e => LowerExpressionStatement(e, loc),
+            // R35.18. In a specialization, an `if` its constants decide is the branch taken.
+            IfStatementSyntax i when Decided(i.Condition) is { } taken =>
+                taken ? Lower(i.Statement) : i.Else is null ? new IrBlock(loc, []) : Lower(i.Else.Statement),
             IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
             // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
             IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
@@ -59,10 +66,14 @@ public sealed class StmtLowerer(
             DoStatementSyntax d => LowerDo(d, loc),
             ForStatementSyntax f => LowerFor(f, loc),
             ForEachStatementSyntax f => LowerForEach(f, loc),
+            ForEachVariableStatementSyntax f => LowerForEachVariable(f, loc),
             ReturnStatementSyntax r when _loopDepth > 0 => LowerReturnInLoop(r, loc),
+            // R35.2. `out var x` in a returned expression: declared ahead, as R33.9's `if`.
+            ReturnStatementSyntax { Expression: { } re } r when OutDeclarations(re, loc) is { IsEmpty: false } outs =>
+                new IrBlock(loc, [.. outs, new IrReturn(loc,
+                    _code.ToDeclared(_code.Lower(re), known.MapReturnType(ReturnType(r))))]) { Splice = true },
             ReturnStatementSyntax r => new IrReturn(loc,
-                r.Expression is null ? null : _code.ToDeclared(_code.Lower(r.Expression),
-                    known.MapType(ReturnType(r)))),
+                r.Expression is null ? null : Returned(r, ReturnedType(r))),
             BreakStatementSyntax => new IrBreak(loc),
             ContinueStatementSyntax => new IrContinue(loc),
             SwitchStatementSyntax s => LowerSwitch(s, loc),
@@ -174,9 +185,11 @@ public sealed class StmtLowerer(
         }).FirstOrDefault(b => b is not null);
         var statements = body?.Statements ?? default;
         var at = body is null ? -1 : statements.IndexOf(st => st is LabeledStatementSyntax l && l.Identifier.ValueText == name);
+        // R30.29. A jump back to a label is followed as one forward is, so long as the code it
+        // copies does not contain the jump.
         string? why =
             at < 0 ? "its label is not a statement of the method's outermost block"
-            : statements[at].SpanStart < node.SpanStart ? "it jumps backwards"
+            : _expanding.Contains(name!) ? "it jumps back into the code it is part of"
             : node.Ancestors().TakeWhile(a => a != body).Any(a => a is TryStatementSyntax or
                 AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)
                 ? "it leaves a `try`, a lambda or a local function"
@@ -195,15 +208,34 @@ public sealed class StmtLowerer(
         var from = statements.IndexOf(st => st.Span.Contains(node.Span));
         var tail = statements.Skip(at).ToList();
         var declared = ImmutableArray.CreateBuilder<IrStmt>();
-        foreach (var st in statements.Skip(from + 1).Take(at - from - 1).OfType<LocalDeclarationStatementSyntax>())
+        // R30.29. So may one under a label.
+        static StatementSyntax Unlabeled(StatementSyntax st) => st is LabeledStatementSyntax l ? Unlabeled(l.Statement) : st;
+        foreach (var st in statements.Skip(from + 1).Take(Math.Max(0, at - from - 1)).Select(Unlabeled)
+                     .OfType<LocalDeclarationStatementSyntax>())
             foreach (var v in st.Declaration.Variables)
                 if (model.GetDeclaredSymbol(v) is ILocalSymbol local &&
                     tail.Any(t => t.DescendantNodes().OfType<IdentifierNameSyntax>().Any(id =>
                         SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local))) &&
                     known.MapType(local.Type) is { } localType)
+                {
+                    // R30.29. A snapshot local starts as the null reference.
+                    if (local.IsRef && RefSnapshots.Enclosing(node, model) is not null)
+                    {
+                        var optionType = new IrOptionType(localType);
+                        declared.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, optionType,
+                            new IrNull(Locations.From(v)) { Type = optionType }));
+                        RegisterSnapshot(local, optionType, Locations.From(v));
+                        continue;
+                    }
                     declared.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, localType, null));
-        return new IrBlock(loc, [.. declared, .. LowerStatements(tail)]);
+                }
+        _expanding.Add(name!);
+        try { return new IrBlock(loc, [.. declared, .. LowerStatements(tail)]); }
+        finally { _expanding.Remove(name!); }
     }
+
+    /// <summary>R30.29. The labels whose code is being copied to a jump.</summary>
+    private readonly HashSet<string> _expanding = [];
 
     /// <summary>
     /// R33.2. Whether control can reach the end of <paramref name="statement"/>: C#'s
@@ -307,6 +339,7 @@ public sealed class StmtLowerer(
     // -----------------------------------------------------------------------
 
     public const string ReturnedFlag = "__pal_returned";
+    public const string RaisedFlag = "__pal_raised";
     public const string ReturnedValue = "__pal_result";
     /// <summary>R26.10. What <c>Pal.Broke()</c> names: the innermost loop's break flag.</summary>
     public const string BrokeFlag = "__pal_broke";
@@ -373,6 +406,30 @@ public sealed class StmtLowerer(
     /// null. (A pattern otherwise substitutes the subject for <c>x</c>, re-reading the heap at
     /// each use.)
     /// </summary>
+    /// <summary>
+    /// R35.18. The value of a condition built by <c>!</c>, <c>&amp;&amp;</c>, <c>||</c> and
+    /// parentheses from <c>bool</c> literals and the parameters a specialization fixes, when
+    /// those decide it (<c>false &amp;&amp; e</c> is false, and <c>e</c> never evaluated); else null.
+    /// </summary>
+    private bool? Decided(ExpressionSyntax e)
+    {
+        if (known.Specialization is not { } sp) return null;
+        return e switch
+        {
+            ParenthesizedExpressionSyntax p => Decided(p.Expression),
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.TrueLiteralExpression) => true,
+            LiteralExpressionSyntax l when l.IsKind(SyntaxKind.FalseLiteralExpression) => false,
+            IdentifierNameSyntax id when model.GetSymbolInfo(id).Symbol is IParameterSymbol p &&
+                Declarations.Has(p, known.SpecializeAttribute) && sp.Values.TryGetValue(p.Name, out var v) => v,
+            PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.LogicalNotExpression) => !Decided(u.Operand),
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalAndExpression) =>
+                Decided(b.Left) is { } l ? (l ? Decided(b.Right) : false) : null,
+            BinaryExpressionSyntax b when b.IsKind(SyntaxKind.LogicalOrExpression) =>
+                Decided(b.Left) is { } l ? (l ? true : Decided(b.Right)) : null,
+            _ => null,
+        };
+    }
+
     private IrStmt? RegionPatternIf(IfStatementSyntax i, IrLoc loc)
     {
         if (i.Condition is not IsPatternExpressionSyntax
@@ -414,7 +471,27 @@ public sealed class StmtLowerer(
         ]);
     }
     private ITypeSymbol? _loopReturnType;
+    private IrType? _loopReturnMapped;
+    private bool _loopReturnNull;
     private bool _loopReturnVoid;
+
+    /// <summary>R30.29. The type a <c>return</c> stores: for a snapshot method, its <c>option</c>.</summary>
+    private IrType? ReturnedType(ReturnStatementSyntax r) =>
+        RefSnapshots.Enclosing(r, model) is { } m ? _code.SnapshotType(m) : known.MapReturnType(ReturnType(r));
+
+    private IrExpr Returned(ReturnStatementSyntax r, IrType? mapped) =>
+        mapped is IrOptionType snapshot && RefSnapshots.Enclosing(r, model) is not null &&
+        r.Expression is RefExpressionSyntax { Expression: var target }
+            ? SnapshotTarget(target, snapshot)
+            : _code.ToDeclared(_code.Lower(r.Expression!), mapped);
+
+    /// <summary>
+    /// R30.29. The <c>option</c> <c>ref target</c> is, in a snapshot: <c>None</c> for a null
+    /// reference, another snapshot as it is, and <c>Some</c> of any other location's value.
+    /// </summary>
+    private IrExpr SnapshotTarget(ExpressionSyntax target, IrOptionType type) =>
+        _code.LowerRaw(target, type) ??
+        new IrOptionOp(Locations.From(target), OptionOpKind.Some, _code.ToDeclared(_code.Lower(target), type.Inner)) { Type = type };
 
     /// <summary>Whether a <c>return</c> inside a loop was rewritten, so the body needs its cells.</summary>
     public bool ReturnsInLoop => _loopReturnType is not null || _loopReturnVoid;
@@ -426,11 +503,12 @@ public sealed class StmtLowerer(
     private IrStmt LowerReturnInLoop(ReturnStatementSyntax r, IrLoc loc)
     {
         var stmts = ImmutableArray.CreateBuilder<IrStmt>();
-        if (r.Expression is not null && ReturnType(r) is { } rt && known.MapType(rt) is { } mapped)
+        if (r.Expression is not null && ReturnType(r) is { } rt && ReturnedType(r) is { } mapped)
         {
             _loopReturnType = rt;
-            stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedValue) { Type = mapped },
-                _code.ToDeclared(_code.Lower(r.Expression), mapped)));
+            _loopReturnMapped = mapped;
+            _loopReturnNull = RefSnapshots.Enclosing(r, model) is not null;
+            stmts.Add(new IrAssign(loc, new IrVar(loc, ReturnedValue) { Type = mapped }, Returned(r, mapped)));
         }
         else if (r.Expression is null) _loopReturnVoid = true;
         else return UnsupportedStatement(r, loc);
@@ -456,8 +534,8 @@ public sealed class StmtLowerer(
         var flag = new IrVar(loc, ReturnedFlag) { Type = IrPrim.Bool };
         IrStmt owed = _loopDepth > 0
             ? new IrBreak(loc) { FromReturn = true }
-            : new IrReturn(loc, _loopReturnType is { } rt
-                ? new IrVar(loc, ReturnedValue) { Type = known.MapType(rt) }
+            : new IrReturn(loc, _loopReturnType is not null
+                ? new IrVar(loc, ReturnedValue) { Type = _loopReturnMapped }
                 : _iterator is not null ? TraceVar(loc) : null);
         return new IrBlock(loc, [.. lowered is IrBlock { Splice: true } spliced ? spliced.Statements : [lowered],
             new IrIf(loc, flag, owed, null)]) { Splice = true };
@@ -479,9 +557,11 @@ public sealed class StmtLowerer(
         if (!ReturnsInLoop) return [];
         var cells = ImmutableArray.CreateBuilder<IrStmt>();
         cells.Add(new IrLocalDecl(loc, ReturnedFlag, IrPrim.Bool, new IrLiteral(loc, false) { Type = IrPrim.Bool }));
-        if (_loopReturnType is { } rt && known.MapType(rt) is { } mapped)
+        if (_loopReturnType is { } rt && _loopReturnMapped is { } mapped)
         {
-            if (_code.DefaultValue(rt, loc) is { } init)
+            // R30.29. A snapshot method's cell starts as the null reference.
+            if ((_loopReturnNull && mapped is IrOptionType
+                    ? new IrNull(loc) { Type = mapped } : _code.DefaultValue(rt, loc)) is { } init)
                 cells.Add(new IrLocalDecl(loc, ReturnedValue, mapped, init));
             else
                 diagnostics.Error("PALCS0686", loc,
@@ -603,11 +683,14 @@ public sealed class StmtLowerer(
             // at that local.
             if (symbol is { RefKind: RefKind.Ref or RefKind.RefReadOnly })
             {
+                if (SnapshotLocal(v, symbol, node, statements)) continue;
                 if (ReboundRefLocal(v, symbol, node, statements)) continue;
-                if (RefLocal(v, symbol, node, statements) is null)
+                if (RefLocal(v, symbol, node, statements) is null && !_staleReported.Contains(symbol))
                     diagnostics.Unsupported(Locations.From(v), $"The `ref` local `{v.Identifier.ValueText}`",
                         "Only `ref` locals bound to an element of an array named by an unrebound " +
-                        "local or an unwritten field, and never rebound, are supported (doc/translation.md R24.8).");
+                        "local or an unwritten field, and never rebound, are supported (doc/translation.md R24.8), " +
+                        "or bound, by statements, to elements of one field's array and used only while bound " +
+                        "since the field last changed (R30.1).");
                 continue;
             }
             // R28.2. `C list = _list;`, never written, in a borrowing struct's member is
@@ -628,6 +711,19 @@ public sealed class StmtLowerer(
             {
                 _code.Alias(symbol, arrayField);
                 _spec.Alias(symbol, arrayField);
+                continue;
+            }
+            // R34.20. `var c = e as ICollection<T>;`, never written, on an enumerable argument
+            // `e`: `c` is another name for `e`, and null exactly when `e` is no collection.
+            if (symbol is not null && v.Initializer?.Value is BinaryExpressionSyntax collInit &&
+                collInit.IsKind(SyntaxKind.AsExpression) &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                _code.IsEnumerableArgument(collInit.Left) &&
+                model.GetTypeInfo(collInit.Right).Type is INamedTypeSymbol collTarget &&
+                WellKnown.IsCollectionInterface(collTarget))
+            {
+                _code.CollectionAlias(symbol, _code.Lower(collInit.Left));
+                _spec.CollectionAlias(symbol, _spec.Lower(collInit.Left));
                 continue;
             }
             // R32.14. `V? x = this as V;` in a member of a view's base: `x` is null.
@@ -668,6 +764,26 @@ public sealed class StmtLowerer(
             {
                 _code.Alias(symbol, aliased.Code);
                 _spec.Alias(symbol, aliased.Spec);
+                continue;
+            }
+            // R30.7. `T x = f = e;`, `f` a field of `this` or a local: the assignment, then
+            // `x` initialised with what it stored, read back (not null where C# says so).
+            if (symbol is not null && v.Initializer?.Value is { } chainInit &&
+                ExprLowerer.Unparenthesized(chainInit) is AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } chain &&
+                chain.Right is not RefExpressionSyntax && !known.IsGhost(symbol.Type) &&
+                model.GetSymbolInfo(chain.Left).Symbol is ILocalSymbol or IFieldSymbol { IsStatic: false } &&
+                chain.Left is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax })
+            {
+                statements.Add(LowerAssignment(chain, Locations.From(chain)));
+                var stored = _code.Lower(chain.Left);
+                if (stored.Type is IrOptionType storedOption && type is not IrOptionType && ExprLowerer.SameType(storedOption.Inner, type))
+                    stored = new IrOptionOp(stored.Loc, OptionOpKind.Value, stored) { Type = type };
+                statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type, _code.ToDeclared(stored, type))
+                {
+                    Immutable = type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
+                                    or IrUserSpecType or IrExnType &&
+                                NeverWritten(symbol, node.Parent ?? node),
+                });
                 continue;
             }
             // R24.12. A `Ghost<T>` local is a snapshot: a ghost name for a specification
@@ -820,36 +936,254 @@ public sealed class StmtLowerer(
             return e is IdentifierNameSyntax &&
                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(e).Symbol, symbol);
         }
-        // R33.17. `a = _field;`, as a statement, re-reads the field: `a` is the field again.
-        bool Resync(SyntaxNode? n) =>
-            n is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } ra } &&
-            Names(ra.Left) && ra.Right is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } &&
-            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(ra.Right).Symbol?.OriginalDefinition, field.OriginalDefinition);
-        var resyncs = new List<SyntaxNode>();
-        foreach (var n in scope.DescendantNodes())
-        {
-            if (n is AssignmentExpressionSyntax a && Names(a.Left))
+        // R30.2 / R33.17. `a = _f;` as a statement rebinds the local to the field.
+        bool Rebind(AssignmentExpressionSyntax a) =>
+            a.IsKind(SyntaxKind.SimpleAssignmentExpression) && a.Parent is ExpressionStatementSyntax &&
+            Names(a.Left) && (a.Right is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Right).Symbol?.OriginalDefinition, field.OriginalDefinition);
+        var rebinds = scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Where(Rebind).ToList();
+        if (scope.DescendantNodes().Any(n => n switch
             {
-                if (!Resync(a.Parent)) return null;
-                resyncs.Add(a.Parent!);
-            }
-            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg && Names(arg.Expression))
-                return null;
-        }
-        // Whatever may replace the field after the declaration must be a statement that the
-        // next statement of its block follows by re-reading it (R33.17); a call that cannot
-        // replace it is harmless (before R33.17, any instance method was refused).
+                AssignmentExpressionSyntax a => Names(a.Left) && !rebinds.Contains(a),
+                ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => Names(arg.Expression),
+                _ => false,
+            }))
+            return null;
+        // R33.17. Whatever may replace the field after the declaration is a statement that the
+        // next statement of its block follows by re-reading it; a call that cannot replace it
+        // is harmless.
+        bool resynced = true;
         foreach (var n in scope.DescendantNodes().Where(n => n.SpanStart > v.SpanStart))
         {
             if (!Replaces(n, field)) continue;
             var stmt = n.Parent as ExpressionStatementSyntax;
-            if (stmt?.Expression != n || stmt.Parent is not BlockSyntax block) return null;
-            var at = block.Statements.IndexOf(stmt);
-            if (at + 1 >= block.Statements.Count || !Resync(block.Statements[at + 1])) return null;
+            var block = stmt?.Parent as BlockSyntax;
+            var at = block?.Statements.IndexOf(stmt!) ?? -1;
+            if (stmt?.Expression != n || block is null || at + 1 >= block.Statements.Count ||
+                block.Statements[at + 1] is not ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax next } ||
+                !rebinds.Contains(next))
+            {
+                resynced = false;
+                break;
+            }
         }
-        foreach (var r in resyncs) _resyncs.Add(r);
-        _fieldAliases[symbol] = field;
+        if (resynced)
+        {
+            foreach (var r in rebinds) _resyncs.Add(r.Parent!);
+            _fieldAliases[symbol] = field;
+            return (_code.Lower(init), _spec.Lower(init));
+        }
+        // R30.33. Otherwise, a local that keeps the array the field's one replacement discards.
+        if (rebinds.Count == 0 && KeptAt(v, symbol, field, scope, Names) is { } keeper)
+        {
+            _keepers[keeper] = symbol;
+            return (_code.Lower(init), _spec.Lower(init));
+        }
+        // R30.2. Otherwise the flow check: the local is rebound wherever the field may have changed.
+        if (rebinds.Count == 0) return null;
+        var flow = new AliasFlow(model, known, symbol, new HashSet<ISymbol>(SymbolEqualityComparer.Default) { field },
+            e => e.Expression is AssignmentExpressionSyntax a && rebinds.Contains(a));
+        if (!flow.Check(scope, node, current: true)) { StaleAlias(symbol, flow); return null; }
+        _fieldRebinds.Add(symbol);
         return (_code.Lower(init), _spec.Lower(init));
+    }
+
+    /// <summary>
+    /// R30.33. <c>T[]? a = _f;</c>, never written, where the first thing after it that may
+    /// replace <c>_f</c> is a statement <c>_f = e;</c> of the declaration's own block (with
+    /// <c>e</c> not <c>a</c>), and <c>a</c> is not null wherever it is used after that
+    /// statement: up to the statement <c>a</c> is the field (R24.19); the statement hands
+    /// the old array to <c>a</c>, which owns it from then on, as a fresh array local does
+    /// (R6.11a). The statement, or <c>null</c>.
+    /// </summary>
+    private ExpressionStatementSyntax? KeptAt(VariableDeclaratorSyntax v, ILocalSymbol symbol, IFieldSymbol field,
+        SyntaxNode scope, Func<ExpressionSyntax?, bool> names)
+    {
+        if (v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax block }) return null;
+        var first = scope.DescendantNodes().Where(n => n.SpanStart > v.SpanStart && Replaces(n, field))
+            .OrderBy(n => n.SpanStart).FirstOrDefault();
+        if (first is not AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } a ||
+            a.Parent is not ExpressionStatementSyntax stmt || stmt.Parent != block || names(a.Right) ||
+            a.Left is not (IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }))
+            return null;
+        var uses = scope.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => id.SpanStart > stmt.Span.End &&
+                         SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol))
+            .ToList();
+        if (uses.Count == 0 || uses.Any(id => model.GetTypeInfo(id).Nullability.FlowState != NullableFlowState.NotNull))
+            return null;
+        return stmt;
+    }
+
+    /// <summary>R30.33. The statement that hands a replaced field's array to each keeping local.</summary>
+    private readonly Dictionary<SyntaxNode, ILocalSymbol> _keepers = [];
+
+    /// <summary>
+    /// R30.33. <c>_f = e;</c> for a local that keeps <c>_f</c>'s array: the local, declared
+    /// from the field, then the assignment, after which the name is the local.
+    /// </summary>
+    private IrStmt KeepAndReplace(ExpressionStatementSyntax node, ILocalSymbol kept, IrLoc loc)
+    {
+        var a = (AssignmentExpressionSyntax)node.Expression;
+        var type = known.MapType(kept.Type)!;
+        var decl = new IrLocalDecl(loc, kept.Name, type, _code.Lower(a.Left)) { TakesField = true };
+        var store = LowerSideEffect(node.Expression, loc);
+        _code.Alias(kept, new IrVar(loc, kept.Name) { Type = type });
+        _spec.Alias(kept, new IrVar(loc, kept.Name) { Type = type });
+        return new IrBlock(loc, [decl, store]) { Splice = true };
+    }
+
+    /// <summary>R30.29. The <c>option</c> type of each snapshot <c>ref</c> local.</summary>
+    private readonly Dictionary<ISymbol, IrOptionType> _snapshotLocals = new(SymbolEqualityComparer.Default);
+
+    private void RegisterSnapshot(ILocalSymbol symbol, IrOptionType type, IrLoc loc)
+    {
+        _snapshotLocals[symbol] = type;
+        var raw = new IrVar(loc, symbol.Name) { Type = type };
+        _code.Snapshot(symbol, raw);
+        _spec.Snapshot(symbol, raw);
+    }
+
+    /// <summary>The block a declaration is in, past the labels on it.</summary>
+    private static SyntaxNode BlockOf(SyntaxNode node) =>
+        node.Ancestors().FirstOrDefault(a => a is not LabeledStatementSyntax) ?? node;
+
+    /// <summary>
+    /// R30.29. A <c>ref</c> local in a snapshot method, or bound to a call of one, is an
+    /// <c>option</c> local: <c>None</c> where it is a null reference, <c>Some</c> of the value
+    /// it refers to otherwise, read when it is bound (<see cref="RefSnapshots"/>). It may be
+    /// rebound, by a statement, only in a snapshot method; it is never written through, nor
+    /// passed by reference except to <c>Unsafe.IsNullRef</c>; and outside a snapshot method,
+    /// nothing may write the object's state while it is live.
+    /// </summary>
+    private bool SnapshotLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (v.Initializer?.Value is not RefExpressionSyntax { Expression: var target }) return false;
+        var inner = target;
+        while (inner is ParenthesizedExpressionSyntax or PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression })
+            inner = inner is ParenthesizedExpressionSyntax p ? p.Expression : ((PostfixUnaryExpressionSyntax)inner).Operand;
+        var method = RefSnapshots.Enclosing(node, model);
+        var call = inner is InvocationExpressionSyntax inv && model.GetSymbolInfo(inv).Symbol is IMethodSymbol callee &&
+                   RefSnapshots.IsSnapshot(callee, model.Compilation);
+        if (method is null && !call) return false;
+        if (known.MapType(symbol.Type) is not { } element) return false;
+        var type = new IrOptionType(element);
+        var loc = Locations.From(v);
+        var scope = BlockOf(node);
+        if (SnapshotRefusal(symbol, scope, node, method) is { } why)
+        {
+            diagnostics.Error("PALCS0751", loc,
+                $"`{symbol.Name}` holds a reference that may be null, read once as an `option` " +
+                $"(doc/translation.md R30.29), but {why}.");
+            return true;
+        }
+        var rebound = scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a =>
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, symbol));
+        statements.Add(new IrLocalDecl(loc, symbol.Name, type, SnapshotTarget(target, type)) { Immutable = !rebound });
+        RegisterSnapshot(symbol, type, loc);
+        return true;
+    }
+
+    /// <summary>R30.29. Why the snapshot local <paramref name="symbol"/> cannot be one, if it cannot.</summary>
+    private string? SnapshotRefusal(ILocalSymbol symbol, SyntaxNode scope, SyntaxNode decl, IMethodSymbol? method)
+    {
+        ExpressionSyntax Root(ExpressionSyntax e)
+        {
+            while (true)
+            {
+                switch (e)
+                {
+                    case ParenthesizedExpressionSyntax p: e = p.Expression; continue;
+                    case PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn: e = sn.Operand; continue;
+                    case MemberAccessExpressionSyntax { RawKind: (int)SyntaxKind.SimpleMemberAccessExpression } m: e = m.Expression; continue;
+                    case ElementAccessExpressionSyntax el: e = el.Expression; continue;
+                    default: return e;
+                }
+            }
+        }
+        bool Is(ExpressionSyntax e) => Root(e) is IdentifierNameSyntax &&
+            SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(Root(e)).Symbol, symbol);
+        bool SnapshotSink(SyntaxNode? n) => n switch
+        {
+            ReturnStatementSyntax => true,
+            EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax d } =>
+                model.GetDeclaredSymbol(d) is ILocalSymbol { IsRef: true },
+            AssignmentExpressionSyntax a => model.GetSymbolInfo(a.Left).Symbol is ILocalSymbol { IsRef: true },
+            _ => false,
+        };
+        foreach (var n in scope.DescendantNodes())
+        {
+            var written = n switch
+            {
+                AssignmentExpressionSyntax a => a.Left,
+                PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PreIncrementExpression) ||
+                                                   u.IsKind(SyntaxKind.PreDecrementExpression) => u.Operand,
+                PostfixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PostIncrementExpression) ||
+                                                    u.IsKind(SyntaxKind.PostDecrementExpression) => u.Operand,
+                _ => null,
+            };
+            if (written is not null && Is(written))
+            {
+                if (n is AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression, Right: RefExpressionSyntax, Left: IdentifierNameSyntax } rebind &&
+                    rebind.Parent is ExpressionStatementSyntax)
+                {
+                    if (method is null) return "it is rebound outside the method that may return a null reference";
+                    continue;
+                }
+                return "it is written through";
+            }
+            if (n is ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg && Is(arg.Expression) &&
+                !(arg.Parent?.Parent is InvocationExpressionSyntax isNull &&
+                  model.GetSymbolInfo(isNull).Symbol is IMethodSymbol isNullMethod && RefSnapshots.IsIsNullRef(isNullMethod)))
+                return "it is passed by reference to something other than `Unsafe.IsNullRef`";
+            if (n is RefExpressionSyntax r && Is(r.Expression) && (method is null || !SnapshotSink(r.Parent)))
+                return "a reference into it is taken other than to return it or bind another such local";
+        }
+        if (method is not null)
+            return Declarations.IsReadOnly(method, model.Compilation, known) ? null
+                : $"`{method.Name}` may write its object's state, which the reference would see";
+        var live = LiveStretch(scope, decl, symbol);
+        if (Declarations.MutatesAt(scope, live, model, known) || WritesArrayAt(scope, live))
+            return "the object's state, or an array, may be written while it is live";
+        return null;
+    }
+
+    /// <summary>
+    /// R30.29. Whether an array element may be written in <paramref name="at"/>: through any
+    /// array, a parameter's too, which <see cref="Declarations.MutatesAt"/> does not count
+    /// as the object's state; or by a call that is passed an array and whose body writes an
+    /// element or passes an array on.
+    /// </summary>
+    private bool WritesArrayAt(SyntaxNode scope, Func<SyntaxNode, bool> at)
+    {
+        static bool WritesElement(SyntaxNode n) => n switch
+        {
+            AssignmentExpressionSyntax a => a.Left is ElementAccessExpressionSyntax,
+            PrefixUnaryExpressionSyntax u => u.Operand is ElementAccessExpressionSyntax,
+            PostfixUnaryExpressionSyntax u => u.Operand is ElementAccessExpressionSyntax,
+            ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => arg.Expression is ElementAccessExpressionSyntax,
+            _ => false,
+        };
+        static bool PassesArray(InvocationExpressionSyntax call, SemanticModel m) =>
+            call.ArgumentList.Arguments.Any(a => m.GetTypeInfo(a.Expression).Type is IArrayTypeSymbol);
+        var visiting = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
+        bool Writes(InvocationExpressionSyntax call, SemanticModel m)
+        {
+            if (!PassesArray(call, m)) return false;
+            if (m.GetSymbolInfo(call).Symbol is not IMethodSymbol callee) return true;
+            if (RefSnapshots.IsIsNullRef(callee) || callee.ContainingNamespace?.ToDisplayString() == "PalLang") return false;
+            if (callee.GetAttributes().Any(a => a.AttributeClass?.Name is "SpecAttribute" or "LemmaAttribute" or "PureAttribute"))
+                return false;
+            var body = callee.OriginalDefinition.DeclaringSyntaxReferences.Select(r => r.GetSyntax()).FirstOrDefault();
+            if (body is null || !m.Compilation.Owns(body.SyntaxTree)) return true;
+            if (!visiting.Add(callee.OriginalDefinition)) return false;
+            var calleeModel = m.Compilation.Model(body.SyntaxTree);
+            return body.DescendantNodes().Any(n => WritesElement(n) ||
+                n is InvocationExpressionSyntax inner && Writes(inner, calleeModel));
+        }
+        return scope.DescendantNodes().Where(at).Any(n =>
+            WritesElement(n) || n is InvocationExpressionSyntax call && Writes(call, model));
     }
 
     /// <summary>R33.5. The index local of each rebound <c>ref</c> local.</summary>
@@ -935,6 +1269,11 @@ public sealed class StmtLowerer(
     {
         if (v.Initializer?.Value is not RefExpressionSyntax { Expression: var target }) return null;
         var scope = node.Parent ?? node;
+        var rebinds = scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Where(a =>
+                a.Right is RefExpressionSyntax &&
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, symbol)).ToList();
+        if (rebinds.Count > 0 || IsNullRef(target))
+            return RebindableRefLocal(v, symbol, node, target, rebinds, statements);
         // `x = ref e` rebinds; any other write goes through the alias, to the element.
         if (scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a =>
                 a.Right is RefExpressionSyntax &&
@@ -944,18 +1283,31 @@ public sealed class StmtLowerer(
         var root = target is ElementAccessExpressionSyntax { Expression: var arr }
             ? model.GetSymbolInfo(arr).Symbol : null;
         // Writing an element is seen through the alias; rebinding the array's name is not.
-        // R33.17. Only a rebinding the alias can see, after its declaration; one that
-        // re-reads a field alias (R24.19) leaves the local naming the same field.
-        if (root is ILocalSymbol al && scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
-                .Any(a => a.SpanStart > v.SpanStart && !_resyncs.Contains(a.Parent!) &&
-                          SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
-            return null;
+        // R30.16. Only while the alias is live: from its declaration to its last use, when
+        // the block has no jumps. A local that is R24.19's or R30.2's name for a field is
+        // the field there, so the field must not change in that stretch either.
+        // R33.17. Otherwise, only a rebinding the alias can see, after its declaration; one
+        // that re-reads a field alias (R24.19) leaves the local naming the same field.
+        var viaLive = false;
+        if (root is ILocalSymbol al)
+        {
+            var live = LiveStretch(scope, node, symbol);
+            viaLive = !scope.DescendantNodes().OfType<AssignmentExpressionSyntax>().Any(a => live(a) &&
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)) &&
+                !(al.DeclaringSyntaxReferences is [var ad] && ad.GetSyntax() is VariableDeclaratorSyntax { Initializer.Value: var av } &&
+                  model.GetSymbolInfo(av).Symbol is IFieldSymbol { IsStatic: false } liveField &&
+                  ChangesFields(scope, symbol, new HashSet<ISymbol>(SymbolEqualityComparer.Default) { liveField }, live));
+            if (!viaLive && scope.DescendantNodes().OfType<AssignmentExpressionSyntax>()
+                    .Any(a => a.SpanStart > v.SpanStart && !_resyncs.Contains(a.Parent!) &&
+                              SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(a.Left).Symbol, al)))
+                return null;
+        }
         if (root is IParameterSymbol) return null;
         // A field may be replaced by an assignment or by a call of another method of the
         // class; the alias would then name the new array's element, not the old one. The
         // fields the alias can depend on are the array's own, or every field the inlined
         // `ref`-returning method mentions; assigning any other field is harmless.
-        var aliasOf = root is ILocalSymbol rl && _fieldAliases.TryGetValue(rl, out var af0) ? af0 : null;
+        var aliasOf = !viaLive && root is ILocalSymbol rl && _fieldAliases.TryGetValue(rl, out var af0) ? af0 : null;
         if (target is InvocationExpressionSyntax || root is IFieldSymbol || aliasOf is not null)
         {
             var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
@@ -982,6 +1334,138 @@ public sealed class StmtLowerer(
         // already in the terms a specification uses.
         _spec.Alias(symbol, !v.Initializer.Value.DescendantNodes().Any(Borrowing.IsStep) &&
             _spec.Lower(v.Initializer.Value) is IrElement se ? se with { Index = alias.Index } : alias);
+        return alias;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="scope"/> may, at a node <paramref name="at"/> accepts, assign
+    /// one of the fields in <paramref name="read"/>, or call a method of the class that may.
+    /// </summary>
+    private bool ChangesFields(SyntaxNode scope, ILocalSymbol symbol, HashSet<ISymbol> read, Func<SyntaxNode, bool> at)
+    {
+        var self = symbol.ContainingSymbol.ContainingType;
+        foreach (var n in scope.DescendantNodes().Where(at))
+        {
+            if (n is AssignmentExpressionSyntax a && model.GetSymbolInfo(a.Left).Symbol is IFieldSymbol { IsStatic: false } af &&
+                read.Contains(af))
+                return true;
+            if (n is InvocationExpressionSyntax inv &&
+                model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false, ReturnsByRef: false } m &&
+                SymbolEqualityComparer.Default.Equals(m.ContainingType?.OriginalDefinition, self?.OriginalDefinition) &&
+                !Declarations.Has(m, known.LemmaAttribute))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// R30.16. The nodes of <paramref name="scope"/> that may run while the <c>ref</c> local
+    /// <paramref name="symbol"/>, declared by <paramref name="decl"/>, is live: those between
+    /// the declaration and its last use, or the end of the last loop in the block around a
+    /// use. A use cannot precede the declaration, and a loop around the block declares it
+    /// afresh; only a jump could reach an earlier node while it is bound, so with one in
+    /// the block, every node.
+    /// </summary>
+    private Func<SyntaxNode, bool> LiveStretch(SyntaxNode scope, SyntaxNode decl, ILocalSymbol symbol)
+    {
+        if (scope.DescendantNodes().Any(n => n is GotoStatementSyntax or LabeledStatementSyntax or SwitchStatementSyntax))
+            return _ => true;
+        var from = decl.Span.End;
+        var until = scope.DescendantNodes().OfType<IdentifierNameSyntax>()
+            .Where(id => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol))
+            .Select(id => id.AncestorsAndSelf().TakeWhile(a => a != scope)
+                .Where(a => a == id || a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax)
+                .Max(a => a.Span.End))
+            .DefaultIfEmpty(from).Max();
+        return n => n.SpanStart >= from && n.SpanStart < until;
+    }
+
+    /// <summary>R30.1, R30.2. The locals PALCS0750 has already refused.</summary>
+    private readonly HashSet<ISymbol> _staleReported = new(SymbolEqualityComparer.Default);
+
+    /// <summary>PALCS0750. An alias that may be used while unbound or stale.</summary>
+    private IrExpr? StaleAlias(ILocalSymbol symbol, AliasFlow flow)
+    {
+        var at = flow.Failure ?? symbol.DeclaringSyntaxReferences[0].GetSyntax();
+        diagnostics.Error("PALCS0750", Locations.From(at),
+            $"`{symbol.Name}` stands for an element or the array of a field, and is rebound, but it may " +
+            "be used here before it is bound, or after the field may have changed (an assignment to it, " +
+            "or a call that may replace it) without being rebound since; or it is used where the " +
+            "rebinding cannot be followed (a lambda, `goto`, `switch`, `try`). Rebind it, by a statement, " +
+            "after every such change (doc/translation.md R30.1, R30.2).");
+        _staleReported.Add(symbol);
+        return null;
+    }
+
+    /// <summary>R30.1. <c>Unsafe.NullRef&lt;T&gt;()</c>.</summary>
+    private bool IsNullRef(ExpressionSyntax e)
+    {
+        while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+        return e is InvocationExpressionSyntax { ArgumentList.Arguments.Count: 0 } call &&
+               model.GetSymbolInfo(call).Symbol is IMethodSymbol { Name: "NullRef", ContainingType: var t } &&
+               t.ToDisplayString() == "System.Runtime.CompilerServices.Unsafe";
+    }
+
+    /// <summary>R30.1. The index local of each rebindable <c>ref</c> local.</summary>
+    private readonly Dictionary<ISymbol, (string Index, IrType Type)> _refRebinds = new(SymbolEqualityComparer.Default);
+
+    /// <summary>R30.2. The array locals rebound from their field (<c>a = _f;</c>).</summary>
+    private readonly HashSet<ISymbol> _fieldRebinds = new(SymbolEqualityComparer.Default);
+
+    /// <summary>
+    /// R30.1. A <c>ref</c> local that is declared null (<c>ref Unsafe.NullRef&lt;T&gt;()</c>)
+    /// or rebound (<c>r = ref e;</c>), where every binding is an element of the same field's
+    /// array, either directly or through the same <c>ref</c>-returning method (R24.9), and
+    /// every rebinding is a statement. It is R24.8's element at an index local, which each
+    /// rebinding assigns, provided the local is bound, and bound since the field last changed,
+    /// wherever it is used (<see cref="AliasFlow"/>). The element is then always the field's
+    /// current array at the index, as the reference would be. A null reference is never read:
+    /// its index local starts at 0, and the flow check is what makes that value unobservable.
+    /// </summary>
+    private IrExpr? RebindableRefLocal(VariableDeclaratorSyntax v, ILocalSymbol symbol, SyntaxNode node,
+        ExpressionSyntax target, List<AssignmentExpressionSyntax> rebinds, ImmutableArray<IrStmt>.Builder statements)
+    {
+        static ExpressionSyntax Bare(ExpressionSyntax e)
+        {
+            while (e is ParenthesizedExpressionSyntax p) e = p.Expression;
+            return e;
+        }
+        var isNull = IsNullRef(target);
+        if (rebinds.Any(a => a.Parent is not ExpressionStatementSyntax)) return null;
+        var targets = (isNull ? [] : new List<ExpressionSyntax> { Bare(target) })
+            .Concat(rebinds.Select(a => Bare(((RefExpressionSyntax)a.Right).Expression))).ToList();
+        if (targets.Count == 0) return null;
+        ISymbol? Root(ExpressionSyntax e) => e switch
+        {
+            InvocationExpressionSyntax call => model.GetSymbolInfo(call).Symbol,
+            ElementAccessExpressionSyntax { Expression: var arr } => model.GetSymbolInfo(arr).Symbol is IFieldSymbol f ? f : null,
+            _ => null,
+        };
+        var root = Root(targets[0]);
+        if (root is null || targets.Any(t => !SymbolEqualityComparer.Default.Equals(Root(t), root))) return null;
+        var read = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        if (root is IFieldSymbol rf) read.Add(rf);
+        else if (root is IMethodSymbol { DeclaringSyntaxReferences: [var callee] } && callee.SyntaxTree == model.SyntaxTree)
+        {
+            foreach (var id in callee.GetSyntax().DescendantNodes().OfType<IdentifierNameSyntax>())
+                if (model.GetSymbolInfo(id).Symbol is IFieldSymbol f) read.Add(f);
+        }
+        else return null;
+        var scope = node.Parent ?? node;
+        var flow = new AliasFlow(model, known, symbol, read,
+            e => e.Expression is AssignmentExpressionSyntax a && rebinds.Contains(a));
+        if (!flow.Check(scope, node, current: !isNull)) return StaleAlias(symbol, flow);
+        var template = isNull ? rebinds[0].Right : v.Initializer!.Value;
+        if (_code.Lower(template) is not IrElement element) return null;
+        var index = Fresh("ref");
+        var indexType = element.Index.Type ?? IrPrim.Int;
+        var loc = Locations.From(v);
+        statements.Add(new IrLocalDecl(loc, index, indexType,
+            isNull ? new IrLiteral(loc, 0) { Type = indexType } : element.Index));
+        var alias = element with { Index = new IrVar(element.Loc, index) { Type = indexType } };
+        _code.Alias(symbol, alias);
+        _spec.Alias(symbol, alias);
+        _refRebinds[symbol] = (index, indexType);
         return alias;
     }
 
@@ -1034,10 +1518,13 @@ public sealed class StmtLowerer(
     {
         // R33.17. `a = _field;` re-reading a field alias: `a` already is the field.
         if (_resyncs.Contains(node)) return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
+        // R30.33. The replacement of a field whose old array a local keeps.
+        if (_keepers.TryGetValue(node, out var kept)) return KeepAndReplace(node, kept, loc);
         // R33.18. A call of a method that does nothing.
         if (node.Expression is InvocationExpressionSyntax call && DoesNothing(call))
             return new IrBlock(loc, ImmutableArray<IrStmt>.Empty);
-        return LowerSideEffect(node.Expression, loc);
+        var (stmt, writes) = _code.OutFieldWrites(node, () => LowerSideEffect(node.Expression, loc));
+        return writes.IsEmpty ? stmt : new IrBlock(loc, [stmt, .. writes]);
     }
 
     /// <summary>R33.17. The statements <c>a = _field;</c> that re-read a field alias.</summary>
@@ -1088,7 +1575,7 @@ public sealed class StmtLowerer(
             return true;
         if (method.DeclaringSyntaxReferences is not [var decl]) return true;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is AttributeListSyntax) continue;
@@ -1196,6 +1683,25 @@ public sealed class StmtLowerer(
 
     private IrStmt LowerAssignment(AssignmentExpressionSyntax node, IrLoc loc)
     {
+        // R30.29. Rebinding a snapshot.
+        if (node.IsKind(SyntaxKind.SimpleAssignmentExpression) &&
+            node.Right is RefExpressionSyntax { Expression: var snapshotTarget } &&
+            model.GetSymbolInfo(node.Left).Symbol is ILocalSymbol snapshotLocal &&
+            _snapshotLocals.TryGetValue(snapshotLocal, out var snapshotType))
+            return new IrAssign(loc, new IrVar(loc, snapshotLocal.Name) { Type = snapshotType },
+                SnapshotTarget(snapshotTarget, snapshotType));
+        // R30.1, R30.2. Rebinding an alias: a `ref` local's index, or nothing at all.
+        if (model.GetSymbolInfo(node.Left).Symbol is ILocalSymbol rebound)
+        {
+            if (node.Right is RefExpressionSyntax && _refRebinds.TryGetValue(rebound, out var rb))
+            {
+                if (_code.Lower(node.Right) is IrElement el)
+                    return new IrAssign(loc, new IrVar(loc, rb.Index) { Type = rb.Type }, el.Index);
+                return UnsupportedStatement(node, loc);
+            }
+            if (_fieldRebinds.Contains(rebound) && node.IsKind(SyntaxKind.SimpleAssignmentExpression))
+                return new IrBlock(loc, []);
+        }
         // Compound assignment `x op= e` is `x = x op e` (R5.3).
         var op = node.Kind() switch
         {
@@ -1314,7 +1820,7 @@ public sealed class StmtLowerer(
             return null;
         if (method.DeclaringSyntaxReferences is not [var decl]) return null;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is InvocationExpressionSyntax inv &&
@@ -1388,7 +1894,7 @@ public sealed class StmtLowerer(
         if (method.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute")) return false;
         if (method.DeclaringSyntaxReferences is not [var decl]) return false;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is AttributeListSyntax) continue;
@@ -1426,6 +1932,12 @@ public sealed class StmtLowerer(
                     return new IrGhostStmt(loc, GhostKind.Assert, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Assume):
                     return new IrGhostStmt(loc, GhostKind.Assume, _spec.Lower(args[0].Expression), null);
+                // R30.36. Attached to the `if` before it by Normalize.
+                case nameof(PalLang.Pal.Join):
+                    return new IrGhostStmt(loc, GhostKind.Join, _spec.Lower(args[0].Expression), null);
+                // R30.39. Likewise.
+                case nameof(PalLang.Pal.Split):
+                    return new IrGhostStmt(loc, GhostKind.Split, null, null);
                 // R27.48. The rest of the block is dropped by LowerBlock.
                 case nameof(PalLang.Pal.Unreachable):
                     return new IrGhostStmt(loc, GhostKind.Unreachable, null, null);
@@ -1467,6 +1979,27 @@ public sealed class StmtLowerer(
         if (ArgumentGuard(method, args, loc) is { } guard)
             return guard;
 
+        // R34.22. `d.Keys.CopyTo(a, i)` and `d.Values.CopyTo(a, i)` on an `IDictionary<K, V>`
+        // argument write its keys, or its values, into `a` from `i`, in the pairs' order.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax { Expression: MemberAccessExpressionSyntax part } &&
+            part.Name.Identifier.ValueText is "Keys" or "Values" &&
+            model.GetSymbolInfo(part).Symbol is IPropertySymbol { IsStatic: false } partProperty &&
+            WellKnown.IsDictionaryInterface(partProperty.ContainingType) &&
+            _code.IsEnumerableArgument(part.Expression) &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc,
+                part.Name.Identifier.ValueText == "Keys" ? ArrayOpKind.CopyKeys : ArrayOpKind.CopyValues,
+                [_code.Lower(part.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
+        // R34.5. `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into `a` from `i`.
+        if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
+            node.Expression is MemberAccessExpressionSyntax copied &&
+            known.MapType(model.GetTypeInfo(copied.Expression).Type) is IrEnumerableType { Collection: true } &&
+            args.All(a => a.NameColon is null))
+            return new IrArrayOp(loc, ArrayOpKind.CopyFrom,
+                [_code.Lower(copied.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
         // R22.20 and R22.25. The bulk operations of `System.Array` on one-dimensional
         // arrays. Arguments are matched to parameters by name, so `length:` and the like
         // need no special treatment.
@@ -1474,6 +2007,20 @@ public sealed class StmtLowerer(
             method.ContainingType?.SpecialType == SpecialType.System_Array &&
             ArrayBulkOp(method, args, loc) is { } bulk)
             return bulk;
+
+        // R34.16. CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)`, which
+        // `List<T>.Sort(Comparison<T>)` calls, is R26.7's `Array.Sort(a, i, n, comparer)`.
+        if (method is { IsStatic: true, Name: "Sort" } &&
+            method.ContainingType is { Name: "ArraySortHelper", Arity: 1 } && args.Count == 2 &&
+            args.All(a => a.NameColon is null) &&
+            args[0].Expression is ObjectCreationExpressionSyntax { ArgumentList.Arguments: [var sa, var si, var sn] } span &&
+            model.GetTypeInfo(span).Type is INamedTypeSymbol { Name: "Span", Arity: 1 } &&
+            model.GetTypeInfo(sa.Expression).Type is IArrayTypeSymbol { Rank: 1 } &&
+            model.GetTypeInfo(si.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            model.GetTypeInfo(sn.Expression).Type?.SpecialType == SpecialType.System_Int32 &&
+            known.MapType(model.GetTypeInfo(args[1].Expression).Type) is IrUserSpecType { FStar: Sorted.ComparerType })
+            return new IrArrayOp(loc, ArrayOpKind.Sort,
+                [_code.Lower(sa.Expression), _code.Lower(si.Expression), _code.Lower(sn.Expression), _code.Lower(args[1].Expression)]);
 
         // R23.4. `Array.Resize(ref a, n)` replaces `a` by a fresh array of length `n`.
         if (method is { IsStatic: true, Name: "Resize", IsGenericMethod: true } &&
@@ -1502,7 +2049,7 @@ public sealed class StmtLowerer(
         if ((known.RegionOpName(method) is not null || known.SpecOpName(method) is not null) && method.ReturnsVoid)
             return new IrGhostStmt(loc, GhostKind.LemmaCall, _spec.Lower(node), null);
 
-        var kind = Declarations.KindOf(method, known);
+        var kind = Declarations.KindOf(_code.ThisInterfaceImpl(node, method) ?? method, known);
         if (kind == CalleeKind.Lemma)
         {
             var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
@@ -1518,15 +2065,137 @@ public sealed class StmtLowerer(
         // position, so it is lowered by the same code: the receiver threading of §4.5 and
         // the `MutatesReceiver` flag of R4.11 are decided in exactly one place.
         if (kind == CalleeKind.Method) return new IrExprStmt(loc, _code.Lower(node));
+        // R35.4. A helper forwarding to a held struct's member is that member's call.
+        if (_code.ForwardedToHeld(node, method, loc) is { } forwarded)
+            return new IrExprStmt(loc, forwarded);
 
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");
         return new IrBlock(loc, []);
     }
 
+    /// <summary>
+    /// R34.6. <c>using (IEnumerator&lt;T&gt; en = e.GetEnumerator())</c>, or the declaration
+    /// <c>using IEnumerator&lt;T&gt; en = e.GetEnumerator();</c>, on an enumerable argument
+    /// <c>e</c>: <c>en</c> is a cursor, the number of items it has moved past, which starts
+    /// at 0. Disposing it does nothing. Null when the declaration is not one.
+    /// </summary>
+    private IrStmt? EnumeratorDeclaration(VariableDeclarationSyntax? declaration, IrLoc loc)
+    {
+        if (declaration is not { Variables: [{ Initializer.Value: var init } v] } ||
+            ExprLowerer.Unparenthesized(init) is not InvocationExpressionSyntax
+            {
+                Expression: MemberAccessExpressionSyntax { Name.Identifier.ValueText: "GetEnumerator" } access,
+                ArgumentList.Arguments.Count: 0,
+            } ||
+            !_code.IsEnumerableArgument(access.Expression))
+            return null;
+        var source = _code.Lower(access.Expression);
+        var name = v.Identifier.ValueText;
+        _code.HoldCursor(name, source);
+        _spec.HoldCursor(name, _spec.Lower(access.Expression));
+        return new IrLocalDecl(Locations.From(v), name, IrPrim.Int,
+            new IrEnumOp(Locations.From(init), EnumOpKind.Start, source, []) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.7. A loop that moves an enumerator on keeps it within the items, and ends
+    /// because the items it has not yet moved past are fewer each time round.
+    /// </summary>
+    private static (ImmutableArray<IrExpr>, IrExpr?) EnumeratorLoopSpecs(
+        IrEnumOp moved, ImmutableArray<IrExpr> invariants, IrExpr? decreases)
+    {
+        var loc = moved.Loc;
+        var cursor = moved.Args[0];
+        IrExpr Length() => new IrSeqOp(loc, SeqOpKind.Length,
+            [new IrContents(loc, moved.Source) { Type = new IrSeqType(((IrEnumerableType)moved.Source.Type!).Element) }])
+            { Type = IrPrim.Int };
+        var bounds = new IrBinary(loc, BinOp.And,
+            new IrBinary(loc, BinOp.Le, new IrLiteral(loc, 0) { Type = IrPrim.Int }, cursor) { Type = IrPrim.Bool },
+            new IrBinary(loc, BinOp.Le, cursor, Length()) { Type = IrPrim.Bool }) { Type = IrPrim.Bool };
+        return (invariants.Insert(0, bounds),
+                decreases ?? new IrBinary(loc, BinOp.Sub, Length(), cursor) { Type = IrPrim.Int });
+    }
+
+    /// <summary>
+    /// R34.8. <c>foreach (T x in e) body</c> over an enumerable argument <c>e</c> is
+    /// <c>using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }</c>,
+    /// whose cursor <c>Pal.Index(x)</c> names.
+    /// </summary>
+    private IrStmt ForEachEnumerable(ForEachStatementSyntax node, IrEnumerableType enumerable, IrLoc loc) =>
+        ForEachEnumerable(node.Identifier.ValueText, Locations.From(node.Identifier), node.Expression,
+            node.Statement, enumerable, loc,
+            (vloc, current) => [new IrLocalDecl(vloc, node.Identifier.ValueText, enumerable.Element, current) { Immutable = true }]);
+
+    private IrStmt ForEachEnumerable(string name, IrLoc vloc, ExpressionSyntax expression, StatementSyntax statement,
+        IrEnumerableType enumerable, IrLoc loc, Func<IrLoc, IrExpr, IrStmt[]> bind)
+    {
+        var cursorName = ExprLowerer.ForEachIndex(name);
+        var source = _code.Lower(expression);
+        var (invariants, decreases, body) = ExtractLoopSpecs(statement);
+        IrExpr Cursor() => new IrVar(vloc, cursorName) { Type = IrPrim.Int };
+        var moved = new IrEnumOp(vloc, EnumOpKind.MoveNext, source, [Cursor()]) { Type = IrPrim.Bool };
+        (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
+        var items = bind(vloc, new IrEnumOp(vloc, EnumOpKind.Current, source, [Cursor()]) { Type = enumerable.Element });
+        return new IrBlock(loc,
+        [
+            new IrLocalDecl(vloc, cursorName, IrPrim.Int,
+                new IrEnumOp(vloc, EnumOpKind.Start, source, []) { Type = IrPrim.Int }),
+            new IrWhile(loc, moved, invariants, decreases,
+                new IrBlock(body.Loc, [.. items, .. ((IrBlock)body).Statements])),
+        ]);
+    }
+
+    /// <summary>
+    /// R34.19. <c>foreach ((A a, B b) in e)</c> (or <c>foreach (var (a, b) in e)</c>) over an
+    /// enumerable argument of pairs is R34.8's loop whose item is bound to a fresh local
+    /// <c>p</c>, followed by <c>A a = p.Item1; B b = p.Item2;</c>. <c>Pal.Index</c> of either
+    /// variable names the loop's cursor.
+    /// </summary>
+    private IrStmt LowerForEachVariable(ForEachVariableStatementSyntax node, IrLoc loc) => AfterLoop(() =>
+    {
+        if (known.MapType(model.GetTypeInfo(node.Expression).Type) is not IrEnumerableType enumerable ||
+            !_code.IsEnumerableArgument(node.Expression) ||
+            ExprLowerer.DeconstructedPair(node) is not ({ } first, { } second))
+        {
+            diagnostics.Unsupported(loc, "The statement `ForEachVariableStatement`",
+                "A deconstructing `foreach` is translated over an enumerable argument of pairs, with two " +
+                "variables (doc/translation.md R34.19).");
+            return new IrBlock(loc, []);
+        }
+        var name = first.Identifier.ValueText;
+        var pair = name + "__pair";
+        IrType ComponentType(SingleVariableDesignationSyntax v) =>
+            known.MapType((model.GetDeclaredSymbol(v) as ILocalSymbol)?.Type) ?? IrPrim.Int;
+        IrStmt Component(IrLoc vloc, SingleVariableDesignationSyntax v, string proj)
+        {
+            var type = ComponentType(v);
+            return new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
+                new IrSpecOp(vloc, proj, [new IrVar(vloc, pair) { Type = enumerable.Element }])
+                    { MachineArgs = true, Type = type }) { Immutable = true };
+        }
+        return ForEachEnumerable(name, Locations.From(first), node.Expression, node.Statement, enumerable, loc,
+            (vloc, current) =>
+            [
+                new IrLocalDecl(vloc, pair, enumerable.Element, current) { Immutable = true },
+                Component(vloc, first, "fst"),
+                Component(vloc, second, "snd"),
+                // The pair is its components put back together (F*'s eta for pairs).
+                new IrGhostStmt(vloc, GhostKind.Assert, new IrBinary(vloc, BinOp.Eq,
+                    new IrVar(vloc, pair) { Type = enumerable.Element },
+                    new IrSpecOp(vloc, "Mktuple2",
+                    [
+                        new IrVar(vloc, first.Identifier.ValueText) { Type = ComponentType(first) },
+                        new IrVar(vloc, second.Identifier.ValueText) { Type = ComponentType(second) },
+                    ]) { MachineArgs = true, Type = enumerable.Element }) { Type = IrPrim.Bool }, null),
+            ]);
+    }, loc);
+
     private IrStmt LowerWhile(WhileStatementSyntax node, IrLoc loc) => AfterLoop(() =>
     {
         var (invariants, decreases, body) = ExtractLoopSpecs(node.Statement);
         var cond = _code.Lower(node.Condition);
+        if (cond is IrEnumOp { Op: EnumOpKind.MoveNext } moved)
+            (invariants, decreases) = EnumeratorLoopSpecs(moved, invariants, decreases);
         // R26.11. A guard that writes -- `(i = f(n)) < size`, `++i < bound` -- is a `for`
         // whose init and step are the write: the guard's effect runs before each test, the
         // loop specification describes the state just after it, and a `continue` still
@@ -1545,7 +2214,7 @@ public sealed class StmtLowerer(
     private IrStmt LowerDo(DoStatementSyntax node, IrLoc loc)
     {
         if (node.Statement.DescendantNodesAndSelf(n => n == node.Statement ||
-                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or ForEachStatementSyntax or
+                n is not (WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or CommonForEachStatementSyntax or
                           AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax))
                 .OfType<ContinueStatementSyntax>().FirstOrDefault() is { } cont)
         {
@@ -1651,6 +2320,8 @@ public sealed class StmtLowerer(
     {
         var collectionType = model.GetTypeInfo(node.Expression).Type;
         var symbol = model.GetSymbolInfo(node.Expression).Symbol;
+        if (known.MapType(collectionType) is IrEnumerableType enumerable && _code.IsEnumerableArgument(node.Expression))
+            return ForEachEnumerable(node, enumerable, loc);
         if (known.MapType(collectionType) is not IrArrayType && ForEachOwner(node, loc) is { } overOwner)
             return overOwner;
         if (known.MapType(collectionType) is not IrArrayType { Element: var element } arrayType ||
@@ -1736,10 +2407,12 @@ public sealed class StmtLowerer(
         if (moveNext is null || current?.GetMethod is null || variable is null ||
             known.MapType(st) is not { } structType || known.MapType(owner.Type) is not IrClassType ownerType ||
             known.MapType(variable.Type) is not { } elementType ||
-            self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
+            self is null || self.MethodKind == MethodKind.LambdaMethod ||
             !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
             receiver is not IrVar { Name: var ownerName } ||
             (ownerName != Pal.Compiler.Emit.Names.This && !self.Parameters.Any(q => q.Name == ownerName)) ||
+            // R30.41. A static member of the class walks a parameter, never `this`.
+            (self.IsStatic && ownerName == Pal.Compiler.Emit.Names.This) ||
             node.Parent is not BlockSyntax ||
             node.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
                 .Any(a => a is WhileStatementSyntax or DoStatementSyntax or ForStatementSyntax or
@@ -1747,8 +2420,8 @@ public sealed class StmtLowerer(
                           LocalFunctionStatementSyntax or TryStatementSyntax or SwitchSectionSyntax))
         {
             diagnostics.Error("PALCS0714", Locations.From(node.Expression),
-                $"`foreach` over `{node.Expression}`. A `foreach` over an object is translated in an " +
-                "instance method of its class, over `this` or a parameter of the class, directly in a " +
+                $"`foreach` over `{node.Expression}`. A `foreach` over an object is translated in a " +
+                "member of its class, over `this` (in an instance method) or a parameter of the class, directly in a " +
                 "block outside any loop, lambda or `try`, when the class's `GetEnumerator()` returns a " +
                 "borrowing struct with `MoveNext()` and `Current` (doc/translation.md R27.51).");
             return new IrBlock(loc, []);
@@ -1838,7 +2511,12 @@ public sealed class StmtLowerer(
     {
         var loc = Locations.From(arrow);
         if (model.GetEnclosingSymbol(arrow.Expression.SpanStart) is IMethodSymbol { ReturnsVoid: false } m)
-            return new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapType(m.ReturnType)));
+        {
+            // R35.2. As in a `return`, an `out var x` in it is declared ahead.
+            var outs = OutDeclarations(arrow.Expression, loc);
+            IrStmt ret = new IrReturn(loc, _code.ToDeclared(_code.Lower(arrow.Expression), known.MapReturnType(m.ReturnType)));
+            return outs.IsEmpty ? ret : new IrBlock(loc, [.. outs, ret]) { Splice = true };
+        }
         if (arrow.Expression is ThrowExpressionSyntax th)
             return new IrThrow(loc, _code.Lower(th.Expression));
         return LowerSideEffect(arrow.Expression, loc);
@@ -1865,6 +2543,11 @@ public sealed class StmtLowerer(
     private IrStmt? IntegerGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
         var owner = method.ContainingType?.ToDisplayString();
+        // R34.2. So is one at an enumerable argument: the caller lends a resource, not null.
+        if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
+            args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
+            _code.IsEnumerableArgument(args[0].Expression) && !_code.IsCollectionAlias(args[0].Expression))
+            return new IrBlock(loc, []);
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull" && args.Count >= 1 &&
             args.Skip(1).All(a => model.GetConstantValue(a.Expression).HasValue) &&
             // R27.40. So is one at a non-nullable delegate type (R26.1).
@@ -1874,7 +2557,9 @@ public sealed class StmtLowerer(
              model.GetSymbolInfo(args[0].Expression).Symbol is IParameterSymbol xp &&
              FrontendPass.ExactParameter(xp, model.Compilation, known) is not null) &&
             nt.Nullability.FlowState == NullableFlowState.NotNull &&
-            nt.Type.NullableAnnotation != NullableAnnotation.Annotated)
+            nt.Type.NullableAnnotation != NullableAnnotation.Annotated &&
+            // R35.11. Not one at `object`, which may be null (R35.7) and is tested (R25.7).
+            ntType.SpecialType != SpecialType.System_Object)
             return new IrBlock(loc, []);
 
         // R33.1. System.Collections' own polyfills of the same guards (its `ThrowHelper`,
@@ -1925,7 +2610,9 @@ public sealed class StmtLowerer(
     /// </summary>
     private IrStmt? OpaqueNullGuard(IMethodSymbol method, SeparatedSyntaxList<ArgumentSyntax> args, IrLoc loc)
     {
-        if (!method.IsStatic || args.Count != 1 || args[0].NameColon is not null) return null;
+        // R35.1. A trailing parameter-name argument (`nameof(item)`) is a constant, not evaluated.
+        if (!method.IsStatic || args.Count < 1 || args[0].NameColon is not null ||
+            args.Skip(1).Any(a => !model.GetConstantValue(a.Expression).HasValue)) return null;
         var owner = method.ContainingType?.ToDisplayString();
         IrExpr test;
         if (owner == "System.ArgumentNullException" && method.Name == "ThrowIfNull")
@@ -2001,6 +2688,13 @@ public sealed class StmtLowerer(
 
             case ("Reverse", 3) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { }:
                 return new IrArrayOp(loc, ArrayOpKind.Reverse, [L(0), L(1), L(2)]);
+
+            // R34.22. `Array.Sort<K, V>(keys, values, comparer)`: the keys sorted, each value
+            // moved with its key.
+            case ("Sort", 3) when method.IsGenericMethod && method.TypeArguments.Length == 2 &&
+                ArrayOf(byParam[0]) is { } && ArrayOf(byParam[1]) is { } &&
+                known.MapType(method.Parameters[2].Type) is IrUserSpecType { FStar: Sorted.ComparerType }:
+                return new IrArrayOp(loc, ArrayOpKind.SortPairs, [L(0), L(1), L(2)]);
 
             // R26.7. `Array.Sort<T>(a, index, length, comparer)`.
             case ("Sort", 4) when method.IsGenericMethod && IsInt(1) && IsInt(2) && ArrayOf(byParam[0]) is { } &&

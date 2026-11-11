@@ -14,6 +14,9 @@ public sealed record Provenance(string Construct, IrLoc Loc);
 /// <summary>One line of a generated module, and the C# it was emitted for.</summary>
 public readonly record struct EmittedLine(string Text, IrLoc? Loc);
 
+/// <summary>R30.39. A function <c>Pal.Split</c> outlined from a method's tail: its header, through <c>raises</c>, and its body.</summary>
+public sealed record OutlinedFn(string Header, ImmutableArray<EmittedLine> Body, IrLoc Loc);
+
 /// <summary>
 /// A one-based line of a generated module, and the C# it came from. This is the map an
 /// F* error is read through: F* reports a range in a `.fst` nobody wrote, and the only
@@ -172,6 +175,15 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// </summary>
     public SpanOrigin? Origin { get; init; }
 
+    /// <summary>
+    /// R34.6. For an enumerator's cursor (a <see cref="SlotKind.Cell"/> of type <c>int</c>):
+    /// the enumerable parameter it enumerates.
+    /// </summary>
+    public string? Cursor { get; init; }
+
+    /// <summary>R34.1. For an enumerable parameter: the ghost binder of the items it yields.</summary>
+    public string? Items { get; init; }
+
     /// <summary>R33.27. The receiver's array field a span local borrowed, if that is its source.</summary>
     public string? BorrowedField { get; init; }
 
@@ -182,6 +194,8 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
+        SlotKind.Enumerable => $"Pulse.Lib.CSharp.Enumerable.pts_to {Binder} {Perm}{value}",
+        SlotKind.ArrayCell => $"Pulse.Lib.CSharp.ArrayCell.pts_to {Binder} {value}",
         // R27.23. An `[Open]` receiver is held as its record.
         SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
         // R27.41. A receiver held at its heaps and not opened, carried across a loop at
@@ -199,7 +213,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     };
 
     public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
-        or SlotKind.Span or SlotKind.Object or SlotKind.Trace;
+        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell;
 }
 
 public enum SlotKind
@@ -224,6 +238,16 @@ public enum SlotKind
     /// caller passed with it.
     /// </summary>
     Trace,
+    /// <summary>
+    /// R34.1. An <c>IEnumerable&lt;T&gt;</c> argument, owned read-only through
+    /// <c>Pulse.Lib.CSharp.Enumerable.pts_to</c> at the items it yields.
+    /// </summary>
+    Enumerable,
+    /// <summary>
+    /// R34.10. A local that owns an array and is reassigned: a cell holding the array,
+    /// owned with it through <c>Pulse.Lib.CSharp.ArrayCell.pts_to</c>.
+    /// </summary>
+    ArrayCell,
 }
 
 /// <summary>
@@ -298,10 +322,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private ILookup<string, IrMethod> _virtuals =
         Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
 
-    public ImmutableArray<EmittedModule> Emit(IrProgram program)
+    /// <param name="context">R36.3. The referenced units' declarations. Every table a call
+    /// site reads is built over them too, exactly as when the two were one program; only
+    /// the program's own declarations are emitted.</param>
+    public ImmutableArray<EmittedModule> Emit(IrProgram program, ImmutableArray<IrDecl> context = default)
     {
+        var all = context.IsDefaultOrEmpty ? program.Declarations : [.. program.Declarations, .. context];
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
-        _classes = program.Declarations.OfType<IrClass>()
+        _classes = all.OfType<IrClass>()
             .GroupBy(c => c.Name).ToDictionary(g => g.Key, g => g.First());
         // R9.19. Both spec emitters need the base chain, to compose R9.6's forgetting when
         // an observation is read off a model further down the hierarchy than it was
@@ -312,17 +340,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .ToDictionary(g => g.Key, g => g.First().BaseClass!);
         _spec.Bases = bases;
         _hierarchy.Bases = bases;
-        _virtuals = program.Declarations.OfType<IrMethod>()
+        _virtuals = all.OfType<IrMethod>()
             .Where(m => m is { IsAbstract: true, DeclaringClass: not null })
             .ToLookup(m => m.DeclaringClass!);
-        _slots = [.. program.Declarations.OfType<IrMethod>()
+        _slots = [.. all.OfType<IrMethod>()
             .Where(m => m.IsAbstract).Select(m => m.Name)];
         // R18.3. Two declarations may not compete for one name, and the frontend refuses
         // the way that happens today (two constructors, PALCS0501). These lookups are keyed
         // by name, so a collision that slipped through would abort the process inside
         // `ToDictionary` — no diagnostic, no output, a stack trace naming a dictionary.
         // Grouping instead means a frontend refusal is what the user sees.
-        _overrides = program.Declarations.OfType<IrMethod>()
+        _overrides = all.OfType<IrMethod>()
             .Where(m => m.Overrides is not null)
             .GroupBy(m => m.Name)
             .ToDictionary(g => g.Key, g => g.First().Overrides!);
@@ -330,32 +358,32 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // argument's invariant with them, by position, so that a call site can stop owning
         // what it handed over. Computed from the same predicate the callee's own contract
         // is built from, once, because it is a property of the program and not of a call.
-        _methods = program.Declarations.OfType<IrMethod>()
+        _methods = all.OfType<IrMethod>()
             .GroupBy(m => m.Name)
             .ToDictionary(g => g.Key, g => g.First());
-        _consumed = program.Declarations.OfType<IrMethod>()
+        _consumed = all.OfType<IrMethod>()
             .GroupBy(m => m.Name)
             .ToDictionary(
                 g => g.Key,
                 g => Enumerable.Range(0, g.First().Parameters.Length)
                     .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i], _methods))
                     .ToImmutableHashSet());
-        _heapsKept = HeapsKept(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _heapIndexed = program.Declarations.OfType<IrMethod>()
+        _heapsKept = HeapsKept(all.OfType<IrMethod>().ToImmutableArray());
+        _heapIndexed = all.OfType<IrMethod>()
             .Select(m => (m, HeapRegions(m)))
             .Where(x => !x.Item2.IsEmpty)
             .GroupBy(x => x.m.Name)
             .ToDictionary(g => g.Key, g => g.First().Item2);
-        _openMethods = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
-        _readOnly = [.. program.Declarations.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
-        _compared = [.. program.Declarations.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
-        _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _ownerBorrows = OwnerBorrows(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _raising = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
+        _openMethods = new HashSet<string>(all.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
+        _readOnly = [.. all.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
+        _compared = [.. all.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
+        _regionHeld = RegionHeld(all.OfType<IrMethod>().ToImmutableArray());
+        _ownerBorrows = OwnerBorrows(all.OfType<IrMethod>().ToImmutableArray());
+        _raising = new HashSet<string>(all.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
         // R27.38. A call to an owner's method that gives its heaps back writes no region.
         foreach (var kept in _heapsKept)
             if (!_regionHeld.ContainsKey(kept)) _regionHeld[kept] = [];
-        _ownedFields = program.Declarations.OfType<IrStruct>()
+        _ownedFields = all.OfType<IrStruct>()
             .Where(st => st.Fields.Any(f => f.IsOwned))
             .GroupBy(st => st.Name)
             .ToDictionary(g => g.Key, g => g.First().Fields.Where(f => f.IsOwned).ToImmutableArray());
@@ -536,7 +564,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 ],
                 // R32.12. A wrapping struct's member adds the bridges of its wrapped copies.
                 IrMethod wm => [new Provenance(construct, decl.Loc),
-                    .. RevealBridges(wm).Select(b => new Provenance(b.Name, decl.Loc))],
+                    .. RevealBridges(wm).Select(b => new Provenance(b.Name, decl.Loc)),
+                    // R30.39. And the functions its `Pal.Split`s outline.
+                    .. Enumerable.Range(0, wm.Body is null ? 0 : AllStatements(wm.Body)
+                            .Count(st => st is IrIf { SplitAfter: true }))
+                        .Select(i => new Provenance($"{construct}__split{i}", decl.Loc))],
                 _ => [new Provenance(construct, decl.Loc)],
             };
 
@@ -549,7 +581,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             if (decl is IrClass { IsAbstract: false, BaseClass: { } baseName } leaf &&
                 _classes.TryGetValue(baseName, out var super))
             {
-                var overrides = program.Declarations.OfType<IrMethod>()
+                var overrides = all.OfType<IrMethod>()
                     .Where(m => m.DeclaringClass == leaf.Name && m.Overrides is not null)
                     .ToImmutableArray();
                 var vtbl = _hierarchy.EmitVtbl(leaf, super, Visible(super), overrides);
@@ -726,6 +758,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             binders.Add($"({name}: {rendered})");
             scope.Bind(p.Name, new Term(name, kind, p.Type));
         }
+
+        // R30.31. A lemma of no arguments is a function of `unit`: an F* `Lemma` (or a
+        // `ghost fn`) must be a function.
+        if (binders.Count == 0) binders.Add("()");
 
         // R12.7. A lemma whose contract mentions ownership is a *ghost function*, not an
         // F* `Lemma`. The two are told apart by exactly the test R12.2 already applies to
@@ -1959,7 +1995,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             Names.FunctionModule(method.Name), method.Body,
             method.Requires, method.Ensures, method.Preserves,
             method.Throws.Where(t => t.When is not null).Select(t => t.When!));
-        // R33.25. A constructor folds its class's invariant, whose model it returns.
+        // R30.20 / R33.25. A constructor folds its class's invariant, whose model it returns.
         var classOpens = method.Parameters.Select(p => p.Type)
             .Concat(method.IsConstructor ? [method.ReturnType] : [])
             .Select(t => t is IrClassType ct && _classes.TryGetValue(ct.Name, out var owner) ? owner : null)
@@ -1976,11 +2012,45 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"#set-options \"--z3rlimit_factor {factor}\"");
             sb.AppendLine();
         }
+        if (method.InitialFuel is var (fuel, ifuel))
+        {
+            sb.AppendLine($"#set-options \"--initial_fuel {fuel} --initial_ifuel {ifuel}\"");
+            sb.AppendLine();
+        }
+        if (!method.OpaqueSpecs.IsEmpty)
+        {
+            sb.AppendLine($"#set-options \"--using_facts_from '* {string.Join(" ", method.OpaqueSpecs.Select(m => "-" + m))}'\"");
+            sb.AppendLine();
+        }
 
         foreach (var (name, type) in RevealBridges(method))
             sb.Append(RevealBridge(name, type, method.TypeParameters));
 
         var origins = ImmutableArray.CreateBuilder<LineOrigin>();
+
+        // R30.39. The body is emitted first, so that what `Pal.Split` outlines of it is
+        // defined before the function that calls it.
+        string? bodyText = null;
+        ImmutableArray<LineOrigin> bodyOrigins = [];
+        if (!method.Admit && method.PulseBody is null && method.Body is not null)
+        {
+            bodyText = body.EmitBody(method, plan);
+            bodyOrigins = body.Origins();
+        }
+        foreach (var outlined in body.Outlined)
+        {
+            origins.Add(new LineOrigin(Lines(sb) + 1, outlined.Loc));
+            sb.Append(outlined.Header);
+            origins.Add(new LineOrigin(Lines(sb) + 1, outlined.Loc));
+            sb.AppendLine("{");
+            foreach (var line in outlined.Body)
+            {
+                if (line.Loc is { } l) origins.Add(new LineOrigin(Lines(sb) + 1, l));
+                sb.Append(line.Text);
+            }
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
 
         origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.Append(_recursiveMethod ? "fn rec " : "fn ").Append(Names.Function(method.Name));
@@ -2030,11 +2100,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 sb.AppendLine("  " + line.TrimEnd());
             }
         }
-        else if (method.Body is not null)
+        else if (bodyText is not null)
         {
             var offset = Lines(sb);
-            sb.Append(body.EmitBody(method, plan));
-            foreach (var o in body.Origins())
+            sb.Append(bodyText);
+            foreach (var o in bodyOrigins)
                 origins.Add(o with { Line = o.Line + offset });
         }
 
@@ -2235,7 +2305,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrBlock b: foreach (var x in b.Statements) Collect(x); return;
                 case IrLocalDecl d: CollectExpr(d.Init); return;
                 case IrAssign a: CollectExpr(a.Target); CollectExpr(a.Value); return;
-                case IrIf i: CollectExpr(i.Cond); Collect(i.Then); Collect(i.Else); return;
+                case IrIf i:
+                    CollectExpr(i.Cond);
+                    if (i.Joined) foreach (var fact in i.JoinFacts) CollectExpr(fact);
+                    Collect(i.Then); Collect(i.Else);
+                    return;
                 case IrWhile w:
                     CollectExpr(w.Cond);
                     foreach (var inv in w.Invariants) CollectExpr(inv);
@@ -2287,6 +2361,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
                 case IrField f: CollectExpr(f.Receiver); return;
                 case IrContents ct: CollectExpr(ct.Array); return;
+                case IrEnumOp eo: CollectExpr(eo.Source); foreach (var a in eo.Args) CollectExpr(a); return;
                 case IrSeqOp s: foreach (var a in s.Args) CollectExpr(a); return;
                 case IrListOp l2: foreach (var a in l2.Args) CollectExpr(a); return;
                 case IrSpecOp so: foreach (var a in so.Args) CollectExpr(a); return;

@@ -35,7 +35,9 @@ public static partial class FrontendPass
         // R32.12. A wrapping struct's member is one of the object its core borrows.
         var (corePath, core) = Borrowing.Innermost(self, known);
         var owner = Borrowing.OwnerField(core, known)!;
-        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor)
+        // R35.3. Unless the core owns no objects and is created by a method of the owner's class.
+        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor &&
+            !(Borrowing.CreatableWrapping(self, known) && Borrowing.OwnerParameter(symbol, owner, known.Compilation) is not null))
         {
             diagnostics.Error("PALCS0801", loc,
                 $"The constructor of the wrapping struct `{self.Name}`. A wrapping struct's members are " +
@@ -110,7 +112,7 @@ public static partial class FrontendPass
                new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value),
                .. owned.Select(o => new IrParam(loc, Borrowing.OwnedName(o.Field), o.Type, ParamMode.Value))];
 
-        var returnType = isCtor ? selfType : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+        var returnType = isCtor ? selfType : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -172,7 +174,8 @@ public static partial class FrontendPass
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
         // R32.11. A lambda a borrowing member passes to a `[Callback]` is lifted as any other's.
-        lowerer.Expressions.LiftPrefix = view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ??
+            (view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol));
         lowerer.Expressions.LiftTypeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
@@ -200,8 +203,10 @@ public static partial class FrontendPass
             bodyRequires = br;
             bodyEnsures = be;
             body = trimmed ?? body;
+            if (body is not null && lowerer.Expressions.HoistedCells.Count > 0)
+                body = new IrBlock(body.Loc, [.. lowerer.Expressions.HoistedCells.Values.OrderBy(d => d.Name, StringComparer.Ordinal), body]);
             if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
-                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
+                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax))
                 body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);
         }
 

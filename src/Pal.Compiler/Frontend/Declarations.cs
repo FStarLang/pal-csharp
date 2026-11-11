@@ -172,8 +172,8 @@ public static class Declarations
         try
         {
             var syntax = method.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax();
-            if (syntax is null || !compilation.ContainsSyntaxTree(syntax.SyntaxTree)) return false;
-            var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+            if (syntax is null || !compilation.Owns(syntax.SyntaxTree)) return false;
+            var model = compilation.Model(syntax.SyntaxTree);
 
             return !Mutates(syntax, model, visiting, known);
         }
@@ -192,10 +192,18 @@ public static class Declarations
     public static bool Mutates(SyntaxNode syntax, SemanticModel model, WellKnown? known = null) =>
         Mutates(syntax, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
 
+    /// <summary>R30.29. Whether a node of <paramref name="scope"/> that <paramref name="at"/> accepts moves an object's model.</summary>
+    public static bool MutatesAt(SyntaxNode scope, Func<SyntaxNode, bool> at, SemanticModel model, WellKnown? known) =>
+        Mutates(scope.DescendantNodes().Where(at), scope, model, new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default), known);
+
     private static bool Mutates(
-        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known)
+        SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known) =>
+        Mutates(syntax.DescendantNodes(), syntax, model, visiting, known);
+
+    private static bool Mutates(
+        IEnumerable<SyntaxNode> nodes, SyntaxNode syntax, SemanticModel model, HashSet<IMethodSymbol> visiting, WellKnown? known)
     {
-        foreach (var node in syntax.DescendantNodes())
+        foreach (var node in nodes)
         {
             // R29.3b. Filling a view cache writes a field outside the representation.
             if (known is not null && node is AssignmentExpressionSyntax fill &&
@@ -249,6 +257,9 @@ public static class Declarations
 
             if (node is InvocationExpressionSyntax call)
             {
+                // R30.29. `Unsafe.IsNullRef(ref r)` only tests the reference.
+                if (model.GetSymbolInfo(call).Symbol is IMethodSymbol isNull && RefSnapshots.IsIsNullRef(isNull))
+                    continue;
                 // R27.41. A member of a borrowing struct held in a local writes the local,
                 // and takes the object it borrows read-only.
                 if (known is not null && model.GetSymbolInfo(call).Symbol is IMethodSymbol held &&
@@ -258,10 +269,10 @@ public static class Declarations
                     // R32.13. Unless it is a view's member that writes the object it borrows.
                     !(Borrowing.IsView(held.ContainingType, known) &&
                       held.OriginalDefinition.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } heldBody &&
-                      Borrowing.WritesOwner(heldBody, model.Compilation.GetSemanticModel(heldBody.SyntaxTree),
+                      Borrowing.WritesOwner(heldBody, model.Compilation.Model(heldBody.SyntaxTree),
                           held.ContainingType.OriginalDefinition, known)))
                     continue;
-                // R33.14. A `[SpecBinding]`-bound library method (a comparer's `Equals`) is an
+                // R30.26 / R33.14. A `[SpecBinding]`-bound library method (a comparer's `Equals`) is an
                 // F* term, which cannot reach this object's state except through an array
                 // argument, checked below.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
@@ -386,7 +397,7 @@ public static class Declarations
         {
             if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not TypeDeclarationSyntax decl)
                 continue;
-            var model = compilation.GetSemanticModel(decl.SyntaxTree);
+            var model = compilation.Model(decl.SyntaxTree);
             foreach (var p in ctor.Parameters)
             {
                 var assigned = decl.DescendantNodes().Any(n =>
@@ -434,7 +445,7 @@ public static class Declarations
             foreach (var reference in m.DeclaringSyntaxReferences)
             {
                 var syntax = reference.GetSyntax();
-                var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+                var model = compilation.Model(syntax.SyntaxTree);
                 foreach (var id in syntax.DescendantNodes().OfType<IdentifierNameSyntax>())
                     if (model.GetSymbolInfo(id).Symbol is IFieldSymbol or IParameterSymbol &&
                         model.GetSymbolInfo(id).Symbol is { } f &&
@@ -521,7 +532,7 @@ public static class Declarations
         foreach (var reference in method.DeclaringSyntaxReferences)
         {
             var syntax = reference.GetSyntax();
-            var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+            var model = compilation.Model(syntax.SyntaxTree);
             // By declaration, not by symbol: `p` may come from another compilation of the
             // same trees (the one the spec shims were added to).
             bool Names(ExpressionSyntax e) =>

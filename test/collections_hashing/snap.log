@@ -1,0 +1,23 @@
+/home/nswamy/wt/pal-dict/src/Pal.Tool/bin/Release/net10.0/palcs -o out   Chain.cs Ctor.cs Search.cs Snapshot.cs Table.cs Unlink.cs
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.71
+palcs: 36 module(s), 2 written, 0 error(s)
+/home/nswamy/wt/pal-dict/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-dict/pulse --include /home/nswamy/wt/pal-dict/pulse/_cache  out/Func_Bag_CountUp.fst
+/home/nswamy/wt/pal-dict/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-dict/pulse --include /home/nswamy/wt/pal-dict/pulse/_cache  out/Func_Snapshot_Find.fst
+/home/nswamy/wt/pal-dict/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-dict/pulse --include /home/nswamy/wt/pal-dict/pulse/_cache  out/TranslationErrors.fst
+Verified module: TranslationErrors
+All verification conditions discharged successfully
+Verified module: Func_Bag_CountUp
+All verification conditions discharged successfully
+Verified module: Func_Snapshot_Find
+All verification conditions discharged successfully
+/home/nswamy/wt/pal-dict/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-dict/pulse --include /home/nswamy/wt/pal-dict/pulse/_cache  out/Func_Snapshot_Contains.fst
+Verified module: Func_Snapshot_Contains
+All verification conditions discharged successfully
+/home/nswamy/wt/pal-dict/tools/run-fstar.sh --message_format json --cache_checked_modules --cache_dir _cache --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore' --include _cache --include out --include /home/nswamy/wt/pal-dict/pulse --include /home/nswamy/wt/pal-dict/pulse/_cache  out/Func_Snapshot_GetOr.fst
+Verified module: Func_Snapshot_GetOr
+All verification conditions discharged successfully

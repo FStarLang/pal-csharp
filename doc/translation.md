@@ -4679,7 +4679,7 @@ case study's headline finding is machine-checked and independent of everything b
 
 | Rule | Construct | Translation |
 |---|---|---|
-| **R13.1** | explicit numeric cast `(T)e` | `Cast.<src>_to_<tgt> ⟦e⟧`, from `FStar.Int.Cast`. **Modular, with no precondition** (F46). An explicit cast is the programmer *asking* for truncation, and C#'s default `unchecked` context defines it to truncate; demanding `0 <= v < 256` at a `(byte)` cast would be the emitter inventing a refusal for an operation the source language defines (§0 rule 3). A user who wants exactness proves the range and F49 hands it back. |
+| **R13.1** | explicit numeric cast `(T)e` | `Cast.<src>_to_<tgt> ⟦e⟧`, from `FStar.Int.Cast`. **Modular, with no precondition** (F46). An explicit cast is the programmer *asking* for truncation, and C#'s default `unchecked` context defines it to truncate; demanding `0 <= v < 256` at a `(byte)` cast would be the emitter inventing a refusal for an operation the source language defines (§0 rule 3). A user who wants exactness proves the range and F49 hands it back. F* deprecates these functions (warning 288, "implementation-defined in C"); C# defines the result, so `palcs report` drops that warning. |
 | **R13.2** | a conversion in *specification* position | the identity on the mathematical value iff every value of the source type is a value of the target (F47) — **not** merely "the target is wider". Otherwise `% pow2 n` (unsigned target) or `FStar.Int.op_At_Percent` (signed) (F48). `Types.RangeFits` decides. |
 | **R13.3** | `x++`, `++x`, `x--`, `--x` in expression position | an `IrStmtExpr(prelude, value)`: the write is emitted **at the operator's own position in the tree**, not hoisted to a statement before the enclosing one. The node therefore inherits the emitter's left-to-right operand order and R6.3's short-circuit capture for free, and is faithful by construction with no side condition. Hoisting would have been wrong for `p && a[i++] > 0`. In specification position the construct is refused (PALCS0576): a specification denotes a state and never changes one. |
 | **R13.4** | implicit numeric promotion | recorded as an `IrConvert` at the same place reference conversions are. C# evaluates `byte & int` at `int` width — both operands promoted, `int`'s operator applied — and the promotion must be translated or the emitted term is ill-typed. **Literals are re-typed, not converted**: `byte b = 5;` converts at compile time, and emitting a cast would name a runtime operation the program does not perform. |
@@ -5709,7 +5709,8 @@ try states them the way a loop does: `Pal.Invariant(INV)` at the head of the `tr
 `INV` must hold wherever control leaves the body, at its end and at every raise that
 reaches the handler, and at the end of every handler. It is stated over the slots' values
 at that point, and it is what a statement after the `try` may rely on. A
-`Pal.Decreases` there is refused (PALCS0614): a `try` runs once.
+`Pal.Decreases` there is refused (PALCS0614): a `try` runs once. R35.13's `Pal.Raised()` lets `INV` say
+which of the two exits it describes.
 
 ---
 
@@ -6817,6 +6818,9 @@ is unchanged. `SortedList.Remove` (`if (i >= 0) RemoveAt(i); return i >= 0;`) is
 blocks; `verify.mk` passes `$(PAL_CS_FLAGS)` through. dotnet/runtime builds its libraries
 that way (`SortedSet.cs` uses `?.=` and `stackalloc`). The translator still refuses unsafe
 code in any member it translates.
+
+`palcs --reference DIR` (repeatable) translates against a unit already translated into
+`DIR`, without translating it again; §36 describes it, and `verify.mk`'s `REFERENCES`.
 
 ### R25.12 Partial classes
 
@@ -9354,6 +9358,716 @@ KeyValuePair)` is translated as written; no translation at the dynamic type was 
 assumption. The bindings of the two shared empty enumerators to `empty_enumerator` are the
 only new trust: each says the read or call is pure and does not throw.
 
+## 30. `Dictionary<TKey,TValue>` and the rest of `HashSet<T>`
+
+§24 verified `HashSet<T>`'s lookups and removal. §30 adds the members that grow, fill and
+rebuild the table (`AddIfNotPresent`, `Resize`, `EnsureCapacity`, `TrimExcess`,
+`Initialize`), and the same for `Dictionary<TKey,TValue>` (`TryInsert` and its wrappers,
+`Remove`, `Resize`, `Clear`, …). The runtime harnesses are `pal/HashSet` and the new
+`pal/Dictionary` (with its glue `pal/Dictionary/DictionaryChain.fst`). `test/rebind_alias`
+and `test/collections_hashing/Ctor.cs` pin the rules, and `test/diagnostics/cases/Rebind*.cs`
+pin PALCS0750.
+
+### R30.1 A `ref` local rebound by statements
+
+A `ref` local bound to an element of a field's array (R24.8) may be rebound, as a
+statement (`r = ref e;`), to an element of the same field's array; or be declared
+`ref Unsafe.NullRef<T>()` and bound later. Each binding evaluates the element's index into
+the local's index variable; every use of the name is the element of the field's array at
+that index. That is sound only where the local is *current*: bound since the field last
+changed. The field changes by an assignment to it, or by a call of another non-lemma
+instance method of the class (which may replace the array, as `Resize` does). A conservative
+walk in C#'s evaluation order (`AliasFlow`) checks that every use is current; anything it
+does not follow (`goto`, a lambda that names the local) fails. A use that may be stale, or
+unbound, is **PALCS0750**.
+
+### R30.2 An array local rebound from its field
+
+An array local that is R24.19's name for a field (`Entry[]? entries = _entries;`) may be
+rebound by the statement `entries = _entries;`, typically after a call that replaced the
+array. The same walk as R30.1 checks that every read of the local is current; where it is,
+the local is the field. Otherwise **PALCS0750**.
+
+### R30.3 Growing and rebuilding a chained table (library)
+
+`Pulse.Lib.CSharp.HashInsert` proves, over `HashChain`'s separate-chaining table seen through
+a projection of its entries (`view o f`: the key for `HashSet<T>`, the key-value pair for
+`Dictionary`), that inserting an entry (from the free list or at the end), rebuilding the
+chains into new arrays (`Resize`), recomputing the hash codes (`forceNewHashCodes`) and
+compacting into new arrays (`CopyEntries`) keep the table well formed and its contents. It
+is fully proved.
+
+### R30.4 The code's bucket index
+
+`HashChain.bkt_code` (and `bkt_code_long`, for `GetBucket`'s `uint % int`, which C# computes
+in `long`) state that the index the code computes is `HashChain.bkt` of the hash code.
+Both are proved and fire by pattern.
+
+### R30.5 Static helpers of bound static classes read only their arguments
+
+A static method of a static class bound by R21.5 (`HashHelpers.GetPrime`) reads no state,
+like a method outside the sources. Its binding is `Pulse.Lib.CSharp.HashSize`:
+`get_prime`, `get_prime_at_least` and `is_prime`, which are **trusted** (`HashHelpers`
+trial-divides upward without a bound). They state only that the result is at least the
+request and at least 3, prime, and at most `MaxPrimeArrayLength` (`0x7FFFFFC3`) when the
+request is.
+
+### R30.6 A type test against a bound library class
+
+`c is C`, `C` a library class bound by R21.5, translates to the predicate bound to
+`"is:" + C`'s documentation-comment ID, applied to the non-null value.
+`NonRandomizedStringEqualityComparer` is bound to `Pulse.Lib.CSharp.StringComparers`, whose
+`val`s are **trusted**: `is_non_randomized`, `randomized` (`GetRandomizedEqualityComparer`),
+that the randomized comparer has the same equality, and that a non-randomized comparer's
+equality is reflexive.
+
+### R30.7 `T x = f = e;`
+
+A declaration initialised by a simple assignment to a field of `this` or a local is the
+assignment followed by the declaration, initialised by reading back what was stored (not
+null where C# says so). `int[] buckets = _buckets = new int[size];` is such a declaration.
+
+### R30.8 A field of a name as an argument to an inlined `ref` helper
+
+R24.9 inlines a `ref`-returning helper whose arguments are names or constants. A field of
+one (`entry.hashCode`) is accepted too: reading it has no effect.
+
+### R30.9 A reference cast between bound library types
+
+`(C)e`, with `C` and `e`'s type both reference types bound by R21.5 and C# converting one
+to the other by reference (`(IEqualityComparer<string>)comparer`), is `e` at `C`'s image.
+
+### R30.10 An arm that declares a mutable scalar
+
+An `if` arm that declares a mutable scalar local outside any loop body (a `for` counter):
+Pulse allocates a cell only where the post-condition is known, so the rest of the block is
+moved into both arms, as for R22.12. This lifts F19 for such blocks.
+
+### R30.11 An array local moved into a field
+
+After `_f = a;`, the array local `a` no longer owns its array: the field does. A ghost
+statement later in the method does not mention `a`'s resource.
+
+### R30.12 An element write followed by a lemma
+
+An `if` arm that writes an array element, followed in a loop body by a lemma call or an
+assertion: Pulse's join of the arms keeps no pure fact about the array's new contents, so
+the rest of the body moves into both arms.
+
+### R30.13 `out _`
+
+Each `out _` (or `out var _`) in a statement is a fresh local, declared just before it at its
+type's `default`. The callee writes it and nothing reads it.
+
+After the merge with §33 this is implemented by R33.7, which passes the fresh local at the
+argument itself; the separate declaration was removed.
+
+### R30.14 `a?.Length ?? d`
+
+On a nullable array `a` whose evaluation has no effect, `a?.Length ?? d` means
+`a != null ? a.Length : d`. A null array is a property of the reference (R24.7), not an
+option. `a?.Length` alone is the length of the bound array.
+
+### R30.15 An element as an argument to an inlined `ref` helper
+
+R30.8 also accepts an element of an array named by a name, at an index that is a name or a
+constant, or a field of such an element (`entries[i].hashCode`). The read is proved in
+bounds where it occurs, so it cannot throw, and substituting it is evaluating it.
+
+### R30.16 A `ref` local's array local is checked only while the alias is live
+
+R24.8 refuses a `ref` local into an array *local* when the program rebinds that local. Now
+only rebindings in the alias's live stretch count: from its declaration to its last use,
+extended to the end of any loop (within the block) around a use. A loop around the block
+declares the alias afresh. With a `goto`, label or `switch` in the block, every node
+counts. When the array local is R24.19's or R30.2's name for a field, the field must not
+change in that stretch either (by assignment or by a call of a non-lemma instance method of
+the class). `TryInsert` needs this rule: its `entries = _entries;` (after `Resize`) precedes
+`ref Entry entry = ref entries![index];`.
+
+### R30.17 A by-value argument does not make a variable assignable
+
+A variable passed to a call is taken to be possibly assigned by it (it may be passed by
+reference, or be an object the callee mutates), so it gets a mutable cell, and loop
+invariants hold it only existentially. A variable of a primitive type or of a type
+parameter, passed by value, is copied: the callee cannot change it. Such arguments no
+longer count. Before this rule, `ThrowHelper.ThrowAddingDuplicateWithKeyArgumentException(key)`
+inside `TryInsert`'s loops lost `key`'s value at the loop head.
+
+### R30.18 `NonRandomizedStringEqualityComparer.GetStringComparer`
+
+`GetStringComparer(o)` is `StringComparerOf.string_comparer (Obj.box o)`, a trusted
+`option Eq.handle`. Its one lemma (`string_comparer_equals`) says that, at `T == string`,
+a comparer it returns is non-randomized and equates exactly what the comparer it was given
+does. `HashSet<T>(comparer)` swaps its comparer for that one; `HashSetChain.string_swap`
+proves the swap keeps the set's equality (`SameEquality`).
+
+### R30.19 A `null` cast to a nullable reference type
+
+`(IEqualityComparer<T>?)null`, where the type is an `option`, is that `option`'s `None`,
+not a `B.null`. A constructor's field of `option` type with no initialiser starts at
+`None`, typed with its element type.
+
+### R30.20 A constructor opens its class's spec modules
+
+A constructor's module opens the modules the class's other members' specifications open
+(`ClassSpecOpens`). Before this, a constructor whose contract named a class-level `[Spec]`
+function (`HashSet<T>.ItemsOf`) did not typecheck.
+
+### R30.21 A nullable reference compared with a non-null one
+
+`comparer != EqualityComparer<T>.Default`, with `comparer` an `option` and the other side
+not, wraps the other side in `Some`. Two C# types bound to the same F* type
+(`IEqualityComparer<T>` and `EqualityComparer<T>`) count as the same type here.
+The `option` side must be declared nullable (`T?`). In a specification string, types are
+nullable-oblivious and are `option`s only by R20.9's default, which F* sees through.
+Wrapping them broke `OrderedDictionary`'s constructors, which compare
+`OrDefault(...) == EqualityComparer<TKey>.Default`.
+
+### R30.22 A `return` nested in an `if` with no `else`
+
+`if (a) { …; if (b) { …; return x; } } rest; return y;` is R5.5b's guard chain one level
+deeper: the statements after the outer `if` are appended to its branch (where the inner
+`if` absorbs them as its `else`) and become the outer `if`'s `else`. The tail is
+duplicated. `HashSet<T>.TryGetValue` is the case.
+
+### R30.23 A constructor's arm that assigns a field
+
+In a constructor, an `if` an arm of which assigns a field of the object being built is not
+joined (R22.12): the rest of the body moves into both arms. Pulse's join generalises the
+whole record, so what the arm stored (`_comparer = comparer ?? EqualityComparer<T>.Default`)
+was lost to the postcondition.
+
+### R30.24 A chained constructor that throws
+
+A chained constructor (R27.45) holds the object the chained call returned under that
+call's binder rather than `result`. At a `throw` or a `[DoesNotReturn]` call, that object
+is discarded exactly as R22.11 discards the one R22.9 allocates; before, its invariant was
+left over. `HashSet<T>(int capacity, comparer)`'s argument check is the case.
+
+### R30.25 An array parameter compared with `null` in a contract
+
+An array parameter's reference is bound under R24.7's `ArrayRefKey` in the contract's
+scopes, so `[Requires("array != null")]` is `not (A.is_null var_array)`. Before, the
+comparison was read as one of the contents and was ill-typed. `CopyTo`'s null check is the
+case.
+
+### R30.26 A call to a bound member writes nothing
+
+R4.11's write-set scan counted an instance call to a method with no body in the
+compilation as a write of the receiver. A member bound by `[SpecBinding]` (R21.5) is a pure
+F* function, so a call to it is no longer counted: `EqualityComparer<TValue>.Default.Equals`
+leaves `Dictionary.ContainsValue` read-only, which `ValueCollection`'s
+`ICollection<TValue>.Contains` (holding the dictionary at a fraction, R27.41) needs.
+
+### R30.27 A `[DoesNotReturn]` call does not reopen a read-only receiver
+
+R27.38 has a loop of a read-only method reopen the receiver at a fresh record when its
+body may call a raising method: the call closes the receiver around itself. A
+`[DoesNotReturn]` call does too (R22.11), but nothing follows it, so there is nothing to
+reopen for; the record stays named, and a measure may still mention a field
+(`(uint)entries.Length - collisionCount`, where `entries` aliases `_entries`). Before, the
+measure's field read was refused as unsupported. R30.26 made `HashSet<T>.FindItemIndex`
+read-only, which is how it was found.
+
+### R30.28 Constructors that call `Initialize` before setting the comparer (library)
+
+`Dictionary(int capacity, comparer)` calls `Initialize(capacity)` before it assigns
+`_comparer`, so the invariant, which names the comparer, does not hold at the call.
+`Initialize` is `[Open]` (R27.23, R33.15): it takes the raw record and returns the fields
+it assigned, with `Wf` at whatever `_comparer` holds then. Two lemmas of
+`pal/Dictionary/DictionaryChain.fst` then carry the table to the comparer the constructor
+stores: `wf_rebind` (an empty table is well formed at any comparer, since only live
+entries' hashes depend on it) and `string_swap` (replacing a string-keyed dictionary's
+comparer by what `NonRandomizedStringEqualityComparer.GetStringComparer` returned keeps its
+equality, from R30.18's `string_comparer_equals`). `GetStringComparer(_comparer!)` boxes the
+non-null comparer, where `string_comparer`'s argument is the boxed option, so
+`Pulse.Lib.CSharp.Obj` gained `box_some : box (Some x) == box x`, proved in `Obj.fst`, whose
+`obj` (abstract in the interface) is `unit`. No compiler change.
+
+### R30.29 A `ref` return that may be `Unsafe.NullRef`: snapshots
+
+A method that returns `ref T` and whose body calls `Unsafe.NullRef` (a *snapshot method*,
+`Dictionary<TKey,TValue>.FindValue`) is translated as one returning `option T`: the value
+the reference designates when the method returns, or `None` for the null reference.
+
+* In the method, a `ref` local of type `T` is an `option T` local (`ref Unsafe.NullRef<T>()`
+  is `None`, `ref a[i]` is `Some a[i]`, `ref x.f` of another such local is
+  `Some (Some?.v x).f`); a use of it is `Some?.v x`, whose precondition `Some? x` is the
+  proof obligation that the reference is not null. It may be rebound by statement, as
+  R33.5's locals are.
+* In a caller, `ref T v = ref M(...)` binds `v` to the option the call returns, and is
+  read as `Some?.v v`; `M(...)` used as a value is `Some?.v` of the call.
+* `Unsafe.IsNullRef(ref v)` (or `(ref M(...))`) is `not (Some? v)`. In a contract,
+  `Unsafe.IsNullRef(ref Result)` and `Result` are the option and its value; in a loop
+  invariant, `Pal.ResultRef<T>()` names the value R26.2's return cell holds, as
+  `Pal.Result<T>()` does for a by-value return.
+* The snapshot is sound only while nothing can change the element, so **PALCS0751**
+  refuses a `ref` local that is written through (`v = e`, `v++`), passed by reference to
+  anything but `Unsafe.IsNullRef`, or has a reference into it taken other than to return
+  it or bind another such local; a snapshot method that is not read-only (R4.11); and, in a
+  caller, a field or any array element that may be written (directly, or by a call passed
+  an array whose body writes an element) while the local is live. `Unsafe.IsNullRef` of
+  anything else is PALCS0751 too.
+
+R33.2's `goto` is extended for `FindValue`'s shape: a jump back to a label (`goto Return;`
+from below it) is followed as a forward one is, so long as the code it copies does not
+contain the jump itself; a local declared under a label between the jump and its target is
+hoisted with the others (a snapshot local as `None`). R5.5b's sinking of what follows an
+`if` into its arms skips an arm that never completes (a throw, a `[DoesNotReturn]` call),
+as R33.21 already did for a returning `if`. In an escaping loop, an `if` an arm of which
+declares a cell (the copied `ref TValue value = ref entry.value;` inside the loop) takes
+the rest of the body into its other arm, as R27.27 does for a moved region.
+
+`FindValue`'s contract is `IsNullRef(ref Result) <==> !Mem(comparer, keys, key)` and, when
+not null, `Maps(comparer, keys, values, key, Result)`; its callers (`ContainsKey`,
+`TryGetValue`, the indexer's getter, `ICollection<KeyValuePair>.Contains`/`Remove`,
+`KeyCollection.Contains`) are verified against it. The do-while loops need
+`Pal.Broke() == Pal.Returned()` in their invariants: the loop's condition
+(`collisionCount <= (uint)entries.Length`) never fails, by `SearchStep`, so it is left only
+by a jump to a label, which is a return.
+
+### R30.30 A non-null reference for a nullable parameter, in a specification
+
+In a contract, an argument that is a non-nullable reference passed for a parameter of a
+nullable reference type is `Some` of it (`SameEquality(Result, SpecComparer)`, where
+`Result` is an `IEqualityComparer<TKey>` and the spec method's parameter is
+`IEqualityComparer<TKey>?`). A postcondition's `Result` is typed by the method's declared
+return type, since the shim's `Result` parameter is nullable-oblivious.
+
+### R30.31 A lemma of no arguments
+
+A `[Lemma]` method with no parameters (and no type parameters) is translated as a function
+of `unit`, `let lemma_M () : Lemma ...`; a call passes `()`. F* refuses a `Lemma` (or a
+ghost function) that is not a function. `HashHelpers.MaxPrimeIsPrime()` is the first: with
+`Debug.Assert` erased, `ExpandPrime`'s `return MaxPrimeArrayLength;` needs that
+`MaxPrimeArrayLength` is a table size (prime), which the assertion
+`MaxPrimeArrayLength == GetPrime(MaxPrimeArrayLength)` used to establish. The lemma it
+calls, `HashSize.max_prime_is_prime`, is proved from `get_prime`'s contract (`get_prime`
+returns a prime at least its argument and at most `max_prime`); it is not a new assumption,
+though it changes the pinned interface.
+
+### R30.32 A borrowing constructor's `if (p == null)` throw
+
+R32.1's skipped guard is extended to its spelled-out form: `if (p == null) { ... }` (or
+`p is null`) with no `else`, whose arm is only `throw`s and `[DoesNotReturn]` calls, where
+`p` is a by-value parameter of a non-nullable class type. Such a reference is not null
+(R10.2), so the arm is dead. `Dictionary<TKey,TValue>.KeyCollection(dictionary)` and
+`ValueCollection(dictionary)` check `dictionary == null` and call
+`ThrowHelper.ThrowArgumentNullException`; both constructors are verified, and `Keys` /
+`Values` ensure `ReferenceEquals(Result._dictionary, @this)` (R29.3b).
+
+### R30.33 An array local keeps the array its field's replacement discards
+
+`TrimExcess` reads `Entry[]? oldEntries = _entries;`, replaces `_entries` with a new array,
+and passes `oldEntries` to `CopyEntries`. R30.2's alias would name the field, which no
+longer holds the old array; R33.17 refuses the declaration. Such a local now *takes* the
+array from the field, when
+
+* the first statement after the declaration that may replace the field is a plain
+  assignment `_f = e;` in the same block, with `e` not the local; and
+* every use of the local after that assignment is one where it is known not to be null
+  (C#'s flow state), so the field's `NA.pts_to` is `A.pts_to` there.
+
+Before the assignment the local is the field (R30.2's alias, so `oldEntries is null` and
+`oldEntries.Length` read the field). At the assignment, instead of dropping the field's
+old contents, the emitter binds `let var_oldEntries = this._entries;`, eliminates the
+nullable permission (`NA.elim`) and rewrites it to `A.pts_to var_oldEntries s`: the local
+owns the old array from then on, with the contents the field had, and is dropped at the
+end of the method like any other array local. A later use names the local.
+
+`CopyEntries` is `[Open]` (R27.23): it is called with `_buckets` and `_entries` new and
+empty, which the invariant does not describe. Its contract states the new table is
+well formed (`Wf`, with `_freeList == -1` and `_freeCount == 0`), holds the old live keys and
+values in order (`KeysOf`/`ValuesOf`, `ItemsOf` for `HashSet`), and leaves `entries`
+unchanged; `TrimExcess` folds the invariant back from that. The loop is
+`HashInsert.compact_*` (proved), wrapped as `Compacted`/`CompactStart`/`CompactRoom`/
+`CompactStep`/`CompactDone` in `DictionaryChain.fst` and `HashSetChain.fst`.
+
+### R30.34 `Comparer`
+
+`Dictionary<TKey,TValue>.Comparer` and `HashSet<T>.Comparer` return, for a string-keyed
+collection, `IInternalStringEqualityComparer.GetUnderlyingEqualityComparer(_comparer)`: the
+public comparer in place of the non-randomized one the constructor swapped in (R30.18).
+Otherwise they return `_comparer ?? EqualityComparer<T>.Default`. Both ensure
+`SameEquality(Result, SpecComparer)` (with R30.30's `Some`).
+`GetUnderlyingEqualityComparer` is bound (R21.5) to
+`Pulse.Lib.CSharp.StringUnderlying.underlying`, trusted to have its argument's equality; the
+cast `(IEqualityComparer<string?>)_comparer` is `Some?.v`, whose obligation is the
+invariant's `typeof(T).IsValueType || _comparer != null` with the trusted fact that
+`string` is not a value type (`string_not_value_type`, an `SMTPat` lemma on
+`is_value_type (type_of t)` when `type_of t == type_of string`).
+
+The emitter's scan for field accesses (R4.10c) did not look under `Some?.v`/`Some?`
+(`IrOptionOp`), so a body whose only field reads were the nullable `_comparer` was emitted
+without opening the receiver; it now does.
+
+### R30.35 `foreach` over a hash set; `IsSubsetOfHashSetWithSameComparer`
+
+`IsSubsetOfHashSetWithSameComparer(other)` is a `foreach` over `this` that asks
+`other.Contains` of each element. R27.51 lowers it over `HashSet<T>.Enumerator`, whose
+`MoveNext` (R28) walks the prefixes of the live elements (`SpecPrefixes`, one per entry
+index). The enumerator gains two `[Spec]` members for the loop invariant: `SpecIndex`
+(`_index`) and `SpecFresh` (`_version == _hashSet.SpecVersion`). The contract is
+`Result <==> AllIn(other.SpecComparer, other.SpecItems, SpecItems)`, where `AllIn c s xs`
+(`HashSetChain.all_in`) is that every element of `xs` is a `Mem` of `s` at `c`.
+
+* **The walk is stated by `MoveNext`.** A loop that reads none of the receiver's fields
+  keeps the receiver closed at its model. A method that does read one (a lemma call naming
+  `Pal.Contents(_entries)`) holds it open, and for a class with array fields the loop
+  invariant then knows nothing that relates the open record to the model, so the receiver
+  cannot be folded again around `MoveNext`. So the facts the loop needs are in `MoveNext`'s
+  contract: `Walk(SpecPrefixes, SpecItems)` (each prefix is a prefix of the items, and the
+  last is all of them; `HashSetChain.walk`, from `prefixes_walk`) and that the first prefix
+  is empty. The enumerator's constructor ensures `SpecSlots >= 0`, for `MoveNext`'s
+  precondition on the first call.
+* **Lemmas.** `all_in_snoc` (a pattern) carries the invariant over a step;
+  `all_in_walk` turns a failing prefix into a failing whole on the `return false`.
+* **A measure reads a read-only receiver at its model.** `Pal.Decreases(SpecSlots - …)`
+  named the receiver's spec at the receiver itself (an ill-typed term) when the receiver's
+  class has array fields; R27.50's binding of the receiver in the measure's scope applied
+  only to classes without them. A receiver the method leaves unchanged is now bound at its
+  model in any case.
+
+`OverlapsHashSetImpl` is the same walk, but it is `static` (its sets are parameters), and
+R27.51 lowers `foreach` only in instance methods. The public set operations that call these
+helpers take `IEnumerable<T>`; with `[Exactly(typeof(HashSet<>))]` they would still need
+`EqualityComparersAreEqual`, which is `IEqualityComparer<T>.Equals(object)` (unmodeled,
+unlike R27.47's comparer identity), and `IsSubsetOf`'s `Count > other.Count` shortcut
+needs a counting argument over two comparers. They are not done.
+
+### R30.36 `Pal.Join`: an `if` whose arms rejoin
+
+Pulse checks the code after an `if` once for each arm whenever an arm ends a scope the
+rest needs: a split (R22.12), the guard after a loop's early exit (R26.2), or the code
+sunk into an arm (R24.14). Several such `if`s in a row multiply. `TryInsert` was 12 copies
+of its insertion tail and 4 of its search loop, and took about 1h35m and 115 GB to check.
+
+`Pal.Join(facts)` placed directly after an `if` (several in a row are conjoined) makes the
+`if` a join point. It is emitted as Pulse's `if (c) ensures J { … } else { … };`, and the
+code after it is checked once, against `J` alone.
+
+* **The postcondition is not framed.** A Pulse `if` with an `ensures` is like a loop body:
+  its postcondition has to own every slot in scope. `J` is a loop frame (R5.8b) over the two
+  arms, with the facts as invariants. Every live slot is owned. A slot or record the arms
+  leave alone keeps its name, so facts already known about it persist. Anything an arm
+  assigns becomes existential, so the facts have to restate everything the rest of the
+  method needs about it. That includes the class-invariant pieces of a receiver record that
+  an arm writes.
+* **Early exits inside the arms.** A loop's `return` inside an arm (R26.2) leaves a guard
+  `if (__pal_returned) return` in that arm. The guard is hoisted: the arm's remainder moves
+  under `if (!__pal_returned)`, and the guard is placed once after the join. Facts can say
+  what holds on each path with `Pal.Returned()` and `Pal.Result<T>()`. An arm that still
+  returns, breaks or continues is refused (PALCS0753).
+* **Restrictions.** A `Pal.Join` that does not follow an `if` is refused (PALCS0752). So is
+  a joined `if` whose condition is a null test of a local, because R22.12 narrows a null
+  test by splitting (PALCS0754); a null test of a field can be joined (R30.43). Joined `if`s
+  are not sunk into and not split at. A short-circuit condition that R35.15 nests keeps its
+  join on the outer `if` (R30.42).
+
+### R30.37 `Pal.Index` of a rebindable `ref` local
+
+A `ref int bucket = ref GetBucket(h)` that R30.1 rebinds is an index cell into the array.
+In a specification, `Pal.Index(bucket)` names that index, so a join fact can relate it
+(`Pal.Index(bucket) == hashCode % _buckets.Length`).
+
+### R30.38 A quotient stored in a cell is named first
+
+`let mut c = int64_to_int32 (I64.rem h len)` puts the quotient term in the cell's
+`pts_to`, and Pulse typechecks it again, including its `len <> 0` precondition, at every
+later step that mentions the cell. In `TryInsert` that was 163 queries and 418 s. A value
+containing `rem` or `div` that initializes or is assigned to a cell is bound to a `let`
+first, so the cell holds a name. The exception is an arm of a plain `if` that Pulse
+joins itself (no `Pal.Join`): a `let` there would leave its binding in the arm's
+context, which Pulse cannot join with the other arm's, so the value is stored unnamed.
+
+### R30.39 `Pal.Split`: what follows a join, as a function of its own
+
+A join (R30.36) stops the code after an `if` from being copied, but Pulse still checks the
+rest of the method in the context the whole method has built up: every binder, every
+`with`, every fact before the join. In `TryInsert` that context made each typing query
+of the insertion tail slow.
+
+`Pal.Split()` written directly after the `Pal.Join`s of an `if` that is a statement of the
+method's body (not inside a loop, an arm or a `try`, and with no field region open) moves
+the code after the join into a separate Pulse `fn`, `<method>__split<k>`, emitted before
+the method. The method's body ends by calling it. Each such function is recorded in the
+provenance (R2.2) against the method it was outlined from.
+
+* **Its parameters** are the method's own (including the `pre_` models, passed
+  explicitly), the cells live at the join (as `R.ref`s), the immutable locals the rest
+  mentions, and the ghost locals it mentions (as `erased`).
+* **Its precondition** is the join's postcondition, with the values the join named
+  before the `if` quantified too, conjoined with the method's own pure precondition. Only
+  what the join states is known after the split: a fact established before the `if`
+  that the rest needs, such as `keys0.Value == Pal.Old(this.SpecKeys)`, has to be a
+  `Pal.Join` fact.
+* **Its postcondition and `raises`** are the method's, plus the cells it borrowed.
+
+Nothing is assumed. The outlined function is checked against its contract, and the call
+is checked against it. Splitting is a proof-structuring device, like a lemma: it changes
+how the method is checked, not what is proved. A `Pal.Split` that does not follow a
+`Pal.Join`, or a split in the wrong place, is refused (PALCS0755).
+
+### R30.40 `[OpaqueSpecs]`: a `[Spec]` the solver does not unfold
+
+A `[Spec]` with a body is a transparent F* definition in its own module (`Let_<Type>_<Name>`),
+and the SMT solver unfolds it wherever it occurs. `Dictionary.Search` unfolds to
+`HashChain.search`, which carries the table invariant and quantifiers over the entries; in
+`TryInsert`'s loops every typing query (a `nat`, a sequence index bound) was checked in the
+presence of those quantifiers, about 400 queries at about 0.6 s each.
+
+`[OpaqueSpecs("Search", ...)]` on a method names `[Spec]` members of its declaring type. The
+method's module is checked with `--using_facts_from '* -Let_<Type>_<Name> ...'`: the
+definitions of the named specs are not given to the solver, so what the proof knows of them
+is what the lemmas it calls (`SearchStart`, `SearchStep`, `SearchHit`, `SearchAbsent`)
+ensure, and what is stated in their terms. The setting covers the functions R30.39 outlines
+from the method, which are in the same module. A name that is not a `[Spec]` method of the
+declaring type is refused (PALCS0756).
+
+This is sound in the same way `[Rlimit]` is: it removes facts, so what is proved with it is
+provable without it. `TryInsert` is `[OpaqueSpecs("Search", "Wf", "Mem", "Overwritten")]`.
+Its loops' invariants had relied on `Search` unfolding to recover the table invariant `Wf`;
+with `Search` opaque they state `Wf` too. `Hit` stays transparent: `SearchHit`'s
+precondition is proved from the branch condition by unfolding it.
+
+### R30.41 `HashSet<T>`'s set operations: set relations modulo the comparer
+
+The set operations are specified over the model's items modulo the comparer, in
+`pal/HashSet/HashSetSets.fst` (all proved): `except c s0 o s` (`s` holds what `s0` does and
+`o` does not), `overlaps c s o`, `none_in`, `distinct c xs` (no two items equal at `c`), and
+`equiv c` (`c.Equals` is reflexive, symmetric and transitive). §24 leaves the comparer's
+`Equals` uninterpreted, so `equiv` and `distinct` are hypotheses of the contracts that need
+them, written `Pal.Implies(HashSet<T>.Equiv(c) && HashSet<T>.Distinct(c, Old(items)), ...)`;
+`IEqualityComparer<T>` states the equivalence as an obligation of the comparer, and the
+table's invariant does not make the items distinct (a non-equivalence comparer can store two
+equal items). The pigeonhole principle modulo an equivalence (`HashSetSets.pigeonhole`: a
+distinct sequence all of whose items are in `s` is no longer than `s`) is proved by induction,
+removing one matched item at a time.
+
+* **`foreach` over an `IEnumerable<T>`** (R34) walks `Pal.Contents(other)`; `Pal.Index(x)`
+  is the cursor after `MoveNext`, so the current item is `Pal.Contents(other)[Pal.Index(x) - 1]`
+  and the invariant speaks of `Pal.Slice(Pal.Contents(other), 0, Pal.Index(x))`.
+  `ExceptWith`'s loop calls `Remove`, so it reads the fields: its invariant restates the
+  class invariant in their terms (as every loop that reads fields and calls a method of the
+  receiver does) and states `Except` of `ItemsOf(Pal.Contents(_entries), _count)`.
+  `this.SpecItems` in a method body is the model on entry (`pre_this`), not the current one.
+* **A static member of the class** may `foreach` over a parameter of the class (R27.51 was
+  instance methods only): the enumerator is held from the parameter as from `this`.
+  `OverlapsHashSetImpl(smaller, larger)` walks `smaller`'s prefixes (R30.35) with
+  `OverlapsWalk`/`NoneInWalk`. No ghost read of the parameter's fields was needed: its
+  `[Spec]` members suffice. `this` is still refused in a static member (PALCS0714).
+* **`RemoveWhere`** reads `Entry[]? entries = _entries;` once and calls `Remove` in the loop.
+  The alias is R24.19's name for the field because no statement after it may replace
+  `_entries`: R33.17's check follows `Remove` (and what it calls) and finds no assignment to
+  the field, so every use of `entries` is a read of `_entries` after the last call. A
+  contract cannot state the array's identity (`_entries` is not a `[Spec]` member, PALCS0523,
+  and `ReferenceEquals` of an array is refused, PALCS0733), so that check, not a postcondition
+  of `Remove`, is what keeps the alias valid. `RemoveWhere` ensures that its result is the
+  number of items removed and, at an equivalence and distinct items, that the items stay
+  distinct and are all among the old ones (`AllIn`).
+
+### R30.42 A joined `if` whose condition R35.15 nests
+
+R35.15 turns `if (a && f(x)) S` (or `a || f(x)`) into nested `if`s when `f` is a method or a
+callback, so that the call's postcondition is in scope in the arm. A `Pal.Join` after such an
+`if` used to be lost there: the nested `if`s were built afresh, without the join.
+`SortedSet<T>.TreeSubSet.BreadthFirstTreeWalk`'s
+`if (IsWithinRange(current.Item) && !action(current)) return false;` is one.
+
+The join now goes on the outer `if`, the one testing `a`. Its two arms are the whole of the
+original `if`: the `then` arm is the inner `if` on `f(x)` (with the original `else` copied
+into the inner one's `else`, as R35.15 already does), and the `else` arm is the original
+`else`. For `||` the roles are exchanged. The facts hold after either arm, so they hold
+after the original `if`. Inner `if`s stay plain and Pulse joins them itself, as before.
+
+What R30.36 frames changes in two ways:
+
+* **The leading test is evaluated before the frame is named.** `a` is computed into a
+  temporary, and the slots it reads are named after that. A method call in `a` (here
+  `IsWithinRange`) can then change only what its own contract says, and the frame records
+  the state after it.
+* **The moved operands are framed with the arms.** `f(x)` now runs inside the `then` arm, so
+  its effects belong to the arms: a callback's trace, and any object passed to it, become
+  existential at the join, as an arm's assignments do (R30.36). The facts have to restate
+  them, typically with `Pal.Trace`, `Pal.Returned()` and `Pal.Result<T>()`.
+
+`test/join_cond` (`VisitRoot`) pins the shape with a callback. In `BreadthFirstTreeWalk` the
+join, with two more after its `Enqueue`s, takes the generated function from 557 to 277
+lines and its check from 196 s and 3.1 GB to 78 s and 0.9 GB.
+
+### R30.43 A joined `if` on a null test of a field
+
+PALCS0754 refuses to join an `if` on a null test of a local (R30.36): R10.7, R12.3 and R22.12
+narrow the local's slot differently in each arm (an `elim_cons` in one, `is_null` in the
+other), and a join would have to state both. A null test whose operand is a field
+(`current.Left != null`, `root.Right == null`) narrows nothing. Those rules apply only to
+locals and parameters, and a field read in a condition is a value, `not (B.is_null t)`, like
+any other boolean. Joining it is therefore the same as joining any other condition.
+
+So PALCS0754 now refuses only a null test of a local. That includes a condition that starts
+with one (`n != null && …`), because R35.15 makes that test the outer, joined `if`. A field
+test leading a short-circuit condition (`current.Left != null && f(…)`) is joined by R30.42.
+Nothing is assumed. Pulse checks each arm against the join's facts, so a fact the field test
+does not establish fails as an ordinary proof failure.
+
+`test/join_cond` (`Children`) joins `r.Left != null` and `r.Right != null && IsRedNode(r.Right)`.
+`test/diagnostics/cases/JoinNullLocal.cs` pins the refusal of a local's null test.
+
+### R30.44 `[Fuel(f, i)]`: start the solver with less unfolding
+
+F* gives every query the encoding of recursive definitions and inductive types with some
+*fuel*: how many times the solver may unfold a recursive function (`--initial_fuel`, 2 by
+default) and invert an inductive type (`--initial_ifuel`, 1). A query that fails is retried
+with more, up to `--max_fuel` and `--max_ifuel`. In a long method whose context holds class
+invariants over recursive structures (a red-black tree's `black_height`, `keys`, `rb`), the
+default fuel lets the solver unfold every one of them in every query, including the many
+that only check that an index is in bounds. `SortedSet.UnionWith` spent most of its 169 s of
+solver time doing so.
+
+On a method, `[Fuel(f, i)]` checks its module with
+`#set-options "--initial_fuel f --initial_ifuel i"`. The setting covers the functions R30.39
+outlines from the method. A query that needs more unfolding still gets it on retry, so this
+is sound in the same way `[Rlimit]` is: it changes the order in which the solver is tried,
+not what is proved. A negative count is refused (PALCS0757).
+
+`SortedSet.UnionWith` and `IntersectWith` are `[Fuel(0, 0)]`: their few queries that need
+to unfold a definition are retried, and the rest are much faster. `test/join_if` (`Halve`)
+uses it; `test/diagnostics/cases/FuelNegative.cs` pins the refusal.
+
+### Trusted assumptions
+
+* `Pulse.Lib.CSharp.HashSize`: `is_prime`, `get_prime`, `get_prime_at_least` (R30.5).
+* `Pulse.Lib.CSharp.StringComparers`: all four `val`s (R30.6).
+* `Pulse.Lib.CSharp.StringComparerOf`: `string_comparer` and `string_comparer_equals`
+  (R30.18).
+* `Pulse.Lib.CSharp.StringUnderlying`: `underlying`, `underlying_equals` and
+  `string_not_value_type` (R30.34).
+* The harness's `ThrowHelper` stand-ins (`pal/common/ThrowHelper.cs`): each is
+  `[DoesNotReturn]`, throws its exception and ensures `false`.
+  `ThrowNotSupportedException(ExceptionResource)` gained that contract here (the key and
+  value collections' `Add`, `Clear` and `Remove`).
+* `pal/Dictionary/Stubs.cs` binds `GenericEmptyEnumerator<T>.Instance` to R29.4's
+  `Obj.empty_enumerator`, as `pal/common/Bindings.cs` binds `SZGenericArrayEnumerator`'s
+  (`Dictionary`'s boxed `GetEnumerator`s of an empty dictionary).
+* §24's `Pulse.Lib.CSharp.Equality` bindings of `IEqualityComparer<T>` and
+  `EqualityComparer<T>.Default`, unchanged.
+
+Everything else (`HashInsert`, `HashChain`'s new lemmas, `pal/Dictionary/DictionaryChain.fst`,
+`pal/HashSet/HashSetSets.fst`) is proved.
+
+### The Dictionary model
+
+`Dictionary<TKey,TValue>`'s model is the sequences of live keys and values, in entry order
+(`SpecKeys`, `SpecValues`), the live count, the comparer and the number of slots. Its
+invariant (`Wf`) is that of §24's table plus: `_entries` is null exactly when `_buckets` is,
+and then the dictionary is empty; and every live key is non-null (`NonNullKeys`).
+The specifications are functional: `Added`, `Overwritten`, `Removed`/`RemovedAny` relate
+the sequences before and after.
+
+### Findings
+
+* **Capacity bound.** Inserting into a table of `MaxPrimeArrayLength` (`0x7FFFFFC3`)
+  slots throws `OutOfMemoryException` from `Resize`; the inserting members require fewer
+  slots than that.
+* **Non-null keys.** `Resize(forceNewHashCodes: true)` stores
+  `comparer.GetHashCode(entry.key)` without the null case `Equality.hash` has; it is correct
+  only because no key is null. That is now part of the invariant.
+* **`_entries` null implies empty.** Needed by `Count`, `Clear` and `Remove` when
+  `_buckets` is null.
+* **`_version` wraps.** It is `[Wrapping]`.
+* **`Resize`'s forced rehash** requires `!typeof(TKey).IsValueType` (as its
+  `Debug.Assert` says); the length bound is `Array.MaxLength`.
+* **`HashSet<T>.FindItemIndex`'s `location >= 0`** on a hit is not provable from the
+  invariant alone without a frame; the frame was added.
+* **`Initialize`** returns a positive size.
+* **SMT instability.** `TryInsert` and `AddIfNotPresent` needed assertions at the ends of
+  arms and `[Rlimit]`; `TryInsert` takes about an hour to check, `Remove(key)` about 35
+  minutes. R30.17 changed the SMT context enough that both needed a
+  `Pal.Assert(0 <= index && index < entries.Length)` at the end of each insertion arm.
+  After R30.31--R30.35 the join assertion `count < _entries.Length` (after the `Resize`
+  arm) timed out at `[Rlimit(4)]`; `[Rlimit(8)]` checked it in about 1h35m and ~115 GB
+  for F*. Joins (R30.36) brought that to 15.5 minutes and 13 GB; a split after the
+  search loops (R30.39) to 9:54 and 10.8 GB; a second split before the loops, with
+  `Search`, `Wf`, `Mem` and `Overwritten` opaque (R30.40), to 7:22 and 10.6 GB at the
+  default rlimit (`[Rlimit(8)]` dropped; `/usr/bin/time -v`, one module, `-j2`).
+  CI (16 GB) runs F* with `OCAMLRUNPARAM=o=20`, a smaller GC space overhead, under which
+  `TryInsert` takes 6:50 and 4.5 GB. Three members were still beyond that.
+  `HashSet.AddIfNotPresent` was 12 copies of its insertion tail (2216 lines; 9:11 and
+  18.1 GB, 12:08 and 8.2 GB at `o=20`). It now has `TryInsert`'s shape: joins after
+  `Initialize`, the search, `Resize` and the free-list `if`, a split after the search,
+  `[OpaqueSpecs("Search", "Wf", "Mem")]`, and a `HashCodeOf` spec naming the stored hash
+  code. It is 683 lines, 1:55 and 2.5 GB (2:11 and 1.2 GB at `o=20`). Each
+  `Dictionary.Remove` took over 30 minutes and 29 GB. They are now
+  `[OpaqueSpecs("SearchLast", "Wf", "Mem", "RemovedAny", "Removed")]`, with `Wf` an
+  invariant of their loops and `SearchNext` ensuring the bound on `last` that unfolding
+  `SearchLast` used to supply. A join after the hit `if` of each loop stops the loop's
+  tail from being checked a second time under the `return`'s guard; that copy alone took
+  over ten minutes. A join stating `RemoveWrites` after each
+  `IsReferenceOrContainsReferences` `if` stops the rest of the hit arm from being checked
+  once per combination of arms, which was two thirds of what remained. `Remove(key)` is
+  now 5:55 and 4.0 GB (6:30 and 2.5 GB at `o=20`), and `Remove(key, out value)` 6:45 and
+  4.6 GB (7:25 and 2.9 GB at `o=20`). With `Mem` opaque, the `_buckets == null` path
+  calls `NotMemNone`: no key is a member when there are no slots.
+* **Long division.** `(uint)hashCode % buckets.Length` is computed in `long`; that the
+  quotient fits is nonlinear, so `TryInsert` calls a `DivFits` lemma (proved in
+  `DictionaryChain.div_fits` with `FStar.Math.Lemmas`) before the bucket lookup after `Resize`.
+* **`Remove(key, out value)`** cannot state *which* value it returned: C#'s definite
+  assignment rejects naming the `out` parameter in a loop invariant before it is assigned.
+  Its contract says what `Remove(key)`'s does.
+* **Lookups.** `FindValue` uses `goto` (including a backward one) and returns a `ref` that
+  may be `Unsafe.NullRef`; R30.29 reads it as an option-returning method. Its
+  concurrent-modification throw is unreachable: the chain walk ends within
+  `entries.Length` steps by the invariant.
+* **Constructor order.** `Dictionary(int capacity, comparer)` calls `Initialize` before it
+  sets `_comparer`, so the invariant (which names the comparer) does not hold at that call;
+  R30.28 opens `Initialize` and rebinds the empty table's invariant to the final comparer.
+* **Boxing.** `GetStringComparer(_comparer!)` boxes the comparer, not the nullable field;
+  `Obj.box_some` relates the two.
+* **Broken invariant across calls.** `TrimExcess` calls `CopyEntries` while the table is
+  half rebuilt; with `CopyEntries` `[Open]` and R30.33 both are verified, for `Dictionary`
+  and `HashSet`. `TrimExcess` sets `_freeList = -1` before the new arrays are installed, so
+  the fact that the old table was well formed (`WfCompactable`) has to be taken before
+  that write. `RemoveWhere` holds an alias of `_entries` across calls to `Remove`; R33.17
+  shows `Remove` never replaces it (R30.41).
+* **Collections' constructors.** `KeyCollection(dictionary)` and `ValueCollection` check the
+  argument for `null` before storing it; R30.32 reads the check as dead, and they are
+  verified.
+* **`ExpandPrime` without its assertion.** `ExpandPrime` returns `MaxPrimeArrayLength`
+  when doubling would pass it, relying on `Debug.Assert(MaxPrimeArrayLength ==
+  GetPrime(MaxPrimeArrayLength))` for that being a valid table size. With the assertion
+  erased, the fact is the lemma `MaxPrimeIsPrime` (R30.31), proved.
+* **Out of reach.** `ICollection.CopyTo(Array, int)` (type tests and `try`/`catch` over
+  `Array`), `SyncRoot`, the non-generic `IEnumerable.GetEnumerator`s (interface dispatch),
+  serialization, and those of `HashSet`'s public set operations that test
+  `other is HashSet<T>` (R34 lends an `IEnumerable<T>` and has no type test): `UnionWith`,
+  `IntersectWith`, `SymmetricExceptWith`, `IsSubsetOf`, `IsProperSubsetOf`, `IsSupersetOf`,
+  `IsProperSupersetOf`, `Overlaps` and `SetEquals`. `ExceptWith` is verified, as are the
+  helpers `IsSubsetOfHashSetWithSameComparer`, `OverlapsEnumerableImpl` and
+  `OverlapsHashSetImpl` (R30.41). `CheckUniqueAndUnfoundElements` (`stackalloc`, `BitHelper`)
+  and `SymmetricExceptWith*`/`IntersectWith*` helpers are not.
+* **Write sets.** The write-set scan over-approximated calls to bound members (R30.26),
+  which made `ContainsValue` look like it wrote the dictionary.
+
+### Relation to §32–§33
+
+§30 and §33 were developed in parallel, and some rules overlap:
+
+- **R30.1 and R33.5** (rebound `ref` locals). R33.5 is tried first. It applies when the array is a
+  local or a field that the scope cannot replace. R30.1 takes the rest: a binding through a
+  `ref`-returning method (`GetBucket`), or a field replaced by a call, checked by `AliasFlow`.
+- **R30.2 and R33.17** (`a = _f;`). When every possible replacement is immediately followed by
+  the re-read, R33.17's syntactic check suffices. Otherwise R30.2's flow check applies.
+- **R30.16 and R33.17** (a `ref` local into an array local). The alias is accepted if either
+  holds: the array local and its field are unchanged while the alias is live (R30.16), or
+  nothing after the declaration may replace them (R33.17).
+- **R30.11 and R33.16** (an array local moved into a field). Both are kept: the local's slot is
+  dropped from what the method still owns, and it no longer names an array.
+- **R30.19 and R33.25(a)**, **R30.26 and R33.14**, **R30.27 and R33.14/15**: identical
+  changes, merged.
+- **R30.14** generalises **R33.8** (`a?.M ?? d` for any member `M`, not only `Length`).
+- **R30.22** uses R32.14's `HasReturn`.
+
 ## 31. `LinkedList<T>`: rings of region nodes
 
 `LinkedList<T>` keeps its nodes in a circular doubly-linked list: `head` is the first
@@ -9558,13 +10272,13 @@ and `Version`. Every mutator ensures `Version == Bumped(Old(Version))`, where `B
 | `GetEnumerator`, `IEnumerable<T>.GetEnumerator`, `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) | §28's borrowing enumerator; `MoveNext` throws `InvalidOperationException` when `Version` changed, and otherwise steps `_index` over `Nodes`; requires `Count < int.MaxValue` |
 | `LinkedListNode.Next`, `Previous` | `Succ`/`Pred` of the node in its owner's ring; with the ring's shape, `Nodes[pos ± 1]` or null at the ends |
 | `LinkedListNode.Value` (get and set), `Invalidate` | the node's item; `Detached` |
+| `LinkedList(IEnumerable<T>)` (§34, R34.21) | `SpecItems` the enumerable's items, `SpecCount` their number |
 
 ### Not annotated, and why
 
 * `LinkedListNode.List`. It returns the owner, and a returned object comes with its
   invariant, which the node cannot give.
-* `LinkedList(IEnumerable<T>)` (an interface enumeration), `ICollection.CopyTo(Array, int)`
-  (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
+* `ICollection.CopyTo(Array, int)` (an untyped array), serialization (`GetObjectData`, `OnDeserialization`), `ValueRef`
   (a `ref` return) and the public `LinkedListNode(T)` constructor (a node allocated outside
   any owner's region). The node-taking overloads therefore insert a node already in this
   list's region and detached from it, such as one `Remove(node)` or `Clear` detached: the
@@ -9985,20 +10699,12 @@ that the view shares the set's comparer and, when its version is the set's, its 
 * The other non-generic `IDictionary`/`ICollection` members (`this[object]`, `Add(object,
   object)`, `Contains(object)`, `Remove(object)`, `SyncRoot`): they type-test `object`
   keys and values (`is TKey`) and cast them, catching `InvalidCastException`; neither is
-  modelled for type parameters.
+  modelled for type parameters. §35 (R35.7, R35.12, R35.13) models the type tests and
+  verifies all but `SyncRoot`.
 * `TreeSubSet` members other than those verified above (R32.14):
-  * `Clear` builds a `List<T>` of the in-range items in a breadth-first walk lambda, then
-    removes them through the set. Its contract would need the walk's per-element trace
-    over a queue of region pointers (R32.9 covers only the in-order walk).
-  * `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides: range-pruned walks over a
-    `Stack<Node>`/`Queue<Node>`. They would need R32.11's bounded walk restricted to
-    `range_root`.
-  * The re-count `VersionCheckImpl(updateCount: true)`, and so `Count`, `MinInternal` and
-    `MaxInternal` at a view.
-    * The re-count's lambda writes the view's `count` while the walk holds the view (a
-      PALCS0579 cycle), so `VersionCheckImpl` requires `!updateCount`.
-    * `MinInternal`/`MaxInternal` are reached only through `Min`/`Max`, which read
-      `Count` first.
+  * The `InOrderTreeWalk`/`BreadthFirstTreeWalk` overrides, `MinInternal`/`MaxInternal`,
+    the re-count `VersionCheckImpl(updateCount: true)`, `Count` at a view and `Clear` are
+    now verified (§35, R35.14–R35.19).
   * `InternalIndexOf`: it enumerates the view (`foreach (T i in this)`), and a view's
     enumerator is a borrowing struct of a borrowing class, which is not translated.
   * `GetViewBetween` on a view returns a view of the *underlying* set. R32.13's
@@ -10350,3 +11056,862 @@ allocate) are the case.
   `ThrowConcurrentOperation`, `ThrowIndexArgumentOutOfRange` and `ThrowVersionCheckFailed`
   carry `[Throws]` and `[Ensures("false")]`; their bodies (a `throw`) are translated and
   checked against these contracts.
+
+## 34. Collection arguments: IEnumerable<T> / ICollection<T> dispatch and range operations
+
+The BCL collections' range members (`List<T>(IEnumerable<T>)`, `AddRange`, `InsertRange`,
+the `IEnumerable<T>` constructors of `Stack<T>` and `Queue<T>`, and the shared
+`EnumerableHelpers.ToArray`) take an `IEnumerable<T>`, test whether it is an
+`ICollection<T>`, and either ask it for its `Count` and `CopyTo` or walk it with an
+enumerator. This section translates such an argument. The test `test/collection_arguments`
+exercises each rule below (the name avoids the word "dispatch", which the test-name lint
+reserves).
+
+**R34.1. An enumerable argument.** A parameter of type `IEnumerable<T>` or `ICollection<T>`
+(and only a parameter, or a local initialised from one) is the abstract
+`Pulse.Lib.CSharp.Enumerable.enumerable T`. It is not a pure sequence but a resource,
+`Enumerable.pts_to e #p s`, which the caller lends for the call at any permission `p` and
+gets back unchanged. A member's *result* at either interface, and an object converted to one
+other than as an argument, is instead R35.6's box: R34 owns the parameter positions and R35.6
+the result positions (see R35.6 for the split). The items it yields, in order, are the ghost sequence `s`; a contract
+names them `Pal.Contents(e)`. A caller can lend a read-only array (`Enumerable.lend`), so
+the interface is implemented in `Pulse.Lib.CSharp.Enumerable.fst` with no assumption of
+its own.
+
+**R34.2. Identity and nullness.** `e == null` on an enumerable argument is `false`, and so
+is `this == e` (and `!=` the negations), and `ArgumentNullException.ThrowIfNull(e)` is
+nothing: the caller lends a resource, which a null reference is not, and which is owned
+apart from every object the method holds. A call that would pass an object's own view as
+the argument (`list.InsertRange(0, list)`) is therefore not provable by the caller: it
+would have to own the list both as the receiver and as the enumerable. The member's
+self-insertion branch is dead in the model (see Findings).
+
+**R34.3. `Count`.** `c.Count` on an `ICollection<T>` argument, or on an enumerable the
+method has tested to be one (R34.4), is `Enumerable.count c`, the length of its items.
+
+**R34.4. The type test.** `e is ICollection<T> c` (and `e is ICollection<T>`) on an
+enumerable argument is the abstract `Enumerable.is_collection e`, and `c` is `e`. The method
+is verified in both branches, which must meet one postcondition: no caller can tell them
+apart.
+
+**R34.5. `CopyTo`.** `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into the array
+`a` from index `i`; the caller owes `0 <= i` and `i + Count <= a.Length`.
+
+**R34.6. Enumerators.** `using (IEnumerator<T> en = e.GetEnumerator()) { ... }`, or the
+declaration `using IEnumerator<T> en = e.GetEnumerator();`, on an enumerable argument `e`
+declares a *cursor*: an `int` cell holding how many items `en` has moved past, which starts
+at 0. `en.MoveNext()` advances it and is true while it is within the items;
+`en.Current` is the item before the cursor; disposing does nothing. In a contract,
+`Pal.Index(en)` is the cursor. `GetEnumerator()` anywhere else is reported (PALCS0860), as
+is any other member of the enumerator (PALCS0861) or an enumerator whose cursor is not a
+local of the method (PALCS0862).
+
+**R34.7. Enumerator loops.** A loop whose condition is `en.MoveNext()` has the extra
+invariant `0 <= Pal.Index(en) <= Pal.Contents(e).Length`, and, unless it states its own,
+the measure `Pal.Contents(e).Length - Pal.Index(en)`.
+
+**R34.8. `foreach`.** `foreach (T x in e) body` over an enumerable argument is
+`using (var en = e.GetEnumerator()) while (en.MoveNext()) { T x = en.Current; body }`, and
+`Pal.Index(x)` names its cursor.
+
+**R34.9. `return` inside a block.** R24.14's sinking of what follows an `if` into its arms
+also applies to a block (a `using` block, say) that returns on some path and is followed by
+code, and recurses into the arms of an `if` that holds such a block. `using (...) { if (c)
+{ ...; return a; } } rest` is `using (...) { if (c) { ...; return a; } else { rest } }`.
+
+**R34.10. A reassigned array local.** A local of array type that the method assigns after
+declaring it (`T[] arr = new T[4]; ... Array.Resize(ref arr, n); ... return arr;`) is a
+cell holding the array, `Pulse.Lib.CSharp.ArrayCell.pts_to c s`, which owns the array too.
+Reading its length or an element, writing an element, `Array.Resize(ref arr, n)` (a fresh
+array of length `n` holding the old prefix, with the rest at the default), assigning it a
+fresh `new T[n]`, and returning it are translated; any other use of it is reported
+(PALCS0863). The old array is dropped on a resize or a reassignment, as the garbage
+collector would.
+
+**R34.11. Arms that a join would lose.** An `if` in a loop body, followed by more of the
+body, whose arm declares a local (a Pulse `let mut`, which needs a known post-condition) or
+assigns a local a conditional value `n = c ? a : b` (whose own join, inside the arm, leaves
+Pulse's join of the arms with that arm's value only), has the rest of the body copied into
+both arms, as R26.5 does, provided that rest has no `if` or loop of its own; otherwise the
+copies would multiply (SortedSet's `DoRemove`, whose arm declares `order`, is left joined).
+
+**R34.12. Wrapping shift.** In a `[Wrapping]` method, `x << s` on `int` is
+`Int32.shift_left_wrap x s`: the distance is taken modulo 32 and the product wraps to 32
+bits, as C#'s unchecked shift does. Lemmas give its value for `x << 1` on a non-negative
+`x` (`2x`, or `2x - 2^32` once that no longer fits), the value of `(uint)x`, and the value of
+a wrapping sum that fits.
+
+**R34.13. `const` locals.** A `const` local is its value, as a `const` field is (R20.9).
+
+**R34.14. `out` fields.** `out _f`, for an instance field `_f` that the statement mentions
+nowhere else, passes a fresh local at the field's default, which is copied into the field
+after the statement: `_array = ToArray(c, out _size);` is
+`int t = 0; _array = ToArray(c, out t); _size = t;`. No other code runs between the
+callee's write and the copy, and the callee cannot reach the field, so the difference is
+unobservable.
+
+**R34.15. A chained constructor's raising call.** `C(…) : this(…) { M(…); }`, where `M` is
+an instance method of the object that may raise (its `[Throws]`) and its arguments are
+parameters or literals: an exception leaves the object the chained constructor built,
+which the caller never receives. The call runs inside a local function that catches it,
+as R31.14's does, whose contract restates `M`'s: its `[Ensures]` over the model the
+chained constructor left and the one `M` leaves when it returns, and its `[Throws]`
+conditions when it raises. The object is then dropped and the exception raised again,
+or it is returned. A local function is needed because Pulse's `try` forwards an
+unhandled exception with what the `try` raises, which would still hold the object.
+(SortedList's `SortedList(int, IComparer)`, whose `Capacity = capacity` throws for a
+negative capacity.)
+
+**R34.16. `Comparison<T>` is a comparer.** A `System.Comparison<T>` maps to the same
+`Pulse.Lib.CSharp.Order.comparer t` an `IComparer<T>` does (R22.24), so the order it decides
+is subject to the same trusted laws. `c == null` / `c != null`, which C# compares with the
+delegate operator (its `null` converted to `Comparison<T>`), is R25.4's `is_null c`.
+`Pal.SortedRangeBy(before, after, i, n, comparison)` is `Pal.SortedRange` with a
+`Comparison<T>` (a separate name, because an overload makes `SortedRange(…, null)`
+ambiguous). CoreLib's `ArraySortHelper<T>.Sort(new Span<T>(a, i, n), comparison)` is
+R26.7's `Array.Sort(a, i, n, comparer)`.
+
+**R34.17. An arm that changes the receiver, before more of the body.** R27.54's case (an
+arm calling a method that changes its receiver, after which Pulse's join keeps neither
+arm's facts about it) when the `if` is not last in the loop body: the rest of the body is
+copied into both arms, under R34.11's proviso that the rest is straight-line code.
+(`PriorityQueue.EnqueueRange`'s `if (nodes.Length == i) { Grow(i + 1); nodes = _nodes; }`
+before `nodes[i++] = …`, which needs `Grow`'s new capacity.)
+
+**R34.18. Sift-down on a subtree (harness proof).** Not a translation rule but the proof
+shape for bottom-up heap construction. `PriorityQueue.MoveDown`'s contract gains a second,
+disjoint case: besides R26.10's "a heap with one hole at `nodeIndex`", it accepts
+`HeapAbove(Store, n, nodeIndex)` — every node above `nodeIndex` roots a 4-ary subtree that
+is a heap — and then ensures `HeapAbove(Store, n, nodeIndex - 1)`, the items permuted. The
+loop invariant is `DownR`: the subtree at the original index is a heap except at the
+hole, and the subtrees below it are untouched heaps. `Heapify`'s loop invariant is
+`HeapAbove(Store, n, index)`; it holds initially above the last parent `(n - 2) / 4` and at
+`-1` is the whole heap. The arity-4 subtree reasoning (membership `in_sub`, disjointness
+of sibling subtrees, the step and the finishing lemmas) is proved in F* in
+`pal/PriorityQueue/PriorityQueueHeapify.fst`, included by the harness and called from C#
+`[Lemma]` wrappers.
+
+**R34.19. A deconstructing `foreach`.** `foreach ((A a, B b) in e)` over an enumerable of
+pairs (R34.8) binds the pair `Current` once, then `a` and `b` to its `fst` and `snd`, and
+asserts the pair equals `(a, b)` (eta for pairs, so a later `(a, b)` is the item). The
+cursor is named by either variable: `Pal.Index(a)`. Other deconstructions (nested, `var
+(a, b)` over three or more components, discards) are PALCS0001.
+
+**R34.20. `as ICollection<T>`.** `var c = e as ICollection<T>;`, with `e` an enumerable
+argument and `c` never assigned again, makes `c` an alias of `e` (no copy): `c is not
+null`, `c != null` are R34.4's unknown `is_collection` test, and `c.Count` and
+`c.CopyTo` under that test are R34.5's. (`PriorityQueue.EnqueueRange`'s dispatch.)
+
+**R34.21. A constructor that only delegates.** R22.9's open constructor holds the object
+unfolded, so its invariant cannot be named in a loop invariant (PALCS0300), and a loop that
+calls the object's methods would need it folded at every call. A constructor body that
+assigns no field, reads no field (R4.10c's test), and calls a method on the object runs
+instead over the object closed: it is allocated with every field at its default (a
+region pointer `null`, in an empty region, R27.6), its invariant is folded at once at
+that state — which F\* must prove holds of the defaults — and the body is then an
+instance method's that only delegates. `this` is in scope throughout a constructor's body
+(a loop may be live in it), so a loop invariant's `this.P` names the object's model as
+the loop holds it. A class with an array field is excluded: its default is R22.9's
+stand-in, which may not be observed. (`LinkedList<T>(IEnumerable<T>)`, whose loop calls
+`AddLast`.)
+
+**R34.22. An `IDictionary<K,V>` argument.** An argument of type `IDictionary<K,V>` is an
+enumerable of pairs `(K, V)` (R34.8): `Pal.Contents(d)` is a ghost sequence of pairs. Its
+`Count` is R34.5's (`d?.Count ?? b`, the argument being non-null, is `d.Count`), and
+`d.Keys.CopyTo(a, i)` / `d.Values.CopyTo(a, i)` are `Enumerable.copy_keys` / `copy_values`,
+which write the contents' keys, respectively values, into `a` from `i` in the same order.
+`Array.Sort<K,V>(keys, values, comparer)` is `SortPairs.sort_pairs`, a verified insertion
+sort of both arrays together: the keys end sorted by `comparer ?? Comparer<K>.Default` and
+the zipped pairs are a permutation of the zipped pairs before. `SpecKeyMap.Zip(ks, vs)` and
+`SpecKeyMap.DistinctKeys(c, s)` (no two keys of `s` compare equal under `c`) name these in
+contracts; the lemmas relating them (`copied_pairs`, `dup_found`, `strict_step`) are in
+`Pulse.Lib.CSharp.SortPairs`. (`SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])`.)
+
+**R34.23. An array element in an exception message.** R25.9's message arguments include
+`a[i]` for an array local `a` and a local or parameter `i`. Unlike the other message
+arguments it may fail (out of bounds), so it is not dropped: the read is emitted, its
+result discarded, before the exception is built, and its bounds are proved as any read's.
+(`SR.Format(SR.Argument_AddingDuplicate, keys[i])`.)
+
+**R34.24. A field getter read in a constructor.** In a constructor body, a read of a
+non-virtual, non-specification property of the same class whose getter is exactly
+`return f;` (or `=> f`, or `this.f`) for an instance field `f` of the representation is
+that field's read. It is the getter's whole meaning, and reading it directly keeps the
+object open: a call would close it, and closing it forgets what its model does not expose
+(array contents past `_size`). (`SortedList`'s `comparer = Comparer;`.)
+
+**R34.25. A chained constructor that throws.** A `throw` in the body of a constructor
+that chains to another (R22.10) drops the object built so far — its arrays and its box —
+as R22.9's open constructor does, rather than closing it: the caller never receives it.
+
+**R34.26. An object passed as a snapshot of its items.** An argument at a parameter of
+type `IEnumerable<T>` or `ICollection<T>` that is an object of a translated class `C` — a
+parameter `[Exactly(typeof(C))]`, or an expression of static type `C` where `C` is sealed or
+effectively sealed (R27.1), so that the object's dynamic type is `C` — is passed as a
+snapshot of its items: `var s = new T[o.Count]; o.CopyTo(s, 0);`, then `s` lent as the
+enumerable (`Enumerable.lend`/`view`) for the call and taken back (`unlend`) once the call
+returns. The snapshot's contents are `C`'s items by `Count`'s and `CopyTo`'s verified
+contracts (`SortDedupe.splice_whole` collapses a whole-array `CopyTo`). `C` must have
+`Count`, `CopyTo(T[], int)` and `GetEnumerator()` translated, and implement
+`ICollection<T>` when the parameter is one; otherwise PALCS0864. A parameter that is itself
+`[Exactly]` is the object (R27.46), not a snapshot. What is trusted is that the runtime's
+dispatch of the interface's members reaches `C`'s, whose contracts all yield the same items
+(see Trusted). Relatedly, an array local initialised by a call that returns an array (and
+never reassigned) owns that array, named by the call's result, as `new T[n]` would be: so
+`Pal.Contents(a)` of such a local is the call's postcondition's.
+(`EnumerableHelpers.ToArray(collection, out count)` in `SortedSet<T>`'s constructor.)
+
+**R34.27. Sort-then-dedupe (harness proof).** `SortedSet<T>(IEnumerable<T>, IComparer<T>)`
+with a collection whose comparer differs copies the items out (R34.26), sorts them with the
+new comparer and keeps the first of each run of equivalent items. The sort is not stable, so
+which of the equivalent items is kept is unspecified; the result is specified by
+`SpecSortDedupe.SetOf(c, items, src)`: `items` is strictly sorted under `c`, every item of
+`src` is equivalent under `c` to one of `items`, and every one of `items` occurs in `src`.
+`Pulse.Lib.CSharp.SortDedupe` proves the loop's invariant `DedupeInv` (`dedupe_init`,
+`dedupe_step` — both arms stated before the `if`, so that the join keeps them — and
+`dedupe_done`); `DedupeInv`'s and `SetOf`'s quantified parts are opaque to SMT outside those
+lemmas. `SpecSortDedupe.ComparerEquals(c, d)` is `c.Equals(d)`, uninterpreted (R27.47).
+
+### Verified (§34)
+
+* `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
+  the enumerable's items, and `length` is their count. Both the `ICollection<T>` branch
+  (`Count` and `CopyTo`) and the enumerator branch (with `Array.Resize` growth, its
+  `(uint)` overflow check and the `Array.MaxLength` cap) are verified.
+* `List<T>(IEnumerable<T>)`, `List<T>.AddRange` and `InsertRange` (both branches).
+* `Stack<T>(IEnumerable<T>)` and `Queue<T>(IEnumerable<T>)`: the stack's or queue's items are
+  the enumerable's, in order.
+* `Stack<T>.TrimExcess()`, `Queue<T>.TrimExcess()` and `SortedList<K,V>.TrimExcess()`: the
+  items (keys, values, comparer) are unchanged, and the capacity is unchanged or the count.
+* `SortedList<K,V>(int, IComparer<K>)`: throws `ArgumentOutOfRangeException` for a negative
+  capacity (R34.15); otherwise empty, with that capacity and `comparer ?? Comparer<K>.Default`.
+* `List<T>.Sort(Comparison<T>)`: throws `ArgumentNullException` for `null`; otherwise the
+  items are a sorted permutation of the old ones (R34.16), count and capacity unchanged.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<E>, P)`: from a heap, a heap with the same
+  comparer and the enumerable's count added (both the empty-queue fill, which grows the
+  array in place, and the `Enqueue` loop). `Enqueue` gains `SpecCount == Old + 1` and `Grow`
+  the preservation of the whole old array as a prefix, both verified.
+* `LinkedList<T>(IEnumerable<T>)` (R34.21): the list's items are the enumerable's, in order,
+  and its count theirs. Requires fewer than `int.MaxValue` items, `AddLast`'s bound.
+* `PriorityQueue<E,P>.Heapify` (R34.18): from any items, a heap that is a permutation of
+  them; `MoveDown` under both of its cases, and all its callers.
+* `PriorityQueue<E,P>(IEnumerable<(E, P)>[, IComparer<P>])`: a heap that is a permutation of
+  the enumerable's items, with the given comparer.
+* `PriorityQueue<E,P>.EnqueueRange(IEnumerable<(E, P)>)`: from a heap, a heap whose items
+  are a permutation of the old items followed by the enumerable's, the comparer unchanged
+  (all three paths: `CopyTo` then `Heapify`, the enumerating fill then `Heapify`, and the
+  `Enqueue` loop).
+* `SortedList<K,V>(IDictionary<K,V>[, IComparer<K>])` (R34.22–R34.25): throws
+  `ArgumentException` only if two of the dictionary's keys compare equal under
+  `comparer ?? Comparer<K>.Default`; otherwise its comparer is that, its count and capacity
+  the dictionary's count, and its key/value pairs a permutation of the dictionary's.
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for a `SortedSet<T>` argument, with any
+  comparer (R34.26, R34.27): the set's comparer is `comparer ?? Comparer<T>.Default`, its
+  items are `SetOf` the argument's under it, and equal to the argument's when the comparers
+  are the same. With the same comparer the tree is cloned; otherwise the items are copied,
+  sorted and deduplicated.
+
+### Findings (§34)
+
+* `List<T>.InsertRange(index, this)` copies the list into itself in two `Array.Copy` steps.
+  Under R34.2 a caller cannot lend the list as an enumerable while owning it as the
+  receiver, so the branch is dead in the model and **not verified**.
+* `ToArray`'s growth `count << 1` relies on two's-complement wrap and on the `(uint)` cast
+  to catch it; the code is correct, but only as a `[Wrapping]` method (an added attribute).
+* R34.11's split copies the rest of the body into each arm. In `SortedSet<T>.DoRemove`
+  (a long loop body after the split) that made a query Z3 did not finish in 24 minutes;
+  R34.11 now splits only when the rest is straight-line code.
+* **Deviation.** The `PriorityQueue` `IEnumerable` constructors and
+  `EnqueueRange(IEnumerable<(E, P)>)` require the resulting count to be at most 2^29, the
+  bound `MoveDown` already needs so that its child index `4i + 1` does not overflow (R26.10's
+  finding); the code itself has no such check.
+* `ToArray` returns an array whose length may exceed `length`; callers (`Stack`, `Queue`)
+  keep the excess as capacity, which their contracts expose.
+* `SortedSet<T>(collection, comparer)` copies `collection`'s tree as it stands when
+  `comparer.Equals(collection.Comparer)` (`HasEqualComparer`), even if the two comparers are
+  different objects. If they are equal but order differently (a user `Equals` that is
+  wrong), the new set's tree is in the wrong order for its comparer. The contract excludes
+  that case: the comparers are the same, or not `Equals`.
+* **Deviation.** With a different comparer, `SortedSet<T>(collection, comparer)` requires
+  `2 * count + 2 <= 2^30`: `ToArray`'s growth may double the array, and
+  `ConstructRootFromSortedArray` needs the array's length within 2^30. The code has no such
+  check.
+
+### Not verified (§34)
+
+* `SortedSet<T>(IEnumerable<T>[, IComparer<T>])` for an argument that is not a
+  `SortedSet<T>`: the constructor's `as SortedSet<T>` on an arbitrary enumerable would hand
+  it a set object it does not own, which a lent enumerable (a ghost sequence) cannot
+  provide. The contract stays `[Exactly(SortedSet)]`; the sort-then-dedupe path itself is
+  verified (R34.27), reached with a different comparer.
+* `SortedDictionary<K,V>(IDictionary<K,V>[, IComparer<K>])`: it tests
+  `dictionary is SortedDictionary<K,V>` and then reads that object's tree, which an
+  `IDictionary` argument modelled as a ghost sequence of pairs (R34.22) does not own, for
+  the same reason.
+
+### Trusted (§34)
+
+* An `IEnumerable<T>` argument behaves as `Pulse.Lib.CSharp.Enumerable` models it:
+  enumerating it yields exactly the items `Pal.Contents(e)`, in the same order each time;
+  `MoveNext` terminates and has no effect beyond the cursor; `Count` is the number of items
+  and `CopyTo` writes exactly them; nothing else holding the object changes it during the
+  call (the caller's lent permission). A user-defined `IEnumerable<T>` with side effects or a
+  `Count` that disagrees with its enumeration is outside this model.
+* An `IDictionary<K,V>` argument (R34.22) is pure and terminating as an enumerable is, and
+  its `Count`, its enumeration, and its `Keys.CopyTo` and `Values.CopyTo` all agree with one
+  ghost sequence of pairs `Pal.Contents(d)`: the keys and values are copied in the
+  enumeration's order. A dictionary whose key and value collections disagree with its
+  enumeration is outside this model. That its keys are distinct is not assumed: the
+  constructors that need it check it.
+* A `Comparison<T>` is a lawful total order, as every comparer is (R22.24, R34.16).
+* R34.26's snapshot: enumerating an object of a translated class `C` passed at an
+  `IEnumerable<T>`/`ICollection<T>` parameter reaches `C`'s own `GetEnumerator`, `Count` and
+  `CopyTo` (the class is sealed, or the parameter `[Exactly(C)]`), and these agree on the
+  items: the snapshot `Count` then `CopyTo` make stands for what the callee enumerates.
+* Whether an argument is an `ICollection<T>` is unknown to the method (R34.4); no assumption
+  is made about it.
+
+## 35. Remaining views, nodes and non-generic members
+
+This section finishes members that §§31–33 left out: `OrderedDictionary`'s key and value
+enumerators and its boxed views, `SortedDictionary`'s non-generic and `DictionaryEntry`
+members, and the leftovers of `LinkedList<T>` and `SortedSet<T>`. The harnesses are
+`pal/OrderedDictionary` and `pal/SortedSet` (which also verifies `SortedDictionary`) in the
+runtime tree. The test `test/views2` exercises each rule below.
+
+**R35.1. A null guard with a parameter name.** R23.1's `ArgumentNullException.ThrowIfNull(x)`
+also accepts trailing arguments that are constants (`ThrowIfNull(key, nameof(key))`). The
+name affects only the exception's message, which no contract reads.
+
+**R35.2. `out var` in a returned expression.** `return TryGet(i, out T? v) && P(v);` declares
+`v` before the `return`, at its type's `default`, as R33.9 does for an `if`'s condition. C#'s
+definite assignment means the call writes `v` before anything reads it.
+
+**R35.3. Creating a wrapping struct.** R32.12 refuses the constructor of a wrapping struct,
+and `new W(...)`, because the core it wraps must come from the owner. Both are accepted when
+both of these hold:
+* the struct wraps its core directly, through one field;
+* the core owns no objects (R28: no `[Owned]`-style fields; an index, a version and the owner).
+
+The constructor then has the shape `_inner = owner.GetEnumerator()` (more statements may
+assign the struct's other fields), where `owner` is a constructor parameter of the owner's
+class. That parameter is the owner the struct borrows, as R28's constructor parameter is for
+a borrowing struct. The constructor's body reads the core through `Result._inner`, so its
+contract may state the core's fields (`Result._inner._index == 0`). A method that returns a
+wrapping struct may state facts about the struct it creates, as one returning a borrowing
+struct may (R28). A core that owns objects (`SortedSet`'s enumerator owns a `Stack<Node>`)
+is still refused (PALCS0801): the wrapping struct would have to take that ownership over.
+
+**R35.4. A helper forwarding to a held struct.** A call `H.M(ref e)` is the call `e.M()` of
+the held struct `e`'s implementation of `M` when all of these hold:
+* `H.M<T>` is a static generic method with one `ref T` parameter;
+* its body is one call of an interface member on that parameter, with no arguments
+  (`Reset<T>(ref T e) where T : IEnumerator => e.Reset()`);
+* `e` is a struct the method holds (R32.12).
+
+That is what the helper does at that `T`. The R4.11 analysis counts a field passed by `ref`
+or `out` as written, so a method making such a call is a writer.
+
+**R35.5. Auto-properties of a held struct.** R33.26 reads a borrowing struct's
+auto-property (`public T Current { get; private set; }`) as its backing field in code. It
+now does so in a contract too, and through a held struct (`_enumerator.Current` in a
+wrapping struct's member). So a `[Spec]` property `SpecCurrent => Current` and a wrapping
+struct's contract `@this._enumerator.SpecCurrent.Key` both read the field.
+
+**R35.6. Collection interfaces are boxes.** R29.4's `object`-like types also include
+`ICollection`, `ICollection<T>` and `IEnumerable<T>`, which are what a dictionary's explicit
+`Keys` and `Values` return, at these positions:
+* the non-generic `ICollection` everywhere (it has no element type R34.1 could lend at);
+* `ICollection<T>` and `IEnumerable<T>` as a *result*: the return type of a method or
+  property, the value of a call or property read at that type, and a postcondition's
+  `Result`;
+* `ICollection<T>` and `IEnumerable<T>` as the target of a conversion of an object anywhere
+  but at a call's argument (`IEnumerable<T> AsEnumerable() => this;`).
+
+Elsewhere -- a parameter, a local derived from one by `is`/`as` or `foreach`, and the
+conversion of an argument to a parameter -- the generic two are R34.1's lent enumerables,
+not boxes. The split is by position, so the two readings never meet: a box is produced only
+where a member's result is, and a lent enumerable exists only for the duration of the call
+that lends it, so no value is ever seen at both. R34.1 never translated a member *returning*
+an enumerable, so no R34 program changes meaning.
+
+A value seen at a boxed position is an abstract `obj`. A class converted to one is `box`ed, and a
+contract describes the result with `Pal.Boxes(Result, c)` for some view `c`. This does not
+apply to an `[Exactly]` operand (R27.46): one seen at such an interface is still the object of
+its exact class, not a box. For example, `foreach (T x in other)` over an
+`[Exactly(typeof(SortedSet<>))] IEnumerable<T> other` keeps its R27.51 meaning.
+
+R35.6 does not box a sequence that a LINQ operator or a `foreach` reads. When the converted
+type is a collection interface and the operand is already an array or an interface
+(`lines.OrderBy(...)` on an `IList<Line>`), the operand keeps its R20.6 meaning.
+
+**R35.7. Type tests of `object`.** A type test or cast of a value at `object` is translated
+when the target is a type parameter or `KeyValuePair<K, V>` (a `tuple2`):
+* `o is T` is `Pulse.Lib.CSharp.TypeTest.is_a T o`;
+* `o is T t` binds `t` to `unbox T o`;
+* `(T)o` is `is_a T o ? unbox T o : (is_null o ? default : raise InvalidCastException)`. A
+  null `o` casts to `default(T)` when that is null, and raises `NullReferenceException`
+  otherwise (emitted as R35.12 describes).
+
+`o is null` and `ThrowIfNull(o)` at `object` use R25.4's `is_null`, and the `null` literal
+at `object` is `TypeTest.null_obj`. Contracts use `Pal.IsA<T>(o)` and `Pal.Unbox<T>(o)`. A
+`Pal.Unbox` is well-typed only where its `Pal.IsA` holds, so contracts guard it
+(`Pal.IsA<TKey>(key) && Mem(..., Pal.Unbox<TKey>(key))`).
+
+The emitter writes a `default_of` let with its type (`let t : T = default_of T`), so that the
+`has_default` instance resolves inside an `if`'s branch.
+
+**R35.8. `typeof` in an exception message.** `typeof(T)` may be an argument of an exception's
+message (`SR.Format(SR.Arg_WrongType, key, typeof(TKey))`). R21.7 already leaves the message
+unmodelled.
+
+**R35.9. A call through `((I)this)` in a sealed class.** `((I)this).M(...)` in a sealed class
+is the class's own implementation of `I.M`, called with `this` as its receiver. It is not a
+dispatch: no subclass can override that implementation.
+
+**R35.10. An indexer assignment through a translated setter.** `x[k] = v` where `x`'s
+indexer is a translated class member (`this[key] = value` in `OrderedDictionary`'s
+`IDictionary.this[object]` setter) is a call of the setter. It is not an array write.
+
+**R35.11. `ThrowIfNull` of a non-nullable `object`.** R23.2 drops
+`ArgumentNullException.ThrowIfNull(x)` at a non-nullable class type, because R10 makes such a
+reference non-null. That does not hold at `object`, which R35.7 lets be null: the non-generic
+members take `object key` from callers that NRT does not constrain. So at `object`, the guard
+is R25.7's test, `if (is_null x) throw`. Before this rule, the guard was silently dropped, and
+a member's `[Throws(ArgumentNullException)]` was vacuous.
+
+**R35.12. A cast is a guard and a pure value.** R35.7's `(T)o` is emitted in two parts:
+* a guard statement before the expression: `if (not (is_a T o))`, raise
+  `NullReferenceException` when `o` is null (at a value type, or at a type parameter whose
+  `default` is not null) and `InvalidCastException` when it is not;
+* the value `TypeTest.unbox_or T o (default_of T)`, which is `unbox T o` where `is_a T o`
+  holds and the default elsewhere.
+
+Before this rule the cast was one `let t = if ... { ... } else { ... }`, and Pulse forgets an
+`if`'s branch facts at such a `let`, so nothing was known of `t`. Now `t == unbox T o` follows
+from `is_a T o`, at the binding and after it. `unbox_or` is a definition in the trusted
+interface, not an assumption.
+
+**R35.13. `Pal.Raised()` in a `try`'s invariant.** R19.5's invariant holds both when the body
+ends normally and when it raises, so it cannot say which. `Pal.Raised()` is a `bool` that
+may appear only in a `try`'s invariant (PALCS0880 elsewhere). It is `false` in the `try`'s
+`ensures` and `true` in its `raises`: the invariant is emitted once for each. So a try can
+keep the method's postcondition for its normal end, and a handler that turns the raise into
+another exception can prove that exception's `[Throws]` condition:
+
+```csharp
+try
+{
+    Pal.Invariant(Pal.Implies(Pal.Raised(), !Pal.IsNull(o) && !Pal.IsA<T>(o)) &&
+                  Pal.Implies(!Pal.Raised() && Pal.IsA<T>(o), Pal.Same(t, Pal.Unbox<T>(o))));
+    t = (T)o!;
+}
+catch (InvalidCastException) { throw new ArgumentException(); }
+```
+
+**R35.14. `SpecRangeWalk`: the view's walks.** `TreeSubSet`'s `InOrderTreeWalk` and
+`BreadthFirstTreeWalk` are R27.35's and R27.40's walks over a `Stack<Node>`/`Queue<Node>` of
+pointers into the set's region, pruned to the view's range. The region stays with the set
+(the view's `_underlying`); the stack or queue owns only its sequence of pointers, and the
+walk reads nodes through the region while it holds the stack. `SpecRangeWalk` binds
+`pulse/Pulse.Lib.CSharp.RangeWalk.fst`, which is proved, not trusted:
+
+| Member | Meaning |
+|---|---|
+| `Filter(c, lo, hi, la, ua, s)` | the items of `s` within the active bounds, in order |
+| `RootFilter(c, nodes, ...)` | lemma: the view's root (`range_root`) holds the in-range keys of the set |
+| `Walkable(h, c, ..., stack)` | every pointer on the stack holds an in-range key over a sorted subtree |
+| `Empty`, `Push`, `PopAt` | the stack's ghost invariant: the left spine of the unvisited in-range part |
+| `SkipRight`, `SkipLeft` | lemmas: a node below (above) the range and its left (right) side hold no in-range key |
+| `Queue(h, c, queue)` | every queued pointer is over a sorted subtree |
+| `BfNext(h, c, ..., queue)` | the queue after a round: the rest, then the children the range may reach |
+| `BfStart`, `BfDequeue` | lemmas: R27.40's `BfStart`/`BfDequeue`, for the in-range keys only |
+
+The walks ensure `SpecWalk.Walked`/`BfWalked` of `Filter(... SpecItems)`: the callback is
+called on the view's items, in order (breadth first), until it returns false. Their loop
+invariants also keep the view's coherence (`SpecCoherent`, `version`, `SpecRootOk`) and
+`_min`/`_max`: the view's record is re-bound at every loop head.
+
+**R35.15. A short-circuit test that calls a method is a nest of tests.** `if (a && b) T else E`,
+where `b` calls a method, is emitted as `if (a) { if (b) T else E } else E`, and
+`if (a || b) T else E` as `if (a) T else { if (b) T else E }`. Emitted as one test, the call's
+statements make the condition a bound `bool` (`let t = if a { ...; b } else { false }`) whose
+meaning Pulse forgets at the join, so neither arm would know its condition. The duplicated
+arm must not hold a loop. An `else if` chain is split link by link. A call of a `[Callback]`
+parameter counts as a method call.
+
+**R35.16. An arm that calls a callback takes what follows.** An `if` one of whose arms, after
+R35.15, calls a `[Callback]` parameter is not joined: what follows it in the block goes into
+both arms (an arm that ends in a jump keeps none of it), as R24.24 and R27.31 do for other
+joins. The trace the arm leaves names the callback's result, which the arm bound; Pulse
+would join the trace as a `match` on the condition, from which nothing later can read it.
+
+**R35.17. The view's least and greatest items.** `TreeSubSet.MinInternal` descends from the
+view's root testing only the lower bound, and `MaxInternal` only the upper one. That is
+enough because the root (`range_root`) holds an in-range key, and every key the descent can
+stop at is on the root's side of the other bound. `Pulse.Lib.CSharp.RangeWalk` (proved, not
+trusted) adds, bound in `SpecRangeWalk`:
+
+| C# | F* | |
+|---|---|---|
+| `FirstOr(s, d)`, `LastOr(s, d)` | `first_or`, `last_or` | `s`'s first (last) item, or `d` |
+| `MinStep(c, lo, hi, la, t, d)` | `min_step` | at a branch of a sorted tree: under the lower bound, `FirstOr` of the lower-bound filter of `t` is that of its right subtree; else it is that of its left subtree with the branch's key as default; at the bound, the key itself |
+| `MaxStep(c, lo, hi, ua, t, d)` | `max_step` | the same for the greatest key and the upper bound |
+| `MinMaxGoal(c, t, lo, hi, la, ua, d)` | `min_max_goal` | in `range_root c t …`, `FirstOr` of the lower-bound filter (`LastOr` of the upper-bound one) is that of the full filter of `t` |
+
+The loop invariant is `Same(FirstOr(Filter(…, la, false, Keys(Tree(current))), result), goal)`,
+and `Pal.Implies(Pal.Broke(), Same(result, goal))` (R26.10) records what the `comp == 0`
+`break` leaves. Both members ensure `Same(Result, FirstOr(Filter(… SpecItems), default(T)))`
+(`LastOr` for the greatest).
+
+**R35.18. A `[Specialize]` parameter is translated once per constant.** A `bool` parameter
+marked `[Specialize]` is not a value the method receives but a choice among translations.
+Each call must pass a literal, or, inside a specialization, forward the parameter of that
+specialization (PALCS0881 otherwise; a call outside a view's dispatch reports it too). The
+call `M(…, true, …)` names the module `M__p_true`, which is lowered on demand, once:
+* its signature is `M`'s, with the parameter kept and `requires p == true` added, so the
+  contract is `M`'s at that constant and nothing is assumed;
+* in its body an `if` whose condition is built from literals and specialized parameters by
+  `!`, `&&`, `||` and parentheses (`&&`/`||` only when the left operand decides) is decided,
+  and only the arm taken is lowered.
+
+So a call that only some constants make, such as `VersionCheckImpl(true)`'s walk, is not a
+call of the other specializations. That is what breaks the cycle `VersionCheckImpl →
+InOrderTreeWalk → VersionCheck → VersionCheckImpl`. The walk calls `VersionCheck()`, which
+is `VersionCheck__updateCount_false`, whose decided body never calls the walk. R10.7's cycle
+check (PALCS0579) then runs on the specialized graph unchanged. The unspecialized method is
+not emitted.
+
+**R35.19. A lambda passed to the view's own member may write the view's scalar fields.**
+R27.39 refuses a lambda that captures the receiver, since the callee holds it. R35.19 allows
+the one case the re-count needs. A lambda passed by a view member to another member of the
+same view may name fields of the view that are:
+* state (not the borrow, not `readonly`);
+* of machine-integer or `bool` type;
+* written as bare identifiers (not through `this` or `base`).
+
+Each such field `f` becomes a cell `__pal_cap_f`, declared where the member's body begins
+(a `let mut` in an arm would need an annotated postcondition, R5.8d). Around the call:
+1. the cell is assigned `f`;
+2. the lambda captures the cell, by reference if it writes `f`;
+3. after the call, `f` is assigned the cell back if the lambda writes it.
+
+The lambda's `Pal.Protocol` names `f`, meaning the cell. The callee's ownership of the view
+record is unchanged. The copy is sound only if the callee never reads `f` once a callback
+may have run, and never writes `f`. PALCS0883 checks this on the callee's IR, transitively
+through what it calls, flow-sensitively (a read before the first callback, like the walk's
+stack capacity `new Stack<Node>(2 * Log2(count + 1))`, is allowed). The copy-out is skipped
+by a raise, as R32.12's is, so the capture is refused inside a `try` (PALCS0882). An emitted
+`if` one of whose arms passes such a call is not joined (R32.6, through statement-expressions
+too).
+
+This is the second calling convention §35's previous round asked for. The walk takes the
+view's record and the set's region as before, and the callback receives only the scalar
+fields it counts in. `Pulse.Lib.CSharp.RangeWalk` adds, bound in `SpecRangeWalk`:
+* `AllTrue(tr)` (`all_true`): every call in the trace returned true;
+* the patterns that keep it;
+* `counted`: a walk whose calls all returned true called back on every key.
+
+The re-count's protocol is `count == tr.Length && AllTrue(tr)`.
+
+### The model (R35.7)
+
+`pulse/Pulse.Lib.CSharp.TypeTest.fsti` declares:
+* `is_a a o`;
+* `unbox a (o: obj{is_a a o})`, which returns a `v: a` with `box v == o` and `~(is_null v)`;
+* the lemmas `is_a a (box x) == not (is_null x)`, `is_a a o ==> not (is_null o)` and
+  `is_null (box x) == is_null x`;
+* `null_obj`, an `obj` that `is_null`.
+
+The model says nothing about `unbox (box x)`, and must not. Boxes are not injective
+(`Pulse.Lib.CSharp.Obj`), so `unbox (box x) == x` would be inconsistent. The interface's
+comment gives a model that satisfies every declaration: `obj` as `option unit`.
+
+### Verified (§35)
+
+All of the following verify in the runtime tree's harnesses (`pal/OrderedDictionary`,
+`pal/SortedSet`).
+
+`OrderedDictionary<TKey, TValue>`:
+
+| Member | Contract |
+|---|---|
+| `IsReadOnly`, `IsFixedSize`, `IsSynchronized` (dictionary and both views) | constants |
+| `IReadOnlyList<KVP>.this[int]`, `IList<KVP>.this[int]` get and set, `IList<KVP>.IndexOf`/`Insert`, `ICollection<KVP>.Add`/`Contains`/`Remove` | through `GetAt`/`SetAt`/`IndexOf`/`Insert`/`Add`, as in §33 |
+| `GetEnumerator`, `IEnumerable<KVP>.GetEnumerator`, `IDictionary.GetEnumerator` | the enumerator at index 0 with the dictionary's version, and `_useDictionaryEntry` (R35.3) |
+| `Enumerator`: `IEnumerator.Current`, `IDictionaryEnumerator.Entry`/`Key`/`Value`, `Dispose` | `Boxes` of the current pair, key or value |
+| `KeyCollection`/`ValueCollection` `Enumerator` (constructor, `Current`, `IEnumerator.Current`, `MoveNext`, `Reset`, `Dispose`) and their `GetEnumerator`s | the wrapped dictionary enumerator (R35.3–R35.5) |
+| `Keys`/`Values` through `IDictionary<,>`, `IReadOnlyDictionary<,>`, `IDictionary` | `Boxes(Result, c)` of the view of this dictionary (R35.6) |
+| `KeyCollection`/`ValueCollection` `IList<T>.this[int]` (get; set throws), `IEnumerable<T>.GetEnumerator`, `ValueCollection` `IList<TValue>.IndexOf` | the item at the index; the first index whose value `DefaultEquals` the item |
+| The views' `ICollection<T>`/`IList` mutators | always throw `NotSupportedException` |
+| `IList.this[int]` get and set | `Boxes` of the pair; set: `SetAt` with the unboxed pair, `ArgumentNullException`/`ArgumentException` when `value` is null or not a pair, or when its key is null |
+| `IDictionary.this[object]` get and set | get: `Boxes` of the key's value, null when absent or not a key; set: as `this[TKey]`, with the argument exceptions |
+| `IDictionary.Add`, `IDictionary.Contains`, `IDictionary.Remove` | as `Add`/`ContainsKey`/`Remove` on the unboxed key, or an argument exception / `false` / nothing |
+| `IList.Add`, `IList.Contains`, `IList.IndexOf`, `IList.Insert`, `IList.Remove` | as the generic members on the unboxed pair |
+| `KeyCollection` `IList.Contains`/`IndexOf`, `ValueCollection` `IList.Contains`/`IndexOf` | on the unboxed key or value; `ValueCollection.IList.IndexOf(null)` finds a null value |
+
+`SortedDictionary<TKey, TValue>`:
+
+| Member | Contract |
+|---|---|
+| `Enumerator` `IEnumerator.Current`, `IDictionaryEnumerator.Key`/`Value`/`Entry` | `Boxes` of the current pair, key or value, by `_getEnumeratorRetType` |
+| `Keys`/`Values` through `IDictionary<,>`, `IReadOnlyDictionary<,>`, `IDictionary` | `Boxes(Result, c)` of the view of this dictionary (R35.6) |
+| `IsCompatibleKey` | `Pal.IsA<TKey>(key)`; throws on a null key |
+| `IDictionary.Contains`, `IDictionary.Remove`, `IDictionary.this[object]` get | as `ContainsKey`/`Remove`/`TryGetValue` on the unboxed key |
+| `IDictionary.Add(object, object)`, `IDictionary.this[object]` set | as `Add`/`this[TKey]` on the unboxed key and value; `ArgumentNullException` for a null key (or a null value where `TValue`'s default is not null), `ArgumentException` for a key or value of the wrong type (R35.12, R35.13) |
+
+`SortedSet<T>.TreeSubSet` (the view of `GetViewBetween`):
+
+| Member | Contract |
+|---|---|
+| `InOrderTreeWalk` | `SpecWalk.Walked(Filter(… SpecItems), trace, Result)`: the callback is called on the view's items in order until it returns false (R35.14–R35.16) |
+| `BreadthFirstTreeWalk` | `SpecWalk.BfWalked` of the same items, breadth first, over a `Queue<Node>` of pointers into the set's region (R35.14) |
+| `MinInternal`, `MaxInternal` | `Same(Result, FirstOr(Filter(… SpecItems), default(T)))` (`LastOr` for the greatest) (R35.17) |
+| `VersionCheck(false)`, `VersionCheckImpl(false)` | `count` and `_countVersion` unchanged (R35.18) |
+| `VersionCheck(true)`, `VersionCheckImpl(true)` (the re-count) | `count == Filter(… SpecItems).Length` and `_countVersion` the set's version (R35.18, R35.19) |
+| `Count` (the base's getter at the view) | `Result == Filter(… SpecItems).Length` |
+| `Clear` | `count == 0`; the in-range items are collected by the breadth-first walk into a `List<T>` and removed from the set |
+
+All of them keep the view coherent (`SpecCoherent`, its version the set's, `SpecRootOk`) and
+its bounds. The re-count, `Count` and `Clear` require `SpecCountOk`: whenever `_countVersion`
+is the set's version, `count` is the number of in-range items (see Findings).
+
+### Not verified (§35)
+
+* `ICollection.CopyTo(Array, int)` and `SyncRoot` (all three types): see §32.
+* `SortedDictionary`'s enumerator constructors and `GetEnumerator`s. A stack of node
+  pointers is not the obstacle: `SortedSet`'s own enumerator constructors and
+  `GetEnumerator` verify, with the stack holding pointers into the set's region and
+  `SpecWalk.Walkable`/`Pending` as its ghost invariant (R27.35, §32). The dictionary's
+  enumerator builds its core by `dictionary._set.GetEnumerator()`. `_set` is an object the
+  dictionary owns, and its node region is existential inside the dictionary's invariant.
+  So the caller cannot be told what the new core borrows (R32.12).
+
+  *Design (not implemented).* "Exposing the region for the duration of a call" is not
+  enough, because the enumerator outlives the call: `GetEnumerator` returns it. The holder
+  has to be borrowed with the region named for the enumerator's whole lifetime:
+  1. *A heap-indexed invariant for holders.* A class that owns a field of a region class
+     gets `class_D__inv_heap d m h`, its invariant with the owned set's region `h` a
+     parameter rather than an existential. This is R27.22's `inv_heap`, lifted one level.
+     Also emit `of_heap`/`to_heap` lemmas between it and `class_D__inv`, so that callers
+     holding `inv` are unchanged.
+  2. *A borrowing struct indexed by the holder's heap.* `SortedDictionary.Enumerator`
+     borrows `dictionary` as `inv_heap d m h` (R32.12 with the extra index `h`). Its core
+     `_set.GetEnumerator()` borrows `class_SortedSet__inv_heap d._set ms h`, obtained by
+     unfolding the holder's `inv_heap`. The two borrows are one: the struct's invariant
+     holds the unfolded holder, and its `Dispose`/end of borrow refolds it.
+  3. *A caller rule.* A method that creates such an enumerator holds the dictionary as
+     `inv_heap` until the enumerator's last use (R27.41's scoping), and then refolds `inv`.
+  Every piece exists for a region class at depth one. The work is generating and threading
+  the second level, and it touches every holder's emitted invariant.
+* `TreeSubSet` `InternalIndexOf` (a `foreach` over the view), the view enumerators, and a
+  view of a view. An enumerator stores its tree in a field (`_tree`), and a view never
+  exists as an object of the base: it lives in a local and binds statically (R32.13). So
+  there is nothing for the enumerator's field to hold.
+
+  *Design (not implemented).* A view is a record (its scalar fields and range) plus a borrow
+  of `_underlying`. Every contract states it through `SpecCoherent`, a predicate over the
+  record and the set, never its identity. The design follows from that:
+  1. *A view stored in a field is a copy of its record.* `SortedSet<T>.Enumerator`
+     translated at the view (as R32.14 replicates base members at the view) has a `_tree`
+     field of the view's record type, and borrows `_underlying` as R32.12 borrows `_tree`
+     for a plain set. C# shares the view object between the local and the enumerator, and
+     the copy does not. That is harmless only because the two can diverge in cache fields
+     alone (`root`, `version`, `count`, `_countVersion`), each of which `SpecCoherent` /
+     `SpecCountOk` ties to the set. So the copy is allowed exactly when every field the
+     enumerator or the local writes is such a cache. A new check is needed: no member
+     reached from either writes a field outside the coherence predicate's caches, and
+     `_min`/`_max`/bounds are `readonly`.
+  2. *Static binding.* The enumerator's calls on `_tree` (`VersionCheck`, the walk's
+     `root`) bind to the view's overrides, as the replica's calls do (R32.14).
+  3. *A view of a view.* `TreeSubSet.GetViewBetween` builds `new TreeSubSet(_underlying, …)`:
+     a new record over the same borrow. Returning it needs R32.13's `Exactly` return from a
+     member of the view. The result borrows what the receiver borrows, which R32.12's
+     borrowed-result convention already states for a set.
+
+  `InternalIndexOf` then translates as a `foreach` over a view enumerator (R27.41).
+* `LinkedList`: the public `LinkedListNode<T>(T)` constructor and `LinkedListNode.List`
+  (§31). A detached node owning a one-node region of its own, merged into the list's region
+  by `AddFirst`/`AddLast`/`AddBefore`/`AddAfter(node)` (`RegionMove`'s `join` does the
+  merge), fails for three reasons:
+  1. *No value carries a region.* A `[Region]` class's local, parameter or return is a bare
+     pointer into some owner's heap (§27). A node that owns `region {x}` would need a new
+     ownership mode for such values, and a calling convention that consumes it.
+  2. *References copy, and ownership would not follow them.* After `var m = n;
+     a.AddFirst(n);`, `b.AddFirst(m)` must throw, because `m.list` is `a`. Proving that
+     means reading `m`'s owner field, which now lives in `a`'s region, which `b`'s call
+     does not hold. That is §31's `Pal.InRegion` limitation, unchanged.
+  3. *One parameter, two ownership states.* `AddFirst(node)` also accepts a node that
+     `Remove(node)` or `Clear` detached. Such a node stays in this list's region (§31), and
+     its type does not tell it apart from a fresh node. The contract would need a
+     disjunction over resources that only a ghost tag could resolve, and a C# caller cannot
+     supply one.
+  `.List` returns the owner as an object, and a returned object comes with its invariant,
+  which a node cannot give. Expressing it needs a non-owning reference return
+  (`ReferenceEquals` only), which no rule provides.
+* `LinkedList` `ValueRef` (a `ref` return), and node arguments outside the list's region
+  (§31's `Pal.InRegion` limitation).
+* `IEnumerable`/`IDictionary` constructors and serialization (`GetObjectData`,
+  `OnDeserialization`) are out of scope.
+
+### Findings (§35)
+
+* At `object`, `ThrowIfNull(key)` was dropped (R35.11). R23.2 assumed that a non-nullable
+  reference is not null, which callers of a non-generic `IDictionary` need not respect.
+* `is_null` of a struct (`KeyValuePair`) is uninterpreted. So a caller cannot prove
+  `is_a KVP (box p)` for its own pair, and the `IList` members that take a boxed pair are
+  usable only when the pair comes in as `object`.
+* `KeyCollection.IList.IndexOf(object)` and `IList.IndexOf(object)` need `Count >= 0`
+  after a call. `OrderedDictionary.Count` now also ensures `0 <= Result`.
+* `IList.Add(object)` returns `Count - 1`, and its overflow check needs that `Count` too.
+* A view member's loop invariants must restate the view's `_min`/`_max`, its coherence and
+  version, and `SpecRootOk`. The view's record is re-bound at each loop head, and only the
+  `__pal_entry__` bool fields are pinned automatically.
+* R35.15's split leaves a limitation when it is not at a block's tail. A local written in a
+  split arm loses its value at the join, as with any un-annotated join (R22.12).
+* The stale count of §32's Findings keeps `SpecCountOk` (`_countVersion` the set's version
+  implies `count` is right) from being established at the view's constructor. So the
+  re-count, `Count` and `Clear` take it as a precondition: `GetViewBetween` cannot ensure it
+  while the set's version may equal the constructor's sentinel.
+* `Clear` ensures only `count == 0`. Its early return (`Count == 0`) leaves `root` as it was.
+  Proving that `root` is null there needs a lemma that an empty filter has a null
+  `range_root`.
+* `SpecRangeWalk`'s `all_true_empty` first took a `unit` argument, and its SMT pattern then
+  did not mention every bound variable. Z3 only warned about it, and the lemma never fired.
+  A pattern lemma takes no argument the pattern does not contain.
+
+### Trusted (§35)
+
+`Pulse.Lib.CSharp.TypeTest` (above) is new: `is_a`, `unbox`, `null_obj` and the three
+lemmas. Its consistency argument is in the interface's comment. It also holds `unbox_or`
+(R35.12), which is a definition from `is_a` and `unbox`, so it adds no assumption.
+
+
+## 36. Verification units
+
+A *unit* is a set of C# sources translated together, into one output directory. Until this
+section every translation was a unit of its own, and code that two harnesses shared was
+translated, and verified, by both: the SortedSet harness re-translated `List.cs`,
+`Queue.cs` and `Stack.cs`. With `palcs --reference DIR` (repeatable), a unit may use the
+declarations of a unit translated before into `DIR`. Those declarations are not
+translated again, and the modules the unit emits refer to the referenced unit's modules
+by the names that unit gave them. So every F* module is emitted, and checked, by exactly
+one unit, in dependency order. The tests are `test/unit_lib` with `test/unit_client`, and
+`test/unit_diagnostics` for the refusals; `samples/dotnet-runtime` is organised as a DAG of
+units (its README lists it).
+
+**R36.1. The manifest.** Every translation writes `unit.json` into its output directory:
+* `assembly`, the unit's assembly name (R36.2);
+* `nullable`, `preview` and `unsafe`, how it was compiled (R20.9, R25.11);
+* `sources`, each source's absolute path and SHA-256;
+* `references`, the absolute output directories of the units it referenced;
+* `modules`, the modules it emitted, sorted.
+
+`--reference DIR` reads `DIR/unit.json` and, transitively, the manifests of the units it
+references. A directory without a manifest, a cycle of references, and a unit whose
+sources no longer hash as they did are refused before anything is compiled: the unit was
+translated, and verified, from other text, and translating its declarations from the new
+text would describe modules that do not exist. The referenced units are ordered
+dependencies first.
+
+**R36.2. Compiling with references.** A referenced unit is compiled again, from the sources
+and options in its manifest, against the compilations of the units it references; the
+primary unit is compiled against all of them. A reference is a Roslyn
+`CompilationReference`, not a DLL, because the frontend reads a callee's syntax and not only
+its symbol (its body for R4.11's analysis, R28's borrowing and R19's exceptions, a class's
+constructor and subclasses). A model of a referenced tree is taken from the compilation
+that owns it.
+
+A unit is a fragment of one assembly's sources: the runtime compiles `SortedSet.cs` and
+`Stack.cs` into one `System.Collections.dll`, and its code calls `Stack<T>`'s internals.
+So every unit's compilation carries a synthesized `[assembly: InternalsVisibleTo]` for
+each unit of the build that references it, and each unit has an assembly name of its own,
+`PalUnit_` followed by a hash of its output directory, the same in every build. A
+declaration of a referenced unit is metadata to its client, not source, so it does not
+win over a framework type of the same name the way the client's own declaration would
+(CS0436). It is made to win: a duplicate in corlib loses by Roslyn's
+`IgnoreCorLibraryDuplicatedTypes` binder flag (`List<T>`), and another framework assembly
+that declares one publicly (`System.Collections` declares `Stack<T>`) is referenced
+behind an extern alias. R24.3's accessibility-ignoring compilation does the same for a
+framework *internal* of the same name (`System.ThrowHelper` is internal to
+`System.Memory` as well). An alias, rather than dropping the reference, keeps the set of
+references, and so the identity of every symbol, unchanged.
+
+**R36.3. Lowering with references; emitting only the primary unit.** Each referenced unit
+is lowered, normalized and checked in turn, with the declarations of the units it
+references as context. A unit that does not translate cleanly cannot be referenced. The
+primary unit is then lowered with all of their declarations as context, and every table
+lookup sees them: a callee's contract, a class's fields and invariant, a struct's
+layout, a vtable's overrides, an exception class. Only the primary unit's declarations
+are emitted. A module name is a function of the declaration it comes from (R3, R28.2), so
+a reference from the client names the module the referenced unit emitted, as it would if
+both were one unit. The SortedSet harness, referencing `List`, `Queue` and `Stack`, emits
+exactly the 205 modules of its own that it emitted when it translated all four, byte for
+byte, and none of theirs.
+
+**R36.4. A module is emitted by one unit (PALCS0758).** Module names do not include
+namespaces or, for a class nested in a class, the outer class (`Dictionary.KeyCollection`
+and `SortedDictionary.KeyCollection` are both `KeyCollection`). So two units can name one
+module, and F* would take whichever came first on its include path. A module the primary
+unit emits that a referenced unit also emits is refused, as are two referenced units
+emitting one module. This comparison ignores case, as F*'s module-file lookup does.
+
+**R36.5. `[TranslateAnnotatedOnly]` is decided once (PALCS0761).** R20.1 decides which
+declarations are translated, and so which modules exist. A unit translated with it may
+not reference one translated without it, or the other way round.
+
+**R36.6. Bindings are inherited (PALCS0760).** A referenced unit's `[SpecBinding]`s
+(R21.11) hold in its clients: the referenced unit's modules were proved under them, and a
+client calls those modules. A client may restate one, and two units may state the same
+one. Binding one member to two terms is refused, whether by a client and a unit it
+references or by two units it references, because a binding is a trusted axiom and
+nothing checks two of them against each other.
+
+**R36.7. No subclass of a referenced class (PALCS0759).** Several rules decide a class's
+translation from the subclasses that are visible in the compilation: whether it is a leaf
+whose methods are verified at its exact type, whether a concrete class is open (R9.18),
+and which overrides its vtable dispatches to. The referenced unit made those decisions
+without the client. A client class deriving from a class of a referenced unit would make
+them wrong after they were verified, so it is refused; the two classes must be translated
+in one unit. Implementing a referenced interface is not refused.
+
+**R36.8. Building units (`test/verify.mk`).** A harness names the harness directories it
+references in `REFERENCES`:
+* Each referenced harness is translated and verified first, by a recursive `make`. When
+  the caller has already built it (`REFERENCES_BUILT=1`, set by `test/Makefile` and
+  `samples/dotnet-runtime/Makefile`, which order the harnesses along the DAG), the harness
+  only checks that the referenced unit's `.verified` stamp is newer than everything in its
+  output. Then two harnesses referencing one unit under `make -j` do not build it at the
+  same time.
+* `palcs` is passed `--reference ref/out`, and the translation is redone when a referenced
+  manifest or translation stamp changes. Stamps propagate changes transitively even when
+  an intermediate unit's own sources and manifest are unchanged.
+* F* is given each referenced unit's `_cache` and `out` (transitively, from the manifests,
+  by `test/unit-closure.py`), after the harness's own, and those units' modules in
+  `--already_cached`. So F* loads their `.checked` files and fails, rather than checking
+  them again, if one is stale. A `.checked` outside the harness's own cache is never made
+  there.
+  The build checks that every referenced module has a current `.checked` file, and removes
+  obsolete copies of those modules from the client's cache so they cannot shadow their
+  owning unit.
+* Every unit emits a `TranslationErrors` sentinel. Each is checked into a private cache
+  directory that no include path names, so that a client never finds a referenced unit's.
+* A unit is a fragment of one assembly, so the `cs` check compiles it with the sources of
+  the units it references, and the editor project (`test/cs-projects.sh`) includes them.
+
+### Findings (§36)
+
+* `samples/dotnet-runtime` previously checked 1,433 module copies, 1,066 of them distinct.
+  As twelve units it checks 1,122, each once. Thirty-six module names are still emitted
+  by two units, `Dictionary` and `OrderedDictionary` (`KeyCollection`, `ValueCollection`,
+  `HashHelpers.ExpandPrime`, `ThrowHelper.ThrowVersionCheckFailed`): they are different
+  declarations, in units neither of which references the other, so no F* include path
+  holds both.
+* Making the shared code one unit exposed one stub divergence: the Queue harness had its
+  own `ThrowHelper`, which numbered `ExceptionResource` differently from the one every
+  other harness used, so `Queue.CopyTo` was a different module in the SortedSet harness.
+  The stubs are now one unit, `common`.
+* `OrderedDictionary` stays a unit of its own. The runtime compiles it against
+  System.Collections' `ThrowHelper`, whose members have the names of `common`'s, and the
+  harness models `HashHelpers` rather than verifying the runtime's `Common` copy, so its
+  modules would collide with `common`'s and `HashCommon`'s (R36.4).

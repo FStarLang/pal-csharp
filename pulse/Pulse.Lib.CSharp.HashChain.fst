@@ -26,6 +26,34 @@ noeq type ops (e: Type0) (k: Type0) = {
 /// The bucket of a hash code: `(uint)hashCode % (uint)buckets.Length`.
 let bkt (h: int) (len: pos) : nat = (h % 4294967296) % len
 
+/// The code's bucket index, `(int)((uint)h % (uint)len)`, is `bkt`.
+let bkt_code (h len: I32.t)
+  : Lemma (requires I32.v len > 0)
+          (ensures I32.v (FStar.Int.Cast.uint32_to_int32
+                            (FStar.UInt32.rem (FStar.Int.Cast.int32_to_uint32 h) (FStar.Int.Cast.int32_to_uint32 len)))
+                   == bkt (I32.v h) (I32.v len))
+          [SMTPat (FStar.Int.Cast.uint32_to_int32
+                     (FStar.UInt32.rem (FStar.Int.Cast.int32_to_uint32 h) (FStar.Int.Cast.int32_to_uint32 len)))]
+  = FStar.Math.Lemmas.lemma_mod_lt (I32.v h % 4294967296) (I32.v len)
+
+/// The same index computed as `uint % int`, which C# does in `long`:
+/// `(int)((long)h % (long)len)` at a stored `uint` hash code `h`.
+let bkt_code_long (h: FStar.UInt32.t) (len: I32.t)
+  : Lemma (requires I32.v len > 0)
+          (ensures I32.v (FStar.Int.Cast.int64_to_int32
+                            (FStar.Int64.rem (FStar.Int.Cast.uint32_to_int64 h) (FStar.Int.Cast.int32_to_int64 len)))
+                   == bkt (I32.v (FStar.Int.Cast.uint32_to_int32 h)) (I32.v len))
+          [SMTPat (FStar.Int.Cast.int64_to_int32
+                     (FStar.Int64.rem (FStar.Int.Cast.uint32_to_int64 h) (FStar.Int.Cast.int32_to_int64 len)))]
+  = let u = FStar.UInt32.v h in
+    let n = I32.v len in
+    FStar.Math.Lemmas.lemma_mod_lt u n;
+    FStar.Math.Lemmas.small_mod u 4294967296;
+    // (int)h then mod 2^32 is h again
+    let x = I32.v (FStar.Int.Cast.uint32_to_int32 h) in
+    assert (x % 4294967296 == u % 4294967296);
+    assert (FStar.Int64.v (FStar.Int64.rem (FStar.Int.Cast.uint32_to_int64 h) (FStar.Int.Cast.int32_to_int64 len)) == u % n)
+
 let inr (#e: Type0) (es: seq e) (i: int) : bool = 0 <= i && i < Seq.length es
 
 let in_bucket (#e #k: Type0) (o: ops e k) (es: seq e) (b: int) (j: int) : bool =

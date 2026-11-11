@@ -40,6 +40,7 @@ public sealed class WellKnown
         ConsumesAttribute = Type("ConsumesAttribute");
         ExactlyAttribute = Type("ExactlyAttribute");
         CallbackAttribute = Type("CallbackAttribute");
+        SpecializeAttribute = Type("SpecializeAttribute");
         PlainAttribute = Type("PlainAttribute");
         RegionAttribute = Type("RegionAttribute");
         WrappingAttribute = Type("WrappingAttribute");
@@ -55,6 +56,8 @@ public sealed class WellKnown
         AdmitAttribute = Type("AdmitAttribute");
         ImplementsAttribute = Type("ImplementsAttribute");
         RlimitAttribute = Type("RlimitAttribute");
+        FuelAttribute = Type("FuelAttribute");
+        OpaqueSpecsAttribute = Type("OpaqueSpecsAttribute");
         GhostArgAttribute = Type("GhostArgAttribute");
         PulseTypeAttribute = Type("PulseTypeAttribute");
         IncludePulseAttribute = Type("IncludePulseAttribute");
@@ -67,7 +70,10 @@ public sealed class WellKnown
         SpecCtorAttribute = Type("SpecCtorAttribute");
         SpecCaseAttribute = Type("SpecCaseAttribute");
         SpecBindingAttribute = Type("SpecBindingAttribute");
-        foreach (var binding in Declarations.All(c.Assembly, SpecBindingAttribute))
+        // R36.6. A referenced unit's bindings hold here too: its declarations are named
+        // here, and a binding of one of them is how they are named. The unit's own come
+        // last; one that disagrees with a reference is PALCS0760's.
+        foreach (var binding in Units.WithReferences(c).Reverse().SelectMany(u => Declarations.All(u.Assembly, SpecBindingAttribute)))
             if (Declarations.StringArgument(binding, 0) is { } member &&
                 Declarations.StringArgument(binding, 1) is { } term)
                 bindings[member] = term;
@@ -122,6 +128,24 @@ public sealed class WellKnown
     /// <summary>R27.57. Replicas asked for and not yet lowered.</summary>
     public Queue<ReplicaRequest> ReplicaDemand { get; } = new();
     public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>R35.18. A method translated at constant values of its <c>[Specialize]</c> parameters.</summary>
+    public sealed record SpecializationRequest(string Source, string Name, ImmutableDictionary<string, bool> Values)
+    {
+        /// <summary>The first call that asked for it.</summary>
+        public Ir.IrLoc? At { get; init; }
+    }
+
+    /// <summary>R35.18. The specialization being lowered, while one is.</summary>
+    public SpecializationRequest? Specialization { get; set; }
+
+    /// <summary>R35.18. Specializations asked for and not yet lowered.</summary>
+    public Queue<SpecializationRequest> SpecializationDemand { get; } = new();
+    public HashSet<string> SpecializationSeen { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>R35.18. Whether a method has a <c>[Specialize]</c> parameter.</summary>
+    public bool IsSpecialized(IMethodSymbol m) =>
+        m.Parameters.Any(p => p.GetAttributes().Any(a => SymbolEqualityComparer.Default.Equals(a.AttributeClass, SpecializeAttribute)));
     public INamedTypeSymbol? Exception { get; }
 
     /// <summary>R19.1. <c>System.Exception</c> itself.</summary>
@@ -138,11 +162,16 @@ public sealed class WellKnown
     /// <summary>R20.1b. An exception class left untranslated under <c>[TranslateAnnotatedOnly]</c>.</summary>
     public void SkipException(INamedTypeSymbol symbol) => skippedExceptions.Add(symbol);
 
+    /// <summary>R36.3. The exception classes the referenced units translate.</summary>
+    public HashSet<string> ReferencedExceptions { get; } = new(StringComparer.Ordinal);
+
     public bool IsExceptionClass(ITypeSymbol? type)
     {
         if (type is not INamedTypeSymbol { TypeKind: TypeKind.Class } named) return false;
         if (named.DeclaringSyntaxReferences.IsEmpty) return false;
         if (skippedExceptions.Contains(named)) return false;
+        // R36.3. A referenced unit's exception class is translated when that unit translated it.
+        if (Compilation.IsReferenced(named.OriginalDefinition) && !ReferencedExceptions.Contains(named.Name)) return false;
         for (var t = named.BaseType; t is not null; t = t.BaseType)
             if (IsSystemException(t)) return true;
         return false;
@@ -158,6 +187,8 @@ public sealed class WellKnown
     public INamedTypeSymbol ExactlyAttribute { get; }
     /// <summary>R27.39. <c>[Callback]</c>: a delegate parameter called with region pointers.</summary>
     public INamedTypeSymbol CallbackAttribute { get; }
+    /// <summary>R35.18. <c>[Specialize]</c>: a <c>bool</c> parameter translated at each constant.</summary>
+    public INamedTypeSymbol SpecializeAttribute { get; }
     public INamedTypeSymbol PlainAttribute { get; }
 
     /// <summary>R27.3. <c>[Region]</c>: a plain representation owned as one region.</summary>
@@ -212,6 +243,8 @@ public sealed class WellKnown
     public INamedTypeSymbol AdmitAttribute { get; }
     public INamedTypeSymbol ImplementsAttribute { get; }
     public INamedTypeSymbol RlimitAttribute { get; }
+    public INamedTypeSymbol FuelAttribute { get; }
+    public INamedTypeSymbol OpaqueSpecsAttribute { get; }
     public INamedTypeSymbol GhostArgAttribute { get; }
     public INamedTypeSymbol PulseTypeAttribute { get; }
     public INamedTypeSymbol IncludePulseAttribute { get; }
@@ -228,6 +261,14 @@ public sealed class WellKnown
     public string? Binding(ISymbol? symbol) =>
         symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
         bindings.TryGetValue(id, out var term) ? term : null;
+
+    /// <summary>
+    /// R30.6. The F* predicate a type test against a library class is bound to: the binding
+    /// of <c>"is:"</c> followed by the class's documentation-comment ID.
+    /// </summary>
+    public string? TypeTestBinding(ITypeSymbol? type) =>
+        type?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
+        bindings.TryGetValue("is:" + id, out var term) ? term : null;
     public INamedTypeSymbol SpecOpAttribute { get; }
 
     /// <summary>R27.22. <c>[RegionOp]</c>: a specification operation over a region's nodes.</summary>
@@ -567,11 +608,49 @@ public sealed class WellKnown
     /// R29.4. <c>object</c>, and the enumerator interfaces a collection's explicit members
     /// return: a value of one of them is an <see cref="ObjType"/>.
     /// </summary>
+    /// <summary>R34.1. <c>IEnumerable&lt;T&gt;</c> or <c>ICollection&lt;T&gt;</c>.</summary>
+    public static bool IsEnumerableInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IEnumerable<T>"
+            or "System.Collections.Generic.ICollection<T>";
+
+    /// <summary>R34.22. <c>IDictionary&lt;K, V&gt;</c>.</summary>
+    public static bool IsDictionaryInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.IDictionary<TKey, TValue>";
+
+    /// <summary>R34.4. <c>ICollection&lt;T&gt;</c>.</summary>
+    public static bool IsCollectionInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface, IsGenericType: true } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.Generic.ICollection<T>";
+
     public static bool IsObjectLike(ITypeSymbol? type) =>
         type is { SpecialType: SpecialType.System_Object } ||
         type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
         i.OriginalDefinition.ToDisplayString() is "System.Collections.IEnumerator"
-            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator";
+            or "System.Collections.Generic.IEnumerator<T>" or "System.Collections.IDictionaryEnumerator"
+            // R35.6. And the non-generic `ICollection`, which has no element type to lend at.
+            or "System.Collections.ICollection";
+
+    /// <summary>
+    /// R35.6. The collection interfaces a dictionary's explicit <c>Keys</c> and <c>Values</c>
+    /// return. The generic two are R34.1's lent enumerables at a parameter (and in what is
+    /// derived from one); they are boxes only where R35.6 places them: a member's result
+    /// (<see cref="MapReturnType"/>, <see cref="IsObjectLikeReturn"/>) and an object converted
+    /// to one anywhere but at an argument.
+    /// </summary>
+    public static bool IsBoxedCollectionInterface(ITypeSymbol? type) =>
+        type is INamedTypeSymbol { TypeKind: TypeKind.Interface } i &&
+        i.OriginalDefinition.ToDisplayString() is "System.Collections.ICollection"
+            or "System.Collections.Generic.ICollection<T>" or "System.Collections.Generic.IEnumerable<T>";
+
+    /// <summary>R29.4/R35.6. A member result that is an <c>obj</c>.</summary>
+    public static bool IsObjectLikeReturn(ITypeSymbol? type) =>
+        IsObjectLike(type) || IsBoxedCollectionInterface(type);
+
+    /// <summary>R35.6. The type of a member's result: a collection interface there is a box.</summary>
+    public IrType? MapReturnType(ITypeSymbol? type) =>
+        IsBoxedCollectionInterface(type) ? Obj : MapType(type);
 
     private static bool IsPlainValue(IrType t) =>
         t is IrPrim or IrTypeParamType or IrUserSpecType or IrOptionType { Inner: IrPrim or IrTypeParamType or IrUserSpecType };
@@ -601,7 +680,7 @@ public sealed class WellKnown
             if (MapType(p.Type) is not { } pt) return null;
             ps.Add(pt);
         }
-        var ret = invoke.ReturnsVoid ? new IrPulseType("unit", "unit") : MapType(invoke.ReturnType);
+        var ret = invoke.ReturnsVoid ? new IrPulseType("unit", "unit") : MapReturnType(invoke.ReturnType);
         if (ret is null) return null;
         return new IrDelegateType(del.ToDisplayString()) { Params = ps.ToImmutable(), Return = ret };
     }
@@ -667,6 +746,15 @@ public sealed class WellKnown
             // span that is the whole of exactly one array, and the point of a span is that
             // it need not be. Being its own type is what lets `a.AsSpan(i, n)` translate
             // (R17.5) and lets a method taking `Span<T>` be called with a window.
+            // R34.1. An enumerable argument is lent, read-only, as an abstract resource.
+            case INamedTypeSymbol named when IsEnumerableInterface(named) &&
+                                             MapType(named.TypeArguments[0]) is { } enumerableElement:
+                return new IrEnumerableType(enumerableElement, IsCollectionInterface(named));
+            // R34.22. An `IDictionary<K, V>` argument is the collection of its pairs.
+            case INamedTypeSymbol named when IsDictionaryInterface(named) &&
+                                             MapType(named.TypeArguments[0]) is { } dk && IsPlainValue(dk) &&
+                                             MapType(named.TypeArguments[1]) is { } dv && IsPlainValue(dv):
+                return new IrEnumerableType(new IrUserSpecType("ValueTuple", TupleType, [dk, dv]), true);
             case INamedTypeSymbol named when IsAnySpan(named) &&
                                              MapType(named.TypeArguments[0]) is { } spanElement:
                 return new IrSpanType(spanElement);

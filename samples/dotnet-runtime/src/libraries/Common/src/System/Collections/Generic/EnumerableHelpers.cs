@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Diagnostics;
+using PalLang;
 
 namespace System.Collections.Generic
 {
@@ -25,6 +26,12 @@ namespace System.Collections.Generic
         /// The resulting array.  The length of the array may be greater than <paramref name="length"/>,
         /// which is the actual number of elements in the array.
         /// </returns>
+        [Ensures("0 <= length && length <= Pal.Contents(Result).Length")]
+        [Ensures("Pal.Contents(Result).Length <= int.MaxValue")]
+        [Ensures("Pal.Contents(Result).Length <= 2 * length + 2")]
+        [Ensures("length == Pal.Contents(source).Length")]
+        [Ensures("Pal.Slice(Pal.Contents(Result), 0, length) == Pal.Contents(source)")]
+        [Wrapping]
         internal static T[] ToArray<T>(IEnumerable<T> source, out int length)
         {
             // Copied from Array.MaxLength in System.Private.CoreLib/src/libraries/System.Private.CoreLib/src/System/Array.cs
@@ -62,6 +69,8 @@ namespace System.Collections.Generic
 
                         while (en.MoveNext())
                         {
+                            Pal.Invariant(1 <= count && count == Pal.Index(en) && count <= arr.Length && arr.Length <= 2 * count + 2);
+                            Pal.Invariant(Pal.Slice(Pal.Contents(arr), 0, count) == Pal.Slice(Pal.Contents(source), 0, count));
                             if (count == arr.Length)
                             {
                                 // This is the same growth logic as in List<T>:

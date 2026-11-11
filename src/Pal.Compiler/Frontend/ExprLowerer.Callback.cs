@@ -37,7 +37,7 @@ public sealed partial class ExprLowerer
             known.IsRegionClass(node) && known.MapType(node) is IrClassType region &&
             node.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute)) is IPropertySymbol view &&
             known.MapType(view.Type) is { } viewType &&
-            known.MapType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
+            known.MapReturnType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
             return new IrCallback(region with { Nullable = false }, viewType, result)
             {
                 Bounded = Declarations.Find(p, known.CallbackAttribute) is { } data &&
@@ -97,7 +97,7 @@ public sealed partial class ExprLowerer
         if (args is not [{ Expression: IdentifierNameSyntax id }] || !TraceTarget(id))
             return Refused("PALCS0708", loc,
                 "`Pal.Trace` takes a `[Callback]` parameter of the enclosing method (doc/translation.md R27.39).");
-        return new IrVar(loc, TraceName(id.Identifier.ValueText)) { Type = known.MapType(method.ReturnType) };
+        return new IrVar(loc, TraceName(id.Identifier.ValueText)) { Type = known.MapReturnType(method.ReturnType) };
     }
 
     /// <summary>
@@ -154,8 +154,12 @@ public sealed partial class ExprLowerer
             .Distinct(SymbolEqualityComparer.Default)
             .OrderBy(s => s.Locations.FirstOrDefault()?.SourceSpan.Start ?? 0)
             .ToList();
-        if (captured.Any(s => s is IParameterSymbol { IsThis: true }) ||
-            flow.CapturedInside.Any(s => s is IParameterSymbol { IsThis: true }))
+        // R35.19. In a view's member, a lambda that reaches `this` only through scalar fields
+        // of the view's own state captures each such field as a local would be captured.
+        var fieldCaptures = ViewFieldCaptures(lambda);
+        if (fieldCaptures is not null) captured.RemoveAll(s => s is IParameterSymbol { IsThis: true });
+        if (fieldCaptures is null && (captured.Any(s => s is IParameterSymbol { IsThis: true }) ||
+            flow.CapturedInside.Any(s => s is IParameterSymbol { IsThis: true })))
             return Refused("PALCS0709", loc,
                 "A lambda passed to a `[Callback]` parameter that captures `this` " +
                 "(doc/translation.md R27.39): the callee holds the object's region already.");
@@ -205,10 +209,21 @@ public sealed partial class ExprLowerer
             var v = new IrVar(loc, s.Name) { Type = mapped };
             captures.Add(byRef ? new IrRefArg(loc, v) : v);
         }
+        var aliases = new List<(IFieldSymbol Field, IrVar Cell)>();
+        foreach (var (f, use, writes) in fieldCaptures ?? [])
+        {
+            var mapped = known.MapType(f.Type)!;
+            var cell = new IrVar(loc, FieldCaptureName(f)) { Type = mapped };
+            parameters.Add(new IrParam(loc, cell.Name, mapped, writes ? ParamMode.Ref : ParamMode.Value));
+            captures.Add(writes ? new IrRefArg(loc, cell) : cell);
+            aliases.Add((f, cell));
+            PendingFieldCaptures.Add((cell, Lower(use), writes));
+        }
         var node = nodeParam.Name;
         parameters.Add(new IrParam(loc, node, cb.Region, ParamMode.Value) { Plain = true });
 
         var spec = new ExprLowerer(model, known, diagnostics, specPosition: true);
+        foreach (var (f, cell) in aliases) spec.Alias(f, cell);
         var pre = spec.Lower(inv.ExpressionBody!);
         var heap = new IrVar(loc, Region.HeapName(cb.Region.Name)) { Type = IrPrim.SpecIntType };
         var nodeVar = new IrVar(loc, node) { Type = cb.Region };
@@ -221,6 +236,7 @@ public sealed partial class ExprLowerer
             { Type = traceType, MachineArgs = true };
         var postLowerer = new ExprLowerer(model, known, diagnostics, specPosition: true);
         postLowerer.Alias(traceParam, extended);
+        foreach (var (f, cell) in aliases) postLowerer.Alias(f, cell);
         var post = postLowerer.Lower(inv.ExpressionBody!);
         var inRegion = new IrSpecOp(loc, $"{Region.Module}.mem", [heap, nodeVar]) { Type = IrPrim.Bool, MachineArgs = true };
         IrExpr bounded = new IrSpecOp(loc, "Pulse.Lib.CSharp.Callback.callable",
@@ -237,6 +253,7 @@ public sealed partial class ExprLowerer
         var body = new StmtLowerer(model, known, diagnostics);
         body.Expressions.LiftPrefix = name;
         body.Expressions.LiftTypeParameters = LiftTypeParameters;
+        foreach (var (f, cell) in aliases) body.Expressions.Alias(f, cell);
         var lowered = statements.Skip(1).Select(body.Lower).ToImmutableArray();
         var method = new IrMethod(loc, name, parameters.ToImmutable(), cb.Result,
             [pre, bounded, inRegion], [post], null, new IrBlock(loc, lowered))
@@ -250,7 +267,53 @@ public sealed partial class ExprLowerer
         {
             Callback = cb,
             Bounded = bound is not null,
+            FieldCaptures = [.. aliases.Select(a => a.Field.Name)],
             TypeArguments = [.. LiftTypeParameters.Select(t => (IrType)new IrTypeParamType(t))],
         };
     }
+
+    /// <summary>R35.19. The local a lambda's capture of the view's field <paramref name="f"/> is.</summary>
+    public static string FieldCaptureName(IFieldSymbol f) => "__pal_cap_" + f.Name;
+
+    /// <summary>
+    /// R35.19. The view fields a lambda captures, when it is passed inside a member of a view
+    /// and reaches <c>this</c> only by naming (as a bare identifier) machine-integer or
+    /// <c>bool</c> fields of the view's state: each field, a use of it to read it by in the
+    /// caller, and whether the lambda writes it. Null when the lambda does not qualify.
+    /// </summary>
+    private List<(IFieldSymbol Field, IdentifierNameSyntax Use, bool Writes)>? ViewFieldCaptures(AnonymousFunctionExpressionSyntax lambda)
+    {
+        if (!_atViewCall || Borrow is not { ViewBase: not null, Constructor: false } bw) return null;
+        if (lambda.DescendantNodes().Any(n => n is ThisExpressionSyntax or BaseExpressionSyntax)) return null;
+        var result = new List<(IFieldSymbol Field, IdentifierNameSyntax Use, bool Writes)>();
+        foreach (var id in lambda.DescendantNodes().OfType<SimpleNameSyntax>())
+        {
+            if (id.Parent is MemberAccessExpressionSyntax ma && ma.Name == id) continue;
+            if (id.Parent is MemberBindingExpressionSyntax) continue;
+            var sym = model.GetSymbolInfo(id).Symbol;
+            if (sym is not { IsStatic: false } || sym is ILocalSymbol or IParameterSymbol or IRangeVariableSymbol or ITypeSymbol or INamespaceSymbol)
+                continue;
+            if (sym is IMethodSymbol { MethodKind: MethodKind.LocalFunction }) return null;
+            if (sym is not IFieldSymbol { IsConst: false } f || !bw.IsState(f) || id is not IdentifierNameSyntax use ||
+                known.MapType(f.Type) is not IrPrim { IsMachineInt: true } and not IrPrim { Kind: PrimKind.Bool })
+                return null;
+            var writes = id.Parent switch
+            {
+                AssignmentExpressionSyntax a => a.Left == id,
+                PrefixUnaryExpressionSyntax p => Borrowing.IsStep(p),
+                PostfixUnaryExpressionSyntax p => Borrowing.IsStep(p),
+                _ => false,
+            };
+            var k = result.FindIndex(r => SymbolEqualityComparer.Default.Equals(r.Field, f));
+            if (k < 0) result.Add((f, use, writes));
+            else if (writes) result[k] = result[k] with { Writes = true };
+        }
+        return result.Count == 0 ? null : result;
+    }
+
+    /// <summary>
+    /// R35.19. The view fields the lambdas lowered since the last call captured: each cell,
+    /// the field's value in the caller, and whether the lambda writes it.
+    /// </summary>
+    internal List<(IrVar Cell, IrExpr Field, bool Writes)> PendingFieldCaptures { get; } = [];
 }

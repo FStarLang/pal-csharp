@@ -122,6 +122,10 @@ To translate and verify one program:
 palcs -o out MyProgram.cs        # C# ─► Pulse
 ```
 
+A program can be split into *units*, each translated and verified once: `palcs -o out2
+--reference out Client.cs` uses the declarations translated into `out` without translating
+them again (§36 of the translation document; `REFERENCES` in a harness Makefile).
+
 The F\* version is pinned and used by both local builds and CI, so the two cannot drift.
 There are two kinds of pin. [`tools/fstar-version.txt`](tools/fstar-version.txt) names a
 nightly binary release, which bundles Pulse. [`tools/fstar-source.txt`](tools/fstar-source.txt),

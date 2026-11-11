@@ -105,6 +105,7 @@ namespace System.Collections.Generic
         // size and capacity of the new list will both be equal to the size of the
         // given collection.
         //
+        [Ensures("@this.Items == Pal.Contents(collection)")]
         public List(IEnumerable<T> collection)
         {
             if (collection == null)
@@ -131,6 +132,9 @@ namespace System.Collections.Generic
                 {
                     while (en.MoveNext())
                     {
+                        Pal.Invariant(0 <= _size && _size <= _items.Length);
+                        Pal.Invariant(Pal.Slice(Pal.Contents(_items), 0, _size) ==
+                                      Pal.Slice(Pal.Contents(collection), 0, Pal.Index(en)));
                         Add(en.Current);
                     }
                 }
@@ -304,6 +308,8 @@ namespace System.Collections.Generic
         // required, the capacity of the list is increased to twice the previous
         // capacity or the new size, whichever is larger.
         //
+        [Requires("@this.SpecCount + Pal.Contents(collection).Length <= int.MaxValue")]
+        [Ensures("@this.Items == Pal.Concat(Pal.Old(@this.Items), Pal.Contents(collection))")]
         public void AddRange(IEnumerable<T> collection)
         {
             if (collection == null)
@@ -332,6 +338,9 @@ namespace System.Collections.Generic
                 {
                     while (en.MoveNext())
                     {
+                        Pal.Invariant(0 <= _size && _size <= _items.Length);
+                        Pal.Invariant(Pal.Slice(Pal.Contents(_items), 0, _size) ==
+                                      Pal.Concat(Pal.Old(this.Items), Pal.Slice(Pal.Contents(collection), 0, Pal.Index(en))));
                         Add(en.Current);
                     }
                 }
@@ -1028,6 +1037,11 @@ namespace System.Collections.Generic
         // capacity or the new size, whichever is larger.  Ranges may be added
         // to the end of the list by setting index to the List's size.
         //
+        [Requires("@this.SpecCount + Pal.Contents(collection).Length <= int.MaxValue")]
+        [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || index > @this.SpecCount")]
+        [Ensures("0 <= index && index <= Pal.Old(@this.SpecCount)")]
+        [Ensures("@this.Items == Pal.Concat(Pal.Concat(Pal.Slice(Pal.Old(@this.Items), 0, index), Pal.Contents(collection)), " +
+                 "Pal.Slice(Pal.Old(@this.Items), index, Pal.Old(@this.SpecCount)))")]
         public void InsertRange(int index, IEnumerable<T> collection)
         {
             if (collection == null)
@@ -1076,6 +1090,12 @@ namespace System.Collections.Generic
                 {
                     while (en.MoveNext())
                     {
+                        Pal.Invariant(0 <= _size && _size <= _items.Length);
+                        Pal.Invariant(index == Pal.Old(index) + Pal.Index(en));
+                        Pal.Invariant(Pal.Slice(Pal.Contents(_items), 0, _size) ==
+                                      Pal.Concat(Pal.Concat(Pal.Slice(Pal.Old(this.Items), 0, Pal.Old(index)),
+                                                            Pal.Slice(Pal.Contents(collection), 0, Pal.Index(en))),
+                                                 Pal.Slice(Pal.Old(this.Items), Pal.Old(index), Pal.Old(this.SpecCount))));
                         Insert(index++, en.Current);
                     }
                 }
@@ -1413,6 +1433,10 @@ namespace System.Collections.Generic
             _version++;
         }
 
+        [Throws(typeof(ArgumentNullException), "comparison == null")]
+        [Ensures("@this.SpecCount == Pal.Old(@this.SpecCount)")]
+        [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity)")]
+        [Ensures("Pal.SortedRangeBy(Pal.Old(@this.Items), @this.Items, 0, Pal.Old(@this.SpecCount), comparison)")]
         public void Sort(Comparison<T> comparison)
         {
             if (comparison == null)
