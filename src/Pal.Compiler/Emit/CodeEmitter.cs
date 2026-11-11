@@ -1099,7 +1099,6 @@ public sealed class CodeEmitter(
         // R32.14. A view's member called with the record by reference rebinds the record.
         Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf) ||
         WritesOpenRecord(i) || CallsCallbackInArm(i);
-
     /// <summary>
     /// R35.16. An arm that calls a <c>[Callback]</c> parameter: the trace it leaves names the
     /// callback's result, bound in the arm, and Pulse's join keeps the trace under the
@@ -1183,6 +1182,14 @@ public sealed class CodeEmitter(
     private static bool ThrowGuard(IrIf i) =>
         i.Else is null or IrBlock { Statements.IsEmpty: true } &&
         (i.Then is IrThrow || i.Then is IrBlock { Statements: [.., IrThrow] });
+
+    /// <summary>
+    /// R37.9. Whether an arm moves a local node pointer of a region (`current = current.Right`).
+    /// A return's write of the result slot is not such a move.
+    /// </summary>
+    private bool MovesNodeLocal(IrStmt s) =>
+        Check.Statements(s).Any(t => t is IrAssign { Target: IrVar { Type: IrClassType k } v } &&
+            v.Name != Frontend.StmtLowerer.ReturnedValue && IsRegionType(k));
 
     /// <summary>
     /// R27.16. Whether an arm allocates in, writes, or calls a method that writes a region:
@@ -4757,7 +4764,11 @@ public sealed class CodeEmitter(
             // goes into the arm that falls through; the escaping arm keeps none of it.
             // R30.29. So does one an arm of which declares a cell (R30.10), as a `return` of a
             // snapshot local from a loop does.
-            if (statements[k] is IrIf { Joined: false } ei && _escape is not null && MayEscape(ei) && (MovesRegion(ei) || ArmDeclaresCell(ei)))
+            // R37.9. So does one an arm of which moves a local node pointer down a region's
+            // tree (`current = current.Right` before a later `level++`): Pulse
+            // cannot type the join of that arm with the one that returns the node.
+            if (statements[k] is IrIf { Joined: false } ei && _escape is not null && MayEscape(ei) &&
+                (MovesRegion(ei) || ArmDeclaresCell(ei) || MovesNodeLocal(ei)))
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc)
                 {

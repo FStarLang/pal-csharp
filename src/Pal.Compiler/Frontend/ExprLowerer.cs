@@ -2708,6 +2708,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     }
 
     private List<IrStmt>? _outFieldWrites;
+    private List<(IFieldSymbol Field, IrVar Local)>? _ctorOutFields;
     private SyntaxNode? _outFieldStatement;
 
     /// <summary>
@@ -2772,7 +2773,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             var oloc = Locations.From(arg);
             var name = Fresh("out");
-            outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
+            // R37.6. In a view's constructor the field is given the local's value: the
+            // constructor builds the record, and does not write it.
+            if (_ctorOutFields is { } ctorOuts && Borrow is { Constructor: true } cb && cb.IsState(outField))
+                ctorOuts.Add((outField, new IrVar(oloc, name) { Type = outIr }));
+            else
+                outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
             return new IrStmtExpr(oloc, [new IrLocalDecl(oloc, name, outIr, outInit)],
                 new IrRefArg(oloc, new IrVar(oloc, name) { Type = outIr })) { Type = outIr };
         }

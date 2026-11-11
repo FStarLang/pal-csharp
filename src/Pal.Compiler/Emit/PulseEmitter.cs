@@ -1005,8 +1005,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             s.Fields.All(f => f.Type is IrPrim { IsMachineInt: true } or IrPrim { Kind: PrimKind.Bool }
                                           or IrTypeParamType))
         {
-            var needs = string.Concat(s.TypeParameters.Select(p =>
-                $" {{| Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(p)} |}}"));
+            // R37.8. Only a type parameter a field holds needs a default of its own.
+            var needs = string.Concat(s.TypeParameters
+                .Where(p => s.Fields.Any(f => f.Type is IrTypeParamType { Name: var n } && n == p))
+                .Select(p => $" {{| Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(p)} |}}"));
             sb.AppendLine();
             sb.AppendLine($"instance {Names.StructType(s.Name)}__has_default{binders.Implicit}{needs} : " +
                           $"Pulse.Lib.CSharp.Inhabited.has_default {binders.App(Names.StructType(s.Name))} = {{");

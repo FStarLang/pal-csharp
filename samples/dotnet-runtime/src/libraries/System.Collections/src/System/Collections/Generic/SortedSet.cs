@@ -110,6 +110,17 @@ namespace System.Collections.Generic
         [Spec]
         public Seq<T> SpecItems => SpecSearchTree.Keys(Model.Tree);
 
+        // pal: §37. The range `CheckUniqueAndUnfoundElements` counts over, and the tree whose
+        // range root it searches. A set's range has no bound, and its tree is its own; a view
+        // overrides each, and its replica of the method reads the overrides (R37.7). A bound
+        // is a sequence: a set has no key to name one by.
+        [Spec] internal virtual Seq<T> SpecRangeLo => SortedSetCount.None<T>();
+        [Spec] internal virtual Seq<T> SpecRangeHi => SortedSetCount.None<T>();
+        [Spec] internal virtual bool SpecRangeLa => false;
+        [Spec] internal virtual bool SpecRangeUa => false;
+        [Spec] internal virtual SpecTree<(T, bool)> SpecRangeTree => Model.Tree;
+        [Spec] internal virtual IComparer<T> SpecRangeComparer => Model.Comparer;
+
         private SerializationInfo? siInfo; // A temporary variable which we need during deserialization.
 
         private const string ComparerName = "Comparer"; // Do not rename (binary serialization)
@@ -1155,7 +1166,12 @@ namespace System.Collections.Generic
         [Ensures("Result <= SpecSearchTree.Breadth(@this.SpecNodes) - 2")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
-        internal virtual int InternalIndexOf(T item)
+        [Requires("(@this.root == null || Pal.Unshared(@this.root)) && Pal.Tree<(T, bool)>(@this.root).Height <= 30", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Result == SpecSearchTree.HeapIndex(@this.comparer, Pal.Tree<(T, bool)>(@this.root), item, 0)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("@this.root == Pal.Old(@this.root) && @this.comparer == Pal.Old(@this.comparer)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Frac("p")]
+        internal int InternalIndexOf(T item)
         {
             Node? current = root;
             int count = 0;
@@ -1185,21 +1201,30 @@ namespace System.Collections.Generic
         [Ensures("Result == null || Pal.WellFormed(Result) && SpecSearchTree.InRange(@this.SpecComparer, from, to, true, true, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(Result), from))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
-        internal Node? FindRange(T? from, T? to) => FindRange(from, to, lowerBoundActive: true, upperBoundActive: true);
+        internal Node? FindRange(T? from, T? to) => FindRange(from, to, lowerBoundActive: true, upperBoundActive: true, level: out _);
 
         [Ensures("(Result != null) == SpecSearchTree.AnyInRange(@this.SpecComparer, @this.SpecItems, from, to, lowerBoundActive, upperBoundActive)")]
         [Ensures("Result == null || Pal.WellFormed(Result) && SpecSearchTree.InRange(@this.SpecComparer, from, to, lowerBoundActive, upperBoundActive, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(Result), from))")]
         [Ensures("Result == null || Pal.Unshared(Result)")]
         [Ensures("Pal.Tree<(T, bool)>(Result) == SpecSearchTree.RangeRoot(@this.SpecComparer, @this.SpecNodes, from, to, lowerBoundActive, upperBoundActive)")]
+        [Ensures("level == SortedSetCount.RangeDepth(@this.SpecComparer, @this.SpecNodes, from, to, lowerBoundActive, upperBoundActive)")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Frac("p")]
-        internal Node? FindRange(T? from, T? to, bool lowerBoundActive, bool upperBoundActive)
+        [Rlimit(4)]
+        internal Node? FindRange(T? from, T? to, bool lowerBoundActive, bool upperBoundActive, out int level)
         {
             Node? current = root;
+            level = 0;
+            SortedSetCount.RangeDepthLeSize(comparer, Pal.Tree<(T, bool)>(root), from, to, lowerBoundActive, upperBoundActive);
             while (current != null)
             {
                 Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
+                Pal.Invariant(Pal.Implies(!Pal.Returned(),
+                              0 <= level && level + SortedSetCount.RangeDepth(comparer, Pal.Tree<(T, bool)>(current), from, to, lowerBoundActive, upperBoundActive) ==
+                              SortedSetCount.RangeDepth(comparer, Pal.Tree<(T, bool)>(root), from, to, lowerBoundActive, upperBoundActive)));
+                Pal.Invariant(Pal.Implies(Pal.Returned(),
+                              level == SortedSetCount.RangeDepth(comparer, Pal.Tree<(T, bool)>(root), from, to, lowerBoundActive, upperBoundActive)));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) && Pal.Unshared(current) &&
                               SpecSearchTree.RangeHit(comparer, Pal.Tree<(T, bool)>(current), from, to, lowerBoundActive, upperBoundActive) ==
                               SpecSearchTree.RangeHit(comparer, Pal.Tree<(T, bool)>(root), from, to, lowerBoundActive, upperBoundActive) &&
@@ -1227,6 +1252,7 @@ namespace System.Collections.Generic
                         return current;
                     }
                 }
+                level++;
             }
 
             return null;
@@ -2216,7 +2242,20 @@ namespace System.Collections.Generic
         /// An earlier implementation used delegates to perform these checks rather than returning
         /// an ElementCount struct; however this was changed due to the perf overhead of delegates.
         /// </summary>
-        private unsafe ElementCount CheckUniqueAndUnfoundElements(IEnumerable<T> other, bool returnIfUnfound)
+        // pal: §37. As dotnet/runtime#133116 rewrites it. The bitmap is a `bool[]` rather than a
+        // `BitHelper` over `stackalloc`ed or allocated ints (R37.2). At a view the method's body
+        // is checked again (R32.13): the range is the view's, and the tree its range root.
+        [Requires("Pal.Contents(other).Length <= int.MaxValue")]
+        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
+        [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Requires("@this.SpecCoherent && @this.SpecCountOk && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Rlimit(20)]
+        private ElementCount CheckUniqueAndUnfoundElements(IEnumerable<T> other, bool returnIfUnfound)
         {
             ElementCount result;
 
@@ -2226,43 +2265,131 @@ namespace System.Collections.Generic
                 int numElementsInOther = 0;
                 foreach (T item in other)
                 {
+                    Pal.Invariant(Pal.Implies(!Pal.Broke(), numElementsInOther == 0 && Pal.Index(item) == 0) &&
+                                  Pal.Implies(Pal.Broke(), numElementsInOther == 1 && Pal.Contents(other).Length > 0));
                     numElementsInOther++;
                     // break right away, all we want to know is whether other has 0 or 1 elements
                     break;
                 }
+                SortedSetCount.EmptyCounts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other));
+                SortedSetCount.Counts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other));
                 result.UniqueCount = 0;
                 result.UnfoundCount = numElementsInOther;
                 return result;
             }
 
-            int originalLastIndex = Count;
-            int intArrayLength = BitHelper.ToIntArrayLength(originalLastIndex);
+            int maxHeight = GetApproximateMaxHeight();
 
-            Span<int> span = stackalloc int[StackAllocThreshold];
-            BitHelper bitHelper = (uint)intArrayLength <= StackAllocThreshold ?
-                new BitHelper(span.Slice(0, intArrayLength), clear: true) :
-                new BitHelper(new int[intArrayLength], clear: false);
+            // maxHeight = 12 needs 8kb for bitHelper, use fallback with HashSet if maxHeight > 12 to mitigate
+            // this by limiting memory complexity to O(n).
+            if (maxHeight > 12)
+            {
+                return CheckUniqueAndUnfoundElementsFallback(other, returnIfUnfound);
+            }
+
+            // A perfect tree of height H has H^2 - 1 nodes; (round up to H^2).
+            SortedSetCount.ShiftOne(maxHeight); // pal: 1 << maxHeight == 2^maxHeight, no overflow
+            int indexLimit = (1 << maxHeight);
+            bool[] marked = new bool[indexLimit];
 
             // count of items in other not found in this
-            int UnfoundCount = 0;
+            int unfoundCount = 0;
+            // count of unique items in other found in this
+            int uniqueFoundCount = 0;
+
+            SortedSetCount.LookupIntro(comparer, this.SpecRangeTree, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa);
+            SortedSetCount.FitsPow2(comparer, Pal.Tree<(T, bool)>(root), maxHeight);
+            SortedSetCount.LoopStart(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(marked), Pal.Contents(other));
+            foreach (T item in other)
+            {
+                Pal.Invariant(SortedSetCount.Lookup(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree)) &&
+                              SortedSetCount.Fits(comparer, Pal.Tree<(T, bool)>(root), indexLimit) &&
+                              this.SpecRangeComparer == Pal.Old(this.SpecRangeComparer) && this.SpecRangeLo == Pal.Old(this.SpecRangeLo) && this.SpecRangeHi == Pal.Old(this.SpecRangeHi) &&
+                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 12 && marked.Length == indexLimit &&
+                              0 <= uniqueFoundCount && 0 <= unfoundCount && uniqueFoundCount + unfoundCount <= Pal.Index(item) &&
+                              Pal.Implies(!Pal.Broke(),
+                                  Pal.Implies(returnIfUnfound, unfoundCount == 0) &&
+                                  SortedSetCount.LoopInv(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                                         Pal.Contents(marked), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
+                              Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
+                                  SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
+                // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
+                // out-of-range nodes; without the range check, an out-of-range item counts as found.
+                int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
+                SortedSetCount.LoopStep(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                        Pal.Contents(marked), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
+                if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"
+                {
+                    if (!marked[index])
+                    {
+                        // item hasn't been seen yet
+                        marked[index] = true;
+                        uniqueFoundCount++;
+                    }
+                }
+                else if (index < 0)
+                {
+                    unfoundCount++;
+                    if (returnIfUnfound)
+                    {
+                        SortedSetCount.LoopDone(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                                Pal.Contents(marked), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount);
+                        break;
+                    }
+                }
+                else
+                {
+                    // pal: R37.4. Dead: every position is below `indexLimit` (`Fits`).
+                    Pal.Unreachable();
+                    // Safe guard: since maxHeight isn't guaranteed, we might need to grow the bitHelper.
+                    indexLimit = (int)BitOperations.RoundUpToPowerOf2((uint)index);
+                    Array.Resize(ref marked, indexLimit);
+                }
+            }
+
+            SortedSetCount.LoopEnd(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                   Pal.Contents(marked), Pal.Contents(other), uniqueFoundCount, unfoundCount, returnIfUnfound && unfoundCount > 0);
+            SortedSetCount.Counts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other));
+            result.UniqueCount = uniqueFoundCount;
+            result.UnfoundCount = unfoundCount;
+            return result;
+        }
+
+        // pal: R37.3. Trusted: `HashSet<Node>` (reference equality on nodes) is not modelled.
+        // Its contract is the bitmap version's.
+        [Admit]
+        [Requires("Pal.Contents(other).Length <= int.MaxValue")]
+        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
+        [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Requires("@this.SpecCoherent && @this.SpecRootOk && @this.version == @this._underlying.SpecVersion && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
+        private ElementCount CheckUniqueAndUnfoundElementsFallback(IEnumerable<T> other, bool returnIfUnfound)
+        {
+            ElementCount result;
+            HashSet<Node>? seenNodes = null;
+            // count of items in other not found in this
+            int unfoundCount = 0;
             // count of unique items in other found in this
             int uniqueFoundCount = 0;
 
             foreach (T item in other)
             {
-                int index = InternalIndexOf(item);
-                if (index >= 0)
+                Node? node = FindNode(item);
+                if (node != null)
                 {
-                    if (!bitHelper.IsMarked(index))
+                    seenNodes ??= new HashSet<Node>();
+                    if (seenNodes.Add(node))
                     {
-                        // item hasn't been seen yet
-                        bitHelper.MarkBit(index);
                         uniqueFoundCount++;
                     }
                 }
                 else
                 {
-                    UnfoundCount++;
+                    unfoundCount++;
                     if (returnIfUnfound)
                     {
                         break;
@@ -2271,7 +2398,7 @@ namespace System.Collections.Generic
             }
 
             result.UniqueCount = uniqueFoundCount;
-            result.UnfoundCount = UnfoundCount;
+            result.UnfoundCount = unfoundCount;
             return result;
         }
 
@@ -2407,6 +2534,7 @@ namespace System.Collections.Generic
         [Throws(typeof(ArgumentException), "Pal.Compare(@this.SpecComparer, lowerValue, upperValue) > 0")]
         [Ensures("Pal.Same(Result.SpecMin, lowerValue) && Pal.Same(Result.SpecMax, upperValue) && Result.SpecLowerActive && Result.SpecUpperActive")]
         [Ensures("Result.SpecRootOk && Result.SpecCoherent")]
+        [Ensures("Pal.Implies(@this.SpecVersion != -1, Result.SpecCountOk)")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes) && @this.SpecComparer == Pal.Old(@this.SpecComparer) && @this.SpecVersion == Pal.Old(@this.SpecVersion)")]
         [return: Exactly(typeof(SortedSet<>.TreeSubSet))]
         public virtual SortedSet<T> GetViewBetween(T? lowerValue, T? upperValue)
@@ -3099,6 +3227,31 @@ namespace System.Collections.Generic
         [Wrapping]
         [Ensures("0 <= Result && Result <= 31")]
         private static int Log2(int value) => BitOperations.Log2((uint)value);
+
+        // The max height is approximate for two reasons:
+        // - SortedSet: the limit is based on "Introduction to algorithms" by Thomas H. Cormen,
+        //   but this implementation deviates slightly from the one in the book;
+        //   it does not immediately do the foxups after Adds/Removes elements, but it is lazily done
+        //   on subsequent Adds/Removes. Further proof is needed to guarantee the max height.
+        // - TreeSubSet: it is based on _rootLevel which can be out-of-date
+        //   (and _underlying.GetApproximateMaxHeight which is approximate).
+        // pal: §37. Not approximate: the set's tree is red-black (its `[Refine]`), so its height
+        // is at most `2 * floor(log2(n + 1))` (`SortedSetCount.red_black_height`). At a view
+        // whose root is current, the view's root is `_rootLevel` below the set's.
+        [Ensures("0 <= Result && @this.SpecNodes.Height <= Result")]
+        [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Requires("@this.SpecRootOk", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("0 <= Result && Pal.Tree<(T, bool)>(@this.root).Height <= Result", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("@this.root == Pal.Old(@this.root) && @this.comparer == Pal.Old(@this.comparer)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
+        internal virtual int GetApproximateMaxHeight()
+        {
+            SortedSetCount.RedBlackHeight(this.SpecNodes);
+            // The maximum height of a red-black tree is 2 * log2(n+1).
+            // See page 264 of "Introduction to algorithms" by Thomas H. Cormen
+            return 2 * BitOperations.Log2((uint)count + 1);
+        }
 
         #endregion
     }

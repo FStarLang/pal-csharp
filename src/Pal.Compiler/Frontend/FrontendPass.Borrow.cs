@@ -86,6 +86,10 @@ public static partial class FrontendPass
             };
             if (target is null || model.GetSymbolInfo(target).Symbol is not IFieldSymbol { IsStatic: false } wf ||
                 borrow.IsState(wf)) continue;
+            // A field of a struct the member holds in a local (`result.Count = …`) is
+            // the local's, not the borrowed object's.
+            if (wf.ContainingType.IsValueType && target is MemberAccessExpressionSyntax { Expression: var recv } &&
+                model.GetSymbolInfo(recv).Symbol is ILocalSymbol) continue;
             diagnostics.Error("PALCS0734", Locations.From(target),
                 $"`{target}` is written in a member of `{self.Name}`, which borrows `{owner.Name}`. A " +
                 "borrowing struct reads the object it borrows and never writes it (doc/translation.md R28.7).");
@@ -180,6 +184,8 @@ public static partial class FrontendPass
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
         ImmutableArray<IrExpr> bodyRequires = [], bodyEnsures = [];
+        // R20.2. An `[Admit]`ted member's body is not translated here either.
+        var admitted = !isCtor && Declarations.Has(symbol, known.AdmitAttribute);
         if (isCtor)
         {
             if (candidate.Syntax is ConstructorDeclarationSyntax { Initializer: { } init } chained &&
@@ -198,8 +204,8 @@ public static partial class FrontendPass
         }
         else
         {
-            body = LowerBody(candidate.Syntax, lowerer);
-            var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: true);
+            body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+            var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
             bodyRequires = br;
             bodyEnsures = be;
             body = trimmed ?? body;
@@ -220,6 +226,7 @@ public static partial class FrontendPass
             specs.Decreases, body)
         {
             Preserves = specs.Preserves,
+            Admit = admitted,
             UnconditionalEnsures = ensures.Count,
             Throws = specs.Throws,
             DeclaringClass = ((INamedTypeSymbol)owner.Type).Name,

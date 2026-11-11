@@ -52,6 +52,23 @@ The verified `InternalIndexOf` requires `Height <= 30`, and ensures its result i
 Each case needs about 2^32 modifications first. The verified writes through a view require
 `version != underlying.version + 1`, which is exactly what keeping the view coherent needs.
 
+### 1.3 dotnet/runtime#133116's fix for 1.1 is wrong at a view
+
+**Reproduced** with the PR's code. §37.
+
+* dotnet/runtime#133116 sizes the bitmap from the tree's height, which fixes 1.1 at the
+  set. At a view, it makes `InternalIndexOf` search from the view's root.
+* That root is the node the range search stops at. Its subtree can hold nodes outside the
+  range, and `InternalIndexOf` finds them, so an out-of-range item counts as found.
+* For `s = {0..9}` and `v = s.GetViewBetween(2, 5)`, `v.SetEquals([2, 3, 4, 9])` and
+  `v.IsSubsetOf([2, 3, 4, 9])` return `true`. Both are `false` on .NET 10.
+
+The proof fails only there: the method verifies at the set, and at the view it fails to
+re-establish its loop invariant where it marks an item as found. With
+`int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;` it verifies at both, against
+the counts of items of `other` in the set (in the view's range, at a view). The proof also
+shows that the PR's bitmap-growth branch is dead.
+
 ## 2. Arithmetic that can overflow
 
 Each of these is unchecked `int` arithmetic that wraps for some state the types allow.
@@ -180,6 +197,11 @@ Found because a proof that should have failed passed, or failed for the wrong re
 * A `decreases` clause naming a spec member of `this` produced an ill-typed term in classes
   with array fields (R30.35).
 * A diagnostic (PALCS0751) was missing from the catalog, and the lint caught it.
+* Under `[TranslateAnnotatedOnly]`, a nested struct that an annotated method returned
+  (`SortedSet<T>.ElementCount`) was skipped silently, and the method named a type that did
+  not exist (R37.8).
+* In a view's replica of a base method, a virtual `[Spec]` property of the base was read
+  with the base's body applied to the view's record, not with the view's override (R37.7).
 * A pattern lemma whose `unit` argument did not appear in its SMT pattern never fired. Z3
   only warned. §35.
 * Copying the rest of a loop body into both arms of an `if` (R34.11) made one

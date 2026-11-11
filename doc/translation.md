@@ -11886,3 +11886,121 @@ references in `REFERENCES`:
   System.Collections' `ThrowHelper`, whose members have the names of `common`'s, and the
   harness models `HashHelpers` rather than verifying the runtime's `Common` copy, so its
   modules would collide with `common`'s and `HashCommon`'s (R36.4).
+
+## 37. `SortedSet<T>.CheckUniqueAndUnfoundElements` as dotnet/runtime#133116 rewrites it
+
+dotnet/runtime#133116 fixes §27's miscount (FINDINGS 1.1) by sizing the bitmap from the
+tree's height rather than its count. This section verifies the method as that PR rewrites
+it, at the set and at a view. The harness is `pal/SortedSet` in the runtime tree; the
+specification and its lemmas are `pal/SortedSet/SortedSetCount.fst` and
+`pal/SortedSet/Count.cs`. Nothing in `SortedSetCount.fst` is trusted.
+
+The PR's method:
+* marks each item of `other` it finds at the item's breadth-first position
+  (`InternalIndexOf`) in a bitmap of `1 << GetApproximateMaxHeight()` bits;
+* falls back to a `HashSet<Node>` when that height exceeds 12;
+* grows the bitmap if a position is past its end;
+* at a view, makes `InternalIndexOf` non-virtual, searching from the view's root, and
+  has the view record `_rootLevel`, the depth of its root, which `FindRange` computes.
+
+**What is proved.**
+* At the set: `UnfoundCount > 0` exactly when some item of `other` is not in the set, and
+  `UniqueCount` is the number of distinct items of `other` in the set
+  (`SortedSetCount.found_all` / `unfound_all`), unless the method returned early.
+* At a view: the same, with "in the set" meaning in the set *and within the view's range*
+  (`found_range` / `unfound_range`). `ViewCounts` in `Count.cs` is a client:
+  `s.GetViewBetween(lo, hi)` followed by the call, verified against that contract.
+* `GetApproximateMaxHeight` is not approximate: the tree is red-black, so its height is at
+  most `2 * floor(log2(n + 1))` (`red_black_height`). At a view, the view's root lies
+  `_rootLevel` below the set's root (`range_root_height`).
+* The bitmap never grows (R37.4).
+* The precondition `Pal.Contents(other).Length <= int.MaxValue` rules out the `int`
+  overflow of `unfoundCount`.
+
+**The finding.** As the PR has it, the method is wrong at a view. The view's root is the
+node the range search stops at (`range_root`), and its subtree may hold nodes outside the
+range. `InternalIndexOf` finds those too, so an out-of-range item of `other` counts as found.
+For `s = {0..9}` and `v = s.GetViewBetween(2, 5)`, `v.SetEquals([2, 3, 4, 9])` and
+`v.IsSubsetOf([2, 3, 4, 9])` return `true` (both are `false` on .NET 10). The proof shows this
+as the one failure: the base method verifies, and the view's replica fails only to
+re-establish the loop invariant (`loop_inv_s`) in the "found" branch. The fix, verified at
+both, is
+
+```csharp
+int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
+```
+
+The view's `IsWithinRange` now also ensures that it leaves `root`, `comparer`, `_min` and
+`_max` unchanged, as its `InternalIndexOf` does.
+
+**R37.1. A range named by the base's virtual `[Spec]` members.** The method's body is
+checked twice, at the set and at the view (R32.13), and the loop invariant must name the
+range it counts over at each. The base declares `[Spec] virtual` members `SpecRangeLo`,
+`SpecRangeHi`, `SpecRangeLa`, `SpecRangeUa`, `SpecRangeTree` and `SpecRangeComparer`, and the
+view overrides each (R37.7). A bound is a `Seq<T>`: empty at the set, which has no key to
+name a bound by, and `One(_min)` or `One(_max)` at a view. The `_s` lemmas of
+`SortedSetCount` take bounds in that form. A view's loop pins its bounds with
+`this.SpecRangeLo == Pal.Old(this.SpecRangeLo)`, and `one_inj` recovers `_min` from it.
+
+**R37.2. `bool[]` for the bitmap.** The PR's `BitHelper` is over a `stackalloc`ed span or an
+allocated `int[]`. The verified code uses a `bool[]` of the same number of bits. This is a
+deviation from the PR's code, not a model of it: `BitHelper`'s bit arithmetic is not
+verified.
+
+**R37.3. The trusted fallback.** `CheckUniqueAndUnfoundElementsFallback` is `[Admit]`: its
+`HashSet<Node>` uses reference equality on nodes, which is not modelled. Its contract
+states the same counts as the main method. `BitOperations.RoundUpToPowerOf2` is bound to
+`SortedSetCount.round_up_pow2`, which only the dead growth branch calls.
+
+**R37.4. The growth branch is dead.** Every position below a tree of height `h` is below
+`2^h` (`fits_pow2`), and `indexLimit = 1 << maxHeight` with `height <= maxHeight`. So the
+branch that grows the bitmap is `Pal.Unreachable()`. `shift_one` gives `1 << h == 2^h` for
+`0 <= h <= 12`.
+
+**R37.5. A view of a parameter, for a client.** A view of `this` is re-abstracted between
+two calls (`of_heap`/`to_heap`), and its root loses the facts that tie it to the set's heap.
+A view of a parameter is held at that object's heaps (§32), so `ViewCounts` takes the set
+as a parameter, `s.GetViewBetween(lo, hi)`.
+
+**R37.6. `out _field` in a view's constructor.** `f = M(…, out _g)` in a view's constructor
+gives `_g` the value of the `out` local. The constructor builds the record, and does not
+write it, so the field is an initial value, as R32.13's assignments are. `TreeSubSet`'s
+constructor sets `_rootLevel` this way, from `FindRange`.
+
+**R37.7. A base's virtual `[Spec]` property at a view.** In a view's replica of a base
+method (R32.13), a specification that reads a virtual `[Spec]` property of the base reads
+the view's override of it, expanded. Before, it read the base's body applied to the view's
+record. An override whose body is not an expression is refused (PALCS0805).
+
+**R37.8. A nested struct named by a signature.** Under `[TranslateAnnotatedOnly]` (R20.1),
+a struct nested in a class with a model is translated when an annotated method of the class
+takes or returns it (`SortedSet<T>.ElementCount`). Before, it was skipped silently, and the
+translated method then named a type that did not exist. A generic struct's
+`has_default` instance requires `has_default` only for the type parameters its fields hold.
+
+**R37.9. A non-tail escaping `if` whose arm moves a node pointer.** In a loop body,
+`FindRange` has `if (…) { …; return current; } … current = current.Right;` followed by
+`level++`. Pulse cannot type the join of an arm that moves the local node pointer down a
+region's tree with one that returns. As for R27.27's arms that write a region, the rest of
+the block is copied into the arms. A return's write of the result slot is not a move.
+
+**R20.2 and R28.7, extended.**
+* An `[Admit]`ted member's body is not lowered on the borrowing path either (R20.2).
+* R28.7's check that a borrowing struct's member does not write the borrowed object skips
+  writes to a field of a struct held in a local (`result.UniqueCount = …`).
+
+### Findings (§37)
+
+* dotnet/runtime#133116 is wrong at a view (above), and the one-line range check fixes it.
+* The PR's growth branch is dead. Its HashSet fallback is taken when the height bound
+  exceeds 12: at a set, `2 * floor(log2(n + 1)) > 12`, that is, from 127 items.
+* The translator needed R37.6–R37.9 to accept the PR's code as written.
+* `Pulse.Lib.CSharp.Arith.log2_u32` now also states that its result is `log2_nat` of its
+  argument. Its body is unchanged and proves it.
+
+### Trusted (§37)
+
+* `CheckUniqueAndUnfoundElementsFallback`'s contract (R37.3).
+* The `BitOperations.Log2` binding (R21.5), now used for `GetApproximateMaxHeight`, and the
+  `RoundUpToPowerOf2` binding, used only in dead code (R37.3).
+* The `bool[]` in place of `BitHelper` (R37.2) is a change to the verified code.

@@ -765,6 +765,16 @@ public static partial class FrontendPass
             ? Locations.From(d)
             : Locations.From(fallback.Identifier);
 
+    /// <summary>
+    /// R37.8. A struct nested in a class with a model, which an annotated method of the
+    /// class takes or returns, is translated with it (a method's result struct).
+    /// </summary>
+    private static bool NamedBySignature(INamedTypeSymbol symbol, WellKnown known) =>
+        symbol.ContainingType is { } owner && known.HasModel(owner) &&
+        owner.GetMembers().OfType<IMethodSymbol>().Any(m => Declarations.IsAnnotated(m, known) &&
+            m.Parameters.Select(p => p.Type).Append(m.ReturnType).Any(t =>
+                SymbolEqualityComparer.Default.Equals(t.OriginalDefinition, symbol.OriginalDefinition)));
+
     private static ImmutableArray<StructCandidate> CollectStructs(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
@@ -790,7 +800,8 @@ public static partial class FrontendPass
                       owner.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic &&
                           SymbolEqualityComparer.Default.Equals(
                               (f.Type is IArrayTypeSymbol at ? at.ElementType : f.Type).OriginalDefinition,
-                              symbol.OriginalDefinition)))) continue;
+                              symbol.OriginalDefinition))) &&
+                    !NamedBySignature(symbol, known)) continue;
                 // R22.6. A `[Spec]` struct is an erased record, never copied or stored at run
                 // time, so R15.1's reason for refusing a generic struct does not apply to it.
                 if (!(Declarations.Has(symbol, known.SpecAttribute) && symbol.TypeParameters.All(WellKnown.Unconstrained))
