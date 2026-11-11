@@ -81,12 +81,14 @@ public sealed class WellKnown
         // framework does not define them is a host on which no program mentions them.
         Span = c.GetTypeByMetadataName("System.Span`1");
         ReadOnlySpan = c.GetTypeByMetadataName("System.ReadOnlySpan`1");
+        memoryExtensions = c.GetTypeByMetadataName("System.MemoryExtensions");
     }
 
     // R20.9. Only a compilation with nullable reference types off (`--nullable disable`)
     // has oblivious strings. Elsewhere an unannotated `string` -- a contract's literal,
     // parsed apart from any `#nullable` context -- is the non-null `string` it is in code.
     private readonly bool obliviousStrings;
+    private readonly INamedTypeSymbol? memoryExtensions;
 
     public static WellKnown For(Compilation compilation) => new(compilation);
 
@@ -266,6 +268,25 @@ public sealed class WellKnown
 
     /// <summary>Either span. R17.1 translates both to the same thing.</summary>
     public bool IsAnySpan(ITypeSymbol? t) => IsSpan(t) || IsReadOnlySpan(t);
+
+    /// <summary>R17.5. Only the framework's array AsSpan and integer Slice members are borrows.</summary>
+    public bool IsSpanBorrow(IMethodSymbol method)
+    {
+        var declaration = (method.ReducedFrom ?? method).OriginalDefinition;
+        if (!declaration.DeclaringSyntaxReferences.IsEmpty) return false;
+
+        if (declaration.Name == "AsSpan" && declaration.IsExtensionMethod &&
+            memoryExtensions is not null &&
+            SymbolEqualityComparer.Default.Equals(declaration.ContainingType, memoryExtensions))
+            return declaration.Parameters.Length is >= 1 and <= 3 &&
+                   declaration.Parameters[0].Type is IArrayTypeSymbol { Rank: 1 } &&
+                   declaration.Parameters.Skip(1).All(p => p.Type.SpecialType == SpecialType.System_Int32);
+
+        return declaration.Name == "Slice" && !declaration.IsStatic &&
+               IsAnySpan(declaration.ContainingType) &&
+               declaration.Parameters.Length is 1 or 2 &&
+               declaration.Parameters.All(p => p.Type.SpecialType == SpecialType.System_Int32);
+    }
 
     /// <summary>
     /// R11.1. The F* type a <c>[SpecType]</c> denotes, or null if this is not one. This is

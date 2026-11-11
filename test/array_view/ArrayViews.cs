@@ -62,6 +62,19 @@ public static class ArrayViews
     [Ensures("Result == Contents(a)[i]")]
     public static int Read(ReadOnlySpan<int> a, int i) => a[i];
 
+    [Requires("0 <= from && from < Contents(a).Length")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    [Ensures("Contents(a).Length > from && from >= 0 && Result == Contents(a)[from]")]
+    public static int ReadSuffix(int[] a, int from)
+    {
+        ReadOnlySpan<int> whole = a;
+        ReadOnlySpan<int> window = whole.Slice(start: from);
+        int value = window[0];
+        Pal.Restore(window);
+        Pal.Restore(whole);
+        return value;
+    }
+
     /// <summary>
     /// Two read-only spans that may be the same memory. Sharing is what a fraction buys,
     /// and R17.2 gives each parameter its own permission, so the caller may pass one array

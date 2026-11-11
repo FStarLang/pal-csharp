@@ -1,4 +1,4 @@
-# The regression gate, run on every push and pull request.
+# The regression gate, run on every push and pull request, and on each merge-queue group.
 #
 # The job mirrors what a developer runs locally (`make test`) rather than reimplementing
 # it, so that CI and a working copy cannot disagree about what passing means. Everything
@@ -9,6 +9,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The merge queue tests each pull request merged onto the latest `main` before landing
+  # it; its required checks (`gate`, `analyzer`) must run on the queue's temporary branch.
+  # Each group has its own `gh-readonly-queue/main/…` ref, so the concurrency group below
+  # never cancels one group in favour of another.
+  merge_group:
 
 # Verification is the expensive part of this repository, so superseded runs are cancelled
 # rather than left to finish. `main` is excluded: its runs are what the cache is built
