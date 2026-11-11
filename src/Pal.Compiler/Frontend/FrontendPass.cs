@@ -984,6 +984,11 @@ public static partial class FrontendPass
                 if (Subclasses.IsAlias(symbol, known)) continue;
                 // R32.13. A view is the record of its state, collected with the structs.
                 if (Borrowing.IsView(symbol, known)) continue;
+                var hasPalAnnotations =
+                    Declarations.IsAnnotated(symbol, known) ||
+                    symbol.GetMembers().Any(member => Declarations.IsAnnotated(member, known));
+                if (known.AnnotatedOnly && !hasPalAnnotations && !known.HasModel(symbol))
+                    continue;
                 if (RefuseGenericType(symbol, diagnostics)) continue;
 
                 // R18.1. Every class the collector *looks at* is one it has spoken about:
