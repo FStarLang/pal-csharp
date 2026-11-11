@@ -1402,11 +1402,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         if (field.DeclaringSyntaxReferences is not [var reference] ||
             reference.GetSyntax() is not VariableDeclaratorSyntax { Initializer.Value: { } init } ||
-            !model.Compilation.ContainsSyntaxTree(init.SyntaxTree))
+            !model.Compilation.Owns(init.SyntaxTree))
             return null;
 
         var lowered = new ExprLowerer(
-            model.Compilation.GetSemanticModel(init.SyntaxTree), known, diagnostics, specPosition: false)
+            model.Compilation.Model(init.SyntaxTree), known, diagnostics, specPosition: false)
             .Lower(init);
         if (IsPureValue(lowered)) return lowered with { Loc = loc };
         // R22.8. A shared empty array is read as a fresh one. It has no cells, so no write
@@ -1586,7 +1586,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (returned is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } thisAccess)
             returned = thisAccess.Name;
         if (returned is not IdentifierNameSyntax id) return null;
-        var getterModel = model.Compilation.GetSemanticModel(returned.SyntaxTree);
+        var getterModel = model.Compilation.Model(returned.SyntaxTree);
         return getterModel.GetSymbolInfo(id).Symbol is IFieldSymbol { IsStatic: false } f &&
                SymbolEqualityComparer.Default.Equals(f.ContainingType, prop.ContainingType) &&
                ObjectFields.Contains(f.Name)
@@ -2831,7 +2831,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 Parent.Parent: BaseMethodDeclarationSyntax method
             })
             return false;
-        var calleeModel = method.SyntaxTree == model.SyntaxTree ? model : model.Compilation.GetSemanticModel(method.SyntaxTree);
+        var calleeModel = method.SyntaxTree == model.SyntaxTree ? model : model.Compilation.Model(method.SyntaxTree);
         foreach (var use in method.DescendantNodes().OfType<IdentifierNameSyntax>())
             if (use.Identifier.ValueText == parameter.Name &&
                 SymbolEqualityComparer.Default.Equals(calleeModel.GetSymbolInfo(use).Symbol, parameter) &&

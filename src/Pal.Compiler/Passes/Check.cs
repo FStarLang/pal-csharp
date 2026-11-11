@@ -24,31 +24,34 @@ namespace Pal.Compiler.Passes;
 /// </summary>
 public static class Check
 {
-    public static IrProgram Run(IrProgram program, DiagnosticBag diagnostics)
+    /// <param name="context">R36.3. The referenced units' declarations: looked up, not checked.</param>
+    public static IrProgram Run(IrProgram program, DiagnosticBag diagnostics, ImmutableArray<IrDecl> context = default)
     {
         CheckModuleNames(program, diagnostics);
+        var all = context.IsDefaultOrEmpty ? program.Declarations : [.. program.Declarations, .. context];
 
         // R3.9a. A `[Spec]` struct is erased, so it is spec-only wherever it appears —
         // and unlike the built-in spec-only types that is a fact about the *program*, not
         // about the IR node, so the set has to be collected before anything is checked.
-        var specOnlyStructs = program.Declarations
+        var specOnlyStructs = all
             .OfType<IrStruct>().Where(t => t.IsSpecOnly).Select(t => t.Name).ToImmutableHashSet();
 
-        var methods = program.Declarations.OfType<IrMethod>()
+        var methods = all.OfType<IrMethod>()
             .GroupBy(m => m.Name).ToImmutableDictionary(g => g.Key, g => g.First());
 
         // R9.15. Which conversions have an image under the scheme is a fact about the
         // hierarchy, so the hierarchy has to be in hand before any body is checked.
-        var bases = program.Declarations.OfType<IrClass>()
+        var bases = all.OfType<IrClass>()
             .Where(c => c.BaseClass is not null)
-            .ToImmutableDictionary(c => c.Name, c => c.BaseClass!);
+            .GroupBy(c => c.Name)
+            .ToImmutableDictionary(g => g.Key, g => g.First().BaseClass!);
 
         // R12.3c. R10.7's window exists to place §10's case lemmas, so its rule about where
         // a null test may appear is a rule about classes that *have* a derived invariant.
         // A `[Plain]` class has none, so a null test of one is an ordinary comparison and
         // may appear wherever C# allows — including a loop condition, which is where a
         // cursor's is and which no window could ever be the extent of.
-        var plain = program.Declarations.OfType<IrClass>()
+        var plain = all.OfType<IrClass>()
             .Where(c => c.IsPlain).Select(c => c.Name).ToImmutableHashSet();
 
         foreach (var decl in program.Declarations)
@@ -57,7 +60,7 @@ public static class Check
             {
                 case IrMethod m when m.IsLemma: CheckLemma(m, diagnostics); break;
                 case IrMethod m: CheckMethod(m, specOnlyStructs, plain, diagnostics); break;
-                case IrSpecFunction s: CheckSpecFunction(s, program, diagnostics); break;
+                case IrSpecFunction s: CheckSpecFunction(s, all, diagnostics); break;
             }
 
             if (decl is IrMethod { Body: not null } withBody)
@@ -365,7 +368,7 @@ public static class Check
     // -----------------------------------------------------------------------
 
     private static void CheckSpecFunction(
-        IrSpecFunction s, IrProgram program, DiagnosticBag diagnostics)
+        IrSpecFunction s, ImmutableArray<IrDecl> all, DiagnosticBag diagnostics)
     {
         if (s.IsRecursive && s.Decreases is null)
             diagnostics.Error("PALCS0506", s.Loc,
@@ -378,7 +381,7 @@ public static class Check
 
         // A specification is a pure function of its arguments. Calling an executable
         // method from one would make the specification depend on the heap.
-        var programMethods = program.Declarations
+        var programMethods = all
             .OfType<IrMethod>().Where(m => !m.IsLemma).Select(m => m.Name)
             .ToImmutableHashSet();
 

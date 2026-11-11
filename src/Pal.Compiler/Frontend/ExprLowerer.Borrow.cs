@@ -311,7 +311,7 @@ public sealed partial class ExprLowerer
             } inner ||
             recv.Identifier.ValueText != param.Name)
             return null;
-        var helperModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var helperModel = model.Compilation.Model(body.SyntaxTree);
         if (helperModel.GetSymbolInfo(inner).Symbol is not IMethodSymbol { IsStatic: false } im ||
             im.ContainingType.TypeKind != TypeKind.Interface ||
             structType.FindImplementationForInterfaceMember(im) is not IMethodSymbol impl ||
@@ -347,7 +347,7 @@ public sealed partial class ExprLowerer
         if (decl?.Parent is AccessorListSyntax { Parent: { } owner }) decl = owner;
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
         var writes = decl is not null &&
-                     Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), held.Struct);
+                     Borrowing.WritesState(decl, model.Compilation.Model(decl.SyntaxTree), held.Struct);
         var local = SelfOf(held, loc);
         if (!writes) return BorrowingCall(callee, local, args, loc);
         if (held.SelfPath.IsEmpty) return BorrowingCall(callee, new IrRefArg(loc, local), args, loc);
@@ -398,7 +398,7 @@ public sealed partial class ExprLowerer
             _ => null,
         };
         if (body is null || _inlineDepth > 16) return null;
-        var nested = new ExprLowerer(model.Compilation.GetSemanticModel(body.SyntaxTree), known, diagnostics, specPosition: true)
+        var nested = new ExprLowerer(model.Compilation.Model(body.SyntaxTree), known, diagnostics, specPosition: true)
         {
             Borrow = held,
             ObjectFields = ObjectFields,
@@ -565,7 +565,7 @@ public sealed partial class ExprLowerer
         if (decl is ArrowExpressionClauseSyntax { Parent: { } arrowOwner }) decl = arrowOwner;
         // R27.37. A member that writes the struct is passed the caller's own `ref`; the
         // caller writes it too (Borrowing.WritesState counts the call).
-        var self = Borrowing.WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), bw.Struct)
+        var self = Borrowing.WritesState(decl, model.Compilation.Model(decl.SyntaxTree), bw.Struct)
             ? new IrRefArg(loc, new IrVar(loc, BorrowContext.Self) { Type = bw.StructType })
             : SelfExpr(loc);
         return BorrowingCall(callee, self, args.Select(Lower), loc);
@@ -723,7 +723,7 @@ public sealed partial class ExprLowerer
         var specialized = name + string.Concat(values.OrderBy(kv => kv.Key, StringComparer.Ordinal)
             .Select(kv => $"__{kv.Key}_{(kv.Value ? "true" : "false")}"));
         if (known.SpecializationSeen.Add(specialized))
-            known.SpecializationDemand.Enqueue(new WellKnown.SpecializationRequest(name, specialized, values.ToImmutable()));
+            known.SpecializationDemand.Enqueue(new WellKnown.SpecializationRequest(name, specialized, values.ToImmutable()) { At = loc });
         return specialized;
     }
 
@@ -961,14 +961,14 @@ public sealed partial class ExprLowerer
         if (!ArgumentsInOrder(init.ArgumentList)) return false;
         if (model.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
             target.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is not ConstructorDeclarationSyntax decl ||
-            !model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) || decl.Initializer is not null)
+            !model.Compilation.Owns(decl.SyntaxTree) || decl.Initializer is not null)
         {
             diagnostics.Error("PALCS0804", loc,
                 $"`{init}`. A view's constructor may call a constructor of its base that is declared in the " +
                 "program and calls no other (doc/translation.md R32.13).");
             return false;
         }
-        var tmodel = model.Compilation.GetSemanticModel(decl.SyntaxTree);
+        var tmodel = model.Compilation.Model(decl.SyntaxTree);
         var nested = new ExprLowerer(tmodel, known, diagnostics, specPosition: false) { Borrow = bw };
         foreach (var a in init.ArgumentList.Arguments)
         {

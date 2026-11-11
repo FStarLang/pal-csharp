@@ -171,19 +171,24 @@ public static class SpecBinder
     /// </summary>
     private static CSharpCompilation? IgnoringAccessibility(CSharpCompilation c)
     {
-        var flagsType = typeof(CSharpCompilation).Assembly.GetType("Microsoft.CodeAnalysis.CSharp.BinderFlags");
-        var with = typeof(CSharpCompilationOptions).GetMethod("WithTopLevelBinderFlags",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        if (flagsType is null || with is null || !Enum.IsDefined(flagsType, "IgnoreAccessibility")) return null;
-        var options = with.Invoke(c.Options, [Enum.Parse(flagsType, "IgnoreAccessibility")]);
+        var units = c.References.OfType<CompilationReference>().Select(r => r.Compilation).ToList();
+        // R36.2. Corlib's duplicates of a referenced unit's types lose to the unit's.
+        var options = units.Count > 0
+            ? Units.WithBinderFlags(c.Options, "IgnoreAccessibility", "IgnoreCorLibraryDuplicatedTypes")
+            : Units.WithBinderFlags(c.Options, "IgnoreAccessibility");
+        if (options is null) return null;
         // Ignoring accessibility also makes every internal type of every referenced
         // assembly a candidate, and two framework assemblies declaring the same internal
         // name (`System.Collections.ThrowHelper`) then make a program name ambiguous that
         // the strict compilation resolves. Only the references the program uses are kept.
         var used = c.GetUsedAssemblyReferences();
-        return options is CSharpCompilationOptions o
-            ? c.WithOptions(o).WithReferences(c.References.Where(r => used.Contains(r)))
-            : null;
+        var kept = c.References.Where(r => used.Contains(r));
+        // R36.2. A referenced unit's declarations are metadata to this compilation, not
+        // source, so they no longer win over a framework internal of the same name the way
+        // its own would; another framework assembly declaring one is hidden.
+        if (units.Count > 0)
+            kept = Units.HidingDuplicates(c, kept, Units.DeclaredTypeNames(units), anyAccessibility: true).ToList();
+        return c.WithOptions(options).WithReferences(kept);
     }
 
     /// <summary>

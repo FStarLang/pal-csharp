@@ -23,14 +23,14 @@ public static class RefSnapshots
             return false;
         // A contract is bound in a compilation of its own, without the body's tree; there the
         // call is recognised by its spelling.
-        if (!compilation.ContainsSyntaxTree(body.SyntaxTree))
+        if (!compilation.Owns(body.SyntaxTree))
             return body.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(c =>
                 c is { ArgumentList.Arguments.Count: 0, Expression: MemberAccessExpressionSyntax
                 {
                     Expression: IdentifierNameSyntax { Identifier.ValueText: "Unsafe" },
                     Name.Identifier.ValueText: "NullRef",
                 } });
-        var model = compilation.GetSemanticModel(body.SyntaxTree);
+        var model = compilation.Model(body.SyntaxTree);
         return body.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(c => IsNullRef(c, model));
     }
 

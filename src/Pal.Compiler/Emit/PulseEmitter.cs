@@ -322,10 +322,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     private ILookup<string, IrMethod> _virtuals =
         Enumerable.Empty<IrMethod>().ToLookup(m => "", m => m);
 
-    public ImmutableArray<EmittedModule> Emit(IrProgram program)
+    /// <param name="context">R36.3. The referenced units' declarations. Every table a call
+    /// site reads is built over them too, exactly as when the two were one program; only
+    /// the program's own declarations are emitted.</param>
+    public ImmutableArray<EmittedModule> Emit(IrProgram program, ImmutableArray<IrDecl> context = default)
     {
+        var all = context.IsDefaultOrEmpty ? program.Declarations : [.. program.Declarations, .. context];
         var modules = ImmutableArray.CreateBuilder<EmittedModule>();
-        _classes = program.Declarations.OfType<IrClass>()
+        _classes = all.OfType<IrClass>()
             .GroupBy(c => c.Name).ToDictionary(g => g.Key, g => g.First());
         // R9.19. Both spec emitters need the base chain, to compose R9.6's forgetting when
         // an observation is read off a model further down the hierarchy than it was
@@ -336,17 +340,17 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .ToDictionary(g => g.Key, g => g.First().BaseClass!);
         _spec.Bases = bases;
         _hierarchy.Bases = bases;
-        _virtuals = program.Declarations.OfType<IrMethod>()
+        _virtuals = all.OfType<IrMethod>()
             .Where(m => m is { IsAbstract: true, DeclaringClass: not null })
             .ToLookup(m => m.DeclaringClass!);
-        _slots = [.. program.Declarations.OfType<IrMethod>()
+        _slots = [.. all.OfType<IrMethod>()
             .Where(m => m.IsAbstract).Select(m => m.Name)];
         // R18.3. Two declarations may not compete for one name, and the frontend refuses
         // the way that happens today (two constructors, PALCS0501). These lookups are keyed
         // by name, so a collision that slipped through would abort the process inside
         // `ToDictionary` — no diagnostic, no output, a stack trace naming a dictionary.
         // Grouping instead means a frontend refusal is what the user sees.
-        _overrides = program.Declarations.OfType<IrMethod>()
+        _overrides = all.OfType<IrMethod>()
             .Where(m => m.Overrides is not null)
             .GroupBy(m => m.Name)
             .ToDictionary(g => g.Key, g => g.First().Overrides!);
@@ -354,32 +358,32 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // argument's invariant with them, by position, so that a call site can stop owning
         // what it handed over. Computed from the same predicate the callee's own contract
         // is built from, once, because it is a property of the program and not of a call.
-        _methods = program.Declarations.OfType<IrMethod>()
+        _methods = all.OfType<IrMethod>()
             .GroupBy(m => m.Name)
             .ToDictionary(g => g.Key, g => g.First());
-        _consumed = program.Declarations.OfType<IrMethod>()
+        _consumed = all.OfType<IrMethod>()
             .GroupBy(m => m.Name)
             .ToDictionary(
                 g => g.Key,
                 g => Enumerable.Range(0, g.First().Parameters.Length)
                     .Where(i => MethodPlan.Consumed(g.First(), g.First().Parameters[i], _methods))
                     .ToImmutableHashSet());
-        _heapsKept = HeapsKept(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _heapIndexed = program.Declarations.OfType<IrMethod>()
+        _heapsKept = HeapsKept(all.OfType<IrMethod>().ToImmutableArray());
+        _heapIndexed = all.OfType<IrMethod>()
             .Select(m => (m, HeapRegions(m)))
             .Where(x => !x.Item2.IsEmpty)
             .GroupBy(x => x.m.Name)
             .ToDictionary(g => g.Key, g => g.First().Item2);
-        _openMethods = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
-        _readOnly = [.. program.Declarations.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
-        _compared = [.. program.Declarations.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
-        _regionHeld = RegionHeld(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _ownerBorrows = OwnerBorrows(program.Declarations.OfType<IrMethod>().ToImmutableArray());
-        _raising = new HashSet<string>(program.Declarations.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
+        _openMethods = new HashSet<string>(all.OfType<IrMethod>().Where(m => m.Open).Select(m => m.Name));
+        _readOnly = [.. all.OfType<IrMethod>().Where(m => m.IsReadOnly).Select(m => m.Name)];
+        _compared = [.. all.OfType<IrMethod>().SelectMany(m => ComparedClasses(m, _classes))];
+        _regionHeld = RegionHeld(all.OfType<IrMethod>().ToImmutableArray());
+        _ownerBorrows = OwnerBorrows(all.OfType<IrMethod>().ToImmutableArray());
+        _raising = new HashSet<string>(all.OfType<IrMethod>().Where(m => !m.Throws.IsEmpty).Select(m => m.Name));
         // R27.38. A call to an owner's method that gives its heaps back writes no region.
         foreach (var kept in _heapsKept)
             if (!_regionHeld.ContainsKey(kept)) _regionHeld[kept] = [];
-        _ownedFields = program.Declarations.OfType<IrStruct>()
+        _ownedFields = all.OfType<IrStruct>()
             .Where(st => st.Fields.Any(f => f.IsOwned))
             .GroupBy(st => st.Name)
             .ToDictionary(g => g.Key, g => g.First().Fields.Where(f => f.IsOwned).ToImmutableArray());
@@ -577,7 +581,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             if (decl is IrClass { IsAbstract: false, BaseClass: { } baseName } leaf &&
                 _classes.TryGetValue(baseName, out var super))
             {
-                var overrides = program.Declarations.OfType<IrMethod>()
+                var overrides = all.OfType<IrMethod>()
                     .Where(m => m.DeclaringClass == leaf.Name && m.Overrides is not null)
                     .ToImmutableArray();
                 var vtbl = _hierarchy.EmitVtbl(leaf, super, Visible(super), overrides);

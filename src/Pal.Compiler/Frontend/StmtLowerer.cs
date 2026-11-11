@@ -1176,9 +1176,9 @@ public sealed class StmtLowerer(
             if (callee.GetAttributes().Any(a => a.AttributeClass?.Name is "SpecAttribute" or "LemmaAttribute" or "PureAttribute"))
                 return false;
             var body = callee.OriginalDefinition.DeclaringSyntaxReferences.Select(r => r.GetSyntax()).FirstOrDefault();
-            if (body is null || !m.Compilation.ContainsSyntaxTree(body.SyntaxTree)) return true;
+            if (body is null || !m.Compilation.Owns(body.SyntaxTree)) return true;
             if (!visiting.Add(callee.OriginalDefinition)) return false;
-            var calleeModel = m.Compilation.GetSemanticModel(body.SyntaxTree);
+            var calleeModel = m.Compilation.Model(body.SyntaxTree);
             return body.DescendantNodes().Any(n => WritesElement(n) ||
                 n is InvocationExpressionSyntax inner && Writes(inner, calleeModel));
         }
@@ -1575,7 +1575,7 @@ public sealed class StmtLowerer(
             return true;
         if (method.DeclaringSyntaxReferences is not [var decl]) return true;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is AttributeListSyntax) continue;
@@ -1820,7 +1820,7 @@ public sealed class StmtLowerer(
             return null;
         if (method.DeclaringSyntaxReferences is not [var decl]) return null;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is InvocationExpressionSyntax inv &&
@@ -1894,7 +1894,7 @@ public sealed class StmtLowerer(
         if (method.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute")) return false;
         if (method.DeclaringSyntaxReferences is not [var decl]) return false;
         var body = decl.GetSyntax();
-        var calleeModel = model.Compilation.GetSemanticModel(body.SyntaxTree);
+        var calleeModel = model.Compilation.Model(body.SyntaxTree);
         foreach (var n in body.DescendantNodes())
         {
             if (n is AttributeListSyntax) continue;

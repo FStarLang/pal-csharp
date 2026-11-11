@@ -69,7 +69,10 @@ public sealed class WellKnown
         SpecCtorAttribute = Type("SpecCtorAttribute");
         SpecCaseAttribute = Type("SpecCaseAttribute");
         SpecBindingAttribute = Type("SpecBindingAttribute");
-        foreach (var binding in Declarations.All(c.Assembly, SpecBindingAttribute))
+        // R36.6. A referenced unit's bindings hold here too: its declarations are named
+        // here, and a binding of one of them is how they are named. The unit's own come
+        // last; one that disagrees with a reference is PALCS0760's.
+        foreach (var binding in Units.WithReferences(c).Reverse().SelectMany(u => Declarations.All(u.Assembly, SpecBindingAttribute)))
             if (Declarations.StringArgument(binding, 0) is { } member &&
                 Declarations.StringArgument(binding, 1) is { } term)
                 bindings[member] = term;
@@ -124,7 +127,11 @@ public sealed class WellKnown
     public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
 
     /// <summary>R35.18. A method translated at constant values of its <c>[Specialize]</c> parameters.</summary>
-    public sealed record SpecializationRequest(string Source, string Name, ImmutableDictionary<string, bool> Values);
+    public sealed record SpecializationRequest(string Source, string Name, ImmutableDictionary<string, bool> Values)
+    {
+        /// <summary>The first call that asked for it.</summary>
+        public Ir.IrLoc? At { get; init; }
+    }
 
     /// <summary>R35.18. The specialization being lowered, while one is.</summary>
     public SpecializationRequest? Specialization { get; set; }
@@ -152,11 +159,16 @@ public sealed class WellKnown
     /// <summary>R20.1b. An exception class left untranslated under <c>[TranslateAnnotatedOnly]</c>.</summary>
     public void SkipException(INamedTypeSymbol symbol) => skippedExceptions.Add(symbol);
 
+    /// <summary>R36.3. The exception classes the referenced units translate.</summary>
+    public HashSet<string> ReferencedExceptions { get; } = new(StringComparer.Ordinal);
+
     public bool IsExceptionClass(ITypeSymbol? type)
     {
         if (type is not INamedTypeSymbol { TypeKind: TypeKind.Class } named) return false;
         if (named.DeclaringSyntaxReferences.IsEmpty) return false;
         if (skippedExceptions.Contains(named)) return false;
+        // R36.3. A referenced unit's exception class is translated when that unit translated it.
+        if (Compilation.IsReferenced(named.OriginalDefinition) && !ReferencedExceptions.Contains(named.Name)) return false;
         for (var t = named.BaseType; t is not null; t = t.BaseType)
             if (IsSystemException(t)) return true;
         return false;

@@ -96,8 +96,8 @@ public static class Borrowing
         if (!IsFillOf(a, f, model, known)) return false;
         foreach (var r in f.ContainingType.OriginalDefinition.DeclaringSyntaxReferences)
         {
-            if (!model.Compilation.ContainsSyntaxTree(r.SyntaxTree)) return false;
-            var m = model.Compilation.GetSemanticModel(r.SyntaxTree);
+            if (!model.Compilation.Owns(r.SyntaxTree)) return false;
+            var m = model.Compilation.Model(r.SyntaxTree);
             foreach (var node in r.GetSyntax().DescendantNodes())
             {
                 var written = node switch
@@ -245,8 +245,8 @@ public static class Borrowing
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol { IsStatic: false } callee &&
                 SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
                 callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } decl &&
-                model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) &&
-                WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), self, seen))
+                model.Compilation.Owns(decl.SyntaxTree) &&
+                WritesState(decl, model.Compilation.Model(decl.SyntaxTree), self, seen))
                 return true;
             // R32.12. A call of a writer member of the struct a wrapping struct wraps writes it.
             if (node is InvocationExpressionSyntax
@@ -261,8 +261,8 @@ public static class Borrowing
                 model.GetSymbolInfo(inner).Symbol is IMethodSymbol { IsStatic: false } innerCallee &&
                 SymbolEqualityComparer.Default.Equals(innerCallee.ContainingType.OriginalDefinition, wt.OriginalDefinition) &&
                 innerCallee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } innerDecl &&
-                model.Compilation.ContainsSyntaxTree(innerDecl.SyntaxTree) &&
-                WritesState(innerDecl, model.Compilation.GetSemanticModel(innerDecl.SyntaxTree), wt, seen))
+                model.Compilation.Owns(innerDecl.SyntaxTree) &&
+                WritesState(innerDecl, model.Compilation.Model(innerDecl.SyntaxTree), wt, seen))
                 return true;
             var target = node switch
             {
@@ -310,8 +310,8 @@ public static class Borrowing
             if (callee is null) return;
             var target = viaBase ? callee : Subclasses.OverrideOf(view, callee) ?? callee;
             foreach (var r in target.DeclaringSyntaxReferences)
-                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree))
-                    ViewWrites(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, written, seen);
+                if (model.Compilation.Owns(r.SyntaxTree))
+                    ViewWrites(r.GetSyntax(), model.Compilation.Model(r.SyntaxTree), view, known, written, seen);
         }
         foreach (var node in body.DescendantNodes())
         {
@@ -379,8 +379,8 @@ public static class Borrowing
             var target = receiver is BaseExpressionSyntax ? callee
                 : Subclasses.OverrideOf(view, callee) ?? callee;
             foreach (var r in target.DeclaringSyntaxReferences)
-                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree) &&
-                    WritesOwner(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, seen))
+                if (model.Compilation.Owns(r.SyntaxTree) &&
+                    WritesOwner(r.GetSyntax(), model.Compilation.Model(r.SyntaxTree), view, known, seen))
                     return true;
         }
         return false;
@@ -413,7 +413,7 @@ public static class Borrowing
             if (compilation is null || !init.ThisOrBaseKeyword.IsKind(SyntaxKind.ThisKeyword) ||
                 decl.Body is { Statements.Count: > 0 } || decl.ExpressionBody is not null)
                 return null;
-            var m = compilation.GetSemanticModel(decl.SyntaxTree);
+            var m = compilation.Model(decl.SyntaxTree);
             if (m.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
                 OwnerParameter(target, owner, compilation) is not { } tp)
                 return null;
@@ -452,7 +452,7 @@ public static class Borrowing
         IMethodSymbol ctor, ConstructorDeclarationSyntax decl, IFieldSymbol owner, Compilation compilation)
     {
         if (ctor.ContainingType is not { TypeKind: TypeKind.Struct } self || decl.Initializer is not null) return null;
-        var model = compilation.GetSemanticModel(decl.SyntaxTree);
+        var model = compilation.Model(decl.SyntaxTree);
         IEnumerable<ExpressionSyntax> exprs = decl.Body?.Statements.OfType<ExpressionStatementSyntax>()
             .Select(s => s.Expression) ?? [];
         if (decl.ExpressionBody is { } eb) exprs = [eb.Expression];
