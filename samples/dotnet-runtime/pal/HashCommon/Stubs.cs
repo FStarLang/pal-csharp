@@ -9,13 +9,6 @@ namespace System
         internal const string LegacyFormatterImplMessage = "This API supports obsolete formatter-based serialization.";
         internal const string LegacyFormatterImplDiagId = "SYSLIB0051";
     }
-
-    internal static class SR
-    {
-        internal const string Arg_HTCapacityOverflow = "Hashtable's capacity overflowed and went negative.";
-        internal const string Argument_AddingDuplicateWithKey = "An item with the same key has already been added.";
-        internal static string Format(string format, object? arg0) => format;
-    }
 }
 
 namespace System.Collections.Generic

@@ -151,6 +151,6 @@ internal enum ExceptionResource
     Arg_ArrayPlusOffTooSmall, Arg_NonZeroLowerBound, InvalidOperation_IncompatibleComparer,
     NotSupported_KeyCollectionSet, NotSupported_ValueCollectionSet, Serialization_MissingKeys,
     Serialization_NullKey,
-    // sortedset family (Queue<T> in the SortedSet harness)
+    // Queue<T>
     ArgumentOutOfRange_IndexMustBeLessOrEqual,
 }

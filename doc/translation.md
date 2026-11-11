@@ -6790,6 +6790,9 @@ blocks; `verify.mk` passes `$(PAL_CS_FLAGS)` through. dotnet/runtime builds its 
 that way (`SortedSet.cs` uses `?.=` and `stackalloc`). The translator still refuses unsafe
 code in any member it translates.
 
+`palcs --reference DIR` (repeatable) translates against a unit already translated into
+`DIR`, without translating it again; §36 describes it, and `verify.mk`'s `REFERENCES`.
+
 ### R25.12 Partial classes
 
 A `partial` class is collected once. It is collected at the declaration that holds its
@@ -11754,3 +11757,128 @@ is the set's version, `count` is the number of in-range items (see Findings).
 lemmas. Its consistency argument is in the interface's comment. It also holds `unbox_or`
 (R35.12), which is a definition from `is_a` and `unbox`, so it adds no assumption.
 
+
+## 36. Verification units
+
+A *unit* is a set of C# sources translated together, into one output directory. Until this
+section every translation was a unit of its own, and code that two harnesses shared was
+translated, and verified, by both: the SortedSet harness re-translated `List.cs`,
+`Queue.cs` and `Stack.cs`. With `palcs --reference DIR` (repeatable), a unit may use the
+declarations of a unit translated before into `DIR`. Those declarations are not
+translated again, and the modules the unit emits refer to the referenced unit's modules
+by the names that unit gave them. So every F* module is emitted, and checked, by exactly
+one unit, in dependency order. The tests are `test/unit_lib` with `test/unit_client`, and
+`test/unit_diagnostics` for the refusals; `samples/dotnet-runtime` is organised as a DAG of
+units (its README lists it).
+
+**R36.1. The manifest.** Every translation writes `unit.json` into its output directory:
+* `assembly`, the unit's assembly name (R36.2);
+* `nullable`, `preview` and `unsafe`, how it was compiled (R20.9, R25.11);
+* `sources`, each source's absolute path and SHA-256;
+* `references`, the absolute output directories of the units it referenced;
+* `modules`, the modules it emitted, sorted.
+
+`--reference DIR` reads `DIR/unit.json` and, transitively, the manifests of the units it
+references. A directory without a manifest, a cycle of references, and a unit whose
+sources no longer hash as they did are refused before anything is compiled: the unit was
+translated, and verified, from other text, and translating its declarations from the new
+text would describe modules that do not exist. The referenced units are ordered
+dependencies first.
+
+**R36.2. Compiling with references.** A referenced unit is compiled again, from the sources
+and options in its manifest, against the compilations of the units it references; the
+primary unit is compiled against all of them. A reference is a Roslyn
+`CompilationReference`, not a DLL, because the frontend reads a callee's syntax and not only
+its symbol (its body for R4.11's analysis, R28's borrowing and R19's exceptions, a class's
+constructor and subclasses). A model of a referenced tree is taken from the compilation
+that owns it.
+
+A unit is a fragment of one assembly's sources: the runtime compiles `SortedSet.cs` and
+`Stack.cs` into one `System.Collections.dll`, and its code calls `Stack<T>`'s internals.
+So every unit's compilation carries a synthesized `[assembly: InternalsVisibleTo]` for
+each unit of the build that references it, and each unit has an assembly name of its own,
+`PalUnit_` followed by a hash of its output directory, the same in every build. A
+declaration of a referenced unit is metadata to its client, not source, so it does not
+win over a framework type of the same name the way the client's own declaration would
+(CS0436). It is made to win: a duplicate in corlib loses by Roslyn's
+`IgnoreCorLibraryDuplicatedTypes` binder flag (`List<T>`), and another framework assembly
+that declares one publicly (`System.Collections` declares `Stack<T>`) is referenced
+behind an extern alias. R24.3's accessibility-ignoring compilation does the same for a
+framework *internal* of the same name (`System.ThrowHelper` is internal to
+`System.Memory` as well). An alias, rather than dropping the reference, keeps the set of
+references, and so the identity of every symbol, unchanged.
+
+**R36.3. Lowering with references; emitting only the primary unit.** Each referenced unit
+is lowered, normalized and checked in turn, with the declarations of the units it
+references as context. A unit that does not translate cleanly cannot be referenced. The
+primary unit is then lowered with all of their declarations as context, and every table
+lookup sees them: a callee's contract, a class's fields and invariant, a struct's
+layout, a vtable's overrides, an exception class. Only the primary unit's declarations
+are emitted. A module name is a function of the declaration it comes from (R3, R28.2), so
+a reference from the client names the module the referenced unit emitted, as it would if
+both were one unit. The SortedSet harness, referencing `List`, `Queue` and `Stack`, emits
+exactly the 205 modules of its own that it emitted when it translated all four, byte for
+byte, and none of theirs.
+
+**R36.4. A module is emitted by one unit (PALCS0758).** Module names do not include
+namespaces or, for a class nested in a class, the outer class (`Dictionary.KeyCollection`
+and `SortedDictionary.KeyCollection` are both `KeyCollection`). So two units can name one
+module, and F* would take whichever came first on its include path. A module the primary
+unit emits that a referenced unit also emits is refused, as are two referenced units
+emitting one module.
+
+**R36.5. `[TranslateAnnotatedOnly]` is decided once (PALCS0761).** R20.1 decides which
+declarations are translated, and so which modules exist. A unit translated with it may
+not reference one translated without it, or the other way round.
+
+**R36.6. Bindings are inherited (PALCS0760).** A referenced unit's `[SpecBinding]`s
+(R21.11) hold in its clients: the referenced unit's modules were proved under them, and a
+client calls those modules. A client may restate one, and two units may state the same
+one. Binding one member to two terms is refused, whether by a client and a unit it
+references or by two units it references, because a binding is a trusted axiom and
+nothing checks two of them against each other.
+
+**R36.7. No subclass of a referenced class (PALCS0759).** Several rules decide a class's
+translation from the subclasses that are visible in the compilation: whether it is a leaf
+whose methods are verified at its exact type, whether a concrete class is open (R9.18),
+and which overrides its vtable dispatches to. The referenced unit made those decisions
+without the client. A client class deriving from a class of a referenced unit would make
+them wrong after they were verified, so it is refused; the two classes must be translated
+in one unit. Implementing a referenced interface is not refused.
+
+**R36.8. Building units (`test/verify.mk`).** A harness names the harness directories it
+references in `REFERENCES`:
+* Each referenced harness is translated and verified first, by a recursive `make`. When
+  the caller has already built it (`REFERENCES_BUILT=1`, set by `test/Makefile` and
+  `samples/dotnet-runtime/Makefile`, which order the harnesses along the DAG), the harness
+  only checks that the referenced unit's `.verified` stamp is newer than everything in its
+  output. Then two harnesses referencing one unit under `make -j` do not build it at the
+  same time.
+* `palcs` is passed `--reference ref/out`, and the translation is redone when a referenced
+  manifest changes.
+* F* is given each referenced unit's `_cache` and `out` (transitively, from the manifests,
+  by `test/unit-closure.py`), before the harness's own, and those units' modules in
+  `--already_cached`. So F* loads their `.checked` files and fails, rather than checking
+  them again, if one is stale. A `.checked` outside the harness's own cache is never made
+  there.
+* Every unit emits a `TranslationErrors` sentinel. Each is checked into a private cache
+  directory that no include path names, so that a client never finds a referenced unit's.
+* A unit is a fragment of one assembly, so the `cs` check compiles it with the sources of
+  the units it references, and the editor project (`test/cs-projects.sh`) includes them.
+
+### Findings (§36)
+
+* `samples/dotnet-runtime` previously checked 1,433 module copies, 1,066 of them distinct.
+  As twelve units it checks 1,122, each once. Thirty-six module names are still emitted
+  by two units, `Dictionary` and `OrderedDictionary` (`KeyCollection`, `ValueCollection`,
+  `HashHelpers.ExpandPrime`, `ThrowHelper.ThrowVersionCheckFailed`): they are different
+  declarations, in units neither of which references the other, so no F* include path
+  holds both.
+* Making the shared code one unit exposed one stub divergence: the Queue harness had its
+  own `ThrowHelper`, which numbered `ExceptionResource` differently from the one every
+  other harness used, so `Queue.CopyTo` was a different module in the SortedSet harness.
+  The stubs are now one unit, `common`.
+* `OrderedDictionary` stays a unit of its own. The runtime compiles it against
+  System.Collections' `ThrowHelper`, whose members have the names of `common`'s, and the
+  harness models `HashHelpers` rather than verifying the runtime's `Common` copy, so its
+  modules would collide with `common`'s and `HashCommon`'s (R36.4).

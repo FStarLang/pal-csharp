@@ -72,7 +72,8 @@ Besides the pal-csharp attributes and `Pal.*` ghost calls:
   includes `test/verify.mk`. Any `.cs` beside it stands in for runtime internals the
   collection uses (`SR`, `ThrowHelper`, etc.), and any `.fst` is an F* theory the
   contracts refer to.
-- `pal/common/`, `pal/HashCommon/`: stand-ins shared by several harnesses.
+- `pal/common/`, `pal/HashCommon/`: stand-ins shared by several harnesses, each a unit of
+  its own (see Running).
 
 The harnesses only translate and verify. They do not run the stock-compiler check that
 `test/` does, because these files compiled on their own would collide with the BCL types
@@ -90,10 +91,26 @@ out). In CI each harness is its own job, with `OCAMLRUNPARAM=o=20`: a few module
 (`Dictionary.TryInsert`, `Dictionary.Remove`, `HashSet.AddIfNotPresent`) take several GB for
 F*, and a lower GC space overhead keeps them inside a runner's memory.
 
-The SortedSet harness also translates `List.cs`, `Queue.cs` and `Stack.cs`, which their own
-harnesses verify. Its Makefile names them in `VERIFIED_BY`, and `test/verified-by.py`
-compares the generated F*. If a module and everything it depends on in this harness are
-byte-identical to an owner's, the module is checked with `--admit_smt_queries true`, and
-the owner discharges its proof obligations. Any module that differs is verified as usual.
-For example, `Queue.CopyTo` differs because this harness numbers `ExceptionResource`
-differently. An owner may not use `VERIFIED_BY` itself.
+Shared code is translated and verified in exactly one harness: each harness is a
+*verification unit* (`doc/translation.md` §36), and one that uses another's declarations
+names its directory in `REFERENCES`. `palcs --reference` then translates only the
+harness's own sources, and F* uses the referenced harness's `.checked` files rather than
+checking those modules again. The units form this DAG:
+
+| unit | references | sources of its own |
+| --- | --- | --- |
+| `common` | | `ThrowHelper`, `SR`, `EnumerableHelpers`, `BitHelper`, shared bindings |
+| `HashCommon` | `common` | `HashHelpers` (the runtime's `Common` copy) and its stand-ins |
+| `List`, `Queue`, `Stack`, `LinkedList`, `SortedList`, `PriorityQueue` | `common` | the collection |
+| `Dictionary`, `HashSet` | `HashCommon` | the collection |
+| `SortedSet` | `List`, `Queue`, `Stack` | `SortedSet`, `SortedDictionary` |
+| `OrderedDictionary` | | the collection, System.Collections' `ThrowHelper`, a `HashHelpers` model |
+
+`OrderedDictionary` stands alone because it is compiled, in the runtime, against
+System.Collections' own `ThrowHelper` and its own `HashHelpers`, whose declarations have the
+names `common`'s and `HashCommon`'s do.
+
+Making a harness first makes the harnesses it references (recursively, so `make -C
+pal/SortedSet` also verifies `List`, `Queue`, `Stack` and `common` if they are out of date).
+`make -C samples/dotnet-runtime` instead orders the harnesses along the DAG and builds each
+once, so that two clients of one unit never build it at the same time.

@@ -1,6 +1,8 @@
 # Verify dotnet/runtime's PriorityQueue<TElement, TPriority> with pal-csharp (sample; see ../../README.md).
 GENERIC  := ../../src/libraries/System.Collections/src/System/Collections/Generic
-SOURCES  := $(GENERIC)/PriorityQueue.cs ../../src/libraries/Common/src/System/Collections/Generic/EnumerableHelpers.cs $(wildcard ../common/*.cs) ../HashCommon/Bindings.cs $(wildcard *.cs)
+# HashCommon's bindings, and not the unit: PriorityQueue calls no HashHelpers.
+SOURCES  := $(GENERIC)/PriorityQueue.cs ../common/GlobalUsings.cs ../common/Scope.cs ../HashCommon/Bindings.cs $(wildcard *.cs)
+REFERENCES := ../common
 
 # The stock-compiler check (`cs`) is the runtime's own build. The harness only
 # translates and verifies.
