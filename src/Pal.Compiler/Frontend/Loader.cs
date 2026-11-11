@@ -17,7 +17,7 @@ public static class Loader
 
     public static CSharpCompilation Create(
         IEnumerable<string> sourcePaths, string assemblyName = "PalInput", bool nullable = true,
-        bool preview = false, bool allowUnsafe = false)
+        bool preview = false, bool allowUnsafe = false, IEnumerable<string>? references = null)
     {
         var parseOptions = new CSharpParseOptions(
             preview ? LanguageVersion.Preview : LanguageVersion.Latest,
@@ -30,7 +30,7 @@ public static class Loader
         return CSharpCompilation.Create(
             assemblyName,
             trees,
-            ReferenceSet(),
+            [.. ReferenceSet(), .. UserReferences(references)],
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
                                 nullableContextOptions: nullable
@@ -41,6 +41,16 @@ public static class Loader
 
     private static Microsoft.CodeAnalysis.Text.SourceText SourceText(string path) =>
         Microsoft.CodeAnalysis.Text.SourceText.From(File.ReadAllText(path), System.Text.Encoding.UTF8);
+
+    /// <summary>
+    /// R21.5a. The assemblies a program was given with <c>-r</c>: libraries it calls but
+    /// whose source is not part of the compilation, such as a vendor SDK. They are
+    /// referenced as metadata so that Roslyn binds each call to the member the production
+    /// build binds it to, overload for overload. Nothing in them is translated, and a call
+    /// into one is still refused unless a <c>[SpecBinding]</c> gives the member a model.
+    /// </summary>
+    private static IEnumerable<MetadataReference> UserReferences(IEnumerable<string>? paths) =>
+        (paths ?? []).Select(p => (MetadataReference)MetadataReference.CreateFromFile(Path.GetFullPath(p)));
 
     /// <summary>
     /// References: the shared framework plus <c>Pal.Annotations</c>, and nothing else.

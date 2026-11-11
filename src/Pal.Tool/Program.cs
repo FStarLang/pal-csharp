@@ -36,6 +36,7 @@ public static class Program
         var nullable = true;
         var preview = false;
         var allowUnsafe = false;
+        var references = new List<string>();
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -60,6 +61,16 @@ public static class Program
                 // `AllowUnsafeBlocks`; a file from it compiles only as it is built.
                 case "--preview": preview = true; break;
                 case "--unsafe": allowUnsafe = true; break;
+                // R21.5a. A library the program calls but does not contain, as metadata.
+                case "-r" or "--reference" when i + 1 < args.Length:
+                    var reference = args[++i];
+                    if (!File.Exists(reference))
+                    {
+                        Console.Error.WriteLine($"palcs: reference `{reference}` does not exist");
+                        return 2;
+                    }
+                    references.Add(reference);
+                    break;
                 case "-h" or "--help": Usage(); return 0;
                 default:
                     if (args[i].StartsWith('-')) { Console.Error.WriteLine($"palcs: unknown option `{args[i]}`"); return 2; }
@@ -75,7 +86,8 @@ public static class Program
         var diagnostics = new DiagnosticBag();
         var watch = Stopwatch.StartNew();
 
-        var compilation = Loader.Create(sources, nullable: nullable, preview: preview, allowUnsafe: allowUnsafe);
+        var compilation = Loader.Create(sources, nullable: nullable, preview: preview, allowUnsafe: allowUnsafe,
+            references: references);
         var csharpErrors = compilation.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
@@ -271,6 +283,8 @@ public static class Program
               --nullable M   compile with nullable reference types `enable`d (default) or `disable`d
               --preview      compile with `LangVersion=preview`, as dotnet/runtime does
               --unsafe       allow `unsafe` blocks in members that are not translated
+          -r, --reference DLL  reference a library assembly (repeatable); its members are
+                             callable only through `[assembly: SpecBinding]` models
           -h, --help         show this message
         """);
 }

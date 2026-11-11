@@ -6017,6 +6017,48 @@ A library member the program cannot annotate is bound by documentation-comment I
 like a `[SpecOp]` (R11.2). A user-defined operator so bound is an application wherever C#
 calls it. Each binding is an axiom (R20.8).
 
+**R21.5a (libraries as metadata: `palcs -r`).** A library the program calls but does not
+contain, such as a vendor SDK, is passed as an assembly: `palcs -r Sdk.dll`, repeatable
+(`PAL_CS_REFERENCES` in a harness Makefile, which `test/build-cs.sh` and
+`test/cs-projects.sh` reference too). It is metadata only. Nothing in it is translated, and
+a call into it is refused (PALCS0592) unless a `[SpecBinding]` names the member. So the
+reference adds no trust of its own; each binding still does. What it buys is fidelity:
+Roslyn resolves every call against the assembly the production build links, so overload
+resolution is the real one, and no hand-written C# stand-in for the library's API can
+drift from it. `test/external_library` is the example, against a library built separately
+in `test/_external_sdk`.
+
+`PAL_CS_REFERENCES` accepts space-separated relative or absolute DLL paths. The stock
+C# project resolves them to absolute paths and XML-escapes its reference entries.
+
+**A binding may name only a member that modifies none of its arguments.** A binding is
+applied as a pure term, so the caller keeps every fact it held about the arguments, and a
+member that writes one (`void SetFlag(Entity e, bool f)`, or `bool TrySet(Entity e, …)`)
+is not the function the binding says it is. The translator cannot tell from metadata
+that a member writes, so this is the binding author's obligation, like the rest of R20.8.
+A `void` member bound to a pure term has no meaning at all: today it is emitted as a
+discarded term, which F\* rejects only when the term is not `unit`. Writers wait on a rule
+that lets a binding name what it writes, and refuses a `void` member bound without one.
+
+**R21.5b (a binding must name something).** A `[SpecBinding]` whose documentation-comment
+ID resolves to no symbol of the compilation or its references is PALCS0629, at the
+attribute. Without it, a misspelt ID, or a library upgrade that renamed the member, binds
+nothing and surfaces only as a refused call elsewhere.
+
+An extension method is bound by its unreduced declaration ID, including its receiver
+parameter. The same binding applies to `value.Extension(...)` and
+`Extensions.Extension(value, ...)`; a generic receiver participates in type inference,
+and a nullable receiver is passed as a nullable value rather than dereferenced.
+
+**Open: one binding, two readings.** A binding's term is applied at machine types in code
+(R20.10: `I32.t` for an `int`) but at mathematical types in a contract (`I32.v` of each
+argument, a `Prims.int` result expected). A library member over `int` that a contract also
+names cannot be given one term that serves both. Until a rule settles it, bind the member
+to its machine-typed model and give contracts a `[Spec]` mirror with
+`[PulseBody]` (R24.17) over the mathematical function that the machine model is defined
+from, as `test/external_library` does. A binding over types with one reading
+(`BigInteger` as `Prims.int`, `bool`, an F\* type) is unaffected.
+
 ### R21.6 `as` and pattern variables
 
 `e as C` is `if ⟦e is C⟧ then Some e else None`. A pattern variable has the type of the

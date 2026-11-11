@@ -13,6 +13,18 @@ work="obj/cs"
 # doc/translation.md §20) sets PAL_CS_NULLABLE=disable; the tests keep the default.
 nullable="${PAL_CS_NULLABLE:-enable}"
 
+# Library assemblies the sources call (R21.5a), as `palcs -r` is given them.
+refs="$(python3 - <<'PY'
+import os
+from xml.sax.saxutils import escape, quoteattr
+
+for path in os.environ.get("PAL_CS_REFERENCES", "").split():
+    name = os.path.splitext(os.path.basename(path))[0]
+    print(f"    <Reference Include={quoteattr(name)}>"
+          f"<HintPath>{escape(os.path.abspath(path))}</HintPath></Reference>")
+PY
+)"
+
 mkdir -p "$work"
 cat > "$work/$name.csproj" <<EOF
 <Project Sdk="Microsoft.NET.Sdk">
@@ -25,6 +37,7 @@ cat > "$work/$name.csproj" <<EOF
   </PropertyGroup>
   <ItemGroup>
 $(for f in "$@"; do printf '    <Compile Include="%s/%s" />\n' "$(pwd)" "$f"; done)
+${refs}
     <ProjectReference Include="$root/src/Pal.Annotations/Pal.Annotations.csproj" />
   </ItemGroup>
 </Project>

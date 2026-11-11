@@ -1,0 +1,17 @@
+using Acme.Sdk;
+using PalLang;
+
+// The SDK's AsSpan returns an empty window, not the whole array. Recognizing it by
+// shape would prove this false postcondition without any binding.
+public static class UnboundVendorSpan
+{
+    [Requires("Contents(array).Length > 0")]
+    [Ensures("Result == Contents(array).Length")]
+    public static int Count(int[] array)
+    {
+        var window = array.AsSpan();
+        int length = window.Length;
+        Pal.Restore(window);
+        return length;
+    }
+}

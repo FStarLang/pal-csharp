@@ -28,6 +28,10 @@ OUT        ?= out
 CACHE_DIR  ?= _cache
 
 SOURCES    ?= $(sort $(wildcard *.cs))
+# Library assemblies the sources call but do not contain (R21.5a): passed to `palcs -r`
+# and referenced by the stock-compiler check. Space-separated paths; a harness Makefile
+# `export`s it, since this file re-invokes itself.
+PAL_CS_REFERENCES ?=
 # More F* include directories: a harness whose contract is an F* development kept beside it.
 EXTRA_INCLUDES ?=
 # The modules of that development, checked by its own build: used, never re-checked here.
@@ -53,7 +57,7 @@ all: cs verify
 # The core invariant: annotated C# is ordinary C#.
 # ---------------------------------------------------------------------------
 
-cs: $(SOURCES)
+cs: $(SOURCES) $(PAL_CS_REFERENCES)
 	@$(PAL_ROOT)/test/build-cs.sh $(TEST_NAME) $(SOURCES)
 
 # ---------------------------------------------------------------------------
@@ -63,9 +67,9 @@ cs: $(SOURCES)
 translate: $(OUT)/.stamp
 
 # An [IncludePulseFile] is copied into $(OUT) by the translation, so it is an input too.
-$(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst)
+$(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst) $(PAL_CS_REFERENCES)
 	@mkdir -p $(OUT)
-	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(PAL_CS_FLAGS) $(SOURCES)
+	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(foreach r,$(PAL_CS_REFERENCES),-r $(r)) $(PAL_CS_FLAGS) $(SOURCES)
 	@touch $@
 
 verify: translate

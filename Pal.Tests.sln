@@ -52,6 +52,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "dll_segment", "test/dll_seg
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "enumerators", "test/enumerators/enumerators.csproj", "{4A225493-9DC7-B265-A5FC-23D4895C6421}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "external_library", "test/external_library/external_library.csproj", "{9A1399AC-F04F-B28A-9ADC-A1B1117B5D28}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "frac_alias", "test/frac_alias/frac_alias.csproj", "{5C22A22A-DD0D-1634-75E6-4E3B71FFBF18}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "generic_list", "test/generic_list/generic_list.csproj", "{AFED8B9A-82E4-BF87-FEE2-3A193656F0C9}"
@@ -250,6 +252,10 @@ Global
 		{4A225493-9DC7-B265-A5FC-23D4895C6421}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{4A225493-9DC7-B265-A5FC-23D4895C6421}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{4A225493-9DC7-B265-A5FC-23D4895C6421}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9A1399AC-F04F-B28A-9ADC-A1B1117B5D28}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9A1399AC-F04F-B28A-9ADC-A1B1117B5D28}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9A1399AC-F04F-B28A-9ADC-A1B1117B5D28}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9A1399AC-F04F-B28A-9ADC-A1B1117B5D28}.Release|Any CPU.Build.0 = Release|Any CPU
 		{5C22A22A-DD0D-1634-75E6-4E3B71FFBF18}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{5C22A22A-DD0D-1634-75E6-4E3B71FFBF18}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{5C22A22A-DD0D-1634-75E6-4E3B71FFBF18}.Release|Any CPU.ActiveCfg = Release|Any CPU

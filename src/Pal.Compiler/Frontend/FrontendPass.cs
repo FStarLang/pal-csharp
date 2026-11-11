@@ -20,6 +20,7 @@ public static partial class FrontendPass
     {
         var known = WellKnown.For(compilation);
         ValidateSpecTypes(compilation, known, diagnostics);
+        ValidateBindings(compilation, known, diagnostics);
         var candidates = Collect(compilation, known, diagnostics);
         var structs = CollectStructs(compilation, known, diagnostics);
         var attempted = ImmutableHashSet.CreateBuilder<ISymbol>(SymbolEqualityComparer.Default);
@@ -567,6 +568,29 @@ public static partial class FrontendPass
     /// the member failing with PALCS0573 — a message about the use, pointing away from the
     /// mistake.</para>
     /// </summary>
+    /// <summary>
+    /// R21.5b. A <c>[SpecBinding]</c> names its member by documentation-comment ID, and an
+    /// ID that names nothing in the compilation or its references binds nothing. Left
+    /// alone, a misspelt ID, or an SDK upgrade that renamed the member, would surface only
+    /// as a refused call somewhere else, with no word about the binding that was meant to
+    /// cover it. So it is reported where it is written.
+    /// </summary>
+    private static void ValidateBindings(
+        CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
+    {
+        foreach (var binding in Declarations.All(compilation.Assembly, known.SpecBindingAttribute))
+        {
+            if (Declarations.StringArgument(binding, 0) is not { } id) continue;
+            if (!DocumentationCommentId.GetSymbolsForDeclarationId(id, compilation).IsEmpty) continue;
+            var syntax = binding.ApplicationSyntaxReference?.GetSyntax();
+            diagnostics.Error("PALCS0629",
+                Locations.From(syntax?.GetLocation() ?? Location.None),
+                $"`[SpecBinding(\"{id}\", …)]` names no type or member of this compilation or " +
+                "its references. Check the documentation-comment ID (an SDK's `.xml` doc file " +
+                "lists them), and pass the library with `-r` if it is not part of the sources.");
+        }
+    }
+
     private static void ValidateSpecTypes(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
