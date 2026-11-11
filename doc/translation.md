@@ -11825,7 +11825,7 @@ namespaces or, for a class nested in a class, the outer class (`Dictionary.KeyCo
 and `SortedDictionary.KeyCollection` are both `KeyCollection`). So two units can name one
 module, and F* would take whichever came first on its include path. A module the primary
 unit emits that a referenced unit also emits is refused, as are two referenced units
-emitting one module.
+emitting one module. This comparison ignores case, as F*'s module-file lookup does.
 
 **R36.5. `[TranslateAnnotatedOnly]` is decided once (PALCS0761).** R20.1 decides which
 declarations are translated, and so which modules exist. A unit translated with it may
@@ -11855,12 +11855,16 @@ references in `REFERENCES`:
   output. Then two harnesses referencing one unit under `make -j` do not build it at the
   same time.
 * `palcs` is passed `--reference ref/out`, and the translation is redone when a referenced
-  manifest changes.
+  manifest or translation stamp changes. Stamps propagate changes transitively even when
+  an intermediate unit's own sources and manifest are unchanged.
 * F* is given each referenced unit's `_cache` and `out` (transitively, from the manifests,
-  by `test/unit-closure.py`), before the harness's own, and those units' modules in
+  by `test/unit-closure.py`), after the harness's own, and those units' modules in
   `--already_cached`. So F* loads their `.checked` files and fails, rather than checking
   them again, if one is stale. A `.checked` outside the harness's own cache is never made
   there.
+  The build checks that every referenced module has a current `.checked` file, and removes
+  obsolete copies of those modules from the client's cache so they cannot shadow their
+  owning unit.
 * Every unit emits a `TranslationErrors` sentinel. Each is checked into a private cache
   directory that no include path names, so that a client never finds a referenced unit's.
 * A unit is a fragment of one assembly, so the `cs` check compiles it with the sources of

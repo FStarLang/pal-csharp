@@ -106,7 +106,15 @@ public sealed class UnitGraph
         {
             if (byDir.ContainsKey(dir)) return null;
             if (!visiting.Add(dir)) return $"the references of `{dir}` form a cycle";
-            var manifest = UnitManifest.Read(dir);
+            UnitManifest? manifest;
+            try
+            {
+                manifest = UnitManifest.Read(dir);
+            }
+            catch (JsonException e)
+            {
+                return $"`{dir}` has an invalid {UnitManifest.FileName}: {e.Message}";
+            }
             if (manifest is null)
                 return $"`{dir}` has no {UnitManifest.FileName}: it is not the output of a translation";
             foreach (var s in manifest.Sources)
@@ -194,7 +202,7 @@ public sealed class UnitGraph
     /// </summary>
     public void CheckCollisions(ImmutableArray<EmittedModule> modules, DiagnosticBag diagnostics)
     {
-        var owner = new Dictionary<string, string>(StringComparer.Ordinal);
+        var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var u in Closure(Direct))
             foreach (var name in u.Manifest.Modules)
             {

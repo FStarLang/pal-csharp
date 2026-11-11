@@ -45,6 +45,7 @@ REFERENCES_BUILT ?=
 comma := ,
 REF_GOAL := $(if $(filter translate,$(MAKECMDGOALS)),translate,verify)
 REF_MANIFESTS := $(addsuffix /out/unit.json,$(REFERENCES))
+REF_STAMPS := $(addsuffix /out/.stamp,$(REFERENCES))
 # Every unit's TranslationErrors sentinel has the same module name, so each is checked into
 # a cache directory of its own that no include path names.
 SENTINEL_CACHE := $(CACHE_DIR)/sentinel
@@ -60,16 +61,17 @@ endif
 # `--message_format json` so that a failure can be read by `palcs report` and said again
 # against the C# it came from. F* still prints nothing else, so a passing run is as quiet
 # as it ever was; the pipeline below only has work to do when there is a failure. A
-# referenced unit's include directories come first, so that this unit's own win.
+# referenced unit's include directories come last, so obsolete copies in this unit's
+# cache cannot shadow modules that have moved to a referenced unit.
 FSTAR_OPTIONS := --message_format json \
                  --cache_checked_modules --cache_dir $(CACHE_DIR) \
                  --already_cached 'Prims,FStar,Pulse,Pulse.Main,Pulse.Nolib,Pulse.Class,Pulse.Lib,PulseCore$(if $(EXTRA_CACHED),$(comma)$(EXTRA_CACHED))$(if $(REF_CACHED),$(comma)$(REF_CACHED))' \
-                 $(foreach d,$(REF_OUTS),--include $(dir $(d))_cache --include $(d)) \
                  --include $(CACHE_DIR) --include $(OUT) \
                  --include $(PULSE_DIR) --include $(PULSE_DIR)/$(CACHE_DIR) \
-                 $(foreach d,$(EXTRA_INCLUDES),--include $(d))
+                 $(foreach d,$(EXTRA_INCLUDES),--include $(d)) \
+                 $(foreach d,$(REF_OUTS),--include $(dir $(d))_cache --include $(d))
 
-.PHONY: all cs print-sources translate verify _verify references clean
+.PHONY: all cs print-sources translate verify _verify references reference-caches clean
 
 all: cs verify
 
@@ -103,11 +105,11 @@ else
 endif
 
 ifneq ($(PHASE),verify)
-$(REF_MANIFESTS): | references
+$(REF_MANIFESTS) $(REF_STAMPS): | references
 endif
 
 # An [IncludePulseFile] is copied into $(OUT) by the translation, so it is an input too.
-$(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst) $(REF_MANIFESTS)
+$(OUT)/.stamp: $(SOURCES) $(PALCS) $(PALCS_DEPS) $(wildcard *.fst) $(REF_MANIFESTS) $(REF_STAMPS) Makefile $(PAL_ROOT)/test/verify.mk
 	@mkdir -p $(OUT)
 	$(PALCS) -o $(OUT) $(if $(PAL_CS_NULLABLE),--nullable $(PAL_CS_NULLABLE)) $(PAL_CS_FLAGS) \
 	    $(foreach r,$(REFERENCES),--reference $(r)/out) $(SOURCES)
@@ -127,10 +129,16 @@ _verify: $(CHECKED) $(if $(filter $(OUT)/TranslationErrors.fst,$(GENERATED)),$(S
 # Only in the second phase: at top level the generated files may be stale, and
 # remaking `.depend` from them during parse would fail before `translate` runs.
 ifeq ($(PHASE),verify)
+reference-caches:
+ifneq ($(REFERENCES),)
+	@python3 $(PAL_ROOT)/test/unit-closure.py --check $(CACHE_DIR) $(addsuffix /out,$(REFERENCES))
+endif
+
+_verify: | reference-caches
 ifneq ($(MODULES),)
 # F* computes the module dependency order, so a method calling another method
 # verifies in the right order without the harness knowing anything about it.
-$(CACHE_DIR)/.depend: $(MODULES) $(REF_MANIFESTS)
+$(CACHE_DIR)/.depend: $(MODULES) $(REF_MANIFESTS) $(REF_STAMPS) $(PAL_ROOT)/test/verify.mk $(PAL_ROOT)/test/unit-closure.py | reference-caches
 	@mkdir -p $(CACHE_DIR)
 	@$(FSTAR_EXE) $(FSTAR_OPTIONS) --message_format human --dep full $(MODULES) \
 	    --output_deps_to $@
@@ -148,6 +156,7 @@ endif
 	@mkdir -p $(CACHE_DIR)
 	@echo "$(FSTAR_EXE) $(FSTAR_OPTIONS) $<"
 	@set -o pipefail; $(FSTAR_EXE) $(FSTAR_OPTIONS) $< 2>&1 | $(PALCS) report -q -o $(OUT)
+	@touch -c $@
 
 $(SENTINEL_CACHE)/TranslationErrors.fst.checked: $(OUT)/TranslationErrors.fst
 	@mkdir -p $(SENTINEL_CACHE)

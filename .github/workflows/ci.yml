@@ -27,9 +27,6 @@ jobs:
   toolchain:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    outputs:
-      harnesses: ${{ steps.harnesses.outputs.list }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -99,15 +96,6 @@ jobs:
             pulse/_cache
             pulse/.depend
           key: pulselib-${{ runner.os }}-${{ hashFiles('tools/fstar-version.txt', 'tools/fstar-source.txt', 'pulse/*.fst', 'pulse/*.fsti', 'pulse/Makefile') }}
-
-      # The dotnet-runtime harnesses, one job each (see `dotnet-runtime` below). Listed
-      # from the tree so that a new harness cannot be left out of CI.
-      - name: List the dotnet-runtime harnesses
-        id: harnesses
-        run: |
-          list="$(cd samples/dotnet-runtime/pal && for m in */Makefile; do printf '%s\n' "${m%/Makefile}"; done | jq -R . | jq -cs .)"
-          echo "list=$list" >> "$GITHUB_OUTPUT"
-          echo "$list"
 
   gate:
     needs: toolchain
@@ -206,7 +194,7 @@ jobs:
       # `palcs` generates from it, followed by the seven lints. This is the root target
       # rather than `make -C test`, so the lints also see what the emitter produced for
       # the examples. It runs one F* job per core. The dotnet-runtime sample is left to
-      # the `dotnet-runtime` jobs: it is hours of verification sequentially, and a few of
+      # the `dotnet-runtime` job: it is hours of verification sequentially, and a few of
       # its modules need most of a runner's memory.
       - name: Test
         run: opam exec -- make -j"$(nproc)" test SKIP_SAMPLES=dotnet-runtime
@@ -226,19 +214,13 @@ jobs:
       - name: Every emitted module reference must resolve
         run: bash test/module-refs.sh
 
-  # One job per dotnet-runtime harness (samples/dotnet-runtime/pal/*), each on its own
-  # runner. The heaviest modules (Dictionary, HashSet) need several GB each, so F* runs
-  # with a smaller GC space overhead -- slower, but within a runner's 16 GB -- and two
-  # jobs at a time.
+  # One dependency-driven build for all collection units: separate matrix jobs would
+  # translate and prove shared dependencies more than once. The top-level Makefile
+  # discovers every harness and schedules each once, after its references.
   dotnet-runtime:
     needs: toolchain
     runs-on: ubuntu-latest
     timeout-minutes: 150
-    strategy:
-      fail-fast: false
-      matrix:
-        harness: ${{ fromJson(needs.toolchain.outputs.harnesses) }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -287,10 +269,10 @@ jobs:
 
       # Three F* processes on a 4-core, 16 GB runner: with `o=20` no module needs more than
       # about 4.5 GB (Dictionary.TryInsert), so three of the largest still fit.
-      - name: Verify ${{ matrix.harness }}
+      - name: Verify collection dependency graph
         env:
           OCAMLRUNPARAM: o=20
-        run: make -C samples/dotnet-runtime/pal/${{ matrix.harness }} -j3
+        run: make -C samples/dotnet-runtime -j3
 
   # `make test` already runs this, as the seventh lint. It is repeated here as its own job
   # because it needs no F* at all: an analyzer regression is reported in about three
