@@ -47,12 +47,21 @@ write_project() {
     fi
 
     # Library assemblies the Makefile passes to `palcs -r` (R21.5a) are referenced here
-    # too, so the editor binds each call to the member the build does.
-    local references="" r
-    for r in $(sed -n 's/^export PAL_CS_REFERENCES := *//p' "$dir/Makefile" 2>/dev/null); do
-        references+="
+    # too. A harness can supply project references instead, so MSBuild builds local
+    # libraries before the editor project, even in a clean checkout.
+    local references="" project_references r
+    project_references=$(sed -n 's/^export PAL_CS_PROJECT_REFERENCES := *//p' "$dir/Makefile" 2>/dev/null)
+    if [ -n "$project_references" ]; then
+        for r in $project_references; do
+            references+="
+    <ProjectReference Include=\"$r\" />"
+        done
+    else
+        for r in $(sed -n 's/^export PAL_CS_REFERENCES := *//p' "$dir/Makefile" 2>/dev/null); do
+            references+="
     <Reference Include=\"$(basename "$r" .dll)\"><HintPath>$r</HintPath></Reference>"
-    done
+        done
+    fi
     [ -n "$references" ] && references="
   <ItemGroup>$references
   </ItemGroup>"

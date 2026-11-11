@@ -2,6 +2,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <Import Project="../pal-tests.props" />
   <ItemGroup>
-    <Reference Include="AcmeSdk"><HintPath>../_external_sdk/bin/AcmeSdk.dll</HintPath></Reference>
+    <ProjectReference Include="../_external_sdk/AcmeSdk.csproj" />
   </ItemGroup>
 </Project>
