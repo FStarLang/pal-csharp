@@ -96,6 +96,11 @@ public static class Declarations
         // object's class: it carries the class's invariant, read-only.
         if (Borrowing.IsMember(method, known)) return CalleeKind.Method;
 
+        // R17.10. A method or constructor of a span wrapper is a function of its span.
+        if (method is { IsStatic: false, MethodKind: MethodKind.Ordinary or MethodKind.Constructor } &&
+            known.SpanWrapperField(method.ContainingType) is not null)
+            return CalleeKind.Method;
+
         // §4.5. An instance method or constructor of a translated class: it carries the
         // object's invariant, which is what makes it translatable at all. R9.20 adds the
         // getter of a computed property, which is a nullary instance method that C# spells

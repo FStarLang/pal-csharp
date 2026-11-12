@@ -192,3 +192,28 @@ fn copy_to (#t: Type0) (src: S.slice t) (dst: S.slice t) (#p: perm)
   requires exists* v_dst. S.pts_to dst v_dst ** S.pts_to src #p v **
                           pure (Seq.length v_dst == Seq.length v)
   ensures  S.pts_to dst v ** S.pts_to src #p v
+
+(* ---------------------------------------------------------------------- *)
+(* Fresh spans (doc/translation.md R17.9).                                *)
+(* ---------------------------------------------------------------------- *)
+
+/// `Span<T> s = stackalloc T[n];`. The span owns its memory: there is no receipt and
+/// nothing to give back, and the memory is dropped with the span. The contents are
+/// arbitrary -- the runtime's libraries are compiled with `SkipLocalsInit` -- so
+/// `fill` is only what the implementation happens to write, and the caller learns
+/// nothing but the length.
+fn stackalloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (fill: t)
+  requires emp
+  returns  s : span t
+  ensures  exists* v. S.pts_to s v ** pure (Seq.length v == I32.v n)
+
+/// `new T[n]` where a span is wanted: a fresh span over a fresh array, every cell `init`.
+fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
+  requires emp
+  returns  s : span t
+  ensures  S.pts_to s (Seq.create (I32.v n) init)
+
+/// `s.Clear()`, with `z` the element type's `default(T)`.
+fn clear (#t: Type0) (s: span t) (z: t) (#v: Ghost.erased (Seq.seq t))
+  requires S.pts_to s v
+  ensures  S.pts_to s (Seq.create (Seq.length v) z)

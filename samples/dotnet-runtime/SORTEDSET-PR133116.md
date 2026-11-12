@@ -10,6 +10,10 @@ these steps:
    proposes a fix. The fix is correct for a set but wrong for a view.
 4. A one-line patch makes the PR's method verify for both a set and a view.
 
+The verified method is the PR's code as written, including its `BitHelper` over
+`stackalloc`ed memory, apart from the one patched line. Its four public callers are verified
+too, on the path that calls it.
+
 All paths below are relative to the repository root. Line numbers refer to the
 commit this document was added in. `SortedSet.cs` stands for
 `samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs`.
@@ -77,12 +81,12 @@ comparer:
 
 | caller | call | result |
 |---|---|---|
-| `IsSubsetOf` (`SortedSet.cs:1903`) | `:1927`, `returnIfUnfound = false` | `UniqueCount == Count` |
-| `IsProperSubsetOf` (`:1971`) | `:1995`, `false` | `UniqueCount == Count && UnfoundCount > 0` |
-| `IsProperSupersetOf` (`:2060`) | `:2110`, `true` | `UniqueCount < Count && UnfoundCount == 0` |
-| `SetEquals` (`:2119`) | `:2171`, `true` | `UniqueCount == Count && UnfoundCount == 0` |
+| `IsSubsetOf` (`SortedSet.cs:1906`) | `:1926`, `returnIfUnfound = false` | `UniqueCount == Count` |
+| `IsProperSubsetOf` (`:1972`) | `:1993`, `false` | `UniqueCount == Count && UnfoundCount > 0` |
+| `IsProperSupersetOf` (`:2061`) | `:2108`, `true` | `UniqueCount < Count && UnfoundCount == 0` |
+| `SetEquals` (`:2119`) | `:2168`, `true` | `UniqueCount == Count && UnfoundCount == 0` |
 
-The method returns an `ElementCount` (`SortedSet.cs:3188`) with these fields:
+The method returns an `ElementCount` (`SortedSet.cs:3198`) with these fields:
 * **`UniqueCount`**: the number of *distinct* items of `other` that are in the set;
 * **`UnfoundCount`**: the number of items of `other` that are not. With
   `returnIfUnfound`, it may stop at the first such item, so the count is then only
@@ -207,7 +211,7 @@ the set within a view's range), using an admit predicate `ok`:
 | `marks c ok tr m s` | 412 | every bit `p < |m|` of the bitmap `m` equals `phit ... s p` |
 | `loop_inv_g`/`loop_inv_s` | 633/639 | after `i` items: `marks` holds, `uniq == found(prefix)`, `unf == unfound(prefix)` |
 
-The method's contract at the set (`SortedSet.cs:2248-2252`) states:
+The method's contract at the set (`SortedSet.cs:2246-2250`) states:
 * `UnfoundCount > 0` exactly when `unfound_all > 0`;
 * `UniqueCount == found_all`, unless the method returned early.
 
@@ -218,61 +222,43 @@ the callers' tests in §1.4 are then right.
 
 The repository's method is dotnet/runtime#133116's (§6). The original body is checked
 by applying `harness/experiments/original.patch` and running it through
-`harness/experiments/run.sh original`. The patch differs from the repository's method only
-in the following ways:
-* The bitmap is `bool[intArrayLength * 32]`, with
-  `intArrayLength = (Count - 1) / 32 + 1`, as `BitHelper.ToIntArrayLength` computes.
-* The loop uses `BitHelper`'s semantics for a position past the bitmap:
-  ```csharp
-  if (index >= 0)
-  {
-      // BitHelper: `IsMarked` reads false and `MarkBit` does nothing past the bitmap.
-      if (!(index < marked.Length && marked[index]))
-      {
-          if (index < marked.Length) marked[index] = true;
-          uniqueFoundCount++;
-      }
-  }
-  ```
+`harness/experiments/run.sh original`. The patch restores the original's executable code
+**verbatim**: the code of §2.1, with the real `BitHelper` (§7.3). Only ghost code differs
+from the repository's method:
 * The step lemma is `loop_step_beyond_s` (`SortedSetCount.fst:701`), which is
   `LoopStepBeyond` in `Count.cs`. For a position `p` past the bitmap, it states what keeps
   the invariant: the found count may grow only if `not (phit ... prefix p)`, that is, only
   if no earlier item had position `p`. The bitmap cannot tell.
-* There is one assumption, `Pal.Assume(Height <= 30 && Count < 2^30)`:
-  * the height bound is `InternalIndexOf`'s precondition, assuming away the separate
-    overflow defect (§2.2);
-  * the count bound keeps `intArrayLength * 32` in range, which is an artifact of the
-    `bool[]` model (`BitHelper` multiplies nothing).
-
-  Neither bound touches the miscount.
+* `BitHelperBits.bits_at` (`pal/common/BitHelperBits.fst:144`) states `BitHelper` at any
+  position: below `32 * intArrayLength`, `IsMarked` reads the bit and `MarkBit` sets it;
+  past it, `IsMarked` reads false and `MarkBit` does nothing.
+* The invariant drops `Fits` and the bound `Height <= 12`, which come from the PR's sizing.
+* There is one assumption, `Pal.Assume(Height <= 30)`. It is `InternalIndexOf`'s
+  precondition, and it assumes away the separate overflow defect (§2.2). It does not touch
+  the miscount.
 
 ### 3.3 The result
 
 The proof fails at exactly one obligation:
 
 ```
-SortedSet.cs(2297,13): error PALCS0600: ...
-Failed to prove: SortedSetCount.loop_inv_s _r63.fld_comparer (...SpecRangeLo...) ...
-  (match Prims.not t25 with
-   | true -> (match FStar.Int32.lt t18 (arr_length var_marked) with
-              | true -> FStar.Seq.Base.upd __vmarked (FStar.Int32.v t18) true
-              | false -> __vmarked)
-   | false -> __vmarked)
-  pre_other (... item index + 1 ...)
-  (FStar.Int32.v (match Prims.not t25 with
-                  | true -> FStar.Int32.add __vuniqueFoundCount 1l
-                  | false -> __vuniqueFoundCount))
-  (FStar.Int32.v __vunfoundCount)
+SortedSet.cs(2298,13): error PALCS0600: Failed to prove pure property: ...
+Failed to prove: SortedSetCount.loop_inv_s _r74.fld_comparer (...SpecRangeLo pre_this) ...
+  (BitHelperBits.bits _post_this92) pre_other
+  (FStar.Int32.v (Pulse.Lib.CSharp.Enumerable.advance pre_other __vitem__index_555960))
+  (FStar.Int32.v (FStar.Int32.add __vuniqueFoundCount_586162 1l))
+  (FStar.Int32.v __vunfoundCount_576061)
 ```
 
-Line 2297 is the `foreach`, in the patched file. The failing branch is the one where
-`IsMarked` said "not seen" (`not t25`). The bitmap is updated only `if index < marked.Length`,
-and `uniqueFoundCount + 1` is the new count. The invariant `uniq == found(prefix)` cannot be
-re-established. When `index >= marked.Length` and an earlier item had the same position, the
-true count does not grow, but the code adds one.
+Line 2298 is the `foreach`, in the patched file. The failing branch is the one where
+`IsMarked` said "not seen": the bitmap is the words after `MarkBit` (`_post_this92`, the
+`BitHelper`'s span after the call), and `uniqueFoundCount + 1` is the new count. The
+invariant `uniq == found(prefix)` cannot be re-established. When `index` is past the bitmap
+and an earlier item had the same position, `MarkBit` did nothing and `IsMarked` read false,
+so the true count does not grow, but the code adds one.
 
 The only gap is a position past the `Count`-sized bitmap. As a control, adding
-`Pal.Assume(index < marked.Length)` in the found branch makes the module verify.
+`Pal.Assume(index < 32 * intArrayLength)` in the found branch makes the module verify.
 Everything else in the original method is correct.
 
 The proof does not just fail to go through: it names the defect. A position can lie past
@@ -386,8 +372,8 @@ twice, as the translator replicates it at a view (doc/translation.md R32.13):
 The single error is:
 
 ```
-SortedSet.cs(2303,13): error PALCS0600: ...
-Failed to prove: SortedSetCount.loop_inv_s ... (Seq.upd marked index true) ... (uniqueFoundCount + 1) ...
+SortedSet.cs(2308,13): error PALCS0600: ...
+Failed to prove: SortedSetCount.loop_inv_s ... (BitHelperBits.bits <words after MarkBit>) ... (uniqueFoundCount + 1) ...
 ```
 
 It is in the "found, not yet marked" branch. At the view, `ok` is `in_range`, so the
@@ -401,7 +387,7 @@ not that, so the found count grows where the specification's does not.
 
 ## 6. The patch
 
-The fix is one line in the loop (`SortedSet.cs:2318`):
+The fix is one line in the loop (`SortedSet.cs:2321-2323`):
 
 ```csharp
 // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
@@ -440,15 +426,15 @@ The annotations the proof needs alongside the fix:
 
 ### 7.1 What is proved
 
-The method's contracts, at the set (`SortedSet.cs:2248-2252`):
+The method's contracts, at the set (`SortedSet.cs:2246-2250`):
 
 ```csharp
 [Requires("Pal.Contents(other).Length <= int.MaxValue")]
-[Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
+[Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
 [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
 ```
 
-At a view (`SortedSet.cs:2253-2256`, `At = typeof(SortedSet<>.TreeSubSet)`), the same
+At a view (`SortedSet.cs:2251-2254`, `At = typeof(SortedSet<>.TreeSubSet)`), the same
 contracts hold with `UnfoundRange`/`FoundRange` over `_min`, `_max`, `_lBoundActive` and
 `_uBoundActive`.
 
@@ -457,33 +443,39 @@ followed by the call. It verifies against the `found_range`/`unfound_range` cont
 fresh view does satisfy the replica's precondition.
 
 The proof also establishes:
-* **The bitmap is big enough, and its growth branch is dead.** `SortedSet.cs:2340-2346`
+* **The bitmap is big enough, and its growth branch is dead.** `SortedSet.cs:2347-2357`
   is `Pal.Unreachable()` (R37.4).
-* **`GetApproximateMaxHeight` is exact enough** (`SortedSet.cs:3238-3255`, override in
+* **`GetApproximateMaxHeight` is exact enough** (`SortedSet.cs:3248-3264`, override in
   `TreeSubSet.cs:505-511`). It ensures `Height <= Result` for the set's tree, and for the
   view's root subtree at a view.
 * **No `int` overflow** occurs in the counters (by the precondition on `other`'s length),
   in `1 << maxHeight` (by `shift_one`, `maxHeight <= 12`), or in `InternalIndexOf`
   (`Height <= 12 <= 30`).
+* **`BitHelper` is what the bitmap means** (§7.3). Its members are verified against
+  `BitHelperBits`, so the loop's bitmap is `Bits(Contents(bitHelper.Span))`.
+* **The callers decide correctly** (§7.4).
 
 ### 7.2 How: the lemmas
 
-The method body's ghost calls are at `SortedSet.cs:2291-2350`. Each binds to a lemma in
-`SortedSetCount.fst`:
+The method body's ghost calls are at `SortedSet.cs:2289-2362`. Each binds to a lemma in
+`SortedSetCount.fst`, or in `BitHelperBits.fst` for the bitmap:
 
 | step | C# (`SortedSet.cs`) | lemma (`SortedSetCount.fst`) |
 |---|---|---|
-| height bound, set | `GetApproximateMaxHeight` (`:3250`) | `red_black_height` (373): a red-black tree of `n` nodes has height `<= 2*log2_nat(n+1)`, via `rb_height` (352) and `log2_ge` (363) |
+| height bound, set | `GetApproximateMaxHeight` (`:3260`) | `red_black_height` (373): a red-black tree of `n` nodes has height `<= 2*log2_nat(n+1)`, via `rb_height` (352) and `log2_ge` (363) |
 | height bound, view | `TreeSubSet.cs:507` | `range_root_height` (394): `height(range_root) + range_depth <= height(tree)` |
-| `1 << maxHeight` | `ShiftOne` (`:2291`) | `shift_one` (436): no overflow, equals `2^h` for `h <= 12` |
-| every position fits | `FitsPow2` (`:2301`) | `fits_pow2` (449) from `pos_bound` (348) / `heap_index_bound`: `fits tr (2^h)` |
-| set/view lookup facts | `LookupIntro` (`:2300`) | `lookup_intro_s` (647): the range root's search finds exactly the in-range keys (`range_lookup`) |
-| invariant holds initially | `LoopStart` (`:2302`) | `loop_start_s` (658) |
-| one item | `LoopStep` (`:2319`) | `loop_step_s` (686) → `loop_step_g` (664) → `step` (286) |
-| early exit | `LoopDone` (`:2335`) | `loop_done_s` (724) |
-| loop exit | `LoopEnd` (`:2350`) | `loop_end_s` (732) |
-| contract form | `Counts` (`:2352`) | `counts_s` (750): `found_s` is `found_all` with no bound and `found_range` with `one lo`/`one hi` |
-| empty set or range | `EmptyCounts` (`:2274`) | `empty_counts_s` (741) |
+| `1 << maxHeight` | `ShiftOne` (`:2289`) | `shift_one` (436): no overflow, equals `2^h` for `h <= 12` |
+| the words hold every bit | `WordsCover` (`:2292`) | `BitHelperBits.words_cover` (158): `n <= 32 * ToIntArrayLength(n)` |
+| every position fits | `FitsPow2` (`:2305`) | `fits_pow2` (449) from `pos_bound` (348) / `heap_index_bound`: `fits tr (2^h)` |
+| set/view lookup facts | `LookupIntro` (`:2304`) | `lookup_intro_s` (647): the range root's search finds exactly the in-range keys (`range_lookup`) |
+| a fresh bitmap is clear | `ZeroBits` (`:2306`) | `BitHelperBits.zero_bits` (115): zero words hold no bit |
+| invariant holds initially | `LoopStart` (`:2307`) | `loop_start_s` (658) |
+| one item | `LoopStep` (`:2324`) | `loop_step_s` (686) → `loop_step_g` (664) → `step` (286) |
+| `IsMarked`/`MarkBit` as bits | `MarkedBits`, `SetBits` (`:2328-2329`) | `BitHelperBits.marked_bits` (136), `set_bits` (123): `IsMarked(p)` is bit `p`; `MarkBit(p)` is `Seq.upd bits p true` |
+| early exit | `LoopDone` (`:2342`) | `loop_done_s` (724) |
+| loop exit | `LoopEnd` (`:2360`) | `loop_end_s` (732) |
+| contract form | `Counts` (`:2362`) | `counts_s` (750): `found_s` is `found_all` with no bound and `found_range` with `one lo`/`one hi` |
+| empty set or range | `EmptyCounts` (`:2272`) | `empty_counts_s` (741) |
 
 The key step is `loop_step_g`. If `p = index_of ok tr x` is below `|m|`, all three branches
 preserve the invariant:
@@ -495,45 +487,140 @@ The lemma relies on two facts:
 * **`hit_phit`**: the bit is set exactly when an earlier equal item exists;
 * **`heap_index_inj`/`heap_index_equiv`**: positions are injective on non-equivalent keys.
 
-The loop invariant (`SortedSet.cs:2305-2315`) carries the following, among other facts:
+The loop invariant (`SortedSet.cs:2310-2320`) carries the following, among other facts:
 * `Lookup`: the lookup facts;
 * `Fits(root, indexLimit)`: every position fits;
 * `Height <= 12`;
-* `marked.Length == indexLimit`;
-* `LoopInv`;
+* `Contents(bitHelper.Span).Length == intArrayLength` and `indexLimit <= 32 * intArrayLength`:
+  the bitmap has a bit for every position;
+* `LoopInv` over `Bits(Contents(bitHelper.Span))`;
 * the pins on the `SpecRange*` members, which keep a view's bounds unchanged across the
   loop.
 
 With `Fits`, the precondition `index_s < |m|` of `loop_step_s` holds, and the third branch,
 growth, is unreachable.
 
-### 7.3 Trust base
+### 7.3 `BitHelper`, verified as written
+
+The method uses the PR's code as written:
+
+```csharp
+// SortedSet.cs:2290-2297
+int indexLimit = (1 << maxHeight);
+int intArrayLength = BitHelper.ToIntArrayLength(indexLimit);
+Span<int> span = stackalloc int[StackAllocThreshold];
+BitHelper bitHelper = (uint)intArrayLength <= StackAllocThreshold ?
+    new BitHelper(span.Slice(0, intArrayLength), clear: true) :
+    new BitHelper(new int[intArrayLength], clear: false);
+```
+
+`BitHelper.cs` (`samples/dotnet-runtime/src/libraries/Common/src/System/Collections/Generic/`)
+is the PR's version, with contracts added. It is translated and verified in the `common`
+unit (`samples/dotnet-runtime/pal/common`), against `pal/common/BitHelperBits.fst`:
+
+| member | `BitHelper.cs` | contract | `BitHelperBits.fst` |
+|---|---|---|---|
+| constructor | `:21` | `clear` zeroes the words; otherwise they are kept | `zero` (22) |
+| `MarkBit(p)` | `:34` | the words become `set_bit ws p` | `set_bit` (26): word `p/32` OR `1 << (p%32)`, if it exists |
+| `IsMarked(p)` | `:52` | returns `marked ws p` | `marked` (38): word `p/32` exists and has bit `p%32` |
+| `ToIntArrayLength(n)` | `:67` | `n > 0 ? (n - 1) / 32 + 1 : 0` | |
+
+`bits ws` (18) is the `32 * |ws|` bits of the words, with bit `p` being bit `p % 32` of word
+`p / 32`. The lemmas `zero_bits`, `set_bits`, `marked_bits` and `bits_at` connect the words
+to the `Seq<bool>` that the counting lemmas of §7.2 use. The proof of
+`IsMarked`/`MarkBit` goes down to bit vectors: `mask_nth` (42), `logand_mask` (58) and
+`logor_mask` (78). `1 << 31` is `int.MinValue`, as C#'s unchecked shift computes it, and
+the methods are `[Wrapping]` (R34.12).
+
+The translator rules that make this possible are in doc/translation.md §17:
+* **R17.9, fresh spans.** `stackalloc T[n]` as a local's initializer, and `new T[n]` as a
+  wrapper's span, create spans that own their memory. `stackalloc`'s contents are
+  *arbitrary* (the runtime compiles with `SkipLocalsInit`), which is why the proof needs the
+  `clear: true` arm to zero them.
+* **R17.10, span wrappers.** A `ref struct` whose only field is a span is that span. Its
+  members become functions of the span, the constructor drops its final `_span = span;`,
+  and the "workaround for dotnet/runtime#72004" locals `Span<int> span = _span;` are
+  aliases. The two-armed initializer above is split, as R27.53 splits a conditional, so
+  each arm has a single span origin: a window into the `stackalloc`ed span in one arm, a
+  fresh array in the other.
+* **R17.11.** `span.Clear()`.
+
+### 7.4 The callers
+
+`IsSubsetOf`, `IsProperSubsetOf`, `IsProperSupersetOf` and `SetEquals` (§1.4) are verified
+on the path that calls the method, as well as on their fast path (doc/translation.md
+R37.10). The verified callers take `other` as `[Exactly(typeof(SortedSet<>))]`, so
+`other` is a `SortedSet<T>`, but *any* comparer is allowed. With the same comparer the fast
+path runs; with another, the counting path runs.
+
+Let `c` be this set's comparer, `A` its items and `O` `other`'s items. The results are
+stated with `SortedSetCount.all_hit c s t` (`SortedSetCount.fst:776`): every item of `t` is
+equivalent, under `c`, to some item of `s`.
+
+| caller | `[Ensures]` |
+|---|---|
+| `IsSubsetOf` (`SortedSet.cs:1906`) | `Result == AllHit(c, O, A)` |
+| `IsProperSubsetOf` (`:1972`) | `Result == (AllHit(c, O, A) && !AllHit(c, A, O))` |
+| `IsProperSupersetOf` (`:2061`) | `Result == (AllHit(c, A, O) && !AllHit(c, O, A))` |
+| `SetEquals` (`:2119`) | `Result == (AllHit(c, O, A) && AllHit(c, A, O))` |
+
+The two paths are bridged by two lemmas:
+* **`counts_decide c A O`** (`SortedSetCount.fst:839`, called after each counting call, e.g.
+  `SortedSet.cs:1927`). It states:
+  * `found_all c A O <= |A|`;
+  * `found_all c A O = |A|` exactly when `all_hit c O A`, by pigeonhole over the strictly
+    sorted `A` (`all_hit_pigeon`, 864);
+  * `unfound_all c A O = 0` exactly when `all_hit c A O`.
+
+  These turn the method's contract (§7.1) into the callers' tests of §1.4.
+* **`sorted_hits`** (897, e.g. `SortedSet.cs:1918`). It restates the fast paths'
+  `SpecSetOps.AllIn`/`SpecSetCompare.SameKeys`, which binary-search and so only mean
+  something under the sets' shared comparer, as `all_hit`.
+
+The method's contract now also states `UnfoundCount >= 0`, which the case analysis needs.
+`IsSubsetOf`'s `result.UnfoundCount >= 0` test is therefore always true.
+
+There is one precondition: `HasEqualComparer` must not call two different comparers equal.
+It is stated as
+`Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)`.
+A comparer whose `Equals` lies would send a differently-sorted `other` down the fast path,
+which is wrong (R27.47).
+
+An `other` that is not a `SortedSet<T>` (a `List<T>`, say) still goes through the same
+method, but the verified callers do not accept it. Lending a general `IEnumerable<T>` has
+no type test for `other as SortedSet<T>` (R34), and a `SortedSet<T>` it might be could be a
+`TreeSubSet` with overridden members.
+
+### 7.5 Trust base
 
 These pieces are taken on trust:
-* **`CheckUniqueAndUnfoundElementsFallback`** is `[Admit]` (`SortedSet.cs:2360`, R37.3).
+* **`CheckUniqueAndUnfoundElementsFallback`** is `[Admit]` (`SortedSet.cs:2370`, R37.3).
   `HashSet<Node>` with reference equality on nodes is not modelled. Its contract is the
   bitmap version's.
 * **Bindings.** `BitOperations.Log2` is bound to `log2_u32`, whose body proves it equals
   `log2_nat` (R21.5). `RoundUpToPowerOf2` is bound to `round_up_pow2`, which occurs only in
   the dead branch.
-* **The bitmap is a `bool[]`, not a `BitHelper`** (R37.2). This is a change to the verified
-  code. The `bool[]` has `1 << maxHeight` entries where `BitHelper` has
-  `ceil(2^maxHeight / 32)` ints, but the bits mean the same.
-* **The callers' count paths are not exercised by the verified callers.** The verified
-  `IsSubsetOf`/`SetEquals`/... require `other` to be a `SortedSet<T>` with the same comparer
-  (`[Exactly]`, R27.46-R27.49), so their call sites are `Pal.Unreachable()`. The method is
-  verified against its own contract. The step "`found_all == Count` iff `other` contains
-  every element" (§3.1) is not mechanised.
+* **The `Pulse.Lib.CSharp.Span` library.** `stackalloc`, `alloc` and `clear` are verified
+  Pulse functions. They model the stack allocation as an array allocation whose memory the
+  proof never frees.
 
-### 7.4 Translator changes
+Nothing else is assumed: no `[Admit]` on `BitHelper`, the method or the callers. The PR's
+growth branch, after `Pal.Unreachable()`, is not translated (R27.48). It is the one part of
+the PR's code that is proved dead rather than proved correct.
 
-Accepting the PR's code as written needed four translator changes, each documented in
-doc/translation.md §37:
-* **R37.6**: `out _field` in a view's constructor (`FindRange(..., out _rootLevel)`).
+### 7.6 Translator changes
+
+Accepting the PR's code as written needed these translator changes, documented in
+doc/translation.md:
+* **R37.6** (§37): `out _field` in a view's constructor (`FindRange(..., out _rootLevel)`).
 * **R37.7**: a base's virtual `[Spec]` property read at a view's replica.
 * **R37.8**: a nested struct named by a signature (`ElementCount`) under
   `[TranslateAnnotatedOnly]`.
 * **R37.9**: a non-tail escaping `if` whose arm moves a node pointer (`FindRange`'s loop).
+* **R17.9–R17.11** (§17) and an extension of **R27.53**: fresh spans, span-wrapper
+  `ref struct`s, `Span.Clear`, and the split of a two-origin span initializer (§7.3).
+  `test/span_struct` exercises them. `test/diagnostics/cases/WrapperStoresLate.cs` shows
+  that a malformed wrapper constructor is refused (PALCS0595).
 
 ---
 
@@ -544,7 +631,11 @@ The F* toolchain is set up as described in the repository's README. Then:
 ```sh
 cd samples/dotnet-runtime/pal/SortedSet
 
-# The revised proof: the whole harness, including the referenced List/Queue/Stack units.
+# BitHelper, against BitHelperBits.
+make -C ../common -j$(nproc) -k   # rc=0
+
+# The revised proof: the method, its callers and the rest of the harness,
+# including the referenced List/Queue/Stack units.
 make -j$(nproc) -k          # rc=0
 
 # §3: the original method fails at loop_inv_s.
@@ -555,7 +646,8 @@ experiments/run.sh pr133116-unfixed     # "verification failed (expected)"
 ```
 
 `run.sh` works as follows:
-* it applies the patch to `SortedSet.cs`;
+* it applies the patch to `SortedSet.cs` (only ghost code and the method's executable code
+  change);
 * it runs `make translate`, then checks only the method's modules;
 * it reverts the patch on exit.
 

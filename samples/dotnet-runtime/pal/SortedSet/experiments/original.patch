@@ -1,8 +1,7 @@
 diff --git a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
-index 149dcae..e3b414c 100644
 --- a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
 +++ b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
-@@ -2278,19 +2278,14 @@ namespace System.Collections.Generic
+@@ -2276,20 +2276,11 @@
                  return result;
              }
  
@@ -18,36 +17,35 @@ index 149dcae..e3b414c 100644
 -            // A perfect tree of height H has H^2 - 1 nodes; (round up to H^2).
 -            SortedSetCount.ShiftOne(maxHeight); // pal: 1 << maxHeight == 2^maxHeight, no overflow
 -            int indexLimit = (1 << maxHeight);
--            bool[] marked = new bool[indexLimit];
+-            int intArrayLength = BitHelper.ToIntArrayLength(indexLimit);
+-            BitHelperBits.WordsCover(indexLimit);
 +            // pal: EXPERIMENT (samples/dotnet-runtime/SORTEDSET-PR133116.md §3): the body before dotnet/runtime#133116.
++            // `InternalIndexOf`'s own overflow (FINDINGS 1.1, last bullet) is a separate defect: assume it away.
++            Pal.Assume(Pal.Tree<(T, bool)>(root).Height <= 30);
 +            int originalLastIndex = Count;
-+            // `InternalIndexOf`'s own overflow (FINDINGS 1.1, last bullet) is a separate defect:
-+            // assume it away to isolate the miscount. A tree of height 30 has fewer than 2^30
-+            // nodes, so `intArrayLength * 32` (the `bool[]` model's, not `BitHelper`'s) fits.
-+            Pal.Assume(Pal.Tree<(T, bool)>(root).Height <= 30 && originalLastIndex < 1073741824);
-+            int intArrayLength = (originalLastIndex - 1) / 32 + 1; // BitHelper.ToIntArrayLength(originalLastIndex)
-+            bool[] marked = new bool[intArrayLength * 32];
++            int intArrayLength = BitHelper.ToIntArrayLength(originalLastIndex);
  
-             // count of items in other not found in this
-             int unfoundCount = 0;
-@@ -2298,14 +2293,12 @@ namespace System.Collections.Generic
+             Span<int> span = stackalloc int[StackAllocThreshold];
+             BitHelper bitHelper = (uint)intArrayLength <= StackAllocThreshold ?
+@@ -2302,15 +2293,13 @@
              int uniqueFoundCount = 0;
  
              SortedSetCount.LookupIntro(comparer, this.SpecRangeTree, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa);
 -            SortedSetCount.FitsPow2(comparer, Pal.Tree<(T, bool)>(root), maxHeight);
-             SortedSetCount.LoopStart(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(marked), Pal.Contents(other));
+             BitHelperBits.ZeroBits(Pal.Contents(bitHelper.Span));
+             SortedSetCount.LoopStart(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree), BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other));
              foreach (T item in other)
              {
                  Pal.Invariant(SortedSetCount.Lookup(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree)) &&
 -                              SortedSetCount.Fits(comparer, Pal.Tree<(T, bool)>(root), indexLimit) &&
                                this.SpecRangeComparer == Pal.Old(this.SpecRangeComparer) && this.SpecRangeLo == Pal.Old(this.SpecRangeLo) && this.SpecRangeHi == Pal.Old(this.SpecRangeHi) &&
--                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 12 && marked.Length == indexLimit &&
-+                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 30 &&
+-                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 12 && Pal.Contents(bitHelper.Span).Length == intArrayLength && indexLimit <= 32 * intArrayLength &&
++                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 30 && Pal.Contents(bitHelper.Span).Length == intArrayLength &&
                                0 <= uniqueFoundCount && 0 <= unfoundCount && uniqueFoundCount + unfoundCount <= Pal.Index(item) &&
                                Pal.Implies(!Pal.Broke(),
                                    Pal.Implies(returnIfUnfound, unfoundCount == 0) &&
-@@ -2313,21 +2306,20 @@ namespace System.Collections.Generic
-                                                          Pal.Contents(marked), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
+@@ -2318,15 +2307,12 @@
+                                                          BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
                                Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
                                    SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
 -                // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
@@ -56,17 +54,17 @@ index 149dcae..e3b414c 100644
 -                SortedSetCount.LoopStep(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
 +                int index = InternalIndexOf(item);
 +                SortedSetCount.LoopStepBeyond(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
-                                         Pal.Contents(marked), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
+                                         BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
 -                if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"
 +                if (index >= 0)
                  {
--                    if (!marked[index])
-+                    // BitHelper: `IsMarked` reads false and `MarkBit` does nothing past the bitmap.
-+                    if (!(index < marked.Length && marked[index]))
+-                    BitHelperBits.MarkedBits(Pal.Contents(bitHelper.Span), index);
+-                    BitHelperBits.SetBits(Pal.Contents(bitHelper.Span), index);
++                    BitHelperBits.BitsAt(Pal.Contents(bitHelper.Span), index);
+                     if (!bitHelper.IsMarked(index))
                      {
                          // item hasn't been seen yet
--                        marked[index] = true;
-+                        if (index < marked.Length) marked[index] = true;
+@@ -2334,7 +2320,7 @@
                          uniqueFoundCount++;
                      }
                  }
@@ -75,7 +73,7 @@ index 149dcae..e3b414c 100644
                  {
                      unfoundCount++;
                      if (returnIfUnfound)
-@@ -2337,14 +2329,6 @@ namespace System.Collections.Generic
+@@ -2344,17 +2330,6 @@
                          break;
                      }
                  }
@@ -85,7 +83,10 @@ index 149dcae..e3b414c 100644
 -                    Pal.Unreachable();
 -                    // Safe guard: since maxHeight isn't guaranteed, we might need to grow the bitHelper.
 -                    indexLimit = (int)BitOperations.RoundUpToPowerOf2((uint)index);
--                    Array.Resize(ref marked, indexLimit);
+-                    intArrayLength = BitHelper.ToIntArrayLength(indexLimit);
+-                    Span<int> newSpan = new int[intArrayLength];
+-                    bitHelper.Span.CopyTo(newSpan);
+-                    bitHelper = new BitHelper(newSpan, clear: false);
 -                }
              }
  

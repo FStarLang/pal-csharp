@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
@@ -302,6 +303,38 @@ public sealed class WellKnown
 
     /// <summary>Either span. R17.1 translates both to the same thing.</summary>
     public bool IsAnySpan(ITypeSymbol? t) => IsSpan(t) || IsReadOnlySpan(t);
+
+    /// <summary>
+    /// R17.10. The span a <em>span wrapper</em> is: a non-generic <c>ref struct</c> the
+    /// program declares whose only instance field is a <c>readonly</c> span. Null for any
+    /// other type.
+    /// </summary>
+    public IFieldSymbol? SpanWrapperField(ITypeSymbol? t) =>
+        t is INamedTypeSymbol { TypeKind: TypeKind.Struct, IsRefLikeType: true, IsGenericType: false } s &&
+        !s.DeclaringSyntaxReferences.IsEmpty &&
+        s.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic && !f.IsConst).ToList() is [{ IsReadOnly: true } only] &&
+        IsAnySpan(only.Type)
+            ? only
+            : null;
+
+    /// <summary>R17.10. Whether <paramref name="f"/> is the span field of a span wrapper.</summary>
+    public bool IsWrappedSpan(ISymbol? f) =>
+        f is IFieldSymbol field && SymbolEqualityComparer.Default.Equals(SpanWrapperField(field.ContainingType), field);
+
+    /// <summary>
+    /// R17.10. A property of a span wrapper whose getter is exactly its span field
+    /// (<c>Span =&gt; _span</c>): it names the wrapper itself.
+    /// </summary>
+    public bool IsWrappedSpanGetter(ISymbol? p) =>
+        p is IPropertySymbol { IsStatic: false, GetMethod: { DeclaringSyntaxReferences: [var r] }, ContainingType: { } owner } &&
+        SpanWrapperField(owner) is { } field &&
+        (r.GetSyntax() switch
+        {
+            ArrowExpressionClauseSyntax { Expression: var e } => e,
+            AccessorDeclarationSyntax { ExpressionBody.Expression: var e } => e,
+            AccessorDeclarationSyntax { Body.Statements: [ReturnStatementSyntax { Expression: { } e }] } => e,
+            _ => null,
+        }) is IdentifierNameSyntax { Identifier.ValueText: var name } && name == field.Name;
 
     /// <summary>
     /// R11.1. The F* type a <c>[SpecType]</c> denotes, or null if this is not one. This is
@@ -668,6 +701,9 @@ public sealed class WellKnown
         {
             case null:
                 return null;
+            // R17.10. A span wrapper is the span it holds.
+            case INamedTypeSymbol wrapper when SpanWrapperField(wrapper) is { } wrapped:
+                return MapType(wrapped.Type);
             case IArrayTypeSymbol { Rank: 1 } array when MapType(array.ElementType) is { } e:
                 return new IrArrayType(e);
             // R20.4. `List<T>`, `IList<T>` and `IReadOnlyList<T>` are an array: an indexed

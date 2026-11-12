@@ -69,7 +69,11 @@ The proof fails only there: the method verifies at the set, and at the view it f
 re-establish its loop invariant where it marks an item as found. With
 `int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;` it verifies at both, against
 the counts of items of `other` in the set (in the view's range, at a view). The proof also
-shows that the PR's bitmap-growth branch is dead.
+shows that the PR's bitmap-growth branch is dead. The verified code is the PR's own
+`BitHelper` over `stackalloc`ed memory, and `BitHelper` is verified against a bit-level
+specification. `SetEquals`, `IsSubsetOf`, `IsProperSubsetOf` and `IsProperSupersetOf` are
+verified on the path that calls the method, for any `SortedSet<T>` argument under any
+comparer.
 
 ## 2. Arithmetic that can overflow
 

@@ -705,6 +705,8 @@ public static class Normalize
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
             case IrNewArray na: Free(na.Length, into); if (na.Source is { } nas) Free(nas, into); return;
+            case IrSpanCreate sc: Free(sc.Source, into); if (sc.Start is { } ss) Free(ss, into); if (sc.Length is { } sl) Free(sl, into); return;
+            case IrSpanWrap sw: Free(sw.Span, into); Free(sw.Ctor, into); return;
             case IrArraySearch se: Free(se.Array, into); Free(se.Item, into); Free(se.Start, into); Free(se.Count, into); return;
             case IrArrayBinarySearch bs: Free(bs.Array, into); Free(bs.Start, into); Free(bs.Count, into); Free(bs.Item, into); Free(bs.Comparer, into); return;
             case IrContents ct: Free(ct.Array, into); return;

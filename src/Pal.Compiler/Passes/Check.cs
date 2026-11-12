@@ -664,6 +664,7 @@ public static class Check
             IrContents c => [c.Array],
             IrEnumOp e => [e.Source, .. e.Args],
             IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
+            IrSpanWrap sw => [sw.Span, sw.Ctor],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
             IrSpecOp o => o.Args,

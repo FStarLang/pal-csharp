@@ -187,6 +187,21 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// <summary>R33.27. The receiver's array field a span local borrowed, if that is its source.</summary>
     public string? BorrowedField { get; init; }
 
+    /// <summary>R17.9. The span local this span local is a window of, if it borrowed one.</summary>
+    public string? Parent { get; init; }
+
+    /// <summary>
+    /// R17.9. A span local that owns fresh memory, or is a window of one that does: it is
+    /// released where it goes out of scope rather than given back.
+    /// </summary>
+    public bool Released { get; init; }
+
+    /// <summary>R17.9. A span local a window has been borrowed from: until the window is given back, it owns nothing.</summary>
+    public bool Lent { get; init; }
+
+    /// <summary>R17.9. The order span locals were declared in, for releasing the latest first.</summary>
+    public int Serial { get; init; }
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
@@ -212,7 +227,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         _ => "",
     };
 
-    public bool Owns => Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
+    public bool Owns => !Lent && Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
         or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell;
 }
 
@@ -2358,6 +2373,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrLength l: CollectExpr(l.Array); return;
                 case IrOld o: CollectExpr(o.Operand); return;
                 case IrNewArray na: CollectExpr(na.Length); if (na.Source is { } nas) CollectExpr(nas); return;
+                case IrSpanWrap sw: CollectExpr(sw.Span); CollectExpr(sw.Ctor); return;
+                case IrSpanCreate sc: CollectExpr(sc.Source); if (sc.Start is { } ss) CollectExpr(ss); if (sc.Length is { } sl) CollectExpr(sl); return;
                 case IrArraySearch se: CollectExpr(se.Array); CollectExpr(se.Item); CollectExpr(se.Start); CollectExpr(se.Count); return;
                 case IrArrayBinarySearch bs: CollectExpr(bs.Array); CollectExpr(bs.Start); CollectExpr(bs.Count); CollectExpr(bs.Item); CollectExpr(bs.Comparer); return;
                 case IrNewException ne: foreach (var a in ne.Args) CollectExpr(a); return;
