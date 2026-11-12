@@ -86,6 +86,12 @@ namespace System.Collections.Generic
         internal static void LoopStep<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();
 
+        // Used only by the experiment that checks the body before dotnet/runtime#133116
+        // (samples/dotnet-runtime/SORTEDSET-PR133116.md).
+        [SpecOp("SortedSetCount.loop_step_beyond_s")]
+        internal static void LoopStepBeyond<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
+                                                     Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();
+
         [SpecOp("SortedSetCount.loop_done_s")]
         internal static void LoopDone<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();

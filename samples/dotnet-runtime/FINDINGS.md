@@ -12,7 +12,8 @@ read off the source and pinned by the verified contracts.
 
 ### 1.1 `SortedSet<T>.SetEquals` / `IsSubsetOf` miscount (`InternalIndexOf` vs `BitHelper`)
 
-**Reproduced on .NET 10.** §27.3, R27.14.
+**Reproduced on .NET 10.** §27.3, R27.14. Open upstream as dotnet/runtime#102118; a
+walk-through with the failing proof is in [SORTEDSET-PR133116.md](SORTEDSET-PR133116.md) §2-§3.
 
 * `CheckUniqueAndUnfoundElements` marks each element of `other` it finds in a `BitHelper`
   bitmap. The bitmap is sized from `Count`.
@@ -54,7 +55,8 @@ Each case needs about 2^32 modifications first. The verified writes through a vi
 
 ### 1.3 dotnet/runtime#133116's fix for 1.1 is wrong at a view
 
-**Reproduced** with the PR's code. §37.
+**Reproduced** with the PR's code. §37. The full account, with the counterexample, the
+patch and the proof, is [SORTEDSET-PR133116.md](SORTEDSET-PR133116.md).
 
 * dotnet/runtime#133116 sizes the bitmap from the tree's height, which fixes 1.1 at the
   set. At a view, it makes `InternalIndexOf` search from the view's root.

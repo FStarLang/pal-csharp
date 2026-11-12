@@ -1,0 +1,17 @@
+diff --git a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+index 149dcae..af3a741 100644
+--- a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
++++ b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+@@ -2313,9 +2313,9 @@ namespace System.Collections.Generic
+                                                          Pal.Contents(marked), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
+                               Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
+                                   SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
+-                // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
+-                // out-of-range nodes; without the range check, an out-of-range item counts as found.
+-                int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
++                // pal: EXPERIMENT (samples/dotnet-runtime/SORTEDSET-PR133116.md §5): the lookup as
++                // dotnet/runtime#133116 writes it, without the range check.
++                int index = InternalIndexOf(item);
+                 SortedSetCount.LoopStep(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                         Pal.Contents(marked), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
+                 if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"

@@ -11894,6 +11894,10 @@ tree's height rather than its count. This section verifies the method as that PR
 it, at the set and at a view. The harness is `pal/SortedSet` in the runtime tree; the
 specification and its lemmas are `pal/SortedSet/SortedSetCount.fst` and
 `pal/SortedSet/Count.cs`. Nothing in `SortedSetCount.fst` is trusted.
+`samples/dotnet-runtime/SORTEDSET-PR133116.md` is a self-contained account of the bug, the
+PR, its counterexample, the fix and this proof. Its experiments (`pal/SortedSet/experiments`)
+check the original body and the unfixed PR, and both fail where the bug is; the original
+body's step lemma is `loop_step_beyond_s`.
 
 The PR's method:
 * marks each item of `other` it finds at the item's breadth-first position

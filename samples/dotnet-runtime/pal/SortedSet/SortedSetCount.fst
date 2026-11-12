@@ -693,6 +693,34 @@ let loop_step_s (#a #b: Type0) (c: O.comparer a) (los his: Seq.seq a) (la ua: bo
                     (p < 0 ==> loop_inv_s c los his la ua tr ks m all (i + 1) uniq (unf + 1))))
   = loop_step_g c (ok_s c los his la ua) tr ks m all i uniq unf
 
+/// One item, `all[i]`, with `BitHelper`'s semantics for a position `p` past the bitmap: `IsMarked`
+/// is false and `MarkBit` does nothing. The found count is then to grow only if no earlier item
+/// was at `p`, which the bitmap cannot tell. Used only by the experiment that checks the body
+/// before dotnet/runtime#133116, whose bitmap is sized from `Count`
+/// (`samples/dotnet-runtime/SORTEDSET-PR133116.md`).
+let loop_step_beyond_s (#a #b: Type0) (c: O.comparer a) (los his: Seq.seq a) (la ua: bool) (tr: T.tree (a & b)) (ks: Seq.seq a)
+                       (m: Seq.seq bool) (all: Seq.seq a) (i: int) (uniq unf: int)
+  : Lemma (requires lookup_s c los his la ua tr ks /\ loop_inv_s c los his la ua tr ks m all i uniq unf /\
+                    i < Seq.length all)
+          (ensures (let p = index_s c los his la ua tr (Seq.index all i) in
+                    let ok = ok_s c los his la ua in
+                    (p >= Seq.length m ==>
+                       loop_inv_s c los his la ua tr ks m all (i + 1)
+                         (uniq + (if phit c ok tr (Seq.slice all 0 i) p then 0 else 1)) unf) /\
+                    (p < Seq.length m ==>
+                       (p >= 0 /\ not (Seq.index m p) ==> loop_inv_s c los his la ua tr ks (Seq.upd m p true) all (i + 1) (uniq + 1) unf) /\
+                       (p >= 0 /\ Seq.index m p ==> loop_inv_s c los his la ua tr ks m all (i + 1) uniq unf) /\
+                       (p < 0 ==> loop_inv_s c los his la ua tr ks m all (i + 1) uniq (unf + 1)))))
+  = let ok = ok_s c los his la ua in
+    let x = Seq.index all i in
+    let p = index_of c ok tr x in
+    if p < Seq.length m then loop_step_g c ok tr ks m all i uniq unf
+    else begin
+      let s = Seq.slice all 0 i in
+      slice_snoc all i;
+      step c ok tr ks s x
+    end
+
 let loop_done_s (#a #b: Type0) (c: O.comparer a) (los his: Seq.seq a) (la ua: bool) (tr: T.tree (a & b)) (ks: Seq.seq a)
                 (m: Seq.seq bool) (all: Seq.seq a) (i: int) (uniq unf: int)
   : Lemma (requires loop_inv_s c los his la ua tr ks m all i uniq unf /\ (i == Seq.length all \/ unf > 0))
