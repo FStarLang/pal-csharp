@@ -760,3 +760,157 @@ let counts_s (#a: Type0) (c: O.comparer a) (los his: Seq.seq a) (la ua: bool) (k
                unfound_s c los his la ua ks s == unfound_range c lo hi la ua ks s)
       = if not (la || ua) then counts_off c lo hi ks s in
     FStar.Classical.forall_intro_2 aux
+
+(* ---------------------------------------------------------------------------------- *)
+(* What the callers decide from the counts                                             *)
+(*                                                                                     *)
+(* `IsSubsetOf`, `IsProperSubsetOf`, `IsProperSupersetOf` and `SetEquals` compare the  *)
+(* two counts with `Count`. With a different comparer `other`'s items are not sorted   *)
+(* under this set's, so the contracts speak of membership by equivalence (`all_hit`),  *)
+(* which needs no order; on two sequences sorted under `c` it is `SetOps.all_in`.       *)
+
+module SO = Pulse.Lib.CSharp.SetOps
+module SC = Pulse.Lib.CSharp.SetCompare
+
+/// Every item of `t` is equivalent under `c` to some item of `s`.
+let rec all_hit (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) : Tot bool (decreases Seq.length t) =
+  Seq.length t = 0 || (hit c s (Seq.last t) && all_hit c s (init t))
+
+let rec hit_at (#a: Type0) (c: O.comparer a) (s: Seq.seq a) (y: a)
+  : Lemma (ensures hit c s y <==> (exists (i: nat). i < Seq.length s /\ O.compare c (Seq.index s i) y == 0))
+          (decreases Seq.length s)
+  = if Seq.length s = 0 then ()
+    else begin
+      hit_at c (init s) y;
+      assert (forall (i: nat). i < Seq.length s - 1 ==> Seq.index (init s) i == Seq.index s i)
+    end
+
+let rec all_hit_at (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (ensures all_hit c s t <==> (forall (j: nat). j < Seq.length t ==> hit c s (Seq.index t j)))
+          (decreases Seq.length t)
+  = if Seq.length t = 0 then ()
+    else begin
+      all_hit_at c s (init t);
+      assert (forall (j: nat). j < Seq.length t - 1 ==> Seq.index (init t) j == Seq.index t j)
+    end
+
+let all_hit_empty (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (ensures (Seq.length t == 0 ==> all_hit c s t) /\
+                   (Seq.length s == 0 /\ Seq.length t > 0 ==> not (all_hit c s t)))
+          [SMTPat (all_hit c s t)]
+  = ()
+
+/// In a strictly sorted `ks`, an item has a key index exactly when it hits `ks`.
+let sorted_hit (#a: Type0) (c: O.comparer a) (ks: Seq.seq a) (y: a)
+  : Lemma (requires S.strictly_sorted c ks) (ensures (S.key_index c ks y >= 0) == hit c ks y)
+  = hit_at c ks y;
+    let k = S.key_index c ks y in
+    if k >= 0 then assert (O.compare c (Seq.index ks k) y == 0)
+    else if hit c ks y then begin
+      let aux (i: nat) : Lemma (requires i < Seq.length ks /\ O.compare c (Seq.index ks i) y == 0) (ensures False)
+        = equiv_sym c (Seq.index ks i) y; key_index_unique c ks y i in
+      FStar.Classical.forall_intro (FStar.Classical.move_requires aux)
+    end
+
+/// On a strictly sorted `s`, `all_in` is `all_hit`.
+let all_in_hit (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires S.strictly_sorted c s) (ensures SO.all_in c s t == all_hit c s t)
+  = SO.all_in_at c s t;
+    all_hit_at c s t;
+    FStar.Classical.forall_intro (FStar.Classical.move_requires (sorted_hit c s))
+
+let rec found_upto_all (#a: Type0) (c: O.comparer a) (ks s: Seq.seq a) (n: nat{n <= Seq.length ks})
+  : Lemma (ensures found_upto c all_ok ks s n <= n /\
+                   (found_upto c all_ok ks s n == n <==> (forall (j: nat). j < n ==> hit c s (Seq.index ks j))))
+          (decreases n)
+  = if n = 0 then () else found_upto_all c ks s (n - 1)
+
+let rec unfound_all_zero (#a: Type0) (c: O.comparer a) (ks s: Seq.seq a)
+  : Lemma (ensures unfound_all c ks s == 0 <==> (forall (j: nat). j < Seq.length s ==> S.key_index c ks (Seq.index s j) >= 0))
+          (decreases Seq.length s)
+  = if Seq.length s = 0 then ()
+    else begin
+      unfound_all_zero c ks (init s);
+      assert (forall (j: nat). j < Seq.length s - 1 ==> Seq.index (init s) j == Seq.index s j)
+    end
+
+/// The set's counts decide the relations: every key is found exactly when `s` holds all of
+/// them, and nothing is unfound exactly when the keys hold all of `s`.
+let counts_decide (#a: Type0) (c: O.comparer a) (ks s: Seq.seq a)
+  : Lemma (requires S.strictly_sorted c ks)
+          (ensures found_all c ks s <= Seq.length ks /\
+                   (found_all c ks s = Seq.length ks) == all_hit c s ks /\
+                   (unfound_all c ks s = 0) == all_hit c ks s)
+  = found_upto_all c ks s (Seq.length ks);
+    all_hit_at c s ks;
+    unfound_all_zero c ks s;
+    all_hit_at c ks s;
+    FStar.Classical.forall_intro (FStar.Classical.move_requires (sorted_hit c ks))
+
+/// Each member of `t` at or above position `i` is at least as far from the end of `s`.
+let rec key_index_top (#a: Type0) (c: O.comparer a) (s t: Seq.seq a) (i: nat)
+  : Lemma (requires S.strictly_sorted c s /\ S.strictly_sorted c t /\ i < Seq.length t /\
+                    (forall (k: nat). k < Seq.length t ==> S.key_index c s (Seq.index t k) >= 0))
+          (ensures S.key_index c s (Seq.index t i) <= Seq.length s - Seq.length t + i)
+          (decreases Seq.length t - i)
+  = if i = Seq.length t - 1 then ()
+    else begin
+      key_index_top c s t (i + 1);
+      SO.key_index_lt c s (Seq.index t i) (Seq.index t (i + 1))
+    end
+
+/// Pigeonhole: a strictly sorted `t` within a strictly sorted `s`, and no shorter, is `s`
+/// position by position.
+let all_hit_pigeon (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires S.strictly_sorted c s /\ S.strictly_sorted c t /\ all_hit c s t /\
+                    Seq.length s <= Seq.length t)
+          (ensures SC.pointwise c s t)
+  = all_in_hit c s t;
+    SO.all_in_at c s t;
+    SO.all_in_length c s t;
+    assert (Seq.length s == Seq.length t);
+    assert (forall (k: nat). k < Seq.length t ==> S.key_index c s (Seq.index t k) >= 0);
+    let aux (i: nat{i < Seq.length s /\ i < Seq.length t})
+      : Lemma (O.compare c (Seq.index s i) (Seq.index t i) == 0)
+      = SO.all_in_index c s t i;
+        key_index_top c s t i;
+        let k = S.key_index c s (Seq.index t i) in
+        assert (k >= i);
+        assert (k <= i);
+        assert (O.compare c (Seq.index s k) (Seq.index t i) == 0) in
+    FStar.Classical.forall_intro aux
+
+let pointwise_hits (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires SC.pointwise c s t) (ensures all_hit c s t /\ all_hit c t s)
+  = all_hit_at c s t;
+    all_hit_at c t s;
+    let l (j: nat{j < Seq.length t /\ j < Seq.length s})
+      : Lemma (hit c s (Seq.index t j) /\ hit c t (Seq.index s j))
+      = hit_at c s (Seq.index t j);
+        hit_at c t (Seq.index s j);
+        equiv_sym c (Seq.index s j) (Seq.index t j) in
+    FStar.Classical.forall_intro l
+
+/// The fast paths' facts: on two sequences strictly sorted under one comparer, `all_in` is
+/// `all_hit`, a subset is no longer, a subset no shorter is the whole, and `same_keys` is
+/// inclusion both ways.
+let sorted_hits (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
+  : Lemma (requires S.strictly_sorted c s /\ S.strictly_sorted c t)
+          (ensures SO.all_in c s t == all_hit c s t /\ SO.all_in c t s == all_hit c t s /\
+                   (all_hit c s t ==> Seq.length t <= Seq.length s) /\
+                   (all_hit c t s ==> Seq.length s <= Seq.length t) /\
+                   (all_hit c s t /\ Seq.length s <= Seq.length t ==> all_hit c t s) /\
+                   (all_hit c t s /\ Seq.length t <= Seq.length s ==> all_hit c s t) /\
+                   SC.same_keys c s t == (all_hit c s t && all_hit c t s))
+  = all_in_hit c s t;
+    all_in_hit c t s;
+    SO.all_in_length c s t;
+    SO.all_in_length c t s;
+    SC.same_keys_pointwise c s t;
+    if all_hit c s t && Seq.length s <= Seq.length t then begin
+      all_hit_pigeon c s t; pointwise_hits c s t
+    end;
+    if all_hit c t s && Seq.length t <= Seq.length s then begin
+      all_hit_pigeon c t s; pointwise_hits c t s
+    end;
+    if SC.same_keys c s t then pointwise_hits c s t

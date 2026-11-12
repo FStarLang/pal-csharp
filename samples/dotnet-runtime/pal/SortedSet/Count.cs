@@ -106,6 +106,21 @@ namespace System.Collections.Generic
         // The counts the contracts state, from the body's: the set's, or the view's range's.
         [SpecOp("SortedSetCount.counts_s")]
         internal static void Counts<T>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, Seq<T> ks, Seq<T> s) => throw Ghost();
+
+        // What the callers decide (R37.10). `AllHit(c, s, t)`: every item of `t` is equivalent
+        // under `c` to an item of `s`; neither need be sorted under `c`.
+        [SpecOp("SortedSetCount.all_hit")]
+        internal static bool AllHit<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+        // On a strictly sorted `ks`: `FoundAll == |ks|` iff `s` holds every key, and
+        // `UnfoundAll == 0` iff the keys hold every item of `s`.
+        [SpecOp("SortedSetCount.counts_decide")]
+        internal static void CountsDecide<T>(IComparer<T> c, Seq<T> ks, Seq<T> s) => throw Ghost();
+
+        // On two sequences strictly sorted under `c`: `AllIn` is `AllHit`, a subset no shorter is
+        // the whole, and `SameKeys` is inclusion both ways.
+        [SpecOp("SortedSetCount.sorted_hits")]
+        internal static void SortedHits<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
     }
 
     public partial class SortedSet<T>

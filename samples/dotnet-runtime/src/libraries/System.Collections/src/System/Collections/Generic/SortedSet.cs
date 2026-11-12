@@ -1897,8 +1897,11 @@ namespace System.Collections.Generic
             }
         }
 
-        [Requires("@this.SpecComparer == other.SpecComparer")]
-        [Ensures("Result == SpecSetOps.AllIn(@this.SpecComparer, other.SpecItems, @this.SpecItems)")]
+        // R37.10. `other` is a SortedSet<T> (R27.46) under any comparer that `Equals` does not
+        // confuse with this set's (R27.47). With the same comparer the fast path decides; with
+        // another, the counts do.
+        [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
+        [Ensures("Result == SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems)")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         public bool IsSubsetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
@@ -1912,19 +1915,16 @@ namespace System.Collections.Generic
             SortedSet<T>? asSorted = other as SortedSet<T>;
             if (asSorted != null && HasEqualComparer(asSorted))
             {
-                SpecSetOps.AllInLength(this.SpecComparer, asSorted.SpecItems, this.SpecItems);
+                SortedSetCount.SortedHits(this.SpecComparer, asSorted.SpecItems, this.SpecItems);
                 if (Count > asSorted.Count)
                     return false;
                 return IsSubsetOfSortedSetWithSameComparer(asSorted);
             }
             else
             {
-                // The contract requires `other` to be a SortedSet<T> with this set's comparer,
-                // so the branch above was taken (doc/translation.md R27.46-R27.49).
-                Pal.Unreachable();
-
                 // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
                 ElementCount result = CheckUniqueAndUnfoundElements(other, false);
+                SortedSetCount.CountsDecide(this.SpecComparer, this.SpecItems, asSorted!.SpecItems);
                 return result.UniqueCount == Count && result.UnfoundCount >= 0;
             }
         }
@@ -1965,8 +1965,9 @@ namespace System.Collections.Generic
             return true;
         }
 
-        [Requires("@this.SpecComparer == other.SpecComparer")]
-        [Ensures("Result == (SpecSetOps.AllIn(@this.SpecComparer, other.SpecItems, @this.SpecItems) && @this.SpecItems.Length < other.SpecItems.Length)")]
+        // R37.10. As `IsSubsetOf`; and some item of `other` is not in this set.
+        [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
+        [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems) && !SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, other.SpecItems))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         public bool IsProperSubsetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
@@ -1982,17 +1983,15 @@ namespace System.Collections.Generic
             SortedSet<T>? asSorted = other as SortedSet<T>;
             if (asSorted != null && HasEqualComparer(asSorted))
             {
+                SortedSetCount.SortedHits(this.SpecComparer, asSorted.SpecItems, this.SpecItems);
                 if (Count >= asSorted.Count)
                     return false;
                 return IsSubsetOfSortedSetWithSameComparer(asSorted);
             }
 
-            // The contract requires `other` to be a SortedSet<T> with this set's comparer,
-            // so the branch above was taken (doc/translation.md R27.46-R27.49).
-            Pal.Unreachable();
-
             // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
             ElementCount result = CheckUniqueAndUnfoundElements(other, false);
+            SortedSetCount.CountsDecide(this.SpecComparer, this.SpecItems, asSorted!.SpecItems);
             return result.UniqueCount == Count && result.UnfoundCount > 0;
         }
 
@@ -2053,8 +2052,10 @@ namespace System.Collections.Generic
         }
 
         // R32.14. As `IsSupersetOf`, with the counts compared first.
-        [Requires("@this.SpecComparer == other.SpecComparer")]
-        [Ensures("Result == (SpecSetOps.AllIn(@this.SpecComparer, @this.SpecItems, other.SpecItems) && other.SpecItems.Length < @this.SpecItems.Length)")]
+        // R37.10. Every item of `other` is in this set, and some item of this set is not in
+        // `other`; `other` as in `IsSubsetOf`.
+        [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
+        [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, other.SpecItems) && !SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Rlimit(8)]
         public bool IsProperSupersetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
@@ -2071,6 +2072,7 @@ namespace System.Collections.Generic
             SortedSet<T>? asSorted = other as SortedSet<T>;
             if (asSorted != null && HasEqualComparer(asSorted))
             {
+                SortedSetCount.SortedHits(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 if (asSorted.Count >= Count)
                     return false;
                 SpecSetOps.SortedBounds(this.SpecComparer, asSorted.SpecItems, 0);
@@ -2100,21 +2102,19 @@ namespace System.Collections.Generic
                 return true;
             }
 
-            // The contract requires `other` to be a SortedSet<T> with this set's comparer,
-            // so the branch above was taken (doc/translation.md R27.46-R27.49).
-            Pal.Unreachable();
-
             // Worst case: I mark every element in my set and see if I've counted all of them. O(M log N).
             // slight optimization, put it into a HashSet and then check can do it in O(N+M)
             // but slower in better cases + wastes space
             ElementCount result = CheckUniqueAndUnfoundElements(other, true);
+            SortedSetCount.CountsDecide(this.SpecComparer, this.SpecItems, asSorted!.SpecItems);
             return result.UniqueCount < Count && result.UnfoundCount == 0;
         }
 
-        // Two strictly sorted sequences are position by position equal under the comparer
-        // exactly when they hold the same set (`SetCompare.same_keys_members`).
-        [Requires("@this.SpecComparer == other.SpecComparer")]
-        [Ensures("Result == SpecSetCompare.SameKeys(@this.SpecComparer, @this.SpecItems, other.SpecItems)")]
+        // R37.10. Each set holds every item of the other under this set's comparer; `other` as
+        // in `IsSubsetOf`. With the same comparer, two strictly sorted sequences are position by
+        // position equal exactly when they hold the same set (`SortedSetCount.sorted_hits`).
+        [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
+        [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems) && SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, other.SpecItems))")]
         [Rlimit(8)]
         public bool SetEquals([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
@@ -2127,6 +2127,7 @@ namespace System.Collections.Generic
                 Enumerator theirs = asSorted.GetEnumerator();
                 bool mineEnded = !mine.MoveNext();
                 bool theirsEnded = !theirs.MoveNext();
+                SortedSetCount.SortedHits(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 SpecSetCompare.SameKeysWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 while (!mineEnded && !theirsEnded)
                 {
@@ -2163,12 +2164,9 @@ namespace System.Collections.Generic
                 return mineEnded && theirsEnded;
             }
 
-            // The contract requires `other` to be a SortedSet<T> with this set's comparer,
-            // so the branch above was taken (doc/translation.md R27.46-R27.49).
-            Pal.Unreachable();
-
             // Worst case: I mark every element in my set and see if I've counted all of them. O(size of the other collection).
             ElementCount result = CheckUniqueAndUnfoundElements(other, true);
+            SortedSetCount.CountsDecide(this.SpecComparer, this.SpecItems, asSorted!.SpecItems);
             return result.UniqueCount == Count && result.UnfoundCount == 0;
         }
 
@@ -2246,12 +2244,12 @@ namespace System.Collections.Generic
         // `BitHelper` over `stackalloc`ed or allocated ints (R37.2). At a view the method's body
         // is checked again (R32.13): the range is the view's, and the tree its range root.
         [Requires("Pal.Contents(other).Length <= int.MaxValue")]
-        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
+        [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Requires("@this.SpecCoherent && @this.SpecCountOk && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
-        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
         [Rlimit(20)]
@@ -2359,12 +2357,12 @@ namespace System.Collections.Generic
         // Its contract is the bitmap version's.
         [Admit]
         [Requires("Pal.Contents(other).Length <= int.MaxValue")]
-        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
+        [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Requires("@this.SpecCoherent && @this.SpecRootOk && @this.version == @this._underlying.SpecVersion && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
-        [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
         private ElementCount CheckUniqueAndUnfoundElementsFallback(IEnumerable<T> other, bool returnIfUnfound)
