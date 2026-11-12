@@ -444,7 +444,7 @@ fresh view does satisfy the replica's precondition.
 
 The proof also establishes:
 * **The bitmap is big enough, and its growth branch is dead.** `SortedSet.cs:2347-2357`
-  is `Pal.Unreachable()` (R37.4).
+  is `Pal.Unreachable()` (R37.4). See "Why the bitmap never needs to grow" below.
 * **`GetApproximateMaxHeight` is exact enough** (`SortedSet.cs:3248-3264`, override in
   `TreeSubSet.cs:505-511`). It ensures `Height <= Result` for the set's tree, and for the
   view's root subtree at a view.
@@ -454,6 +454,47 @@ The proof also establishes:
 * **`BitHelper` is what the bitmap means** (§7.3). Its members are verified against
   `BitHelperBits`, so the loop's bitmap is `Bits(Contents(bitHelper.Span))`.
 * **The callers decide correctly** (§7.4).
+
+**Why the bitmap never needs to grow.** The PR keeps a branch that grows the bitmap, with
+the comment "since maxHeight isn't guaranteed, we might need to grow the bitHelper"
+(`SortedSet.cs:2351`). The proof shows that the height estimate is guaranteed, so the branch
+never runs. The argument has four steps:
+
+1. **A position is bounded by the height.** `InternalIndexOf` returns a breadth-first
+   position (§1.3): a node at depth `d` has a position below `2^(d+1) - 1`. So every
+   position in a tree of height `h` is below `2^h`. This is `pos_bound`
+   (`SortedSetCount.fst:348`), and the contract of `InternalIndexOf` states it as
+   `Result <= Breadth(tree) - 2`.
+2. **The estimate is never below the height.**
+   * At the set, the tree is red-black (its `[Refine]`), so its height is at most
+     `2 * floor(log2(n + 1))`. That is exactly what `GetApproximateMaxHeight` returns
+     (`SortedSet.cs:3258-3264`, `red_black_height` at `SortedSetCount.fst:373`).
+   * At a view, the range root's subtree is `_rootLevel` levels below the set's root, so
+     `underlyingHeight - _rootLevel` still bounds its height
+     (`SortedSet.TreeSubSet.cs:505-511`, `RangeRootHeight`). This needs the view's root to
+     be current, which is the `SpecRootOk` predicate (`SortedSet.TreeSubSet.cs:54`). A stale
+     view regains it through `VersionCheck`.
+   * The word "Approximate" in the method's name is therefore conservative: the estimate
+     can exceed the true height but never falls short.
+3. **The bitmap covers `2^maxHeight` positions.** The method falls back to `HashSet` when
+   `maxHeight > 12` (`SortedSet.cs:2279-2286`), so `maxHeight <= 12` here. Then
+   `indexLimit = 1 << maxHeight = 2^maxHeight` with no overflow (`shift_one`), and
+   `ToIntArrayLength` gives at least `indexLimit` bits (`words_cover`).
+4. **So every found index is below `indexLimit`.** `FitsPow2` (`SortedSet.cs:2305`,
+   `fits_pow2` at `SortedSetCount.fst:449`) turns steps 1–3 into `Fits(tree, indexLimit)`.
+   That fact is part of the loop invariant, which is why an index `>= indexLimit` cannot
+   occur.
+
+Consequently, in the loop's three-way test, either `(uint)index < (uint)indexLimit` holds
+or `index < 0` holds, and the `else` branch is unreachable. Its first statement is
+`Pal.Unreachable()` (`SortedSet.cs:2350`), which the verifier checks like any assertion.
+Once a branch is proved unreachable, nothing in its body needs proving: the bitmap never
+grows. The statements after `Pal.Unreachable()` are not translated (R27.48), so F* never
+checks the growth code itself (`RoundUpToPowerOf2`, the copy). That only matters if the
+branch could run, and it cannot.
+
+Upstream could therefore delete the growth branch or replace it with
+`Debug.Assert(index < indexLimit)`.
 
 ### 7.2 How: the lemmas
 
@@ -605,8 +646,8 @@ These pieces are taken on trust:
   proof never frees.
 
 Nothing else is assumed: no `[Admit]` on `BitHelper`, the method or the callers. The PR's
-growth branch, after `Pal.Unreachable()`, is not translated (R27.48). It is the one part of
-the PR's code that is proved dead rather than proved correct.
+growth branch is proved unreachable (§7.1, "Why the bitmap never needs to grow"), so nothing
+in it needs proving. Its statements after `Pal.Unreachable()` are not translated (R27.48).
 
 ### 7.6 Translator changes
 
