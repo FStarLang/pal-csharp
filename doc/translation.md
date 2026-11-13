@@ -2636,7 +2636,7 @@ declarations; *constrained* type parameters (§14 delivers unconstrained ones, a
 says why a constraint is a typeclass obligation rather than a syntactic one);
 `IEnumerable<T>` and `foreach`; delegates and lambdas in executable position; `async`;
 `goto`; `try`/`catch`/`throw`; `Memory<T>` and `ArraySegment<T>` (§17.5); `stackalloc`
-(R17.7); a non-tail `return` **inside a loop** (R5.5b reaches every other position); and a
+other than a span local's initializer (R17.7, R17.9); a non-tail `return` **inside a loop** (R5.5b reaches every other position); and a
 `switch` label that is a pattern or carries a `when` guard.
 
 **Gaps in the scheme, each with its reason.**
@@ -5324,10 +5324,9 @@ it rather than hiding it.
 
 ### 17.3 Creation is a borrow
 
-**R17.5 — every span comes from somewhere, and taking it consumes the source.** There is no
-way to make a span out of nothing (R17.7 refuses the one C# offers), so every span
-expression in the subset names a source that already owns memory, and taking the window
-takes that ownership. Five C# forms, three library operations, one receipt each:
+**R17.5 — every span comes from somewhere, and taking it consumes the source.** Apart from
+the fresh spans of R17.9, every span expression in the subset names a source that already
+owns memory, and taking the window takes that ownership. Five C# forms, three library operations, one receipt each:
 
 | C# | operation | receipt left in context |
 |---|---|---|
@@ -5379,15 +5378,60 @@ A read-only window restored unwritten gives the parent back exactly what it had,
 `splice_same`. So a read-only borrow costs its user nothing beyond the bounds — see
 `ReadAt` in `test/array_view`, whose `Contents(a) == Old(Contents(a))` needs no help.
 
+**R17.9 — a fresh span owns its memory.** Two forms make a span over memory no array owns:
+
+| C# | operation | contents |
+|---|---|---|
+| `Span<T> s = stackalloc T[n];` (a local's initializer, one size, no element list) | `Span.stackalloc n default` | arbitrary, of length `n` |
+| `new T[n]` as the span argument of a span wrapper's constructor (R17.10) | `Span.alloc n default` | `n` defaults |
+
+`stackalloc`'s contents are arbitrary because the runtime libraries compile with
+`SkipLocalsInit`: no proof may assume they are zero, which is why `BitHelper` clears them.
+Both operations are verified functions of `Pulse.Lib.CSharp.Span` (an array allocation
+viewed as a slice, its `is_from_array` receipt dropped). The slot records origin
+`SpanOrigin.Stackalloc` or `NewArray`; there is no receipt and nothing to restore. A window
+borrowed from a fresh span (R17.5's `Slice`) marks the fresh span *lent*. At every exit of
+the method (each `return`, the end of the body) and at the end of the block that declared
+them, the emitter releases spans latest first: a window over a fresh span is given back
+(`Span.restore_sub`), then the fresh span's `S.pts_to` is dropped (`drop_`; Pulse's
+separation logic is affine). The memory is not freed by the proof: a `stackalloc` dies with
+the frame, and an array is collected.
+
+**R17.10 — a span wrapper is the span it holds.** A non-generic `ref struct` whose only
+instance field is a `readonly` `Span<T>` or `ReadOnlySpan<T>` is a *span wrapper*.
+`MapType` maps it to its field's span type, and no record is emitted for it:
+
+* An instance member is a function whose first parameter, `this`, is the span (full
+  permission for `Span<T>`, a fraction for `ReadOnlySpan<T>`, R17.2). The field (`_span`),
+  and a property whose getter is exactly the field (`Span => _span`), lower to `this`, in
+  code and in contracts. `x.M(a)` passes `x` first.
+* A span local initialised from the field and never reassigned (`Span<int> span = _span;`,
+  the "workaround for dotnet/runtime#72004") is an alias of `this`: nothing is bound, and
+  each use is `this`. Writes to its elements are writes to `this`; Pulse matches resources
+  by name (F77), so a copy would not hold them.
+* The constructor `W(Span<T> p, …) { …; _span = p; }` is a function over `p` with the
+  final store removed. It is admitted only if that store is its last statement, stores a
+  by-value parameter of the constructor, and no earlier statement names the field or
+  `this` (`PALCS0595` otherwise).
+* `W x = new W(e, …);` binds the span local `x` from `e` by R17.5 or R17.9, then calls the
+  constructor function on `x`. Named arguments are accepted in parameter order. A wrapper
+  creation anywhere but a local's initializer is refused (`PALCS0590`).
+* `W x = c ? new W(e1, …) : new W(e2, …);` is split as R27.53's conditional: the rest of
+  the block is emitted in both arms, each binding `x` from one creation. Each arm then has
+  one origin, and Pulse never joins two spans of different origins.
+
+**R17.11 — `s.Clear()` zeroes a span.** As a statement, `Clear()` on a `Span<T>` is
+`Span.clear s default`, a verified library function ensuring the contents are
+`Seq.create (length) default`.
+
 ### 17.4 What is refused
 
 **R17.7 — the forms that are not borrows (`PALCS0590`).** The list is short now and every
 entry is on it for a reason of its own, not because a rule ran out:
 
-* **`stackalloc`.** An allocation, not a borrow: no `T[]` owns the memory, so there is no
-  parent to consume and nothing for `Pal.Restore` to give back. It would need a
-  scoped-lifetime allocation rule, interacting with F75's rule about `let mut` and tail
-  position.
+* **`stackalloc` anywhere but a span local's initializer.** The local form is R17.9's
+  fresh span. Elsewhere (an argument, a `Span<T>` expression in a conditional, an element
+  list, a spec) there is no binder for the fresh span's `pts_to` to be held at.
 * **A range on an *array*.** `a[1..3]` where `a` is `int[]` *copies* — C# compiles it to
   `RuntimeHelpers.GetSubArray`, producing a fresh array whose writes are invisible in `a`.
   Translating it as a window would be translating a different program. The refusal is not a
@@ -5427,8 +5471,9 @@ entry is on it for a reason of its own, not because a rule ran out:
   one back to its caller: the receipt would have to travel with it, and R17.6 has no way to
   name a borrow the caller did not take. C# itself restricts `ref struct` returns for a
   related reason.
-* **A span-typed field**, which C# forbids outright (`Span<T>` is a `ref struct`), so this
-  costs nothing.
+* **A span-typed field** of anything but a span wrapper (R17.10). C# allows one only in a
+  `ref struct`; a `ref struct` with other instance fields besides the span is not
+  translated.
 * **`Memory<T>`, `ArraySegment<T>`, `IEnumerable<T>`.** `ArraySegment<T>` is now expressible
   as a window and is a surface question only; `examples/adler32` still spells its segment out
   as three parameters and no longer has to.
@@ -8438,6 +8483,8 @@ receiver unchanged. R27.52 covers a loop that changes it.
   Add(item)` lost `Remove`'s postcondition this way). So the declaration becomes
   `if (c) { T x = a; rest } else { T x = b; rest }`. The rest of the body is copied into
   both arms, and each arm is checked against the loop invariant.
+* **A span local initialised by a conditional** (R17.10's two-origin span wrapper) is
+  split the same way, in any position, so that each arm's span has one origin.
 
 `SymmetricExceptWith` enumerates `other` (an `[Exactly]` `SortedSet<T>` of the same
 comparer). For each element it calls `Remove` if the element is a member of `this`, and
@@ -10685,7 +10732,10 @@ that the view shares the set's comparer and, when its version is the set's, its 
     translate (R25.3). They only throw `PlatformNotSupportedException`.
 * `IsSubsetOf`/`IsSupersetOf` and their proper forms on an `IEnumerable<T>` that is not a
   same-comparer `SortedSet<T>`: they go through `CheckUniqueAndUnfoundElements` (BitHelper,
-  §27 Findings).
+  §27 Findings). §37 verifies that path for `IsSubsetOf`, `IsProperSubsetOf`,
+  `IsProperSupersetOf` and `SetEquals` when `other` is a `SortedSet<T>` under any comparer
+  (R37.10). An `IEnumerable<T>` that is not a `SortedSet<T>` is still outside, because R34
+  has no type test.
 
 ### Findings (§32)
 
@@ -11886,3 +11936,163 @@ references in `REFERENCES`:
   System.Collections' `ThrowHelper`, whose members have the names of `common`'s, and the
   harness models `HashHelpers` rather than verifying the runtime's `Common` copy, so its
   modules would collide with `common`'s and `HashCommon`'s (R36.4).
+
+## 37. `SortedSet<T>.CheckUniqueAndUnfoundElements` as dotnet/runtime#133116 rewrites it
+
+dotnet/runtime#133116 fixes §27's miscount (FINDINGS 1.1) by sizing the bitmap from the
+tree's height rather than its count. This section verifies the method as that PR rewrites
+it, at the set and at a view. The harness is `pal/SortedSet` in the runtime tree; the
+specification and its lemmas are `pal/SortedSet/SortedSetCount.fst` and
+`pal/SortedSet/Count.cs`. Nothing in `SortedSetCount.fst` is trusted.
+`samples/dotnet-runtime/SORTEDSET-PR133116.md` is a self-contained account of the bug, the
+PR, its counterexample, the fix and this proof. Its experiments (`pal/SortedSet/experiments`)
+check the original body and the unfixed PR, and both fail where the bug is; the original
+body's step lemma is `loop_step_beyond_s`.
+
+The PR's method:
+* marks each item of `other` it finds at the item's breadth-first position
+  (`InternalIndexOf`) in a bitmap of `1 << GetApproximateMaxHeight()` bits;
+* falls back to a `HashSet<Node>` when that height exceeds 12;
+* grows the bitmap if a position is past its end;
+* at a view, makes `InternalIndexOf` non-virtual, searching from the view's root, and
+  has the view record `_rootLevel`, the depth of its root, which `FindRange` computes.
+
+**What is proved.**
+* At the set: `UnfoundCount > 0` exactly when some item of `other` is not in the set, and
+  `UniqueCount` is the number of distinct items of `other` in the set
+  (`SortedSetCount.found_all` / `unfound_all`), unless the method returned early.
+* At a view: the same, with "in the set" meaning in the set *and within the view's range*
+  (`found_range` / `unfound_range`). `ViewCounts` in `Count.cs` is a client:
+  `s.GetViewBetween(lo, hi)` followed by the call, verified against that contract.
+* `GetApproximateMaxHeight` is not approximate: the tree is red-black, so its height is at
+  most `2 * floor(log2(n + 1))` (`red_black_height`). At a view, the view's root lies
+  `_rootLevel` below the set's root (`range_root_height`).
+* The bitmap never grows (R37.4).
+* The precondition `Pal.Contents(other).Length <= int.MaxValue` rules out the `int`
+  overflow of `unfoundCount`.
+
+**The finding.** As the PR has it, the method is wrong at a view. The view's root is the
+node the range search stops at (`range_root`), and its subtree may hold nodes outside the
+range. `InternalIndexOf` finds those too, so an out-of-range item of `other` counts as found.
+For `s = {0..9}` and `v = s.GetViewBetween(2, 5)`, `v.SetEquals([2, 3, 4, 9])` and
+`v.IsSubsetOf([2, 3, 4, 9])` return `true` (both are `false` on .NET 10). The proof shows this
+as the one failure: the base method verifies, and the view's replica fails only to
+re-establish the loop invariant (`loop_inv_s`) in the "found" branch. The fix, verified at
+both, is
+
+```csharp
+int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
+```
+
+The view's `IsWithinRange` now also ensures that it leaves `root`, `comparer`, `_min` and
+`_max` unchanged, as its `InternalIndexOf` does.
+
+**R37.1. A range named by the base's virtual `[Spec]` members.** The method's body is
+checked twice, at the set and at the view (R32.13), and the loop invariant must name the
+range it counts over at each. The base declares `[Spec] virtual` members `SpecRangeLo`,
+`SpecRangeHi`, `SpecRangeLa`, `SpecRangeUa`, `SpecRangeTree` and `SpecRangeComparer`, and the
+view overrides each (R37.7). A bound is a `Seq<T>`: empty at the set, which has no key to
+name a bound by, and `One(_min)` or `One(_max)` at a view. The `_s` lemmas of
+`SortedSetCount` take bounds in that form. A view's loop pins its bounds with
+`this.SpecRangeLo == Pal.Old(this.SpecRangeLo)`, and `one_inj` recovers `_min` from it.
+
+**R37.2. The bitmap is the PR's `BitHelper`.** The method's code is the PR's: a
+`stackalloc`ed span of `StackAllocThreshold` ints, sliced and cleared when the bitmap fits,
+an allocated `int[]` otherwise. `BitHelper` (`Common/src/System/Collections/Generic`) is a
+span wrapper (R17.10) over a fresh span (R17.9); the two-origin initializer is split
+(R17.10, R27.53); `Clear` is R17.11; `1 << k` wraps (R34.12). Its members are verified, in
+the `common` unit, against `BitHelperBits` (`pal/common/BitHelperBits.fst`): `bits ws` is
+the `32 * len ws` bits of the words, bit `p` being bit `p % 32` of word `p / 32`. The
+constructor zeroes the words when `clear` and keeps them otherwise; `MarkBit(p)` is
+`set_bit`, `IsMarked(p)` is `marked`; `ToIntArrayLength(n)` is `(n - 1) / 32 + 1` for
+`n > 0`. The loop invariant states the counting lemmas over `Bits(Contents(bitHelper.Span))`
+with `indexLimit <= 32 * intArrayLength`; `zero_bits`, `set_bits` and `marked_bits` connect
+the words to the bits. The unannotated `Span` property is used by the specification and
+by the dead growth branch (R37.4) only.
+
+**R37.3. The trusted fallback.** `CheckUniqueAndUnfoundElementsFallback` is `[Admit]`: its
+`HashSet<Node>` uses reference equality on nodes, which is not modelled. Its contract
+states the same counts as the main method. `BitOperations.RoundUpToPowerOf2` is bound to
+`SortedSetCount.round_up_pow2`, which only the dead growth branch calls.
+
+**R37.4. The growth branch is dead.** Every position below a tree of height `h` is below
+`2^h` (`fits_pow2`), and `indexLimit = 1 << maxHeight` with `height <= maxHeight`. So the
+branch that grows the bitmap is `Pal.Unreachable()`. `shift_one` gives `1 << h == 2^h` for
+`0 <= h <= 12`.
+
+**R37.5. A view of a parameter, for a client.** A view of `this` is re-abstracted between
+two calls (`of_heap`/`to_heap`), and its root loses the facts that tie it to the set's heap.
+A view of a parameter is held at that object's heaps (§32), so `ViewCounts` takes the set
+as a parameter, `s.GetViewBetween(lo, hi)`.
+
+**R37.6. `out _field` in a view's constructor.** `f = M(…, out _g)` in a view's constructor
+gives `_g` the value of the `out` local. The constructor builds the record, and does not
+write it, so the field is an initial value, as R32.13's assignments are. `TreeSubSet`'s
+constructor sets `_rootLevel` this way, from `FindRange`.
+
+**R37.7. A base's virtual `[Spec]` property at a view.** In a view's replica of a base
+method (R32.13), a specification that reads a virtual `[Spec]` property of the base reads
+the view's override of it, expanded. Before, it read the base's body applied to the view's
+record. An override whose body is not an expression is refused (PALCS0805).
+
+**R37.8. A nested struct named by a signature.** Under `[TranslateAnnotatedOnly]` (R20.1),
+a struct nested in a class with a model is translated when an annotated method of the class
+takes or returns it (`SortedSet<T>.ElementCount`). Before, it was skipped silently, and the
+translated method then named a type that did not exist. A generic struct's
+`has_default` instance requires `has_default` only for the type parameters its fields hold.
+
+**R37.9. A non-tail escaping `if` whose arm moves a node pointer.** In a loop body,
+`FindRange` has `if (…) { …; return current; } … current = current.Right;` followed by
+`level++`. Pulse cannot type the join of an arm that moves the local node pointer down a
+region's tree with one that returns. As for R27.27's arms that write a region, the rest of
+the block is copied into the arms. A return's write of the result slot is not a move.
+
+**R37.10. The callers' counting path.** `IsSubsetOf`, `IsProperSubsetOf`,
+`IsProperSupersetOf` and `SetEquals` take `other` as `[Exactly(typeof(SortedSet<>))]`
+(R27.46), but no longer require the same comparer. They require only that `Equals` is
+honest about comparers:
+`Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)`.
+With an equal comparer the fast path runs. Otherwise `CheckUniqueAndUnfoundElements`
+runs, which is no longer `Pal.Unreachable()`. Each result is stated over
+`SortedSetCount.all_hit c s t`: every item of `t` is equivalent, under this set's comparer
+`c`, to some item of `s`. This is a linear scan, because `SpecSetOps.AllIn` binary-searches
+and means nothing when `s` is sorted by another comparer:
+
+* `IsSubsetOf` is `all_hit c O A`;
+* `IsProperSubsetOf` is `all_hit c O A && !all_hit c A O`;
+* `IsProperSupersetOf` is `all_hit c A O && !all_hit c O A`;
+* `SetEquals` is both.
+
+Here `A` is this set's items and `O` is `other`'s. `counts_decide` turns the method's
+contract into these results:
+* `found_all c A O <= |A|`;
+* `found_all c A O = |A|` exactly when `all_hit c O A`;
+* `unfound_all c A O = 0` exactly when `all_hit c A O`.
+
+`found_all` counts distinct keys of the strictly sorted `A`, and a pigeonhole argument
+(`all_hit_pigeon`) gives the first equivalence. On the fast paths, `sorted_hits` restates
+`AllIn`/`SameKeys` as `all_hit` when both sets share the comparer. The method's contract
+now also states `UnfoundCount >= 0`, which the case analysis needs. `R34.26`'s snapshot of
+`other` is `other.SpecItems`.
+
+**R20.2 and R28.7, extended.**
+* An `[Admit]`ted member's body is not lowered on the borrowing path either (R20.2).
+* R28.7's check that a borrowing struct's member does not write the borrowed object skips
+  writes to a field of a struct held in a local (`result.UniqueCount = …`).
+
+### Findings (§37)
+
+* dotnet/runtime#133116 is wrong at a view (above), and the one-line range check fixes it.
+* The PR's growth branch is dead. Its HashSet fallback is taken when the height bound
+  exceeds 12: at a set, `2 * floor(log2(n + 1)) > 12`, that is, from 127 items.
+* The translator needed R37.6–R37.9, and R17.9–R17.11 for `BitHelper`, to accept the PR's code as written.
+* The four callers are verified on their counting path too (R37.10). `IsSubsetOf`'s
+  `result.UnfoundCount >= 0` test is vacuous: the count is never negative.
+* `Pulse.Lib.CSharp.Arith.log2_u32` now also states that its result is `log2_nat` of its
+  argument. Its body is unchanged and proves it.
+
+### Trusted (§37)
+
+* `CheckUniqueAndUnfoundElementsFallback`'s contract (R37.3).
+* The `BitOperations.Log2` binding (R21.5), now used for `GetApproximateMaxHeight`, and the
+  `RoundUpToPowerOf2` binding, used only in dead code (R37.3).

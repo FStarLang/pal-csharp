@@ -412,6 +412,21 @@ public sealed partial class ExprLowerer
             : inlined;
     }
 
+    /// <summary>R37.7. The view's override of the base's property <paramref name="baseProperty"/>.</summary>
+    private static IPropertySymbol? ViewOverride(INamedTypeSymbol view, IPropertySymbol baseProperty) =>
+        view.GetMembers(baseProperty.Name).OfType<IPropertySymbol>().FirstOrDefault(p =>
+            p.IsOverride && p.OverriddenProperty is { } o &&
+            SymbolEqualityComparer.Default.Equals(o.OriginalDefinition, baseProperty.OriginalDefinition));
+
+    private IrExpr ViewOverrideRefused(IPropertySymbol baseProperty, INamedTypeSymbol view, IrLoc loc)
+    {
+        diagnostics.Error("PALCS0805", loc,
+            $"`{view.Name}` overrides the `[Spec]` property `{baseProperty.Name}` with a body that is not an " +
+            "expression. A view's replica of a base method reads the view's override of a base `[Spec]` " +
+            "property as its expression body (doc/translation.md R37.7).");
+        return new IrLiteral(loc, null);
+    }
+
     private static bool IsShim(ISymbol? s) =>
         s?.Name.StartsWith(SpecBinder.ShimMethodPrefix, StringComparison.Ordinal) == true;
 
@@ -436,6 +451,13 @@ public sealed partial class ExprLowerer
             case IPropertySymbol { IsStatic: false } sp when SpecPosition && Declarations.Has(sp, known.SpecAttribute) &&
                 SymbolEqualityComparer.Default.Equals(sp.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition):
                 return InlineSpec(bw, sp, loc);
+            // R37.7. A virtual `[Spec]` property of the base, read by a view's replica of a
+            // base method: the view's override of it, expanded.
+            case IPropertySymbol { IsStatic: false, IsVirtual: true } vp when SpecPosition && bw.ViewBase is { } vb &&
+                Declarations.Has(vp, known.SpecAttribute) &&
+                SymbolEqualityComparer.Default.Equals(vp.ContainingType.OriginalDefinition, vb.OriginalDefinition) &&
+                ViewOverride(bw.Struct, vp) is { } ov:
+                return InlineSpec(bw, ov, loc) ?? ViewOverrideRefused(vp, bw.Struct, loc);
             // R27.37. An owned object is a parameter of every member but the constructor.
             case IFieldSymbol f when bw.IsOwned(f) && !bw.Constructor:
                 return OwnedObject(f, loc);
@@ -883,7 +905,12 @@ public sealed partial class ExprLowerer
                 model.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) &&
                 given.All(g => g.Field != f.Name))
             {
-                var value = Lower(right);
+                // R37.6. `f = M(…, out _g)`: `_g` is given the out local's value.
+                var outs = new List<(IFieldSymbol Field, IrVar Local)>();
+                _ctorOutFields = outs;
+                IrExpr value;
+                try { value = OutFieldWrites(node, () => Lower(right)).Value; }
+                finally { _ctorOutFields = null; }
                 if (extended && (bw.IsOwned(f) || ContainsCall(value) || bw.ViewBase is not null && value is not (IrVar or IrLiteral)) &&
                     known.MapType(f.Type) is { } ft)
                 {
@@ -894,6 +921,12 @@ public sealed partial class ExprLowerer
                 given.Add(new IrFieldInit(f.Name, value));
                 // R32.13. A later initialiser of a view's constructor may read the field.
                 if (bw.ViewBase is not null) _ctorGiven[f.Name] = value;
+                foreach (var (of, ov) in outs)
+                {
+                    if (given.Any(g => g.Field == of.Name)) continue;
+                    given.Add(new IrFieldInit(of.Name, ov));
+                    if (bw.ViewBase is not null) _ctorGiven[of.Name] = ov;
+                }
                 continue;
             }
             if (expr is InvocationExpressionSyntax inv &&

@@ -327,6 +327,17 @@ public sealed class CodeEmitter(
                 SplitTail(splitter, statements.RemoveRange(0, i + 1), method, plan);
                 return;
             }
+            // R17.10. A span local initialised by a conditional: each arm creates the span
+            // its own way, so the declaration becomes an `if` whose arms each bind the local
+            // and run the rest, and no join has to merge two origins (as R27.53).
+            if (statements[i] is IrLocalDecl { Type: IrSpanType, Init: IrConditional sc } sd)
+            {
+                var rest = statements.RemoveRange(0, i + 1);
+                Tail(new IrIf(sd.Loc, sc.Cond,
+                    new IrBlock(sc.Then.Loc, [sd with { Init = sc.Then }, .. rest]),
+                    new IrBlock(sc.Else.Loc, [sd with { Init = sc.Else }, .. rest])), method, plan);
+                return;
+            }
             if (statements[i] is IrReturn early)
             {
                 diagnostics.Unsupported(early.Loc, "A `return` that is not the last statement",
@@ -577,7 +588,8 @@ public sealed class CodeEmitter(
                 // is still owned by that local in the other.
                 var owned = _objectLocals.ToList();
                 var moved = _movedArrays.ToList();
-                var arrays = _slots.Where(p => p.Value.Kind is SlotKind.Array or SlotKind.ArrayCell).ToList();
+                // R17.9. And what one arm lends of a span local, the other still holds.
+                var arrays = _slots.Where(p => p.Value.Kind is SlotKind.Array or SlotKind.ArrayCell or SlotKind.Span).ToList();
                 // R27.50. Likewise the receiver is as dirty in the other arm as before both.
                 var dirty = _receiverDirty;
                 Tail(i.Then, method, plan);
@@ -1099,7 +1111,6 @@ public sealed class CodeEmitter(
         // R32.14. A view's member called with the record by reference rebinds the record.
         Check.Statements(i).SelectMany(Check.Expressions).Any(PassesRefSelf) ||
         WritesOpenRecord(i) || CallsCallbackInArm(i);
-
     /// <summary>
     /// R35.16. An arm that calls a <c>[Callback]</c> parameter: the trace it leaves names the
     /// callback's result, bound in the arm, and Pulse's join keeps the trace under the
@@ -1183,6 +1194,14 @@ public sealed class CodeEmitter(
     private static bool ThrowGuard(IrIf i) =>
         i.Else is null or IrBlock { Statements.IsEmpty: true } &&
         (i.Then is IrThrow || i.Then is IrBlock { Statements: [.., IrThrow] });
+
+    /// <summary>
+    /// R37.9. Whether an arm moves a local node pointer of a region (`current = current.Right`).
+    /// A return's write of the result slot is not such a move.
+    /// </summary>
+    private bool MovesNodeLocal(IrStmt s) =>
+        Check.Statements(s).Any(t => t is IrAssign { Target: IrVar { Type: IrClassType k } v } &&
+            v.Name != Frontend.StmtLowerer.ReturnedValue && IsRegionType(k));
 
     /// <summary>
     /// R27.16. Whether an arm allocates in, writes, or calls a method that writes a region:
@@ -2407,7 +2426,8 @@ public sealed class CodeEmitter(
     /// abstraction function applied to the representation it has just written — the same
     /// expression the class module puts in the invariant, evaluated at the post-state.
     /// </summary>
-    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0 || _windows.Count > 0 || _heldPeers.Count > 0;
+    private bool NeedsEpilogue => _objects.Length > 0 || _objectLocals.Count > 0 || _windows.Count > 0 || _heldPeers.Count > 0 ||
+                                  _slots.Values.Any(s => s is { Kind: SlotKind.Span, Released: true });
 
     /// <summary>
     /// R4.14. Discards the invariant of every object this method allocated and did not
@@ -2453,6 +2473,13 @@ public sealed class CodeEmitter(
                     "be checked against (F19). Move it into a field before the block ends, or " +
                     "declare it in the method's own block (doc/translation.md R6.11a).");
             DropLocals(null, mark);
+            // R17.9. A fresh span declared in the block goes out of scope with it; a window
+            // of an outer one gives that one back its memory.
+            var leaving = _slots.Where(p => !declared.Contains(p.Key)).Select(p => p.Value).ToList();
+            ReleaseSpans(leaving);
+            foreach (var parent in leaving.Where(s => s is { Released: true, Parent: not null }).Select(s => s.Parent!))
+                if (declared.Contains(parent) && _slots.TryGetValue(parent, out var lent))
+                    _slots[parent] = lent with { Lent = false };
         }
         if (_objectLocals.Count > mark) _objectLocals.RemoveRange(mark, _objectLocals.Count - mark);
         foreach (var name in _slots.Keys.Where(n => !declared.Contains(n)).ToList())
@@ -2490,12 +2517,14 @@ public sealed class CodeEmitter(
     private void CloseObjects(IrMethod method, MethodPlan plan, string? returned = null, string? ownedBy = null)
     {
         DropLocals(returned, 0, ownedBy, plan.ResultOwned);
+        // R17.9. Fresh spans, and windows of them, are released.
+        ReleaseSpans(_slots.Values);
 
         // R33.27. A span the body borrowed from the opened receiver's arrays and left
         // borrowed when its scope ended is given back before the receiver is closed, the
         // latest borrow first.
         if (_objects.Length > 0)
-            foreach (var span in _slots.Values.Where(s => s is { Kind: SlotKind.Span, Origin: not null }).Reverse().ToList())
+            foreach (var span in _slots.Values.Where(s => s is { Kind: SlotKind.Span, Origin: not null, Released: false }).Reverse().ToList())
             {
                 // A window left as it was borrowed gives the array back unchanged.
                 if (span.Origin is SpanOrigin.ArrayRange)
@@ -2782,11 +2811,27 @@ public sealed class CodeEmitter(
                 _slots[d.Name] = new Slot(d.Name, d.Type, SlotKind.Span, binder)
                 {
                     Origin = create.Origin,
+                    Parent = LendFrom(create),
+                    Released = Releases(create),
+                    Serial = ++_spanSerial,
                     BorrowedField = create.Source is IrField { Receiver: IrVar { Name: Names.This }, Field: var bf } ? bf : null,
                     // R33.27. A window of the receiver's array is held at the receiver's permission.
                     Fraction = create.Source is IrField { Receiver: IrVar { Name: Names.This } }
                         ? _objects.FirstOrDefault(o => o.Name == Names.This)?.Fraction : null,
                 };
+                return;
+            }
+
+            // R17.10. A span wrapper local `W x = new W(s, args);` is the span `s`, bound at
+            // `x` by R17.5 or R17.9, which the constructor then runs over.
+            case IrLocalDecl { Type: IrSpanType, Init: IrSpanWrap wrap } d:
+            {
+                Statement(d with { Init = wrap.Span }, plan);
+                if (Lookup(d.Name) is null) return;
+                Statement(new IrExprStmt(wrap.Loc, wrap.Ctor with
+                {
+                    Args = wrap.Ctor.Args.Insert(wrap.SpanAt, new IrVar(wrap.Loc, d.Name) { Type = d.Type }),
+                }), plan);
                 return;
             }
 
@@ -2983,6 +3028,13 @@ public sealed class CodeEmitter(
                 RaisingRegionCall(rc, held, plan);
                 return;
 
+            // R17.11. `s.Clear()` on a span writes `default(T)` to every cell.
+            case IrArrayOp { Op: ArrayOpKind.Clear, Args: [var cleared] } when IsSpan(cleared):
+            {
+                var element = (cleared.Type as IrSpanType ?? (IrSpanType)Lookup(((IrVar)cleared).Name)!.Type).Element;
+                Line($"Span.clear {Expr(cleared)} {Default(element)};");
+                return;
+            }
             case IrArrayOp c:
             {
                 var args = Operands(c.Args);
@@ -4745,8 +4797,10 @@ public sealed class CodeEmitter(
             // each bind the local and run the rest.
             // R32.14. So does one an arm of which calls a view's member that takes the
             // view's record by reference: Pulse rebinds the record at a fresh value there too.
+            // R17.10. So does a span local initialised by a conditional.
             if (statements[k] is IrLocalDecl { Init: IrConditional ce } d &&
-                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else) || PassesRefSelf(ce.Then) || PassesRefSelf(ce.Else)))
+                (MovesReceiver(ce.Then) || MovesReceiver(ce.Else) || PassesRefSelf(ce.Then) || PassesRefSelf(ce.Else) ||
+                 d.Type is IrSpanType))
             {
                 UnitTail(new IrIf(d.Loc, ce.Cond,
                     new IrBlock(ce.Then.Loc, [d with { Init = ce.Then }, .. rest]),
@@ -4757,7 +4811,11 @@ public sealed class CodeEmitter(
             // goes into the arm that falls through; the escaping arm keeps none of it.
             // R30.29. So does one an arm of which declares a cell (R30.10), as a `return` of a
             // snapshot local from a loop does.
-            if (statements[k] is IrIf { Joined: false } ei && _escape is not null && MayEscape(ei) && (MovesRegion(ei) || ArmDeclaresCell(ei)))
+            // R37.9. So does one an arm of which moves a local node pointer down a region's
+            // tree (`current = current.Right` before a later `level++`): Pulse
+            // cannot type the join of that arm with the one that returns the node.
+            if (statements[k] is IrIf { Joined: false } ei && _escape is not null && MayEscape(ei) &&
+                (MovesRegion(ei) || ArmDeclaresCell(ei) || MovesNodeLocal(ei)))
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc)
                 {
@@ -5180,6 +5238,9 @@ public sealed class CodeEmitter(
         }} {slot.Binder};");
 
         _slots.Remove(v.Name);
+        // R17.9. The span a window was borrowed from owns its memory again.
+        if (slot.Parent is { } parent && _slots.TryGetValue(parent, out var lent))
+            _slots[parent] = lent with { Lent = false };
     }
 
     /// <summary>
@@ -5188,6 +5249,13 @@ public sealed class CodeEmitter(
     /// </summary>
     private string Borrow(IrSpanCreate create, string target)
     {
+        // R17.9. Fresh memory: nothing is borrowed, so there is no receipt.
+        if (create is { Origin: SpanOrigin.Stackalloc or SpanOrigin.NewArray, Source: IrNewArray fresh })
+        {
+            Line($"let {target} = Span.{(create.Origin is SpanOrigin.Stackalloc ? "stackalloc" : "alloc")} " +
+                 $"{Expr(fresh.Length)} {Default(fresh.Element)};");
+            return target;
+        }
         var source = Expr(create.Source);
         if (create.Origin is SpanOrigin.Array)
         {
@@ -5199,6 +5267,49 @@ public sealed class CodeEmitter(
         var op = create.Origin is SpanOrigin.ArrayRange ? "of_array_range" : "sub";
         Line($"let {target} = Span.{op} {source} {start} {count};");
         return target;
+    }
+
+    private int _spanSerial;
+
+    /// <summary>
+    /// R17.9. The span local <paramref name="create"/> borrows a window of, which owns
+    /// nothing until the window is given back; null when it borrows from anything else.
+    /// </summary>
+    private string? LendFrom(IrSpanCreate create)
+    {
+        if (create is not { Origin: SpanOrigin.SpanRange, Source: IrVar { Name: var parent } } ||
+            Lookup(parent) is not { Kind: SlotKind.Span, Released: true } slot)
+            return null;
+        _slots[parent] = slot with { Lent = true };
+        return parent;
+    }
+
+    /// <summary>R17.9. Whether a span created so is released at the end of its scope.</summary>
+    private bool Releases(IrSpanCreate create) =>
+        create.Origin is SpanOrigin.Stackalloc or SpanOrigin.NewArray ||
+        create is { Origin: SpanOrigin.SpanRange, Source: IrVar { Name: var parent } } &&
+        Lookup(parent) is { Kind: SlotKind.Span, Released: true };
+
+    /// <summary>
+    /// R17.9. Releases the span locals among <paramref name="spans"/> that own fresh memory
+    /// or are windows of one, latest first: a window is given back to the span it was
+    /// borrowed from, and fresh memory is dropped. Pulse is affine, so dropping is sound;
+    /// there is nothing to deallocate, because a stack frame's memory and the collector's
+    /// are both reclaimed by the runtime.
+    /// </summary>
+    private void ReleaseSpans(IEnumerable<Slot> spans)
+    {
+        foreach (var span in spans.Where(s => s is { Kind: SlotKind.Span, Released: true }).OrderByDescending(s => s.Serial))
+        {
+            if (span.Parent is not null)
+            {
+                Line($"Span.restore_sub {span.Binder};");
+                continue;
+            }
+            var v = FreshValue("v");
+            Line($"with {v}. assert (S.pts_to {span.Binder} {v});");
+            Line($"drop_ (S.pts_to {span.Binder} {v});");
+        }
     }
 
     /// <summary>R17.1. Whether an expression denotes a span rather than an array.</summary>
@@ -5365,6 +5476,11 @@ public sealed class CodeEmitter(
             // produces the window's, plus a receipt that only `Pal.Restore` can redeem.
             case IrSpanCreate create:
                 return Borrow(create, Fresh());
+
+            // R17.10. A span wrapper is built only as a local's initializer.
+            case IrSpanWrap wrapped:
+                diagnostics.SpanWindow(wrapped.Loc, "a span wrapper built other than as a local's whole initializer");
+                return "()";
 
             // R6.9. `new T[n]`. `Pulse.Lib.CSharp.Array.alloc` is where the garbage
             // collector is assumed: it carries no deallocation obligation, unlike

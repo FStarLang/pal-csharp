@@ -118,6 +118,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "shape_hierarchy", "test/sha
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "sortedset", "test/sortedset/sortedset.csproj", "{02E92EA1-6366-EC17-6499-EAE9D8E973C5}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "span_struct", "test/span_struct/span_struct.csproj", "{4175B254-A9B7-3C25-B3EA-9C962F441321}"
+EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "spec_bitwise", "test/spec_bitwise/spec_bitwise.csproj", "{1DF27C0C-6454-9A78-D236-13C5A0E387B7}"
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "spec_division", "test/spec_division/spec_division.csproj", "{FC832F34-2E81-0F1C-4C1D-7880710E13C4}"
@@ -394,6 +396,10 @@ Global
 		{02E92EA1-6366-EC17-6499-EAE9D8E973C5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{02E92EA1-6366-EC17-6499-EAE9D8E973C5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{02E92EA1-6366-EC17-6499-EAE9D8E973C5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4175B254-A9B7-3C25-B3EA-9C962F441321}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4175B254-A9B7-3C25-B3EA-9C962F441321}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4175B254-A9B7-3C25-B3EA-9C962F441321}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4175B254-A9B7-3C25-B3EA-9C962F441321}.Release|Any CPU.Build.0 = Release|Any CPU
 		{1DF27C0C-6454-9A78-D236-13C5A0E387B7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{1DF27C0C-6454-9A78-D236-13C5A0E387B7}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{1DF27C0C-6454-9A78-D236-13C5A0E387B7}.Release|Any CPU.ActiveCfg = Release|Any CPU

@@ -1,0 +1,93 @@
+diff --git a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+--- a/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
++++ b/samples/dotnet-runtime/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+@@ -2276,20 +2276,11 @@
+                 return result;
+             }
+ 
+-            int maxHeight = GetApproximateMaxHeight();
+-
+-            // maxHeight = 12 needs 8kb for bitHelper, use fallback with HashSet if maxHeight > 12 to mitigate
+-            // this by limiting memory complexity to O(n).
+-            if (maxHeight > 12)
+-            {
+-                return CheckUniqueAndUnfoundElementsFallback(other, returnIfUnfound);
+-            }
+-
+-            // A perfect tree of height H has H^2 - 1 nodes; (round up to H^2).
+-            SortedSetCount.ShiftOne(maxHeight); // pal: 1 << maxHeight == 2^maxHeight, no overflow
+-            int indexLimit = (1 << maxHeight);
+-            int intArrayLength = BitHelper.ToIntArrayLength(indexLimit);
+-            BitHelperBits.WordsCover(indexLimit);
++            // pal: EXPERIMENT (samples/dotnet-runtime/SORTEDSET-PR133116.md §3): the body before dotnet/runtime#133116.
++            // `InternalIndexOf`'s own overflow (FINDINGS 1.1, last bullet) is a separate defect: assume it away.
++            Pal.Assume(Pal.Tree<(T, bool)>(root).Height <= 30);
++            int originalLastIndex = Count;
++            int intArrayLength = BitHelper.ToIntArrayLength(originalLastIndex);
+ 
+             Span<int> span = stackalloc int[StackAllocThreshold];
+             BitHelper bitHelper = (uint)intArrayLength <= StackAllocThreshold ?
+@@ -2302,15 +2293,13 @@
+             int uniqueFoundCount = 0;
+ 
+             SortedSetCount.LookupIntro(comparer, this.SpecRangeTree, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa);
+-            SortedSetCount.FitsPow2(comparer, Pal.Tree<(T, bool)>(root), maxHeight);
+             BitHelperBits.ZeroBits(Pal.Contents(bitHelper.Span));
+             SortedSetCount.LoopStart(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree), BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other));
+             foreach (T item in other)
+             {
+                 Pal.Invariant(SortedSetCount.Lookup(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree)) &&
+-                              SortedSetCount.Fits(comparer, Pal.Tree<(T, bool)>(root), indexLimit) &&
+                               this.SpecRangeComparer == Pal.Old(this.SpecRangeComparer) && this.SpecRangeLo == Pal.Old(this.SpecRangeLo) && this.SpecRangeHi == Pal.Old(this.SpecRangeHi) &&
+-                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 12 && Pal.Contents(bitHelper.Span).Length == intArrayLength && indexLimit <= 32 * intArrayLength &&
++                              (root == null || Pal.Unshared(root)) && Pal.Tree<(T, bool)>(root).Height <= 30 && Pal.Contents(bitHelper.Span).Length == intArrayLength &&
+                               0 <= uniqueFoundCount && 0 <= unfoundCount && uniqueFoundCount + unfoundCount <= Pal.Index(item) &&
+                               Pal.Implies(!Pal.Broke(),
+                                   Pal.Implies(returnIfUnfound, unfoundCount == 0) &&
+@@ -2318,15 +2307,12 @@
+                                                          BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
+                               Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
+                                   SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
+-                // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
+-                // out-of-range nodes; without the range check, an out-of-range item counts as found.
+-                int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
+-                SortedSetCount.LoopStep(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
++                int index = InternalIndexOf(item);
++                SortedSetCount.LoopStepBeyond(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),
+                                         BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
+-                if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"
++                if (index >= 0)
+                 {
+-                    BitHelperBits.MarkedBits(Pal.Contents(bitHelper.Span), index);
+-                    BitHelperBits.SetBits(Pal.Contents(bitHelper.Span), index);
++                    BitHelperBits.BitsAt(Pal.Contents(bitHelper.Span), index);
+                     if (!bitHelper.IsMarked(index))
+                     {
+                         // item hasn't been seen yet
+@@ -2334,7 +2320,7 @@
+                         uniqueFoundCount++;
+                     }
+                 }
+-                else if (index < 0)
++                else
+                 {
+                     unfoundCount++;
+                     if (returnIfUnfound)
+@@ -2344,17 +2330,6 @@
+                         break;
+                     }
+                 }
+-                else
+-                {
+-                    // pal: R37.4. Dead: every position is below `indexLimit` (`Fits`).
+-                    Pal.Unreachable();
+-                    // Safe guard: since maxHeight isn't guaranteed, we might need to grow the bitHelper.
+-                    indexLimit = (int)BitOperations.RoundUpToPowerOf2((uint)index);
+-                    intArrayLength = BitHelper.ToIntArrayLength(indexLimit);
+-                    Span<int> newSpan = new int[intArrayLength];
+-                    bitHelper.Span.CopyTo(newSpan);
+-                    bitHelper = new BitHelper(newSpan, clear: false);
+-                }
+             }
+ 
+             SortedSetCount.LoopEnd(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, Pal.Tree<(T, bool)>(root), SpecSearchTree.Keys(this.SpecRangeTree),

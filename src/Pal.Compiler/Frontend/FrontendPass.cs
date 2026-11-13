@@ -765,6 +765,16 @@ public static partial class FrontendPass
             ? Locations.From(d)
             : Locations.From(fallback.Identifier);
 
+    /// <summary>
+    /// R37.8. A struct nested in a class with a model, which an annotated method of the
+    /// class takes or returns, is translated with it (a method's result struct).
+    /// </summary>
+    private static bool NamedBySignature(INamedTypeSymbol symbol, WellKnown known) =>
+        symbol.ContainingType is { } owner && known.HasModel(owner) &&
+        owner.GetMembers().OfType<IMethodSymbol>().Any(m => Declarations.IsAnnotated(m, known) &&
+            m.Parameters.Select(p => p.Type).Append(m.ReturnType).Any(t =>
+                SymbolEqualityComparer.Default.Equals(t.OriginalDefinition, symbol.OriginalDefinition)));
+
     private static ImmutableArray<StructCandidate> CollectStructs(
         CSharpCompilation compilation, WellKnown known, DiagnosticBag diagnostics)
     {
@@ -780,6 +790,8 @@ public static partial class FrontendPass
                 if (syntax is ClassDeclarationSyntax && !Borrowing.IsBorrowingClass(symbol, known)) continue;
                 if (Declarations.Has(symbol, known.PulseTypeAttribute)) continue;
                 if (known.IsSpecTypeDeclaration(symbol)) continue;   // R11.1a
+                // R17.10. A span wrapper is its span: there is no record to declare.
+                if (known.SpanWrapperField(symbol) is not null) continue;
                 // R20.1. Under `[TranslateAnnotatedOnly]` a struct is translated only when it
                 // or one of its members says so.
                 // R24.6. A struct nested in a class with a model, held by one of its
@@ -790,7 +802,8 @@ public static partial class FrontendPass
                       owner.GetMembers().OfType<IFieldSymbol>().Any(f => !f.IsStatic &&
                           SymbolEqualityComparer.Default.Equals(
                               (f.Type is IArrayTypeSymbol at ? at.ElementType : f.Type).OriginalDefinition,
-                              symbol.OriginalDefinition)))) continue;
+                              symbol.OriginalDefinition))) &&
+                    !NamedBySignature(symbol, known)) continue;
                 // R22.6. A `[Spec]` struct is an erased record, never copied or stored at run
                 // time, so R15.1's reason for refusing a generic struct does not apply to it.
                 if (!(Declarations.Has(symbol, known.SpecAttribute) && symbol.TypeParameters.All(WellKnown.Unconstrained))
@@ -2056,6 +2069,7 @@ public static partial class FrontendPass
                 case IrOld o2: Walk(o2.Operand); return;
                 case IrLive lv: Walk(lv.Operand); return;
                 case IrNewArray na: Walk(na.Length); if (na.Source is { } nas) Walk(nas); return;
+                case IrSpanWrap sw: Walk(sw.Span); Walk(sw.Ctor); return;
                 case IrContents ct: Walk(ct.Array); return;
                 case IrEnumOp eo: Walk(eo.Source); foreach (var a in eo.Args) Walk(a); return;
                 case IrQuantifier q: Walk(q.Body); return;
@@ -2835,6 +2849,18 @@ public static partial class FrontendPass
                           .. parameters];
         }
 
+        // R17.10. A member of a span wrapper is a function of the span: its receiver is the
+        // span, at the wrapper's permission. A constructor is a function of its span
+        // parameter, which its last statement stores; it returns nothing.
+        var wrapped = known.SpanWrapperField(symbol.ContainingType);
+        if (wrapped is not null && symbol is { IsStatic: false, MethodKind: MethodKind.Ordinary })
+            parameters = [new IrParam(loc, Names.This, known.MapType(wrapped.Type)!, ParamMode.Value)
+                          { Fraction = known.IsReadOnlySpan(wrapped.Type) ? "p_" + Names.This : null },
+                          .. parameters];
+        var wrapperCtor = wrapped is not null && symbol.MethodKind == MethodKind.Constructor;
+        if (wrapperCtor && !WrapperConstructorAdmissible(candidate, symbol, wrapped!, model, known, diagnostics, loc))
+            return null;
+
         if (candidate.Kind == CalleeKind.Spec)
             return LowerSpecFunction(candidate, model, known, diagnostics, loc, parameters, specs);
 
@@ -2842,7 +2868,7 @@ public static partial class FrontendPass
         var iterated = Iterators.Element(symbol) is { } yieldedType ? known.MapType(yieldedType) : null;
         if (Iterators.Element(symbol) is not null && !IteratorAdmissible(symbol, model, known, diagnostics, loc))
             return null;
-        var returnType = symbol.MethodKind == MethodKind.Constructor
+        var returnType = symbol.MethodKind == MethodKind.Constructor && !wrapperCtor
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
             // R30.29. A lookup returning a reference that may be null returns an `option`.
@@ -2891,7 +2917,7 @@ public static partial class FrontendPass
         // On any other method both are kept, and the pair is refused (PALCS0503).
         var verbatim = Declarations.Has(symbol, known.PulseBodyAttribute) &&
                        (Declarations.Has(symbol, known.SpecAttribute) || Declarations.Has(symbol, known.LemmaAttribute));
-        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer);
+        var body = admitted || verbatim ? null : LowerBody(candidate.Syntax, lowerer, wrapperCtor);
 
         // Body-level contracts (surface option A2) lead the body and are equivalent to
         // the attribute form; both produce the same IR.
@@ -2940,7 +2966,7 @@ public static partial class FrontendPass
             Throws = specs.Throws,
             AtThrows = specs.AtThrows,
             DeclaringClass = declaringClass,
-            IsConstructor = symbol.MethodKind == MethodKind.Constructor,
+            IsConstructor = symbol.MethodKind == MethodKind.Constructor && !wrapperCtor,
             // R4.11b derives this from the write set. R9.7: an abstract method has no
             // write set, so [Frac] on the method says it instead — the same statement
             // R4.9a makes about a parameter, made about the receiver. R4.11c is why the
@@ -2961,6 +2987,36 @@ public static partial class FrontendPass
                 ? baseName
                 : null,
         };
+    }
+
+    /// <summary>
+    /// R17.10. A span wrapper's constructor is translated as a function of its span
+    /// parameter when its last statement stores that parameter in the field, and nothing
+    /// before it names the field: until that store, the wrapper is the parameter.
+    /// </summary>
+    private static bool WrapperConstructorAdmissible(Candidate candidate, IMethodSymbol ctor, IFieldSymbol field,
+        SemanticModel model, WellKnown known, DiagnosticBag diagnostics, IrLoc loc)
+    {
+        bool NamesField(SyntaxNode n) => n is IdentifierNameSyntax && known.IsWrappedSpan(model.GetSymbolInfo(n).Symbol);
+        var statements = candidate.Syntax is ConstructorDeclarationSyntax { Initializer: null } c
+            ? c.Body?.Statements.ToList() ??
+              (c.ExpressionBody is { Expression: var e } ? [SyntaxFactory.ExpressionStatement(e)] : null)
+            : null;
+        var before = statements?.Take(statements.Count - 1).ToList() ?? [];
+        if (statements is { Count: > 0 } && statements[statements.Count - 1] is ExpressionStatementSyntax
+                { Expression: AssignmentExpressionSyntax { RawKind: (int)SyntaxKind.SimpleAssignmentExpression } store } &&
+            (store.Left is IdentifierNameSyntax || store.Left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
+            known.IsWrappedSpan(model.GetSymbolInfo(store.Left).Symbol) &&
+            store.Right is IdentifierNameSyntax stored &&
+            model.GetSymbolInfo(stored).Symbol is IParameterSymbol { RefKind: RefKind.None } p &&
+            p.DeclaringSyntaxReferences is [var pd] && candidate.Syntax.Span.Contains(pd.Span) &&
+            !before.Any(b => b.DescendantNodesAndSelf().Any(n => NamesField(n) || n is ThisExpressionSyntax)))
+            return true;
+        diagnostics.Error("PALCS0595", loc,
+            $"The constructor of the span wrapper `{ctor.ContainingType.Name}` must end by storing one of its " +
+            $"span parameters in `{field.Name}`, and name neither `{field.Name}` nor `this` before that: " +
+            "the wrapper is translated as the span it holds (doc/translation.md R17.10).");
+        return false;
     }
 
     /// <summary>
@@ -3054,7 +3110,7 @@ public static partial class FrontendPass
         _ => null,
     };
 
-    private static IrStmt? LowerBody(SyntaxNode syntax, StmtLowerer lowerer)
+    private static IrStmt? LowerBody(SyntaxNode syntax, StmtLowerer lowerer, bool wrapperCtor = false)
     {
         // R4.12c. A constructor initializer is not part of the body in Roslyn's tree, and
         // reading only the body is how `: this(…)` used to vanish -- leaving a constructor
@@ -3079,7 +3135,9 @@ public static partial class FrontendPass
                 stmts.AddRange(FieldInitialisers(c, lowerer));
 
             // R33.13. `C(T v) => _f = v;` is the body `{ _f = v; }`.
-            var rest = c.Body is { } body ? lowerer.Lower(body)
+            // R17.10. A span wrapper's constructor without the store that ends it.
+            var rest = wrapperCtor ? c.Body is { } wb ? lowerer.LowerAllButLast(wb) : null
+                : c.Body is { } body ? lowerer.Lower(body)
                 : c.ExpressionBody is { } ctorArrow ? lowerer.LowerArrow(ctorArrow) : null;
             if (rest is IrBlock inner) stmts.AddRange(inner.Statements);
             else if (rest is not null) stmts.Add(rest);

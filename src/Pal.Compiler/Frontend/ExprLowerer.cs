@@ -613,6 +613,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // `new T[n]`, whose translation (R6.9) rests on the CLR's garbage collector.
             // A `stackalloc` span is a stack allocation with a lifetime, which is the one
             // thing `Pulse.Lib.CSharp.Array.alloc` was allowed to assume away.
+            // R17.9. Except as the whole initializer of a span local: the span owns the
+            // memory, which is dropped with it.
+            StackAllocArrayCreationExpressionSyntax sa when !SpecPosition &&
+                node.Parent is EqualsValueClauseSyntax { Parent: VariableDeclaratorSyntax { Parent.Parent: LocalDeclarationStatementSyntax } } &&
+                sa.Type is ArrayTypeSyntax { RankSpecifiers: [{ Sizes: [var size] }] } &&
+                size is not OmittedArraySizeExpressionSyntax && sa.Initializer is null &&
+                known.MapType(info.ConvertedType) is IrSpanType { Element: var stackElem }
+                => new IrSpanCreate(loc, SpanOrigin.Stackalloc, new IrNewArray(loc, stackElem, Lower(size)), null, null),
             StackAllocArrayCreationExpressionSyntax => SpanUnsupported("stackalloc", loc),
             ImplicitStackAllocArrayCreationExpressionSyntax =>
                 SpanUnsupported("stackalloc", loc),
@@ -969,6 +977,44 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             if (Construct(loc, region.Name, region.OriginalDefinition, inits) is not IrNew record)
                 return new IrLiteral(loc, null);
             return new IrAlloc(loc, region.Name, record) { Type = known.MapType(region) ?? new IrClassType(region.Name) };
+        }
+
+        // R17.10. `new W(s, args)` on a span wrapper creates the span and runs the
+        // constructor over it. The span is a borrow (R17.5) or `new T[n]` (R17.9).
+        if (model.GetTypeInfo(node).Type is INamedTypeSymbol wrapperType &&
+            known.SpanWrapperField(wrapperType) is { } wrapperField &&
+            model.GetSymbolInfo(node).Symbol is IMethodSymbol wrapperCtor &&
+            node.ArgumentList?.Arguments is { } wrapperArgs &&
+            wrapperCtor.Parameters.Length == wrapperArgs.Count &&
+            wrapperArgs.Select((a, i) => a.NameColon is null || a.NameColon.Name.Identifier.ValueText == wrapperCtor.Parameters[i].Name).All(ok => ok) &&
+            wrapperCtor.Parameters.Count(p => known.IsAnySpan(p.Type)) == 1)
+        {
+            var spanAt = wrapperCtor.Parameters.IndexOf(wrapperCtor.Parameters.First(p => known.IsAnySpan(p.Type)));
+            var spanArg = Unparenthesized(wrapperArgs[spanAt].Expression);
+            IrExpr span;
+            if (spanArg is ArrayCreationExpressionSyntax)
+            {
+                _inImplicitBorrow = true;
+                try { span = Lower(spanArg); }
+                finally { _inImplicitBorrow = false; }
+                span = span is IrNewArray { Source: null } fresh
+                    ? new IrSpanCreate(loc, SpanOrigin.NewArray, fresh, null, null)
+                    : span;
+            }
+            else span = Lower(spanArg);
+            if (span is not IrSpanCreate create)
+                return SpanUnsupported($"`{Trim(node)}`, whose span is neither a borrow nor `new T[n]`,", loc);
+            var rest = wrapperArgs.Select((a, i) => (a, i)).Where(x => x.i != spanAt)
+                .Select(x => LowerCallArgument(x.a, x.i, wrapperCtor)).ToImmutableArray();
+            return new IrSpanWrap(loc, create with { Type = known.MapType(wrapperField.Type) },
+                new IrCall(loc, Naming.Of(wrapperCtor), rest)
+                {
+                    Kind = CalleeKind.Method,
+                    ResultType = known.MapReturnType(wrapperCtor.ReturnType),
+                    KeepsArguments = true,
+                    MutatesReceiver = true,
+                    ParamTypes = Declarations.ParamTypes(wrapperCtor, known, receiver: false),
+                }, spanAt) { Type = known.MapType(wrapperType) };
         }
 
         // R4.12. `new C(args)` is a call to the constructor's own emitted function. Unlike
@@ -1505,6 +1551,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 ? Deref(new IrResult(loc) { Type = snapshotResult })
                 : new IrResult(loc);
 
+        // R17.10. Inside a span wrapper's member, its span is the receiver.
+        if (known.IsWrappedSpan(symbol) || known.IsWrappedSpanGetter(symbol)) return new IrVar(loc, Names.This);
+
         // R28.2. Inside a borrowing struct's member.
         if (BorrowedIdentifier(symbol, node, loc) is { } borrowed) return borrowed;
 
@@ -1695,6 +1744,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             receiverType = exactClass;
         }
 
+        // R17.10. A span wrapper's span, read off a wrapper, is the wrapper.
+        if (known.IsWrappedSpan(symbol) || known.IsWrappedSpanGetter(symbol)) return Lower(node.Expression);
         if (Bcl.Member(symbol, loc) is { } bclMember) return bclMember;
         if (EnumerableMember(node, symbol, loc) is { } enumerableMember) return enumerableMember;
         // R28.2. The borrowed object, and its fields, inside a borrowing struct's member.
@@ -2577,6 +2628,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrContents c => [c.Array],
             IrEnumOp e => [e.Source, .. e.Args],
             IrSpanCreate sc => [sc.Source, .. new[] { sc.Start, sc.Length }.OfType<IrExpr>()],
+            IrSpanWrap sw => [sw.Span, sw.Ctor],
             IrSeqOp s => s.Args,
             IrListOp l => l.Args,
             IrSpecOp o => o.Args,
@@ -2708,6 +2760,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     }
 
     private List<IrStmt>? _outFieldWrites;
+    private List<(IFieldSymbol Field, IrVar Local)>? _ctorOutFields;
     private SyntaxNode? _outFieldStatement;
 
     /// <summary>
@@ -2772,7 +2825,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             var oloc = Locations.From(arg);
             var name = Fresh("out");
-            outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
+            // R37.6. In a view's constructor the field is given the local's value: the
+            // constructor builds the record, and does not write it.
+            if (_ctorOutFields is { } ctorOuts && Borrow is { Constructor: true } cb && cb.IsState(outField))
+                ctorOuts.Add((outField, new IrVar(oloc, name) { Type = outIr }));
+            else
+                outWrites.Add(new IrAssign(oloc, Lower(arg.Expression), new IrVar(oloc, name) { Type = outIr }));
             return new IrStmtExpr(oloc, [new IrLocalDecl(oloc, name, outIr, outInit)],
                 new IrRefArg(oloc, new IrVar(oloc, name) { Type = outIr })) { Type = outIr };
         }
@@ -3273,6 +3331,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 : node.Expression is MemberBindingExpressionSyntax && _bound is { } rb
                 ? rb
                 : RegionThis(loc, method.ContainingType!)
+            // R17.10. A span wrapper's method takes the span first.
+            : method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
+              known.SpanWrapperField(method.ContainingType) is { } wrappedField
+            ? node.Expression is MemberAccessExpressionSyntax wm && wm.Expression is not ThisExpressionSyntax
+                ? Lower(wm.Expression)
+                : new IrVar(loc, Names.This) { Type = known.MapType(wrappedField.Type) }
             : null;
 
         // R20.12. A receiver-free callee is passed the receiver's readonly fields it reads.
@@ -3334,7 +3398,12 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             ParamTypes = [.. Declarations.ParamTypes(method, known, receiver is not null),
                           .. context.Select(f => (IrType?)known.MapType(Declarations.ContextType(f)))],
             TypeArguments = known.TypeArguments(method),
-            MutatesReceiver = receiver is not null && !Declarations.IsReadOnly(method, model.Compilation, known),
+            // R17.10. A wrapper over a writable span leaves its span under a fresh
+            // existential, whatever the method writes: it changes its receiver.
+            MutatesReceiver = receiver is not null &&
+                (known.SpanWrapperField(method.ContainingType) is { } heldSpan
+                    ? known.IsSpan(heldSpan.Type)
+                    : !Declarations.IsReadOnly(method, model.Compilation, known)),
             DoesNotReturn = method.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() ==
                 "System.Diagnostics.CodeAnalysis.DoesNotReturnAttribute"),
         };

@@ -22,6 +22,9 @@ namespace System.Collections.Generic
             // up to date -> _countVersion = _underlying.version
             // not up to date -> _countVersion < _underlying.version
             private int _countVersion;
+            // level of the subsets root from the underlying roots.
+            // Is up-to date if version = _underlying.version
+            private int _rootLevel;
             // these exist for unbounded collections
             // for instance, you could allow this subset to be defined for i > 10. The set will throw if
             // anything <= 10 is added, but there is no upper bound. These features Head(), Tail(), were punted
@@ -36,10 +39,23 @@ namespace System.Collections.Generic
             [Spec] internal bool SpecLowerActive => _lBoundActive;
             [Spec] internal bool SpecUpperActive => _uBoundActive;
 
-            /// <summary>R32.14. The root is the subtree the range search stops at in the set's tree.</summary>
+            // §37. The view's range, and the set's tree whose range root it searches.
+            [Spec] internal override Seq<T> SpecRangeLo => SortedSetCount.One(_min);
+            [Spec] internal override Seq<T> SpecRangeHi => SortedSetCount.One(_max);
+            [Spec] internal override bool SpecRangeLa => _lBoundActive;
+            [Spec] internal override bool SpecRangeUa => _uBoundActive;
+            [Spec] internal override SpecTree<(T, bool)> SpecRangeTree => _underlying.SpecNodes;
+            [Spec] internal override IComparer<T> SpecRangeComparer => comparer;
+
+            /// <summary>
+            /// R32.14. The root is the subtree the range search stops at in the set's tree. §37:
+            /// a non-null root is `_rootLevel` below the set's root.
+            /// </summary>
             [Spec] internal bool SpecRootOk =>
                 (root == null || Pal.Unshared(root)) &&
-                Pal.Tree<(T, bool)>(root) == SpecSearchTree.RangeRoot(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+                Pal.Tree<(T, bool)>(root) == SpecSearchTree.RangeRoot(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive) &&
+                0 <= _rootLevel &&
+                (root == null || _rootLevel == SortedSetCount.RangeDepth(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive));
 
             /// <summary>
             /// R32.14. The view shares the set's comparer, and its root is the set's range
@@ -74,7 +90,7 @@ namespace System.Collections.Generic
                 _max = Max;
                 _lBoundActive = lowerBoundActive;
                 _uBoundActive = upperBoundActive;
-                root = _underlying.FindRange(_min, _max, _lBoundActive, _uBoundActive); // root is first element within range
+                root = _underlying.FindRange(_min, _max, _lBoundActive, _uBoundActive, out _rootLevel); // root is first element within range
                 count = 0;
                 version = -1;
                 _countVersion = -1;
@@ -169,6 +185,8 @@ namespace System.Collections.Generic
             }
 
             [Ensures("Result == SpecSearchTree.InRange(@this.comparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item)")]
+            [Ensures("@this.root == Pal.Old(@this.root) && @this.comparer == Pal.Old(@this.comparer)")]
+            [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override bool IsWithinRange(T item)
             {
                 int comp = _lBoundActive ? Comparer.Compare(_min, item) : -1;
@@ -444,23 +462,6 @@ namespace System.Collections.Generic
                 return base.FindNode(item);
             }
 
-            // this does indexing in an inefficient way compared to the actual sortedset, but it saves a
-            // lot of space
-            internal override int InternalIndexOf(T item)
-            {
-                int count = -1;
-                foreach (T i in this)
-                {
-                    count++;
-                    if (Comparer.Compare(item, i) == 0)
-                        return count;
-                }
-#if DEBUG
-                Debug.Assert(this.versionUpToDate() && root == _underlying.FindRange(_min, _max));
-#endif
-                return -1;
-            }
-
             /// <summary>
             /// Checks whether this subset is out of date, and updates it if necessary.
             /// </summary>
@@ -480,7 +481,7 @@ namespace System.Collections.Generic
                 Debug.Assert(_underlying != null);
                 if (version != _underlying.version)
                 {
-                    root = _underlying.FindRange(_min, _max, _lBoundActive, _uBoundActive);
+                    root = _underlying.FindRange(_min, _max, _lBoundActive, _uBoundActive, out _rootLevel);
                     version = _underlying.version;
                 }
 
@@ -499,6 +500,14 @@ namespace System.Collections.Generic
             {
                 Debug.Assert(_underlying != null);
                 return _underlying.Count;
+            }
+
+            internal override int GetApproximateMaxHeight()
+            {
+                SortedSetCount.RangeRootHeight(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+                // pal: R23.12. `Math.Max` of effect-free arguments: the call is bound first.
+                int underlyingHeight = _underlying.GetApproximateMaxHeight();
+                return Math.Max(underlyingHeight - _rootLevel, 0);
             }
 
             // This passes functionality down to the underlying tree, clipping edges if necessary

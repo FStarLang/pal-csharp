@@ -359,6 +359,10 @@ public enum SpanOrigin
     ArrayRange,
     /// <summary><c>s.Slice(i)</c>, <c>s.Slice(i, n)</c>, <c>s[i..j]</c> — a window of a span.</summary>
     SpanRange,
+    /// <summary>R17.9. <c>Span&lt;T&gt; s = stackalloc T[n];</c> — fresh memory, contents arbitrary.</summary>
+    Stackalloc,
+    /// <summary>R17.9. <c>new T[n]</c> where a span is wanted — fresh memory, every cell <c>default(T)</c>.</summary>
+    NewArray,
 }
 
 /// <summary>
@@ -372,6 +376,13 @@ public sealed record IrSpanCreate(
     IrExpr Source,
     IrExpr? Start,
     IrExpr? Length) : IrExpr(Loc);
+
+/// <summary>
+/// R17.10. <c>new W(s, args)</c> for a span wrapper <c>W</c>: the span <see cref="Span"/>
+/// is created, and <see cref="Ctor"/> runs over it: its arguments omit the span, which is
+/// its parameter number <see cref="SpanAt"/>.
+/// </summary>
+public sealed record IrSpanWrap(IrLoc Loc, IrSpanCreate Span, IrCall Ctor, int SpanAt) : IrExpr(Loc);
 
 /// <summary><c>x.f</c> on a struct.</summary>
 public sealed record IrField(IrLoc Loc, IrExpr Receiver, string Field) : IrExpr(Loc)

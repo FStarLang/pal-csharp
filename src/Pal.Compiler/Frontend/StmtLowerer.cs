@@ -248,6 +248,10 @@ public sealed class StmtLowerer(
           model.GetSymbolInfo(call).Symbol is IMethodSymbol callee &&
           callee.GetAttributes().Any(a => a.AttributeClass?.Name == "DoesNotReturnAttribute"));
 
+    /// <summary>R17.10. A block without its last statement, which the caller has accounted for.</summary>
+    public IrBlock LowerAllButLast(BlockSyntax block) =>
+        new(Locations.From(block), LowerStatements([.. block.Statements.Take(block.Statements.Count - 1)]));
+
     private IrBlock LowerBlock(BlockSyntax block) =>
         new(Locations.From(block), LowerStatements([.. ReachableStatements(block.Statements)]));
 
@@ -759,6 +763,17 @@ public sealed class StmtLowerer(
             }
             // R27.41. A borrowing struct of the method's own object, held in a local.
             if (borrow is null && symbol is not null && HeldStruct(v, symbol, type, statements)) continue;
+            // R17.10. `Span<T> s = _span;` in a span wrapper's member, `s` never written, is
+            // another name for the span the member was handed: nothing is bound.
+            if (symbol is not null && v.Initializer?.Value is { } wrappedInit &&
+                ExprLowerer.Unparenthesized(wrappedInit) is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax } &&
+                known.IsWrappedSpan(model.GetSymbolInfo(ExprLowerer.Unparenthesized(wrappedInit)).Symbol) &&
+                NeverReassigned(symbol, node.Parent ?? node))
+            {
+                _code.Alias(symbol, _code.Lower(wrappedInit));
+                _spec.Alias(symbol, _spec.Lower(wrappedInit));
+                continue;
+            }
             // R24.19. `T[] a = _field;`, never written, is another name for the field.
             if (symbol is not null && FieldAlias(v, symbol, node) is { } aliased)
             {
@@ -1480,6 +1495,20 @@ public sealed class StmtLowerer(
     private bool ThroughReference(ExpressionSyntax e) =>
         model.GetTypeInfo(e).Type is { IsReferenceType: true };
 
+    /// <summary>
+    /// R17.10. Whether <paramref name="local"/> itself is never assigned or passed by
+    /// reference in <paramref name="scope"/>; writes through it, to its elements, are not
+    /// writes of it.
+    /// </summary>
+    private bool NeverReassigned(ILocalSymbol local, SyntaxNode scope) =>
+        !scope.DescendantNodes().Any(n => n switch
+        {
+            AssignmentExpressionSyntax a => ExprLowerer.Unparenthesized(a.Left),
+            ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => ExprLowerer.Unparenthesized(arg.Expression),
+            RefExpressionSyntax r => ExprLowerer.Unparenthesized(r.Expression),
+            _ => null,
+        } is IdentifierNameSyntax id && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local));
+
     private bool NeverWritten(ILocalSymbol local, SyntaxNode scope)
     {
         foreach (var n in scope.DescendantNodes())
@@ -1991,6 +2020,11 @@ public sealed class StmtLowerer(
             return new IrArrayOp(loc,
                 part.Name.Identifier.ValueText == "Keys" ? ArrayOpKind.CopyKeys : ArrayOpKind.CopyValues,
                 [_code.Lower(part.Expression), _code.Lower(args[0].Expression), _code.Lower(args[1].Expression)]);
+
+        // R17.11. `s.Clear()` on a span.
+        if (method is { Name: "Clear", IsStatic: false, Parameters.Length: 0 } && known.IsSpan(method.ContainingType) &&
+            node.Expression is MemberAccessExpressionSyntax clearedSpan)
+            return new IrArrayOp(loc, ArrayOpKind.Clear, [_code.Lower(clearedSpan.Expression)]);
 
         // R34.5. `c.CopyTo(a, i)` on an `ICollection<T>` writes its items into `a` from `i`.
         if (method is { Name: "CopyTo", IsStatic: false, Parameters.Length: 2 } && args.Count == 2 &&
