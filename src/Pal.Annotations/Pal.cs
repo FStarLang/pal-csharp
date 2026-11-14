@@ -65,6 +65,10 @@ public static class Pal
     [Conditional(Cond)]
     public static void Join(bool facts) { }
 
+    /// <summary>The separating ownership that both arms must establish at a join.</summary>
+    [Conditional(Cond)]
+    public static void Join(SlProp ownership) { }
+
     /// <summary>
     /// R30.39. Written after the <c>Pal.Join</c>s of an <c>if</c> in a method's tail: what
     /// follows the join is verified as a function of its own, which assumes the join's
@@ -97,6 +101,16 @@ public static class Pal
     public static void Assume(bool predicate) { }
 
     // -- Permissions -------------------------------------------------------
+
+    /// <summary>
+    /// The current owner's permission, in a class invariant or instance-method
+    /// specification. Spatial invariants using it must supply a proved
+    /// Pulse.Lib.CSharp.Ownership instance for automatic sharing and gathering.
+    /// </summary>
+    public static Perm Permission() => throw Ghost();
+
+    /// <summary>Names an inferred GhostArg binder in a proof statement, never runtime code.</summary>
+    public static T Ghost<T>(string name) => throw Ghost();
 
     /// <summary>
     /// Halve the permission held on <paramref name="location"/>, an array or an object,
@@ -528,8 +542,9 @@ public static class Pal
 
     /// <summary>
     /// R27.39. The calls made so far through the <c>[Callback]</c> parameter
-    /// <paramref name="action"/>: for each, the <c>[Model]</c> view of the node it was given
-    /// and what it returned. Empty on entry; in a postcondition, the calls the method made.
+    /// <paramref name="action"/>: for each, its declared observation (or legacy region
+    /// <c>[Model]</c> view) and what it returned. Empty on entry; in a postcondition,
+    /// the calls the method made.
     /// </summary>
     public static Seq<(TV, TR)> Trace<TV, TR>(Delegate action) => throw Ghost();
 

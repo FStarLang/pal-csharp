@@ -39,6 +39,12 @@ public class Tally<T>
 
     [Ensures("Result == @this.SpecCount")]
     public int Count => count;
+
+    [Ensures("Result == (@this is CappedTally<T> ? 1 : 0)")]
+    public int ActualKind() => this is CappedTally<T> ? 1 : 0;
+
+    [Ensures("Result == (@this is CappedTally<T> ? 1 : 0)")]
+    public int IndirectKind() => ActualKind();
 }
 
 public sealed class CappedTally<T> : Tally<T>
@@ -79,4 +85,7 @@ public sealed class TallyHolder
 
     [Ensures("Result == @this.SpecCount")]
     public int Count() => tally.Count;
+
+    [Ensures("Result == 1")]
+    public int Kind() => tally.IndirectKind();
 }

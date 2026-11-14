@@ -1,0 +1,27 @@
+using PalLang;
+
+namespace PalCSharp.Tests.NullForgiven;
+
+[Plain]
+public sealed class Cell
+{
+    public int value;
+}
+
+public static class NullSafety
+{
+    [Ensures("Result == cell")]
+    public static Cell Keep(Cell cell) { return cell; }
+
+    public static Cell BadReturn(Cell cell, Cell? replacement)
+    {
+        cell = replacement!;
+        return cell!;
+    }
+
+    public static Cell BadCall(Cell cell, Cell? replacement)
+    {
+        cell = replacement!;
+        return Keep(cell!);
+    }
+}

@@ -1,0 +1,39 @@
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.Text;
+using Pal.Compiler.Frontend;
+using Pal.Compiler.Diagnostics;
+
+var source = CSharpSyntaxTree.ParseText(
+    "namespace System.Collections.Generic { public class SortedSet<T> {} }",
+    path: "Original.cs");
+var refs = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!)
+    .Split(Path.PathSeparator).Select(p => MetadataReference.CreateFromFile(p));
+foreach (var suppressed in new[] { false, true })
+foreach (var expression in new[] { "new SortedSet<int>() != null", "NoSuchSymbol == 0" })
+{
+    var compilation = CSharpCompilation.Create("Repro", [source], refs,
+        new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            .WithGeneralDiagnosticOption(ReportDiagnostic.Error)
+            .WithReportSuppressedDiagnostics(suppressed));
+    var bag = new DiagnosticBag();
+    var site = new SpecSite("Test", expression,
+        Location.Create(source, new TextSpan(0, 1)), [], ["using System.Collections.Generic;"]);
+    SpecBinder.Bind(ref compilation, [site], bag);
+    var diagnostics = compilation.GetSemanticModel(compilation.SyntaxTrees.Last()).GetDiagnostics();
+    if (expression.StartsWith("new"))
+    {
+        if (bag.HasErrors) throw new Exception(bag.Render());
+        if (suppressed && !diagnostics.Any(d => d.Id == "CS0436" &&
+            d.Severity == DiagnosticSeverity.Error && d.IsSuppressed))
+            throw new Exception("The suppressed warning-as-error regression was not exercised.");
+    }
+    else
+    {
+        if (bag.Items.Count(d => d.Severity == Severity.Error) != 1 ||
+            !bag.Render().Contains("NoSuchSymbol") ||
+            !diagnostics.Any(d => d.Id == "CS0103" && !d.IsSuppressed))
+            throw new Exception("A real spec error was lost: " + bag.Render());
+    }
+}
+Console.WriteLine("Spec shims preserve warning suppression under warnaserror and still reject real errors.");

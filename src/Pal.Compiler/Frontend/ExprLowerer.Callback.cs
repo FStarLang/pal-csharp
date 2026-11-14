@@ -8,7 +8,7 @@ using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
 
-/// <summary>R27.39. Callbacks over region pointers, and the lambdas passed to them.</summary>
+/// <summary>Ownership-preserving callbacks and the lambdas passed to them.</summary>
 public sealed partial class ExprLowerer
 {
     /// <summary>R27.39. The lambdas this lowerer lifted to methods, in the order it met them.</summary>
@@ -22,23 +22,29 @@ public sealed partial class ExprLowerer
 
     /// <summary>R27.39. The variable naming the trace of the callback parameter <paramref name="action"/>.</summary>
     public static string TraceName(string action) => "__pal_trace_" + action;
+    public const string CallbackSnapshot = "__pal_callback_snapshot";
+    public const string CallbackPermission = "__pal_callback_permission";
 
     /// <summary>
     /// R27.39. What a <c>[Callback]</c> parameter is called with and returns, or null (with a
-    /// diagnostic) when its delegate is not one taking a reference to a <c>[Region]</c> class
-    /// and returning a value.
+    /// diagnostic) when its delegate or ownership contract is unsupported.
     /// </summary>
     public static IrCallback? CallbackOf(IParameterSymbol p, WellKnown known, DiagnosticBag diagnostics)
     {
         if (!Declarations.Has(p, known.CallbackAttribute)) return null;
+        if (known.CallbackTypes.TryGetValue(p, out var cached)) return cached;
+        known.CallbackTypes[p] = null;
         var loc = p.Locations.Length > 0 ? Locations.From(p.Locations[0]) : IrLoc.None;
+        var attribute = Declarations.Find(p, known.CallbackAttribute)!;
+        if (attribute.ConstructorArguments.Length == 3)
+            return known.CallbackTypes[p] = BorrowedCallback(p, attribute, known, diagnostics, loc);
         if (p.Type is INamedTypeSymbol { TypeKind: TypeKind.Delegate, DelegateInvokeMethod: { ReturnsVoid: false } invoke } &&
             invoke.Parameters is [{ RefKind: RefKind.None, Type: INamedTypeSymbol node }] &&
             known.IsRegionClass(node) && known.MapType(node) is IrClassType region &&
             node.GetMembers().FirstOrDefault(m => Declarations.Has(m, known.ModelAttribute)) is IPropertySymbol view &&
             known.MapType(view.Type) is { } viewType &&
             known.MapReturnType(invoke.ReturnType) is { } result && p.RefKind == RefKind.None)
-            return new IrCallback(region with { Nullable = false }, viewType, result)
+            return known.CallbackTypes[p] = new IrCallback(region with { Nullable = false }, viewType, result)
             {
                 Bounded = Declarations.Find(p, known.CallbackAttribute) is { } data &&
                           Declarations.NamedFlag(data, nameof(PalLang.CallbackAttribute.Bounded)),
@@ -47,6 +53,99 @@ public sealed partial class ExprLowerer
             $"The `[Callback]` parameter `{p.Name}` must be a delegate taking one reference to a " +
             "`[Region]` class and returning a value (doc/translation.md R27.39).");
         return null;
+    }
+
+    private static IrCallback? BorrowedCallback(
+        IParameterSymbol parameter, AttributeData attribute, WellKnown known, DiagnosticBag diagnostics, IrLoc loc)
+    {
+        IrCallback? Refuse(string message)
+        {
+            diagnostics.Error("PALCS0708", loc, message);
+            return null;
+        }
+        if (parameter.Type is not INamedTypeSymbol
+            {
+                TypeKind: TypeKind.Delegate,
+                DelegateInvokeMethod: { ReturnsVoid: false, Parameters: [{ RefKind: RefKind.None } argument] } invoke,
+            } ||
+            known.MapType(argument.Type) is not IrClassType { Plain: true } node ||
+            argument.Type is not INamedTypeSymbol nodeSymbol || known.IsRegionClass(nodeSymbol) ||
+            known.MapReturnType(invoke.ReturnType) is not { } result || parameter.RefKind != RefKind.None)
+            return Refuse("An explicit `[Callback]` borrow requires a delegate taking one `[Plain]` reference and returning a value.");
+
+        var declaration = Declarations.StringArgument(attribute, 0);
+        var syntax = SyntaxFactory.ParseParameterList("(" + declaration + ")");
+        if (declaration is null || syntax.ContainsDiagnostics || syntax.Parameters is not [var snapshot] ||
+            snapshot.Type is null || snapshot.Default is not null || snapshot.Modifiers.Count != 0 ||
+            snapshot.AttributeLists.Count != 0 ||
+            snapshot.Identifier.ValueText is "argument" or "permission" or "Result")
+            return Refuse("A callback snapshot is one C# type-and-name declaration, without modifiers, attributes or a default, " +
+                          "and distinct from `argument`, `permission`, and `Result`.");
+
+        var method = (IMethodSymbol)parameter.ContainingSymbol;
+        var formal = WellKnown.OuterAndOwnTypeParameters(method.OriginalDefinition.ContainingType)
+            .Concat(method.OriginalDefinition.TypeParameters);
+        var actual = WellKnown.OuterAndOwnTypeArguments(method.ContainingType).Concat(method.TypeArguments).ToArray();
+        var replacements = formal.Zip(actual, (first, second) => (First: first, Second: second))
+            .GroupBy(pair => pair.First.Name).ToDictionary(g => g.Key, g => g.Last().Second);
+        var instantiate = new CallbackTypeArguments(replacements);
+        snapshot = snapshot.WithType((TypeSyntax)instantiate.Visit(snapshot.Type)!);
+        static IEnumerable<string> FreeTypes(ITypeSymbol type) => type switch
+        {
+            ITypeParameterSymbol p => [p.Name],
+            IArrayTypeSymbol a => FreeTypes(a.ElementType),
+            INamedTypeSymbol n => WellKnown.OuterAndOwnTypeArguments(n).SelectMany(FreeTypes),
+            _ => [],
+        };
+        var typeParameters = actual.SelectMany(FreeTypes).Distinct().ToImmutableArray();
+        var source = attribute.ApplicationSyntaxReference?.SyntaxTree;
+        var usings = (source?.GetRoot().DescendantNodes().OfType<UsingDirectiveSyntax>().Select(u => u.ToString()) ?? [])
+            .Concat(method.ContainingNamespace.IsGlobalNamespace ? [] : [$"using {method.ContainingNamespace};"])
+            .Append("using PalLang;").Append("using static PalLang.Pal;").Distinct().ToImmutableArray();
+        SpecSite Site(string key, int index, bool permission)
+        {
+            var expression = SyntaxFactory.ParseExpression(Declarations.StringArgument(attribute, index) ?? "");
+            return new SpecSite(key, instantiate.Visit(expression)!.ToString(),
+                Declarations.ArgumentLocation(attribute, index), [new SpecParam("argument", argument.Type)], usings)
+            {
+                TypeParameters = typeParameters,
+                GhostParameters = permission
+                    ? [snapshot.ToString(), "global::PalLang.Perm permission"] : [snapshot.ToString()],
+                Private = method.DeclaredAccessibility == Accessibility.Private,
+            };
+        }
+        var compilation = (CSharpCompilation)known.Compilation;
+        var bound = SpecBinder.Bind(ref compilation,
+            [Site("callback_ownership", 1, true), Site("callback_observation", 2, false)], diagnostics);
+        if (!bound.TryGetValue("callback_ownership", out var owns) ||
+            !bound.TryGetValue("callback_observation", out var view))
+            return null;
+        var shim = owns.Expression.Ancestors().OfType<MethodDeclarationSyntax>().First();
+        var snapshotSymbol = owns.Model.GetDeclaredSymbol(shim.ParameterList.Parameters[1]) as IParameterSymbol;
+        if (snapshotSymbol is null || known.MapType(snapshotSymbol.Type) is not { } snapshotType ||
+            snapshotType is IrGhostType || snapshotType is IrPrim { Kind: PrimKind.Void or PrimKind.SlProp })
+            return Refuse("The callback snapshot must have a supported specification type, not Ghost<T> or SlProp.");
+        var ownership = new ExprLowerer(owns.Model, known, diagnostics, specPosition: true).Lower(owns.Expression);
+        var observation = new ExprLowerer(view.Model, known, diagnostics, specPosition: true).Lower(view.Expression);
+        if (ownership.Type is not IrPrim { Kind: PrimKind.SlProp })
+            return Refuse("The callback ownership expression must have type SlProp.");
+        if (observation.Type is not { } viewType || viewType is IrPrim { Kind: PrimKind.Void or PrimKind.SlProp })
+            return Refuse("The callback observation must have a supported value type.");
+        return new IrCallback(node, viewType, result)
+        {
+            Borrow = new(snapshot.Identifier.ValueText, snapshotType, ownership, observation),
+            Bounded = Declarations.NamedFlag(attribute, nameof(PalLang.CallbackAttribute.Bounded)),
+        };
+    }
+
+    private sealed class CallbackTypeArguments(IReadOnlyDictionary<string, ITypeSymbol> arguments) : CSharpSyntaxRewriter
+    {
+        public override SyntaxNode? VisitIdentifierName(IdentifierNameSyntax node) =>
+            node.Parent is not MemberAccessExpressionSyntax { Name: var name } || name != node
+                ? arguments.TryGetValue(node.Identifier.ValueText, out var type)
+                    ? SyntaxFactory.ParseTypeName(type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)).WithTriviaFrom(node)
+                    : base.VisitIdentifierName(node)
+                : base.VisitIdentifierName(node);
     }
 
     /// <summary>R27.39. The <c>[Callback]</c> parameter <paramref name="target"/> names, if it names one.</summary>
@@ -162,7 +261,7 @@ public sealed partial class ExprLowerer
             flow.CapturedInside.Any(s => s is IParameterSymbol { IsThis: true })))
             return Refused("PALCS0709", loc,
                 "A lambda passed to a `[Callback]` parameter that captures `this` " +
-                "(doc/translation.md R27.39): the callee holds the object's region already.");
+                "(doc/translation.md R27.39): its ownership cannot also be captured in the callback protocol.");
         var written = flow.WrittenInside.ToImmutableHashSet<ISymbol>(SymbolEqualityComparer.Default);
 
         // R32.11. A bound on the calls is fixed when the lambda is passed: it names only
@@ -227,9 +326,12 @@ public sealed partial class ExprLowerer
         var pre = spec.Lower(inv.ExpressionBody!);
         var heap = new IrVar(loc, Region.HeapName(cb.Region.Name)) { Type = IrPrim.SpecIntType };
         var nodeVar = new IrVar(loc, node) { Type = cb.Region };
-        var viewAt = new IrSpecOp(loc,
-            $"Pulse.Lib.CSharp.Callback.view_at {Emit.Names.ClassModule(cb.Region.Name)}.{Region.ViewOf(cb.Region.Name)}",
-            [heap, nodeVar]) { Type = cb.View, MachineArgs = true };
+        IrExpr viewAt = cb.Borrow is { } borrow
+            ? new IrCallbackObservation(loc, borrow, nodeVar,
+                new IrVar(loc, CallbackSnapshot) { Type = borrow.SnapshotType }) { Type = cb.View }
+            : new IrSpecOp(loc,
+                $"Pulse.Lib.CSharp.Callback.view_at {Emit.Names.ClassModule(cb.Region.Name)}.{Region.ViewOf(cb.Region.Name)}",
+                [heap, nodeVar]) { Type = cb.View, MachineArgs = true };
         var entry = new IrSpecOp(loc, "Mktuple2", [viewAt, new IrResult(loc) { Type = cb.Result }])
             { MachineArgs = true };
         var extended = new IrSpecOp(loc, "Seq.snoc", [new IrVar(loc, trace) { Type = traceType }, entry])
@@ -256,7 +358,8 @@ public sealed partial class ExprLowerer
         foreach (var (f, cell) in aliases) body.Expressions.Alias(f, cell);
         var lowered = statements.Skip(1).Select(body.Lower).ToImmutableArray();
         var method = new IrMethod(loc, name, parameters.ToImmutable(), cb.Result,
-            [pre, bounded, inRegion], [post], null, new IrBlock(loc, lowered))
+            cb.Borrow is null ? [pre, bounded, inRegion] : [pre, bounded],
+            [post], null, new IrBlock(loc, lowered))
         {
             Lambda = new IrLambdaInfo(trace, node, cb) { Bound = bound },
             TypeParameters = LiftTypeParameters,

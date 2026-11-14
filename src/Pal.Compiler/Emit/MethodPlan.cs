@@ -219,9 +219,21 @@ public sealed class MethodPlan
                 var boundName = Frontend.ExprLowerer.CallBoundName(p.Name);
                 var bound = cb.Bounded ? "n_" + name : "Pulse.Lib.CSharp.Callback.max_bound";
                 if (cb.Bounded) binders.Add($"({bound}: erased int)");
-                binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
-                            $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
-                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
+                if (cb.Borrow is { } borrow)
+                {
+                    var scope = SpecEmitter.CallbackScope(borrow,
+                        new Term("x", TermKind.Other, cb.Region),
+                        new Term("s", KindOf(borrow.SnapshotType), borrow.SnapshotType), "q");
+                    var owns = _spec.Emit(borrow.Ownership, scope).Text;
+                    var view = _spec.Emit(borrow.Observation, scope).Text;
+                    binders.Add($"({name}: Pulse.Lib.CSharp.Callback.borrowed_cb #{Types.Atom(cb.Region)} " +
+                                $"#{Types.Atom(borrow.SnapshotType)} #{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
+                                $"(fun x s q -> {owns}) (fun x s -> {view}) {protocol} {bound})");
+                }
+                else
+                    binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
+                                $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
+                                $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
                 var boundTerm = new Term($"(reveal {bound})", TermKind.Math, IrPrim.SpecIntType);
                 pre.Bind(boundName, boundTerm);
                 post.Bind(boundName, boundTerm);
@@ -361,20 +373,22 @@ public sealed class MethodPlan
                         // (R4.2), holding the *nullable* pointer as R27.23's `ref` does: C# lets
                         // the body store `null` through a `!`, and the runtime does.
                         var source = Names.Argument(p.Name);
-                        binders.Add($"({source}: {Types.Render(p.Type)})");
-                        prologue.Add(($"{name} : {Types.Render(klass with { Nullable = true })}", source));
-                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name);
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments)})";
+                        binders.Add($"({source}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
+                        prologue.Add(($"{name} : {(klass.Plain ? Types.Render(klass with { Nullable = true }) : rawType)}", source));
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name) { RawReference = true };
                         pre.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
                         post.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
                         break;
                     }
                     if (p.Plain)
                     {
-                        binders.Add($"({name}: {Types.Render(p.Type)})");
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments)})";
+                        binders.Add($"({name}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
                         // An ordinary immutable binder: the reference is a value like any
                         // other. What is *owned* through it is not the slot's business,
                         // because with `[Plain]` it never was the compiler's.
-                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name) { RawReference = true };
                         pre.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
                         post.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
                         break;
@@ -643,6 +657,21 @@ public sealed class MethodPlan
         // the heap held at each end, so `Pal.Old` reads the one it was given.
         ParamBinders = [.. binders];
         ParamPreResources = [.. preResources];
+        if (method.Lambda is { Callback.Borrow: { } borrowed } lambda)
+        {
+            var snapshot = Frontend.ExprLowerer.CallbackSnapshot;
+            var permission = Frontend.ExprLowerer.CallbackPermission;
+            ghostBinders.Add($"(#{snapshot}: erased ({Types.Render(borrowed.SnapshotType)}))");
+            ghostBinders.Add($"(#{permission}: perm)");
+            var value = new Term($"(reveal {snapshot})", KindOf(borrowed.SnapshotType), borrowed.SnapshotType);
+            pre.Bind(snapshot, value);
+            post.Bind(snapshot, value);
+            var scope = SpecEmitter.CallbackScope(borrowed,
+                new Term(Names.Local(lambda.Node), TermKind.Other, lambda.Callback.Region), value, permission);
+            var resource = _spec.Emit(borrowed.Ownership, scope).Text;
+            preResources.Add(resource);
+            postResources.Add(resource);
+        }
         foreach (var use in held.IsDefault ? [] : held)
         {
             var k = use.Region;
@@ -733,6 +762,16 @@ public sealed class MethodPlan
             ? ["()"]
             : [.. binders, .. ghostBinders];
         Prologue = prologue.ToImmutable();
+        if (slots.TryGetValue(Names.This, out var owner))
+        {
+            var permission = new Term(owner.Fraction ?? "1.0R", TermKind.Other);
+            pre.Bind("$permission", permission);
+            post.Bind("$permission", permission);
+        }
+        else if (method.IsConstructor)
+            post.Bind("$permission", new Term("1.0R", TermKind.Other));
+        if (method.IsConstructor && method.ReturnType is IrClassType { Plain: true } plainResult)
+            post.Bind(Names.This, new Term(Names.Result, TermKind.Other, plainResult));
         PreScope = pre;
         PostScope = post;
         Slots = slots.ToImmutable();

@@ -201,6 +201,12 @@ public sealed partial class ExprLowerer
 
     public void Unalias(ILocalSymbol x) => _aliases.Remove(x);
 
+    private bool BorrowingSelfAlias(ExpressionSyntax expression) =>
+        Borrow is { SelfPath.IsEmpty: true } bw &&
+        model.GetSymbolInfo(expression).Symbol is { } alias &&
+        _patternBindings.TryGetValue(alias, out var bound) &&
+        bound is IrVar v && v.Name == bw.SelfName;
+
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
         WrappedField(Unparenthesized(e)) ??
         (model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
@@ -262,6 +268,9 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr? HeldMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
     {
+        if (symbol is IPropertySymbol { IsStatic: false } selfProperty &&
+            Declarations.Has(selfProperty, known.SpecAttribute) && BorrowingSelfAlias(node.Expression))
+            return InlineSpec(Borrow!, selfProperty, loc);
         // R32.13. `Result.P` in a postcondition of a method returning a view: the view's
         // `[Spec]` property, with the method's own object the view's borrowed one.
         if (SpecPosition && symbol is IPropertySymbol { IsStatic: false } rp && Declarations.Has(rp, known.SpecAttribute) &&
@@ -512,12 +521,13 @@ public sealed partial class ExprLowerer
             IsShim(shimThis.ContainingSymbol))
             return InlineSpec(spb, own, loc);
         if (Borrow is not { } bw || symbol is not IFieldSymbol { IsStatic: false } f) return null;
-        if (bw.IsOwner(f) && node.Expression is ThisExpressionSyntax) return BorrowedObject(loc);
+        bool self = node.Expression is ThisExpressionSyntax || BorrowingSelfAlias(node.Expression);
+        if (bw.IsOwner(f) && self) return BorrowedObject(loc);
         if (bw.IsOwned(f) && !bw.Constructor &&
-            (node.Expression is ThisExpressionSyntax ||
+            (self ||
              model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } op && IsShim(op.ContainingSymbol)))
             return OwnedObject(f, loc);
-        if (bw.IsState(f) && node.Expression is ThisExpressionSyntax)
+        if (bw.IsState(f) && self)
             return BorrowedIdentifier(f, SyntaxFactory_Identifier(node), loc);
         if (bw.IsOwner(f) && model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } sp &&
             IsShim(sp.ContainingSymbol) && !bw.Constructor)
@@ -535,6 +545,21 @@ public sealed partial class ExprLowerer
 
     private static IdentifierNameSyntax SyntaxFactory_Identifier(MemberAccessExpressionSyntax node) =>
         node.Name as IdentifierNameSyntax ?? Microsoft.CodeAnalysis.CSharp.SyntaxFactory.IdentifierName(node.Name.Identifier);
+
+    /// <summary>
+    /// An explicitly plain ghost parameter receives the reference, not the object's
+    /// model. Reuse the reference-binder representation for parameters, locals and the
+    /// borrowed receiver; other arguments keep their existing lowering.
+    /// </summary>
+    public IrExpr LowerGhostArgument(ExpressionSyntax expression, IParameterSymbol parameter)
+    {
+        var lowered = Lower(expression);
+        if (Declarations.Has(parameter, known.PlainAttribute) &&
+            Unboxed(lowered) is IrVar { Type: IrClassType } reference &&
+            (model.GetSymbolInfo(expression).Symbol is IParameterSymbol or ILocalSymbol || reference.Name == Names.This))
+            return new IrRefOf(reference.Loc, reference.Name) { Type = reference.Type };
+        return lowered;
+    }
 
     /// <summary>
     /// R28.3. <c>ReferenceEquals(a, b)</c> in a contract: identity of two references. An
@@ -933,6 +958,13 @@ public sealed partial class ExprLowerer
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
                 continue;
+            if (tail.Count == 0 && expr is InvocationExpressionSyntax proof &&
+                model.GetSymbolInfo(proof).Symbol is IMethodSymbol proofMethod &&
+                Declarations.Has(proofMethod, known.LemmaAttribute))
+            {
+                prefix.Add(new IrGhostStmt(Locations.From(node), GhostKind.LemmaCall, Lower(proof), null));
+                continue;
+            }
             // R32.1. `ArgumentNullException.ThrowIfNull(x)` at a non-nullable class type does
             // nothing, as in any body (R23.2): such a reference is not null.
             if (expr is InvocationExpressionSyntax guard &&
@@ -1015,12 +1047,47 @@ public sealed partial class ExprLowerer
         IEnumerable<StatementSyntax> body = decl.ExpressionBody is { } eb
             ? [Microsoft.CodeAnalysis.CSharp.SyntaxFactory.ExpressionStatement(eb.Expression)]
             : decl.Body?.Statements ?? default;
+        // Preserve the base's declared field initializers, including explicit
+        // values of user-bound ghost types that have no default inhabitant.
+        if (decl.Parent is TypeDeclarationSyntax baseType)
+        {
+            foreach (var field in baseType.Members.OfType<FieldDeclarationSyntax>())
+            {
+                if (field.Modifiers.Any(m => m.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.StaticKeyword) ||
+                    m.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.ConstKeyword))) continue;
+                foreach (var variable in field.Declaration.Variables)
+                {
+                    if (variable.Initializer is not { } initializer ||
+                        tmodel.GetDeclaredSymbol(variable) is not IFieldSymbol fieldSymbol ||
+                        !bw.IsState(fieldSymbol) || known.MapType(fieldSymbol.Type) is not { } fieldType) continue;
+                    var value = nested.Lower(initializer.Value);
+                    if (value is not (IrVar or IrLiteral or IrNull))
+                    {
+                        var local = "__pal_initial_" + fieldSymbol.Name;
+                        prefix.Add(new IrLocalDecl(Locations.From(initializer), local, fieldType, value));
+                        value = new IrVar(loc, local) { Type = fieldType };
+                    }
+                    given.Add(new IrFieldInit(fieldSymbol.Name, value));
+                    _ctorGiven[fieldSymbol.Name] = value;
+                }
+            }
+        }
+        var assignedInBody = new HashSet<string>();
         foreach (var st in body)
         {
+            // A proof call contributes its checked resources just as it does in
+            // an ordinary constructor; it is not erased from verification.
+            if (st is ExpressionStatementSyntax { Expression: InvocationExpressionSyntax proof } &&
+                tmodel.GetSymbolInfo(proof).Symbol is IMethodSymbol proofMethod &&
+                Declarations.Has(proofMethod, known.LemmaAttribute))
+            {
+                prefix.Add(new IrGhostStmt(Locations.From(st), GhostKind.LemmaCall, nested.Lower(proof), null));
+                continue;
+            }
             if (st is ExpressionStatementSyntax { Expression: AssignmentExpressionSyntax { Left: var left, Right: var right } a } &&
                 a.IsKind(Microsoft.CodeAnalysis.CSharp.SyntaxKind.SimpleAssignmentExpression) &&
                 (left is IdentifierNameSyntax || left is MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax }) &&
-                tmodel.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) && given.All(g => g.Field != f.Name) &&
+                tmodel.GetSymbolInfo(left).Symbol is IFieldSymbol f && bw.IsState(f) && assignedInBody.Add(f.Name) &&
                 known.MapType(f.Type) is { } ft)
             {
                 var value = nested.Lower(right);
@@ -1030,6 +1097,7 @@ public sealed partial class ExprLowerer
                     prefix.Add(new IrLocalDecl(Locations.From(st), local, ft, value));
                     value = new IrVar(loc, local) { Type = ft };
                 }
+                given.RemoveAll(g => g.Field == f.Name);
                 given.Add(new IrFieldInit(f.Name, value));
                 _ctorGiven[f.Name] = value;
                 continue;

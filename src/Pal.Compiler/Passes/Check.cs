@@ -324,11 +324,12 @@ public static class Check
 
     private static void CheckLemma(IrMethod m, DiagnosticBag diagnostics)
     {
-        // R4.7. A lemma is a proof, so it produces a `Lemma`, whose "value" is unit.
-        if (m.ReturnType is not IrPrim { Kind: PrimKind.Void })
+        // A proof may expose an erased existential witness, never a runtime value.
+        // Void lemmas retain their existing pure-Lemma / spatial-ghost-fn distinction.
+        if (m.ReturnType is not (IrPrim { Kind: PrimKind.Void } or IrGhostType))
             diagnostics.Error("PALCS0504", m.Loc,
                 $"The `[Lemma]` `{m.Name}` returns `{m.ReturnType}`. " +
-                "A lemma must return `void`; state what it proves in `[Ensures]`.");
+                "A lemma must return `void` or `Ghost<T>`; state its proof and resources in `[Ensures]`.");
 
         if (m.Ensures.IsEmpty)
             diagnostics.Warning("PALCS0901", m.Loc,
@@ -638,7 +639,11 @@ public static class Check
     internal static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
         yield return expr;
-        IEnumerable<IrExpr> kids = expr switch
+        foreach (var kid in DirectSubexpressions(expr))
+            foreach (var r in Subexpressions(kid)) yield return r;
+    }
+
+    internal static IEnumerable<IrExpr> DirectSubexpressions(IrExpr expr) => expr switch
         {
             IrUnary u => [u.Operand],
             IrBinary b => [b.Left, b.Right],
@@ -646,9 +651,11 @@ public static class Check
             IrElement e => [e.Array, e.Index],
             IrLength l => [l.Array],
             IrField f => [f.Receiver],
+            IrObserve o => [o.Receiver],
             IrNew n => [.. n.Fields.Select(f => f.Value)],
             IrRefArg r => [r.Operand],
             IrLambdaRef l => l.Captures,
+            IrCallbackObservation o => [o.Argument, o.Snapshot, o.Borrow.Observation],
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
             IrStmtExpr se => [se.Value],
@@ -670,7 +677,4 @@ public static class Check
             IrSpecOp o => o.Args,
             _ => [],
         };
-        foreach (var kid in kids)
-            foreach (var r in Subexpressions(kid)) yield return r;
-    }
 }

@@ -35,6 +35,9 @@ public sealed record SpecSite(
     /// </summary>
     public bool Private { get; init; }
 
+    /// <summary>Parsed, syntax-validated ghost parameter declarations; Roslyn binds their types.</summary>
+    public ImmutableArray<string> GhostParameters { get; init; } = [];
+
     /// <summary>Name of the generated shim method; also the lookup key.</summary>
     public string ShimName => SpecBinder.ShimMethodPrefix + Key;
 }
@@ -120,7 +123,7 @@ public static class SpecBinder
         var exempt = false;
         foreach (var (tree, _, _) in trees)
             foreach (var d in strict.GetSemanticModel(tree).GetDiagnostics())
-                if (d.Severity == DiagnosticSeverity.Error && IsInvariantInaccessible(d, privateShims)) exempt = true;
+                if (!d.IsSuppressed && d.Severity == DiagnosticSeverity.Error && IsInvariantInaccessible(d, privateShims)) exempt = true;
         compilation = exempt && IgnoringAccessibility(compilation) is { } lax
             ? lax.AddSyntaxTrees(trees.Select(t => t.Tree))
             : strict;
@@ -131,7 +134,10 @@ public static class SpecBinder
 
             foreach (var d in strict.GetSemanticModel(strict.SyntaxTrees.First(t => t.FilePath == tree.FilePath)).GetDiagnostics())
             {
-                if (d.Severity != DiagnosticSeverity.Error) continue;
+                // Analyzer hosts may request suppressed diagnostics. The shim's
+                // warning pragma still applies even when /warnaserror promoted
+                // a warning's severity; do not turn it into a fresh PAL error.
+                if (d.IsSuppressed || d.Severity != DiagnosticSeverity.Error) continue;
                 if (IsInvariantInaccessible(d, privateShims)) continue;
                 var (code, message) = Remap(d);
                 diagnostics.Error(code, MapBack(d.Location, map, groupSites), message);
@@ -243,7 +249,7 @@ public static class SpecBinder
             if (site.TypeParameters.Length > 0)
                 sb.Append('<').Append(string.Join(", ", site.TypeParameters)).Append('>');
             sb.Append('(');
-            sb.Append(string.Join(", ", site.Parameters.Select(RenderParam)));
+            sb.Append(string.Join(", ", site.Parameters.Select(RenderParam).Concat(site.GhostParameters)));
             sb.AppendLine(")");
             sb.AppendLine("    {");
             sb.AppendLine("        return");

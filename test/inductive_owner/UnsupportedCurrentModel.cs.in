@@ -1,0 +1,30 @@
+using PalLang;
+
+namespace PalCSharp.Tests;
+
+public sealed class UnsupportedCurrentModel
+{
+    private int[] items;
+    [Model] private Seq<int> Model => Pal.Contents(items);
+    [Spec] public SpecInt Length => Model.Length;
+
+    [Ensures("@this.Length == 1")]
+    public UnsupportedCurrentModel()
+    {
+        items = new int[1];
+    }
+
+    [Requires("@this.Length == 1")]
+    public void Mutate()
+    {
+        int i = 0;
+        while (i < 1)
+        {
+            Pal.Invariant(this.Length == 1);
+            Pal.Invariant(0 <= i && i <= 1);
+            Pal.Decreases(1 - i);
+            items[0] = 42;
+            i++;
+        }
+    }
+}

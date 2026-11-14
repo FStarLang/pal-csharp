@@ -530,9 +530,19 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 /// </summary>
 public sealed record IrCallback(IrClassType Region, IrType View, IrType Result)
 {
+    /// <summary>A user-defined borrow instead of the legacy implicit region borrow.</summary>
+    public IrCallbackBorrow? Borrow { get; init; }
+
     /// <summary>R32.11. <c>[Callback(Bounded = true)]</c>: the caller passes a bound on the calls.</summary>
     public bool Bounded { get; init; }
 }
+
+public sealed record IrCallbackBorrow(
+    string SnapshotName, IrType SnapshotType, IrExpr Ownership, IrExpr Observation);
+
+/// <summary>Instantiate a callback's observation at its argument and borrowed snapshot.</summary>
+public sealed record IrCallbackObservation(
+    IrLoc Loc, IrCallbackBorrow Borrow, IrExpr Argument, IrExpr Snapshot) : IrExpr(Loc);
 
 /// <summary>
 /// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
@@ -872,6 +882,8 @@ public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string
 {
     /// <summary>R24.12. For <see cref="GhostKind.Let"/>, the ghost local's type.</summary>
     public IrType? Type { get; init; }
+    /// <summary>A named ghost-parameter snapshot already has an erased binder.</summary>
+    public bool ErasedSource { get; init; }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +899,8 @@ public sealed record IrParam(
     ParamMode Mode)
 {
     public bool IsGhost { get; init; }
+    /// <summary>A contract-only [GhostArg] binder, inferred even on ghost lemmas.</summary>
+    public bool InferredGhost { get; init; }
     /// <summary>R20.12. Stands for a readonly receiver field, so it is never written.</summary>
     public bool IsContext { get; init; }
     /// <summary>Ownership is transferred to the callee (<c>[Consumes]</c>).</summary>

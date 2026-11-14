@@ -3,6 +3,14 @@ using System.Numerics;
 
 namespace PalLang;
 
+/// <summary>A specification-only fractional permission.</summary>
+[SpecType("PulseCore.FractionalPermission.perm")]
+public readonly struct Perm
+{
+    [SpecOp("1.0R")]
+    public static Perm Full => throw new InvalidOperationException("Specification only");
+}
+
 /// <summary>
 /// A ghost (proof-only) parameter of type <typeparamref name="T"/>.
 /// </summary>

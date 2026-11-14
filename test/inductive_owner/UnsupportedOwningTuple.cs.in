@@ -1,0 +1,15 @@
+using PalLang;
+
+[Invariant("value == 0")]
+public sealed class TupleOwner
+{
+    private int value;
+    [Model] private SpecInt Model => value;
+    public TupleOwner() { value = 0; }
+}
+
+public static class OwningTuples
+{
+    public static (TupleOwner, TupleOwner) Duplicate(TupleOwner owner) => (owner, owner);
+    public static void Nested(Ghost<Seq<(TupleOwner, TupleOwner)>> entries) { }
+}

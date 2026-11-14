@@ -74,6 +74,17 @@ public sealed class SpecScope
 /// </summary>
 public sealed class SpecEmitter(DiagnosticBag diagnostics)
 {
+    internal static string ReferenceKey(string name) => "$reference:" + name;
+
+    public static SpecScope CallbackScope(IrCallbackBorrow borrow, Term argument, Term snapshot, string permission)
+    {
+        var scope = new SpecScope();
+        scope.Bind("argument", argument);
+        scope.Bind(borrow.SnapshotName, snapshot);
+        scope.Bind("permission", new Term(permission, TermKind.Other));
+        return scope;
+    }
+
     /// <summary>
     /// R9.19. Each class's immediate base, which is what <see cref="Forget"/> walks.
     /// Set once per program; empty for a program with no hierarchy.
@@ -231,11 +242,15 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
             case IrSpecOp o:
                 return SpecOp(o, scope);
+            case IrCallbackObservation o:
+                return Emit(o.Borrow.Observation,
+                    CallbackScope(o.Borrow, Emit(o.Argument, scope), Emit(o.Snapshot, scope), ""));
 
             // R28.3. The reference itself: the parameter's Pulse binder, in scope in the
             // pre- and the postcondition alike.
             case IrRefOf r:
-                return new Term(Names.Local(r.Parameter), TermKind.Other);
+                return scope.TryGet(ReferenceKey(r.Parameter), out var reference)
+                    ? reference : new Term(Names.Local(r.Parameter), TermKind.Other);
 
             // R10.2. `null` is `B.null`. The type annotation is what lets F* infer the
             // box's parameter in `pure (x == B.null)` positions where nothing else
@@ -309,6 +324,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
             case IrQuantifier q:
                 return Quantifier(q, scope);
+
+            case IrCall { Kind: CalleeKind.Lemma } call:
+                diagnostics.Unsupported(call.Loc,
+                    "A lemma call in a pure specification expression",
+                    "Call the checked ghost computation in a statement, binding a Ghost<T> result before using its witness.");
+                return new Term("()", TermKind.Other);
 
             case IrCall { Kind: CalleeKind.Spec } call:
                 // R4.6: a [Spec] function returning `bool` denotes a proposition; one
@@ -411,6 +432,14 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
                 (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is { Type: IrClassType } boxed:
                 return b.Op == BinOp.Eq ? $"(B.is_null {Emit(boxed, scope).Text})" : $"(not (B.is_null {Emit(boxed, scope).Text}))";
+
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
+                (b.Left.Type ?? Emit(b.Left, scope).Type) is IrClassType { Plain: true } &&
+                (b.Right.Type ?? Emit(b.Right, scope).Type) is IrClassType { Plain: true }:
+            {
+                var equal = $"(Pulse.Lib.CSharp.RefEq.ref_eq {Emit(b.Left, scope).Text} {Emit(b.Right, scope).Text})";
+                return b.Op == BinOp.Eq ? equal : $"(not {equal})";
+            }
 
             case IrBinary b:
             {

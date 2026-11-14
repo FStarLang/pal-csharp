@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Owner.cs" />
+    <Compile Include="../Views.cs" />
+    <Compile Include="../Callbacks.cs" />
+    <Compile Include="../GenericCallbacks.cs" />
+    <Compile Include="../PlainLocals.cs" />
+    <Compile Include="../MixedSwitch.cs" />
+    <Compile Include="../PlainTuples.cs" />
+    <Compile Include="../PlainPatterns.cs" />
+    <Compile Include="../PlainReturns.cs" />
+    <Compile Include="../PlainThrowGuards.cs" />
+    <Compile Include="../OwnedFieldCalls.cs" />
+    <Compile Include="../CurrentModels.cs" />
+    <Compile Include="../GhostOwnedFields.cs" />
+    <Compile Include="../ImmutableIntegers.cs" />
+    <Compile Include="Program.cs.in" />
+    <ProjectReference Include="../../../src/Pal.Annotations/Pal.Annotations.csproj" />
+  </ItemGroup>
+</Project>
