@@ -884,13 +884,13 @@ admitted lemma is assumed rather than proved.
 
 | Attribute | Meaning |
 |---|---|
-| `[Lemma]` | this method is a proof step; must return `void` |
+| `[Lemma]` | this method is a proof step; returns `void` or `Ghost<T>` |
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
 | `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
 | `[Fuel(f, i)]` | start the method's queries at `f` unfoldings of recursive definitions and `i` of inductive types, retrying with more (R30.44) |
 | `[OpaqueSpecs("S", ...)]` | the solver does not unfold the declaring type's `[Spec]`s `S`, ... while checking the method (R30.40) |
-| `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
+| `[GhostArg("G g")]` | an inferred erased contract parameter on a method or property; `G` is a Roslyn-bound C# type and `g` its name (R4.5) |
 
 Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**
 parameter is such a name: `$(T)` is how a generic lemma says which type it is about, and it
@@ -922,6 +922,18 @@ Two conventions matter here and nowhere else:
   `SpecInt`, not `int`, since that is what a C# `int` becomes in specification position.
 
 This is the shape §9 uses to give a user-defined ownership predicate a C# face.
+
+### 5.2 Lemmas that return ghost witnesses
+
+A `[Lemma]` returning `Ghost<T>` is a checked Pulse ghost function with an erased result.
+Its postcondition names the revealed value as `Result` and must account for every owned
+resource. A `Ghost<T>` local can bind the call's result and use it in subsequent proof
+steps. This is useful for exposing an existential witness from an ownership predicate.
+
+The call is not a pure specification expression, and its result cannot control runtime
+computation. Ordinary runtime-valued lemma results are still rejected. Use `#if PAL` to
+exclude result-bearing lemma declarations and calls from stock-C# execution;
+`[Conditional("PAL")]` cannot be applied to a non-`void` method.
 
 ---
 
@@ -1191,6 +1203,14 @@ A `[Plain]` reference behaves the way the encoding does and no more:
   only** — a constructor call is refused, because reading a constructor body to learn which
   argument lands in which field is exactly the deriving `[Plain]` opts out of.
 * Proof steps are **ordinary C# calls** to the ghost lemmas your predicate publishes (§5.1).
+
+`if (expression is DNode node)` also tests for non-null, evaluating `expression`
+once. The tested constructed type must match the source type, ignoring nullable
+annotations. Direct declaration bindings support an optional `else`; negated or
+compound bindings and recursive/property patterns are not supported. The binding
+does not supply ownership, and ordinary C# scope and definite-assignment rules apply.
+An explicit `Pal.Join` after a Plain-pointer null test must prove its stated
+resources in both branches.
 
 ### One lemma per step
 

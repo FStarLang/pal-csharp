@@ -656,12 +656,13 @@ Consequently an `[Invariant]` clause that mentions no field — only `[Spec]` ob
 PALCS0523: a specification-strength mistake reported at the declaration, rather than as an
 unprovable call site much later.
 
-**R3.10 (object invariant).** Each class emits
+**R3.10 (object invariant).** Each modelled class emits
 ```fstar
 let class_C__inv (this: class_C) (m: model_M) : slprop =
   exists* (r: class_C__raw) … .
-    B.pts_to this r ** <the resource of each reference-typed field> **
-    pure (<bounds> /\ <the model agrees with the representation> /\ <the [Invariant] clauses>)
+    B.pts_to this r ** <the automatically owned field resources> **
+    <the SlProp-valued [Invariant] clauses> **
+    pure (<bounds> /\ <the model agrees with the representation> /\ <the boolean [Invariant] clauses>)
 ```
 
 Two properties of this shape are load-bearing.
@@ -675,14 +676,15 @@ Two properties of this shape are load-bearing.
   functional correctness statable. Note that this is not a new idea here: `A.pts_to var_a s`
   is already a model-indexed resource, and R4.10 threads a class's model exactly as R4.4
   already threads an array's.
-* **A class invariant is a `pure` conjunct inside the predicate, not a `[Refine]`.** A
+* **A boolean class invariant is a `pure` conjunct inside the predicate, not a `[Refine]`.** A
   refinement type must hold of *every* value of the type, but R3.6 writes a whole record
   per field assignment, so a method that transiently breaks its invariant between two field
   writes would be rejected outright. Struct refinements are always true; class invariants
   are temporarily breakable, and the fold/unfold discipline of R4.10 is what marks the
   window in which they may be broken. Using one mechanism for both would be wrong. This
   concerns the **representation** only; a fact about the model alone must go the other way,
-  as a refinement on the model type, for the reason R3.9d and F17 give.
+  as a refinement on the model type, for the reason R3.9d and F17 give. A spatial
+  (`SlProp`-valued) invariant contributes a resource instead; R3.10f describes that case.
 
 **R3.10a (a class owns its arrays).** For each field of array type, the invariant gains an
 existential for its contents, an `A.pts_to` conjunct, and a length bound:
@@ -722,7 +724,7 @@ there. After a method has written into the array, the contents the `unfold` prod
 stale, and the emitter never named the new ones. `with c. assert (A.pts_to …f c);` binds
 them — the same device R4.14 needs, for the same reason.
 
-**R3.10b (a class owns its objects).** For each field of class type the invariant gains an
+**R3.10b (a class owns its objects).** For each field of modelled, non-`[Plain]` class type the invariant gains an
 existential for the sub-object's **model** and a conjunct holding the sub-object's own
 invariant:
 
@@ -799,11 +801,13 @@ is faithful, the program is wrong, and the prover is the one to say it. Sub-obje
 therefore built by the constructor that owns them, which is also why no owner can alias
 two of its fields. Aliasing at a *call* is the same disposition again — see R3.13.
 
-What is *still* PALCS0531 is a field whose type is spec-only — a `Seq`, a `Ghost`. Those
+What is *still* PALCS0531 is a field whose type is a built-in spec-only `Seq` or `Ghost`. Those
 are mathematical values with no runtime representation and no resource, so there is nothing
 for the invariant to hold and nothing for a constructor to allocate. A field of a class
 that declares no `[Model]` is **PALCS0500**, with a message saying so: it fails the type
-map rather than the ownership rule.
+map rather than the ownership rule. A `[Plain]` field is instead a reference value, with no
+automatically owned pointee; a user-defined `[SpecType]` can supply an erased witness.
+R3.10f connects those values to explicit ownership.
 
 **R3.10c (the invariant is indexed by a permission).** Every class invariant takes a
 **meta-argument-defaulted** permission binder, and the permission propagates to every
@@ -834,12 +838,13 @@ Three things about the shape are forced.
   not what you may *know* about it: an observer still names `this.Count` and still gets a
   postcondition about it. That is the point of separating the model from the
   representation — the model was never ownership in the first place.
-* **The permission is not part of the model.** Nothing in a `[Model]`, an `[Invariant]` or
-  a contract can mention `p`; it is a binder the translation introduces and the user names
-  only through `[Frac]`. A specification that could talk about its own permission would be
-  talking about the proof rather than the program.
+* **The permission is not part of the model.** `[Frac]` names method permissions;
+  `Pal.Permission()` names the current owner's permission in an invariant or an
+  instance-method specification. The latter lets a user-written spatial invariant
+  propagate the permission to its resources (R3.10f); it does not change the abstraction
+  function or make the permission a runtime value.
 
-**R3.10d (share and gather).** Each class additionally emits three ghost lemmas:
+**R3.10d (share and gather).** Each shareable modelled class additionally emits three ghost lemmas:
 
 ```fstar
 ghost fn class_C__inv_share (this: class_C) (#p: perm) (#m: class_C__model)
@@ -859,9 +864,9 @@ ghost fn class_C__inv_gather (this: class_C) (#p: perm) (#m #m': class_C__model)
 
 They are emitted per class rather than written once in the support library because their
 proofs recurse into the class's own structure: `share` shares the box, then each array,
-then calls **each sub-object's `share`** (F22). A generic lemma would have to quantify over
-that structure, and there is nothing to quantify over — the invariant is a `let`, not an
-instance of an interface.
+then calls **each sub-object's `share`** (F22). User-written spatial conjuncts supply their
+own checked fractional capabilities (R3.10f); the compiler cannot infer how an arbitrary
+predicate splits.
 
 Six details are forced, and each was found by a probe rather than assumed.
 
@@ -897,8 +902,10 @@ Six details are forced, and each was found by a probe rather than assumed.
   one candidate for every existential — after which the closing `fold` needs no `assert`
   at all, because there is nothing left to disambiguate.
 * **A class with no `[Model]` gets none of them**, because it has no invariant to share.
+  An owner with a permission-independent spatial invariant likewise gets no automatic
+  sharing lemmas: that resource is not presumed duplicable.
 
-**R3.10e (`share` needs no permission left over).** Nothing bounds how far a permission may
+**R3.10e (`share` needs no permission left over).** For a shareable invariant, nothing bounds how far a permission may
 be split: `share` halves whatever it is given, and halving is always possible. The only
 thing a program can never do is *write* through a fraction — a write needs `1.0R`, which no
 proper fraction can reach and which `gather` recovers only by collecting every piece back.
@@ -917,6 +924,55 @@ permissions, and the two are easy to confuse. The permission really does split a
 far; `test/pulse_facts`'s `frac_split_thrice` halves twice and recombines twice with nothing
 in between. It is *simultaneity* that is limited, and pal-csharp says nothing about it —
 the refusal arrives from Pulse, on the C# call site, through R2.3.
+
+**R3.10f (user-defined spatial invariants).** An `[Invariant]` expression may have type
+`SlProp`. It is conjoined with `**`, not embedded in `pure`. This allows a class to own
+resources through an ordinary user-defined predicate, including an inductive one, without
+teaching the compiler that predicate's shape. `test/inductive_owner` is a non-tree example:
+
+```csharp
+[Invariant("OwnerSpec.Holds(cell, OwnerSpec.Value(state), Pal.Permission())")]
+public sealed class CellOwner
+{
+    private OwnedCell cell;      // OwnedCell is [Plain].
+#if PAL
+    private OwnerState state;    // [SpecType] bound to an erased F* witness.
+
+    [Model]
+    private SpecInt Model => OwnerSpec.Value(state);
+#endif
+}
+```
+
+The compiler owns the owner's record. The `cell` field is only a pointer value; it does not
+silently add another ownership predicate for its pointee. `OwnerSpec.Holds` binds to the
+library predicate that owns the pointee and relates its contents to `state`. The `[Model]`
+body remains a genuine abstraction expression, not a placeholder the compiler ignores.
+Updating a ghost witness is therefore not enough to establish a new model: closing the
+owner must re-establish the spatial predicate against the actual heap.
+
+`Pal.Permission()` has specification type `Perm` and denotes the permission of the owner
+being opened or closed. `Perm.Full` denotes `1.0R`. A permission-indexed spatial conjunct
+must provide a checked `Pulse.Lib.CSharp.Ownership.fractional` instance with these ghost
+operations:
+
+```text
+share_half: pred p             -> pred (p / 2) ** pred (p / 2)
+gather:     pred p ** pred q   -> pred (p + q)
+```
+
+These are proof obligations, not axioms or a blanket assertion that slprops can be
+duplicated. `OwnerCells.fst` proves both using the underlying box's fractional operations.
+The generated owner lemmas invoke the capabilities when sharing and gathering the whole
+object. A permission-independent spatial invariant instead restricts the owner to full
+permission and has no automatic sharing lemmas.
+
+The witness representation and its manipulation belong to the verified library.
+`OwnerState.fst` uses `erased I.t`; opening and closing `OwnerCells.holds` are explicit ghost
+operations. C# erasure needs separate care: a `[SpecOp]` initializer still executes under
+the stock C# compiler, even if its result is an empty marker struct. Guard proof-only
+initializers and updates with `#if PAL`; where runtime layout must remain unchanged, guard
+the witness field and its proof-only uses as well.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
@@ -1030,7 +1086,26 @@ contents existential.
 
 **R4.5 (ghost parameters).** A parameter of type `Ghost<G>` (necessarily optional, so C#
 callers may omit it) emits an erased implicit `(#g: erased ⟦G⟧)` and is erased from the
-runtime signature. Equivalently `[GhostArg("G g")]`.
+runtime signature. Contract-only ghost parameters may instead be declared with
+`[GhostArg("G g")]` on a method or property. The string is a C# type-and-name declaration,
+not F* text; Roslyn resolves the type in the declaration's scope. For example:
+
+```csharp
+[GhostArg("CellSnapshot Before"), GhostArg("Perm Permission")]
+[Preserves("OwnerSpec.Raw(@this, Before, Permission)")]
+[Ensures("Result == OwnerSpec.RawValue(Before)")]
+public int Current => value;
+```
+
+The getter receives inferred erased snapshot and permission binders in Pulse, while its
+C# runtime API remains a parameterless getter. The ownership clause preserves the same
+snapshot; the result is related to that snapshot rather than an unrelated existential
+post-state. `test/inductive_owner` exercises this getter through fractional aliases.
+Attribute-declared names are not ordinary C# body variables. Proof expressions may access
+one with `Pal.Ghost<G>("g")`; its name and type must exactly match the declared ghost binder.
+Malformed declarations, modifiers, defaults, duplicate names, and collisions with ordinary
+parameters are **PALCS0884**. Unsupported ghost types, including nested `Ghost<T>`, are
+**PALCS0885**; an unknown C# type is a normal binding error (**PALCS0100**).
 
 *Known limitation, shared with PAL.* An implicit binder is resolved by unification at the
 call site, so a ghost argument that appears only in the **pure** part of a contract is not
@@ -1040,7 +1115,8 @@ appear in a separation-logic conjunct are resolved from the resource and call no
 **R4.7 (`[Lemma]` methods).** A lemma is a proof step about the values the program
 actually holds, so — unlike a `[Spec]` function (R4.6) — its parameters keep their
 **program** reading: `int` is `I32.t`, `SpecInt` is `int`, `T[]` and `Seq<T>` are
-`Seq.seq`. It is emitted as an ordinary F\* lemma in `Let_C_L.fst`,
+`Seq.seq`. A `void` lemma with a pure contract is emitted as an ordinary F\* lemma in
+`Let_C_L.fst`,
 
 ```
 let lemma_C_L (var_p₁: ⟦T₁⟧) … : Lemma (requires ⟦P⟧) (ensures ⟦Q⟧) = ⟦body⟧
@@ -1051,6 +1127,7 @@ or `admit()` under `[Admit]`. A call is a plain ghost statement `Let_C_L.lemma_C
 with the arguments passed **raw** — no `Int32.v` coercion, because the lemma's binders are
 already program-typed. A lemma that wants a mathematical index therefore declares `int n`
 and lets the specification translation insert `I32.v` where the *specification* needs it.
+Lemmas with spatial contracts use R12.7; lemmas returning `Ghost<T>` use R12.7c.
 
 **R4.8 (postconditions are stated under the precondition).** A Pulse `ensures` is
 type-checked in a context that does **not** include the `requires`, so a postcondition
@@ -1184,6 +1261,11 @@ against Roslyn rather than assumed:
 
 `CS0026` inside a spec string is therefore remapped to **PALCS0526**, whose message is
 "write `@this`" — the one error every user will hit once.
+
+Diagnostics from the warning-disabled specification shim respect Roslyn's
+`IsSuppressed`. A suppressed warning must not become a PAL error merely because
+the host requests suppressed diagnostics and treats warnings as errors. Actual
+binding errors, such as an unresolved name (`CS0103`), remain errors.
 
 **R4.10b (a contract may only name accessible members).** The shim lives in
 `namespace __PalSpecShims`, so a contract can reference only `public` or `internal` members
@@ -1520,21 +1602,28 @@ model every method spec collapses to memory safety.
 **R5.1 (sequence).** `s₁ s₂ … sₙ` ⟶ `⟦s₁⟧; ⟦s₂⟧; …; ⟦sₙ⟧`. **Order is preserved.** The
 emitter never reorders, merges, or elides a statement.
 
-**R5.2 (local declaration).** `T x = e;` ⟶ `let mut var_x : ⟦T⟧ = ⟦e⟧;`. Every C# local is
-a Pulse `ref` cell; a read of `x` is `!var_x` (R6.1). Locals are *not* promoted to
-immutable `let` bindings merely because they are never reassigned — that would be an
-optimisation, and optimisations are how translators start fitting examples. R5.2a is the
-one exception, and it is about what a proof can know, not about speed.
+**R5.2 (local declaration).** `T x = e;` ⟶ `let mut var_x : ⟦T⟧ = ⟦e⟧;`. A mutable local
+is a Pulse `ref` cell; a read of `x` is `!var_x` (R6.1). The restricted value-local rule
+R5.2a can instead use an immutable binding when its use analysis permits it. The rule is
+independent of the algorithm being verified.
 
-**R5.2a (a non-arithmetic local that is never written).** A local of type `bool`, `string`,
-an `option`, a `[SpecType]` or an exception, declared with an initialiser and never the
-target of an assignment, increment or `ref`/`out` argument anywhere in its scope, is
+**R5.2a (a value local proved never written).** A local of type `bool`, `string`,
+a machine integer, an `option`, a `[SpecType]` or an exception, declared with an initialiser
+and proved never written or used by reference, is
 `let var_x = ⟦e⟧;` — a value, not a cell. A cell's contents are generalised at every join
 of a stateful `if` (Pulse's join quantifies them afresh), so a fact about what `x` was
 initialised to, such as `bool hasCurrency = r != null && …;`, is lost the first time
 control merges after a branch that raised. A value cannot be generalised, so the fact
-survives. Arithmetic locals keep their cell: there the initialiser reaching the solver as
-an inlined term rather than as a name is what destabilises proofs (`examples/adler32`).
+survives. The initialiser, including any effects, is still evaluated exactly once at its
+original position.
+
+For machine integers, the analysis covers the containing method, accessor or local
+function, including nested/captured writes. Assignment, increment/decrement, address-taking,
+ref aliases and `ref`/`out`/`in` uses prevent promotion; an omitted `in` is detected from
+the resolved formal. Scopes containing `Pal.GhostStmt` or `InlinePulse` are conservatively
+excluded. Such locals retain their cells. This replaces the former blanket arithmetic
+exclusion; both `examples/adler32` and its variant remain verified. The non-tree
+`test/inductive_owner` cases pin effectful initializers and the excluded uses.
 
 **R5.3 (assignment).** `x = e;` ⟶ `var_x := ⟦e⟧;`. `a[i] = e;` ⟶ `array_write var_a (Idx ⟦i⟧) ⟦e⟧`
 after A-normalisation (R6.2). Compound assignment `x op= e` is normalised to `x = x op e`
@@ -1598,6 +1687,25 @@ propagate the enclosing `requires` into the loop; a fact the body needs is the a
 author's responsibility to restate as an invariant. Inventing invariants is exactly the
 "emitter invents proof steps" failure §0 rule 3 forbids.
 
+**R5.6a (current owner models).** Observations of an open mutable receiver in a loop
+refer to its current model, not the method-entry model. For an ordinary non-region,
+non-abstract, non-recursive class with a model body and only raw fields, the current record binder carries the
+complete pure representation validity and exported model predicate; each loop boundary
+must prove these refinements. Plain-pointer and erased ghost fields are supported.
+Owned arrays and non-Plain owned-child fields are outside this binding rule and are
+diagnosed rather than replaced with an entry model or a raw pointer at model type.
+Existing Region and view-base representations retain their own handling.
+
+Only actual current observations introduce this binding. Traversal stops at `Old`,
+which keeps its entry-state meaning. A fixed-record loop reached after mutation uses
+a checked erased snapshot of the current model; a decreases expression needing a
+current read uses a checked ghost helper preserving the exact points-to fraction.
+Neither helper supplies model validity by assumption. `test/inductive_owner` covers
+current projections, decreases, separate `Old` observations, a loop after mutation,
+and rejection of an assertion that incorrectly equates current state with entry state.
+Generated helper provenance points to the class-invariant source span; emission and
+provenance use the same eligibility test.
+
 **R5.7 (`for` → `while`).** `for (init; cond; step) { body }` ⟶
 `{ init; while (cond) { body; step } }` as a **C#→C# rewrite** in the Normalize pass. The
 emitter only ever sees `while`.
@@ -1613,6 +1721,19 @@ reads or writes, computed from the body's free variables. This is an improvement
 which requires an explicit `_invariant(_live(x))` per local. It is a syntactic function of
 the body, not a search: it does not depend on what the loop is *for*. `Pal.Live(x)` adds a
 resource the inference cannot see.
+
+**R5.8a (pointer use is not ownership use).** For a closed ordinary owner, passing its
+reference only to known `[Plain]` parameters does not by itself add the owner's invariant
+to the loop. This includes the implicit owner parameter of an independent borrowing
+getter (R28.2a). The pointer may be needed even while the caller's explicit invariant
+holds an opened predicate or a user-defined cursor instead of the closed owner.
+
+The analysis retains ownership for model observations, unknown calls, opaque ghost or
+statement code, and explicit callee requirements mentioning the parameter. It is
+conservative, not proof search. Existing local-cell, open-owner, and heap-indexed resource
+handling is unchanged; this rule neither constructs missing resources nor drops resources
+already held. The independent and owner-dependent loop cases in `test/inductive_owner`
+exercise both sides of the distinction.
 
 **R5.8b (frame for unassigned locals).** A local that the loop body **never assigns** keeps
 its value across the loop, so the emitter binds that value *outside* the loop
@@ -1903,6 +2024,14 @@ What this rule does *not* do is give the solver a case analysis it did not have.
 would produce, so a proof about a `switch` costs what the same proof about the chain
 costs. That is the intended outcome: `switch` is a notation, and R5.14 says it is only a
 notation.
+
+Expansion can expose mixed returning/fall-through paths after R5.5b has already run.
+When that mixed-return shape was absent before normalization and appears afterward,
+Normalize reapplies the existing guarded tail-sinking logic to the normalized block.
+Only paths that originally fell through receive the continuation. Scrutinee evaluation,
+runtime and ghost prefixes, section terminators, and default handling keep their order.
+The bare and ghost-prefixed switch regressions in `test/inductive_owner` check exact
+ref-counter effects and retained ownership, including exactly-once continuation.
 
 The variant test (§7.2) earned its keep twice here, and neither finding was about
 `switch`. Both were about *where* the rewrite sits among the rules that were already
@@ -2356,6 +2485,13 @@ verification test cannot.
   project — deliberately not one that loads pal-csharp's analyzer, since a project that did
   would no longer be checking the thing that matters. This is the core invariant asserted
   against the C# compiler rather than against a document.
+  Harnesses may opt into `PAL_CS_NOWARN` (default empty), `PAL_CS_UNSAFE` (default
+  false), and `PAL_CS_EXCLUDE` (default empty, whitespace-separated exact absolute
+  input paths). These set project warning exclusions, unsafe-block permission, and
+  explicitly omitted inputs respectively; warnings-as-errors remains enabled.
+  SortedSet alone suppresses the intentional copied-BCL conflict `CS0436`, enables
+  unsafe blocks, and excludes `common/SR.cs` in favor of its own complete resource
+  placeholder class. Other harnesses retain the defaults.
 
 ### 8.3 Findings that are not rules
 
@@ -4367,8 +4503,9 @@ and class_DNode = B.box class_DNode__raw
 and class_DNode__opt = option class_DNode
 ```
 
-That is the whole module. No `[Model]`, no `__inv`, no `intro_nil`/`elim_cons`/`cases`, no
-`__as_opt`, no constructor. Everything §10 would have derived becomes the user's
+That is the whole representation module. No `[Model]`, no `__inv`, no
+`intro_nil`/`elim_cons`/`cases`, no `__as_opt`, no derived constructor. Explicit constructor
+and method bodies are verified separately (R12.3e, R12.4). Everything §10 would have derived becomes the user's
 obligation, which is the trade: the compiler gives up saying anything, and in exchange the
 user may say anything.
 
@@ -4382,6 +4519,31 @@ Consequently, and mechanically:
   R10.2's subtyping, with **no `__as_opt`** — there is no invariant to re-read.
 * A method returning a plain class returns a **bare reference**: no existentially quantified
   result model, no `__inv` conjunct. `Result` denotes the reference itself.
+
+On a `[Lemma]` or `[SpecOp]` parameter, `[Plain]` also permits an ordinary modeled class
+to be passed as a reference rather than as its model, including local owners and
+compiler-established same-slot aliases. The argument uses the actual reference binder,
+not an invented alias binder or the owner's model. Forming that argument does not
+require closing the owner's invariant; explicit resource clauses still govern ownership.
+Unmarked modeled-class arguments retain their model interpretation. Non-opaque
+`Pal.Old(...)` observations use entry models, not current ownership, so a lemma may receive
+the raw owner pointer and an old model observation while its invariant is exposed.
+Opaque ghost code remains conservatively tracked. `test/inductive_owner` exercises these
+reference-taking and model-taking calls together.
+
+Ghost statements capture only the closed-owner and owned-child models their
+observations need, including nested specifications and inferred ghost arguments.
+An unrelated restoration lemma therefore does not demand a child's closed
+invariant while that resource is on loan. A real child or whole-receiver
+observation still requires the corresponding ownership; missing resources are
+proof failures, not default models.
+
+Compiler-established same-slot aliases of an open receiver reuse its exact checked
+model instead of demanding a duplicate closed invariant. Distinct owner slots,
+even of the same class, retain independent capture. Reassignment of ordinary
+owning aliases remains unsupported and is diagnosed. `test/inductive_owner` covers
+direct, nested, receiver and alias observations, including missing-resource
+rejections and observation after checked loan restoration.
 
 Two refusals, both about combining `[Plain]` with something that presupposes a derivation:
 
@@ -4451,11 +4613,43 @@ in its second direction). A cursor's null test is a *loop condition*; no window 
 extent of a loop condition, so the rule would have ruled out every iterative traversal on
 the strength of a constraint whose reason does not apply.
 
+**R12.3d (plain reference identity).** `==` and `!=` between references of the same
+`[Plain]` class use the existing `Pulse.Lib.CSharp.RefEq.ref_eq` primitive (R27.8),
+including nullable references. This compares pointers, not models, and neither
+opens nor duplicates ownership. All access through an equal pointer still needs
+the user's separating predicate. An overloaded equality operator is not pointer
+identity: it needs an explicit specification binding or is refused. The generic,
+nullable cases are checked in `test/tree_cursor/ReferenceIdentity.cs`.
+
+**R12.3e (plain instance members).** Instance methods and computed getters of a `[Plain]`
+class use the same explicit-resource contracts as static helpers. `@this` denotes the
+receiver reference, not an automatically supplied model or invariant. A field access
+therefore still needs the corresponding box resource. A reference stored in a mutable
+local or an owner's field remains a pointer: writing its pointee updates that box, not a
+value-struct copy of the containing record. `test/inductive_owner` checks these paths with
+`OwnedCell.Current`, `OwnedCell.Replace`, and `CellOwner.Read`/`Set`. This does not infer a
+recursive predicate or resolve arbitrary aliasing between the boxes being accessed.
+
+An explicitly `[Plain]` parameter of an ordinary modeled class also permits raw
+field reads and writes. This applies to both a value-bound reference and a parameter
+stored in a mutable cell; it does not reinterpret an ordinary model slot as a pointer.
+The operation needs the actual box's points-to resource, with full permission for
+a write, and derives neither an owner invariant nor ownership of referenced children.
+Nullable raw references must establish non-nullness before access; `!` changes no
+proof obligation. `test/inductive_owner` covers raw loads/stores, fractional reads,
+erased-field updates, and missing/fractional-write permission failures.
+
+For inherited fields, explicit raw access may follow an already-established
+shared-representation alias. Equality is checked on fully instantiated Roslyn
+types, including generic substitutions. This does not grant an upcast, invent a
+layout correspondence, bypass accessibility, or change virtual dispatch.
+
 **R12.4.** `new C { f = e, … }` on a plain class allocates: the record is built exactly as
-R3.5 builds a struct's, then boxed with `B.alloc`. **Object-initializer syntax only** — a
-constructor call is refused with a diagnostic, because a constructor has a *body*, and
-reading a body to learn which parameter lands in which field is precisely the deriving §12
-does not do. The initializer says it outright.
+R3.5 builds a struct's, then boxed with `B.alloc`. An explicit constructor is also supported:
+its body is verified against its explicit contract rather than inspected to invent an
+abstraction. For example, `OwnedCell(int initial)` in `test/inductive_owner` establishes
+`OwnerSpec.Held(Result, initial)`, an ordinary `SlProp` postcondition owning the initialized
+cell. No class invariant is synthesized for it.
 
 The allocation is emitted **at the local's own binder**, not at a fresh one it is then
 copied from: Pulse matches resources by name, so a copy would leave the context holding
@@ -4528,7 +4722,8 @@ all work on it with no special arrangement.
 **R12.7.** A `[Lemma]` whose contract mentions **any** `SlProp` clause is emitted as a Pulse
 `ghost fn` rather than an F* `Lemma`: the `SlProp` clauses become the resource conjuncts,
 joined with `**`, and the remaining pure clauses are collected into a single trailing
-`pure (…)`. A `[Lemma]` with no `SlProp` clause is emitted exactly as before, byte for byte.
+`pure (…)`. A `void` `[Lemma]` with no `SlProp` clause is emitted exactly as before,
+byte for byte; erased-result lemmas use R12.7c.
 The call site needs nothing new — R5.11 already emits a lemma application as `Module.name
 args;`, which is also how a Pulse `ghost fn` is called. Ghost parameters are declared
 `Ghost<T>` and erase to the underlying type, as everywhere else.
@@ -4545,8 +4740,33 @@ DllProof.Close(from, from!, prev, null, last, xs);
 says this of a method: a Pulse `ensures` is type-checked with the `requires` *not* in scope,
 so a postcondition that mentions `l[i]` is ill-typed until `i < l.Length` is restated as a
 hypothesis. A `ghost fn` is a Pulse function, so it needs the same treatment, and a
-`[Lemma]` that owns anything is a `ghost fn`. The pure-`Lemma` form is untouched: there the
+`[Lemma]` that owns anything or returns `Ghost<T>` is a `ghost fn`. The pure-`Lemma` form is untouched: there the
 `requires` *is* in scope, and restating it would only slow the SMT query down.
+
+**R12.7c (checked erased results).** A `[Lemma]` may return `Ghost<T>` as well as `void`.
+It is emitted as a Pulse `ghost fn` returning `erased T`, with its complete precondition
+and postcondition. `Result` in the contract denotes the revealed `T`. Initializing a
+`Ghost<T>` local from such a lemma binds the ghost call directly; it is not a pure
+`SpecOp` invocation wrapped in `hide`.
+
+This exposes existential witnesses obtained from actual owned resources without inventing
+a choice function or using an ordinary mutable reference inside a ghost computation.
+The postcondition must still account for the resources. `test/inductive_owner` checks
+full and fractional cell witnesses, their exact values, and retained permissions.
+
+Ordinary runtime-valued lemma results remain PALCS0504. Lemma calls in pure specification
+expressions are rejected, and an erased result cannot control runtime computation.
+Keep result-bearing lemma declarations and call sites under `#if PAL` for stock-C#
+runtime erasure: C#'s `[Conditional]` is restricted to `void` methods.
+
+**R12.7d (consuming ghost calls).** A successful checked lemma call applies the same
+`[Consumes]` bookkeeping as an ordinary call, for both `void` and `Ghost<T>` results.
+Every compiler-established alias of the consumed binder is marked given, and its
+automatic owning-local cleanup is suppressed. Current ghost observations and raw
+reference uses of a given slot are rejected; `Old` observations remain available.
+Consumption does not establish a resource predicate: the lemma must prove the actual
+transfer. `test/inductive_owner` retains an owner inside a fractional predicate and
+checks result-bearing and void transfers, with negative use-after-consume cases.
 
 **The style rule.** *A user predicate publishes one ghost lemma per step a C# body takes,
 whose signature mentions only what C# can name — parameters, locals, `null`, spec lists — and
@@ -5686,6 +5906,13 @@ folded, as the postcondition does. Inside a `try`, only object locals the `try` 
 declared are dropped, since the `try`'s own `raises` owns the rest. `throw;` re-raises the
 innermost handler's exception.
 
+A recognized throwing guard, `if (condition) throw ...;`, nests its continuation
+in the non-throwing arm so the continuation retains `!condition`. This applies
+also when the method has only Plain pointers or primitive values, not just
+automatically owned objects or wrapped calls. An effectful condition is evaluated
+once, with the original exception and cleanup behavior. Explicit `Pal.Join`
+annotations are still handled explicitly, not discarded by this guard lowering.
+
 ### R19.3 `[Throws]` is the `raises` clause
 
 `[Throws(typeof(E), "P")]` says the method may throw an `E` (or a subclass), and that `P`
@@ -6040,6 +6267,15 @@ calls it. Each binding is an axiom (R20.8).
 `e as C` is `if ⟦e is C⟧ then Some e else None`. A pattern variable has the type of the
 value it was bound to: `var` declares it nullable whatever it matched, so the translation
 uses the bound value's type rather than the declared one.
+
+For `[Plain]` references, a direct `if (e is C local)` (with an optional `else`)
+supports an exact constructed type match, ignoring nullable annotations. The source
+is captured once in a nullable pointer local and tested for non-null; the binding is
+available to executable code and ghost annotations, subject to C# scope and definite
+assignment. `C<T>` can match `C<T>`, not a different constructed `C<int>`.
+Negated, compound, or parenthesized declaration-binding forms and recursive/property
+patterns on Plain references are rejected. A supported non-binding same-type test
+also performs a null test; it is not the constant `true`.
 
 ### R21.7 `throw` in expression position; BCL exceptions
 
@@ -6432,8 +6668,9 @@ method is verified as `[Wrapping]` for that reason.
 
 `LinkedList<T>` (System.Collections) is a *circular* doubly linked list of
 `LinkedListNode<T>` objects, each of which also points back at its list. Marking both
-classes `[Plain]` (§12) and translating `LinkedList.cs` in place stops at four distinct
-obstacles, each confirmed by a probe:
+classes `[Plain]` (§12) and translating `LinkedList.cs` in place originally exposed four
+distinct obstacles, each confirmed by a probe. General constructor support has since
+addressed the third; the complete collection has not been migrated:
 
 1. **An untranslatable field.** `LinkedList<T>._siInfo : SerializationInfo?` (binary
    serialization state) has no translation, so `LinkedList<T>`'s record cannot be emitted
@@ -6445,9 +6682,9 @@ obstacles, each confirmed by a probe:
    308). Needed: the classes of a reference cycle emitted as one module of mutually
    recursive types (`type … and …`), with per-class modules re-exporting it by `include`.
 3. **Constructors of a `[Plain]` class.** `AddFirst(T)`/`AddLast(T)` allocate with
-   `new LinkedListNode<T>(this, value)`; R12.4 accepts only object-initializer syntax.
-   Needed: a `[Plain]` constructor given an explicit contract (`[Ensures]` an `SlProp`
-   cell), translated like any method rather than read for field assignments.
+   `new LinkedListNode<T>(this, value)`. R12.4 now supports constructors with explicit
+   ownership contracts, as checked by the independent `test/inductive_owner` regression.
+   The linked-list constructor still needs its own predicate and proof.
 4. **Aliasing inside one statement.** `InternalInsertNodeBefore` (behind every `Add*`)
    executes `node.prev!.next = newNode`, which reads `node` and writes `node.prev` in a
    single statement. On a one-element list `node.prev == node`; otherwise they are
@@ -6592,6 +6829,13 @@ a machine integer (`Ghost<int> length0 = entries.Length;`) is its mathematical v
 F* `int`, as every machine integer in a specification is. A loop that writes a field may
 not name that field in its measure (F3), so a snapshot is how such a loop is measured:
 `Pal.Invariant(entries.Length == length0.Value); Pal.Decreases(length0.Value - n);`.
+
+Direct named-ghost retrieval, `Ghost<G> copy = Pal.Ghost<G>("g")`, is also a proof-mode
+initializer when `g` is an attribute-declared ghost binder (R4.5). It reuses the existing
+immutable erased parameter rather than wrapping its revealed value in a second `hide`.
+This does not permit the retrieval in runtime expressions. Initializers calling
+ghost-result lemmas remain actual ghost computations and bind their erased results
+according to R12.7c.
 
 ### R24.13 What is trusted
 
@@ -7009,6 +7253,12 @@ neither promises. A `null` comparer is `Comparer.null_comparer`, the comparer th
 A tuple-typed local's `let mut` carries its type, because Pulse needs the pair's universe
 to be 0. This is `PriorityQueue`'s node type.
 
+Ordinary arity-2 tuples also accept `[Plain]` pointer components, including generic
+types, nested pairs, and pairs under `Seq`/`Ghost`. Pointer components retain the
+nullable box representation even when C# annotates them non-null, so the pair's
+`default` remains representable. This does not add owning-class or array components,
+nor extend `KeyValuePair` APIs. Tuple membership itself supplies no ownership.
+
 ### R26.9 Retired
 
 It was `Array.Resize`, which is now R23.4.
@@ -7125,6 +7375,12 @@ The pattern `c is null`, on a type whose null test is R25.4's opaque `is_null`, 
     specified at `comparer ?? Comparer<TPriority>.Default`.
 
 ## 27. `SortedSet<T>`: regions of tree nodes
+
+This section records the earlier compiler-managed Region proof. Its restrictions
+on automatically derived ownership are not restrictions on user-defined inductive
+predicates. Section 39 describes the ordinary-ownership migration; the historical
+SortedSet examples in the intervening chapters remain explanations of the earlier
+translation rules.
 
 `SortedSet<T>` is a red-black tree. Its `Node` class is linked by `Left` and `Right`, and
 insertion and removal re-link nodes top-down, through pointers held in several locals at
@@ -7471,11 +7727,14 @@ unreachability fact. Use `Pal.Assert(false)` for a proof obligation at an unreac
 `Node.Rotate`'s `default:` arm is such a point. `TreeRotation` is closed (R27.17), so the
 arm is unreachable.
 
-### R27.20 A region pointer declared without a value
+### R27.20 A region or plain pointer declared without a value
 
-`Node removeRed;` is a cell of the nullable type, initialised to `null`. C#'s definite
+For a `[Region]` or `[Plain]` pointer, `Node removeRed;` is a cell of the nullable type,
+initialised to `null`. C#'s definite
 assignment guarantees a write before every read. F\* proves the value read non-null from that
-write, where the non-null type is needed.
+write, where the non-null type is needed. No non-null default or owned heap object is
+manufactured. `test/inductive_owner` checks assignment on both branches and retains
+CS0165 rejection when an assignment is missing.
 
 ### R27.21 `Pal.Heap<K>()` and `SpecHeap<K>`
 
@@ -7540,6 +7799,27 @@ translated as `if (c) x = f(); else x = g();`, as R22.15 already does for a `ret
 declaration. The R27.16 split at the join then applies, so the facts each arm proves about
 the new heap survive. `InsertionBalance`'s `currentIsOnRight ? grandParent.RotateLeft() :
 grandParent.RotateRight()` is the case.
+
+### R27.24a A terminal call returning a plain pointer
+
+A conditional arm returning an explicitly owned plain pointer can expose a Pulse
+dependent-result matching problem when emitted as `let t = call; t`: the returned
+points-to resource may remain indexed by `t` rather than the branch result. An eligible
+terminal call is emitted directly instead. Only the redundant final result binding is
+removed; preceding argument evaluation is unchanged.
+
+This rule does not apply when snapshot capture, owner reopening, cleanup, or another
+statement follows the call. Those arms retain their binding and all subsequent work.
+The non-tree `test/inductive_owner` regressions prove the selected cell's exact payload,
+one call per selected branch, and the usability of a reopened owner after a
+cleanup-present conditional; output guards check both emitted forms.
+
+Separately, when lowering a Plain-pointer return expression has already produced
+an identifier binder, the method tail reuses that binder instead of introducing
+another alias. Opaque user predicates can remain indexed by the original binder.
+This does not remove or reorder owner closure, cleanup, or return epilogues.
+The focused regressions cover nullable and non-null generic pointers, an effectful
+return evaluated once, and cleanup of an allocated owner.
 
 ### R27.25 A loop that moves the heap it measures
 
@@ -7864,6 +8144,16 @@ call site does not yet thread the owned objects. `test/sortedset/Walk.cs` verifi
   objects. Before such a call, every open object held read-only (a borrowing struct's
   owner) is closed at its model. After the call it is reopened at the same model, which
   the call could not change.
+* **Direct owned-field calls without regions.** A read-only method of an ordinary
+  holder calling a raising method on `this.child`, where the child is non-Plain,
+  keeps that actual holder open before the call: folding it would hide the child
+  invariant the callee needs. Unrelated owners still close normally. The success
+  path retains normal folding/reopening; exceptional forwarding uses a checked
+  `pulse_intro` restoration helper. Its precondition is the complete existing
+  representation, including child and spatial resources, pure invariants, and
+  exact abstraction equation; its body only folds the holder invariant. It cannot
+  invent missing ownership, permissions, or model facts. Non-region regressions
+  cover success, raised recovery, an unrelated owner, and once-only evaluation.
 * **Throw guards.** In `if (c) throw …;` followed by more statements, the rest of the
   block becomes the `else` arm. Pulse's join of the two arms would otherwise forget `!c`.
 * **Loops that reopen an object.** A loop body that closes and reopens an open object
@@ -7874,6 +8164,17 @@ call site does not yet thread the owned objects. `test/sortedset/Walk.cs` verifi
   `class_C__abs r heaps m`. That is the pure half of the class invariant, which is what
   folding the object back at its model needs. The class module defines `class_C__abs`
   for such classes.
+* **Spatial owners reopened by another owner's call.** Whole-owner exception
+  brackets (R33.22) can close and reopen the receiver even when the loop calls only
+  another owner and never writes the receiver in source. Loop framing uses the
+  same bracket-eligibility test as call emission. The reopened raw record is
+  existential, with complete checked model validity. The bracket preserves the
+  owner's abstract model at that call, not private-field identity. Any relation
+  to loop entry or `Old` must follow from checked loop invariants.
+  Spatial resources still come from the user's explicit loop invariant. A loop
+  with no reopening keeps its fixed raw frame. Non-tree regressions cover a
+  mutation before the loop, `Old`, fractional reads, exception paths, and rejection
+  of stale-model or private-identity assertions.
 
 The runtime `SortedSet<T>.Enumerator` is verified with these rules (27.2). It uses the
 runtime's own verified `Stack<T>` as its stack of region pointers (R27.35), and
@@ -7959,6 +8260,47 @@ its capacity may wrap, so the method is `[Wrapping]`, like the enumerator's cons
 (R27.38). `CopyTo(array, index, count)`'s lambda writes the captured `index` and
 `array`. `RegionWalk.copied_walked` turns its protocol and the walk's `walked` into
 `CopyResult`: the first `min(count, Count)` items, in order, at `index`.
+
+### R27.39a Callbacks borrowing a user-defined predicate
+
+The three-string form of `[Callback]` does not use regions or a derived node model:
+
+```csharp
+[Callback("CallbackSnapshot<T> snapshot",
+          "CallbackCellSpec.Raw(argument, snapshot, permission)",
+          "CallbackCellSpec.Value(snapshot)",
+          Bounded = true)]
+Func<CallbackCell<T>, T> action
+```
+
+The delegate takes one `[Plain]` reference and returns a value. The first string declares
+the snapshot's C# type and name; the second is a `SlProp` expression; the third computes
+the trace observation. Roslyn binds them in the instantiated generic scope. `argument`
+names the reference passed to the callback, and `permission` names its fractional
+permission. The observation can use the argument and snapshot, but not the permission.
+Malformed declarations and non-spatial ownership expressions are PALCS0708.
+
+The emitted `Callback.borrowed_cb` is parameterized by the user's predicate and
+observation function. Each invocation infers an erased snapshot and a permission from
+the caller's resources. In addition to the usual call-budget conditions, its contract is:
+
+```text
+requires protocol(trace) ** owns(argument, snapshot, permission)
+ensures  protocol(snoc(trace, (observation(argument, snapshot), result)))
+         ** owns(argument, snapshot, permission)
+```
+
+The same predicate, snapshot, argument, and permission are returned. The compiler neither
+invents a new snapshot nor assumes arbitrary predicates can be duplicated. A traversal
+can lend just the current node's raw record while retaining child subtrees and cursor
+context in its frame; it reassembles its own inductive predicate afterward.
+
+Lambda lifting, captured-state protocols, trace contracts, and `Bounded`/`Pal.CallBound`
+work as in R27.39 and R32.11. The lifted lambda is checked against the borrowed predicate,
+not trusted to preserve it. `test/inductive_owner/Callbacks.cs` checks a mutable captured
+local, and `GenericCallbacks.cs` checks both polymorphic and closed-generic calls.
+Their stock-C# runtime tests guard `Pal.Protocol` with `#if PAL`: that proof statement
+must not execute in the runtime build.
 
 ### R27.40 Breadth-first walks, captured objects and `RemoveWhere`
 
@@ -8997,7 +9339,8 @@ does not own. The struct's other fields are its own state: plain values, a pair 
 
 Each annotated member `M` of a borrowing struct `S` is translated as a read-only instance
 method of `C`. The receiver is the borrowed object, shared at a fraction like any other
-read-only receiver (§3). The struct is a second parameter:
+read-only receiver (§3), except for owner-independent computed getters (R28.2a).
+The struct is a second parameter:
 ```
 fn func_S_M (ty…) (this: C) (self: S) …                       // reads only its fields
 fn func_S_M (ty…) (this: C) (self: ref S) …                   // writes one of them
@@ -9026,6 +9369,23 @@ the receiver's spec members.
 
 Getters and `void IEnumerator.Reset()` are named as R22 names them. The explicit interface
 name is shortened to `Reset`.
+
+### R28.2a Owner-independent computed getters
+
+A computed getter may read only the borrowing value's own fields, without observing the
+underlying owner's state. When its lowered body and contracts have no dependency on the
+owner's model or resources, its implicit owner parameter is `[Plain]`: the pointer is
+still passed, and the borrowing-field identity requirement remains, but the getter does
+not require or return the owner's invariant. Its own record and other resources are
+checked normally.
+
+The analysis is conservative: a spec projection depending on the owner's model, or a call
+requiring its ownership, retains the owner invariant. This is not permission to read an
+owner without its predicate. It lets an independent getter run while a caller has
+temporarily opened that predicate, without closing it merely to pass the owner's pointer.
+The same rule applies to borrowing classes and view replicas. The non-tree
+`test/inductive_owner` regression distinguishes the independent `Window.Offset` getter
+from the owner-dependent `DependentOffset` and `OwnerValue` getters.
 
 ### R28.3 Contracts name the struct's state and the reference
 
@@ -9455,11 +9815,19 @@ one (`entry.hashCode`) is accepted too: reading it has no effect.
 `(C)e`, with `C` and `e`'s type both reference types bound by R21.5 and C# converting one
 to the other by reference (`(IEqualityComparer<string>)comparer`), is `e` at `C`'s image.
 
-### R30.10 An arm that declares a mutable scalar
+### R30.10 An arm needing an annotated scope
 
 An `if` arm that declares a mutable scalar local outside any loop body (a `for` counter):
 Pulse allocates a cell only where the post-condition is known, so the rest of the block is
 moved into both arms, as for R22.12. This lifts F19 for such blocks.
+
+An initialized invariant-owning class local independently needs the same annotated scope,
+including when initialized by an owning factory result. Detection excludes aliases and
+Plain/Region classes and reuses the existing tail/cleanup machinery. It must not depend
+on a nearby scalar remaining mutable: R5.2a can eliminate that scalar's backing cell
+without eliminating the object's ownership obligations. `test/rebind_alias` covers the
+original nested-object case, a case with no scalar local, and an effectful factory with
+exact branch/continuation counts.
 
 ### R30.11 An array local moved into a field
 
@@ -9765,6 +10133,19 @@ of its insertion tail and 4 of its search loop, and took about 1h35m and 115 GB 
 `if` a join point. It is emitted as Pulse's `if (c) ensures J { … } else { … };`, and the
 code after it is checked once, against `J` alone.
 
+`Pal.Join` also accepts an `SlProp`, just as `Pal.Invariant` does. Such a clause
+joins the separating conjunction of `J`, rather than its pure facts. This lets
+each arm re-establish a user-defined ownership predicate for the following code;
+it does not assume or duplicate that ownership. `test/tree_cursor/JoinedOwnership.cs`
+checks a branch-dependent field update followed by a read through the joined
+predicate.
+
+Join attachment also visits switch-section statement lists. Generated splice-only
+wrappers are flattened before checking adjacency; user lexical blocks are not.
+Explicit joins remain checked at method, loop, and unit tails, before their normal
+cleanup and return epilogues. These positions do not turn an explicit join into an
+inferred postcondition or silently omit its obligations.
+
 * **The postcondition is not framed.** A Pulse `if` with an `ensures` is like a loop body:
   its postcondition has to own every slot in scope. `J` is a loop frame (R5.8b) over the two
   arms, with the facts as invariants. Every live slot is owned. A slot or record the arms
@@ -9778,8 +10159,9 @@ code after it is checked once, against `J` alone.
   what holds on each path with `Pal.Returned()` and `Pal.Result<T>()`. An arm that still
   returns, breaks or continues is refused (PALCS0753).
 * **Restrictions.** A `Pal.Join` that does not follow an `if` is refused (PALCS0752). So is
-  a joined `if` whose condition is a null test of a local, because R22.12 narrows a null
-  test by splitting (PALCS0754); a null test of a field can be joined (R30.43). Joined `if`s
+  a joined `if` whose condition is a null test of an invariant-owning local, because
+  R22.12 narrows that null test by splitting (PALCS0754). Plain-pointer local tests
+  and field tests can be joined (R30.43). Joined `if`s
   are not sunk into and not split at. A short-circuit condition that R35.15 nests keeps its
   join on the outer `if` (R30.42).
 
@@ -9897,7 +10279,16 @@ The join now goes on the outer `if`, the one testing `a`. Its two arms are the w
 original `if`: the `then` arm is the inner `if` on `f(x)` (with the original `else` copied
 into the inner one's `else`, as R35.15 already does), and the `else` arm is the original
 `else`. For `||` the roles are exchanged. The facts hold after either arm, so they hold
-after the original `if`. Inner `if`s stay plain and Pulse joins them itself, as before.
+after the original `if`. With a pure-only join, inner `if`s stay plain and Pulse joins
+them itself.
+
+When the source join includes explicit spatial clauses, the same declared join also
+annotates the generated inner `if`s, with conservative live/unassigned framing. Otherwise
+an inferred inner postcondition can hide the cursor or restoration trade needed to reach
+the outer join. Every branch must prove the stated resources; none are invented.
+`SplitAfter` remains outer-only, and neither the condition operands nor the continuation
+are evaluated twice. The `test/inductive_owner` short-circuit regressions cover both `&&`
+and `||` with observable right-hand-side calls and spatial ownership.
 
 What R30.36 frames changes in two ways:
 
@@ -9910,24 +10301,30 @@ What R30.36 frames changes in two ways:
   existential at the join, as an arm's assignments do (R30.36). The facts have to restate
   them, typically with `Pal.Trace`, `Pal.Returned()` and `Pal.Result<T>()`.
 
-`test/join_cond` (`VisitRoot`) pins the shape with a callback. In `BreadthFirstTreeWalk` the
-join, with two more after its `Enqueue`s, takes the generated function from 557 to 277
-lines and its check from 196 s and 3.1 GB to 78 s and 0.9 GB.
+`test/join_cond` (`VisitRoot`) pins the shape with a callback. In the original Region-based
+`BreadthFirstTreeWalk` proof, the join, with two more after its `Enqueue`s, reduced the
+generated function from 557 to 277 lines and its check from 196 s and 3.1 GB to 78 s and
+0.9 GB.
 
 ### R30.43 A joined `if` on a null test of a field
 
-PALCS0754 refuses to join an `if` on a null test of a local (R30.36): R10.7, R12.3 and R22.12
+PALCS0754 refuses to join an `if` on a null test of an invariant-owning local (R30.36):
+R10.7, R12.3 and R22.12
 narrow the local's slot differently in each arm (an `elim_cons` in one, `is_null` in the
 other), and a join would have to state both. A null test whose operand is a field
 (`current.Left != null`, `root.Right == null`) narrows nothing. Those rules apply only to
 locals and parameters, and a field read in a condition is a value, `not (B.is_null t)`, like
 any other boolean. Joining it is therefore the same as joining any other condition.
 
-So PALCS0754 now refuses only a null test of a local. That includes a condition that starts
+So PALCS0754 refuses a null test of an invariant-owning local. That includes a condition that starts
 with one (`n != null && …`), because R35.15 makes that test the outer, joined `if`. A field
 test leading a short-circuit condition (`current.Left != null && f(…)`) is joined by R30.42.
 Nothing is assumed. Pulse checks each arm against the join's facts, so a fact the field test
 does not establish fails as an ordinary proof failure.
+
+Plain-pointer locals have no derived invariant to narrow. Their null tests may
+therefore carry explicit joins, including spatial clauses: each arm must prove the
+user predicate rather than obtaining ownership from the pointer test.
 
 `test/join_cond` (`Children`) joins `r.Left != null` and `r.Right != null && IsRedNode(r.Right)`.
 `test/diagnostics/cases/JoinNullLocal.cs` pins the refusal of a local's null test.
@@ -10546,7 +10943,8 @@ R29.3 borrowing class of `B`:
 * Its members are methods of `B` that take the underlying object as `this` and the view's
   record as `self`, always by reference. A member that calls, transitively through the
   view's own members, a member of the underlying object that is not read-only holds the
-  underlying object exclusively; otherwise it holds it at a fraction.
+  underlying object exclusively; otherwise it holds it at a fraction. Owner-independent
+  computed getters need only its pointer, as in R28.2a.
 * *Static binding.* A view never exists as an object of `B`: a method returns one only
   under `[return: Exactly(typeof(B<>.V))]`, and a caller holds the result in a local (as it
   holds a borrowing struct, R27.41). So every call on a view binds statically, by exact
@@ -12096,3 +12494,369 @@ now also states `UnfoundCount >= 0`, which the case analysis needs. `R34.26`'s s
 * `CheckUniqueAndUnfoundElementsFallback`'s contract (R37.3).
 * The `BitOperations.Log2` binding (R21.5), now used for `GetApproximateMaxHeight`, and the
   `RoundUpToPowerOf2` binding, used only in dead code (R37.3).
+
+## 38. Red-black sets with regions and with inductive ownership
+
+The paired experiment is `test/regionops` and `test/inductive_rbtree`. Both implement
+empty construction, membership, insertion, deletion, count, and clearing. Insertion
+does not replace an existing comparer-equivalent item; deletion of a missing item
+leaves the contents unchanged. Both maintain a black root, no red-red edge, equal
+black heights, and strictly ordered unique contents. These are functional
+specifications, not just memory-safety claims or equations with an unchecked pure
+implementation.
+
+Both now use the **same iterative top-down insertion and deletion algorithm** from
+the annotated runtime `SortedSet`, and the same iterative membership search. The
+initial inductive implementation used a recursive bottom-up algorithm; that was
+not an apples-to-apples ownership comparison and has been replaced. Neither
+implementation prechecks membership before insertion/deletion or rebuilds the
+set on deletion.
+
+The comparison shares the mathematical red-black and ordering notions from
+`Pulse.Lib.CSharp.SearchTree`, the comparer model, and the pure top-down algorithm
+theory. Runtime checks compare not just contents, but comparison traces, exact
+shapes and colours, and persistent node correspondence. The remaining API and
+resource-disposal differences are identified below; this is not a timing benchmark.
+
+### The region implementation
+
+`RbTree<T>` now has a model refined by sortedness, red-black validity, count equal
+to tree size, and a non-null comparer. Its public `Add` and `Remove` contracts state
+the exact change to the sequence of keys and whether membership changed.
+`Contains` states membership through `KeyIndex`, as well as equality with the
+tree-search specification. `Clients.cs` proves a duplicate-insertion/removal
+round trip and clearing followed by reuse using those public contracts.
+
+`RegionOps.cs` retains the original node-operation examples. `Insert.cs`,
+`Remove.cs`, and `Rotations.cs` complete them using the existing `SpecTopDown`,
+`SpecTopDownRemove`, `RegionTree`, and search-tree theories. No algorithm-specific
+compiler rule or new trusted axiom was added for this experiment.
+
+The owner holds a flat region resource and a pure `unshared` shape fact. A cursor
+is a freely copyable reference into that region; reading it requires membership.
+Rotations rewrite cells while the owner is open, and ghost lemmas relate successive
+heaps to trees and frame out unaffected nodes. The global owner invariant need not
+hold after every individual pointer store, but must be restored when the owner is
+closed.
+
+Deletion disconnects a node without removing its cell from the region's ghost
+heap. The active tree is therefore a reachable subset of the owned region, not
+necessarily its entire domain. `Clear` disconnects the root and resets the count;
+the CLR collects unreachable physical objects. This differs from explicit
+deallocation and from returning detached ownership to a caller.
+
+### The inductive implementation
+
+Here the node is `[Plain]`, not `[Region]`. A handwritten predicate owns the
+structure recursively: the empty case identifies a null pointer, and the branch
+case separates ownership of the root record, left subtree, and right subtree.
+Ghost functions expose and reconstruct those predicates around concrete reads,
+writes, and rotations. Disjointness follows from separating conjunction, rather
+than from a separate `unshared` predicate over a flat heap.
+
+The iterative proof also uses a recursively owned **pointer-labelled tree**,
+relating its labels to actual node addresses. The labels let the pure invariant
+identify `current`, `parent`, `grandParent`, and the other cursors without
+introducing a flat heap resource. A mutable, erased specification value records
+the current labelled tree; there is no runtime stack or recursive traversal in
+`Add`, `Remove`, or `Contains`.
+
+A ghost focus operation exposes a subtree and retains the surrounding ownership
+as a context or quantified **trade**: supplying an appropriately rooted replacement
+subtree gives back ownership of the reconstructed whole tree. This trade requires
+the replacement to have the **same root pointer** as the extracted subtree. Read-only access
+returns the original subtree. Recolouring can return a changed subtree at the same
+address. For a rotation that changes the subtree root, the proof exposes the parent
+as well, performs the real parent-link update, and only then reconstructs the
+surrounding ownership. A ghost function never performs that concrete pointer write.
+
+Deletion similarly keeps the context between the match and its successor while
+unlinking and moving the successor. The runtime search, sibling fixes, rotations,
+and transplantation follow the region algorithm; recursion occurs only in erased
+ownership lemmas. This is the role served by Pulse's trades and explicit spine
+predicates, rather than a compiler-generated region.
+
+The library returns a possibly changed root. `Remove` additionally returns
+detached node ownership, and `Clear` returns ownership of the detached tree.
+This keeps every resource accounted for without a ghost heap, a region conversion,
+or a resource-dropping proof step. It is not the identical object-oriented API of
+`RbTree<T>`: callers explicitly manage the root and the ownership returned by
+these operations. `Count` traverses the tree, with a machine-integer size bound;
+the region owner instead maintains a cached count. That is an API/representation
+choice, not a restriction imposed by inductive ownership. `Count` is not part of
+the matched traversal algorithm.
+
+### What the experiment isolates
+
+| Question | Region ownership | Inductive ownership |
+|---|---|---|
+| What is owned? | A flat collection of node cells, plus separate shape facts. | A tree-shaped separating predicate. |
+| Where is disjointness expressed? | `unshared` and the heap/tree framing theory. | The `**` between the root and its subtrees. |
+| How is a node accessed? | Prove its pointer belongs to the held region. | Open the predicate exposing that node's cell. |
+| How is an untouched subtree preserved? | Heap-update and `Reshaped` lemmas. | Leave its predicate in the separation-logic frame. |
+| What does a rotation need? | Relate several heap snapshots and reconnect the surrounding tree. | Expose the affected nodes, perform the stores, fold the rearranged predicates. |
+| How does traversal retain its context? | Several pointers and pure relationships in a loop invariant. | The same runtime cursors, a labelled-tree invariant, and ghost contexts/trades that expose and restore ownership. |
+| Where is specialization? | Compiler support for two links, region threading, heap-indexed owner invariants, and tree intrinsics. | User-written predicates and ghost lemmas, plus the generic `[Plain]`/`SlProp`/`PulseBody` interface. |
+| What happens to removed ownership? | Detached nodes can remain in the owned region. | Detached ownership is returned explicitly. |
+| Is functional correctness automatic? | No; red-black and content-preservation lemmas are still required. | No; fold/unfold alone proves neither balance nor set semantics. |
+
+The practical distinction is where the proof work moves. Regions suit existing
+multi-cursor code whose mutations do not follow the ownership tree structurally.
+Inductive predicates make subtree framing local and explicit, but require the
+programmer to expose and reassemble ownership even when the runtime traversal
+is iterative and uses several cursors.
+The absence of `[Region]` does not mean the absence of algorithm-specific lemmas;
+it means that those lemmas do not rely on compiler-managed region heaps.
+
+The `TopDown`, `TopDownRemove`, `TopDownSucc`, and `RegionPath` dependencies reuse
+pure labelled-tree, path, rotation, and balancing mathematics. Their historical
+`Region*` names do not mean that the inductive implementation owns a region:
+there is no `[Region]` declaration, `Pal.Heap`, heap-indexed owner invariant, or
+conversion to flat region ownership in this implementation.
+
+The inductive API is `PalCSharp.Tests.Inductive.RbTree`, with explicit non-null
+comparers rather than an owner storing one:
+
+```csharp
+RbNode<int>? root = RbTree.Empty<int>();
+IComparer<int> comparer = Comparer<int>.Default;
+root = RbTree.Add(root, 3, comparer);
+bool present = RbTree.Contains(root, 3, comparer);
+int count = RbTree.Count(root);
+root = RbTree.Remove(root, 3, comparer, out var detachedNode);
+root = RbTree.Clear(root, out var detachedTree);
+```
+
+Optional ghost model arguments are omitted in this runtime example. Verified
+callers must account for the ownership of `detachedNode` and `detachedTree`.
+Deletion physically moves the successor rather than overwriting the matched
+node's key. The detached physical node is therefore the **match**, with both
+child links cleared. Those two stores are extra cleanup compared with the region
+version, which retains the disconnected cell in its ghost region. On a miss,
+the detached node is null.
+
+Both implementations can rotate or recolour on duplicate insertion or missing
+deletion: these are content no-ops, not shape no-ops. Both stop comparing after
+the deletion match and follow the successor path, exactly as `SortedSet` does.
+No separate asymptotic-complexity theorem was added.
+
+Two generic annotation capabilities were needed: same-class `[Plain]` pointer
+equality now uses the existing reference-equality primitive (R12.3d), and
+`Pal.Join(SlProp)` exposes the emitter's existing ownership-bearing branch joins
+(R30.36). Neither adds an algorithm-specific translation rule or a trusted axiom.
+
+### Reading the inductive proof
+
+| Start here | Responsibility |
+|---|---|
+| `InductiveOwnership.fst`, `InductiveCursor.fst` | Public recursive predicate, its labelled counterpart, label/unlabel conversions, contexts, trades, and pointer uniqueness. |
+| `InductiveRelink.fst`, `InductiveState.fst` | Parent-link reconstruction and erased mutable loop models. |
+| `TopDownInsert.cs`, `InductiveInsert.fst`, `InductiveInsertResult.fst` | Insertion loop, invariant/termination steps, and the public semantic result predicate. |
+| `TopDownRemove.cs`, `InductiveRemove.fst`, `InductiveRemoveRepair.fst`, `InductiveRemoveResult.fst` | Deletion loop, sibling repairs, invariant/termination steps, and public result predicate. |
+| `TopDownSuccessor.cs`, `InductiveSuccessor.fst` | Physical successor transplantation and ownership of the detached match. |
+| `Clients.cs` | Generic clients composing the public contracts. |
+
+Insertion and deletion publish an existentially owned result tree together with
+red-black validity, strict ordering, exact resulting key sequence, and cardinality
+change. They do not expose an equation to the old bottom-up algorithm. The completed
+inductive harness checks 137 implementation/proof modules (including 19 handwritten
+F*/Pulse modules), plus its translation-error sentinel. Counts include generated
+ghost wrappers and are not a measurement of runtime code size or total proof cost:
+both implementations also reuse the shared mathematical libraries.
+
+### Executable proof annotations
+
+Proof-only locals and specification-function calls are guarded by `#if PAL`
+where necessary. `palcs` defines `PAL`, so those proof steps are checked. Ordinary
+C# runtime builds omit them: constructing a `Ghost<T>` does not by itself erase
+evaluation of its initializer, and specification operations deliberately throw
+if executed. The editor projects also define `PAL` through `test/pal-tests.props`
+so the analyzer sees the same proof-bearing syntax as the translator; the stock
+and runtime projects do not import those properties.
+
+Both developments remain conditional on the existing comparer model: comparisons
+are pure, nonthrowing, and obey its ordering laws. The experiment adds no new
+trusted comparer assumptions.
+
+### Running the experiment
+
+```sh
+MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0 \
+  UseSharedCompilation=false make -C test -j12 regionops inductive_rbtree
+```
+
+Each harness checks stock C#, verifies its generated modules and included proofs,
+then executes the ordinary C# implementation with `PAL` undefined. Each checks a
+separate translation-error sentinel as well.
+
+Both runtime suites perform the same 318,000 mutations: every pair of insertion
+and deletion permutations of five keys, duplicates and misses, extreme keys,
+clear/reuse, and seeded mixed operations under default, reverse and
+coarse-equivalence comparers. After each mutation they compare exact stored
+representatives with .NET `SortedSet`, and check ordering, count, black root,
+red-red edges, black heights, and cycles/sharing.
+
+The inductive suite additionally checks that insertion retains existing nodes,
+removal returns an isolated original node without allocating replacements, and
+clearing preserves the detached tree. It compiles both implementations into the
+same runtime executable and checks the exact comparer-argument sequence for each
+insertion, deletion, and lookup. After mutations, it compares keys, colours,
+left/right structure, and a persistent bijection between the two implementations'
+node objects. The bijection distinguishes physical successor transplantation
+from merely copying a successor key.
+
+The matched suite passes all 318,000 mutations. These executable checks complement
+the proofs and test erasure; they are not a direct cross-implementation equivalence
+theorem or an exhaustive test of arbitrary tree sizes.
+
+## 39. `SortedSet<T>` with ordinary inductive ownership
+
+The development in `samples/dotnet-runtime/pal/SortedSet` replaces the collection's
+compiler-managed region with user-defined predicates and checked ghost programs.
+Unlike the smaller experiment in §38, it keeps the existing object-oriented API,
+cached count and version, views, enumerators, and dependent SortedDictionary code.
+The runtime algorithms remain iterative where the originals were iterative;
+recursion in ownership lemmas does not introduce a runtime traversal or stack.
+The normal full sample build verifies this migrated development, including its
+dependent dictionary methods, translation-error sentinel, and stock C# gate.
+
+### Owner, model, and retained resources
+
+Nodes are `[Plain]` references. The collection is an ordinary owner whose invariant
+contains `SortedSetOwnership.Owner(root, ownershipState, Pal.Permission())`.
+The generated `Class_SortedSet.class_SortedSet__inv` owns the holder's box, this
+user predicate, and the correspondence with its model. The compiler does not
+interpret the tree, choose a cursor predicate, or perform rotations.
+
+`SortedSetInductive.Ownership.owner` uses an erased `(tree & retired)` state.
+`owns` recursively separates a node's actual record from its left and right
+subtrees; pointer labels identify the runtime cursors. `retained` recursively owns
+the detached resources using `End`, `Cell`, `Forest`, and `Frame`:
+
+* `Cell` retains a removed node with its actual links, without claiming ownership
+  of every node those links reach.
+* `Forest` retains an entire detached tree, including trees disconnected by
+  clearing or rebuilding the collection.
+* `Frame` retains a non-node boxed cell, such as Union's temporary holder after
+  its tree is transferred. A ghost reference stores an existential boxed-cell
+  witness; its fractional capability comes from checked box sharing/gathering,
+  not an arbitrary predicate-sharing assumption.
+
+`share_tree`/`gather_tree`, `share_retired`/`gather_retired`, and
+`share_owner`/`gather_owner` preserve these resources at their actual permissions.
+Detached ownership is retained internally rather than returned through new public
+parameters or discharged by dropping a nonempty temporary collection.
+
+`SortedSetModel<T>` keeps the public `Tree`, `Comparer`, `Count`, and `Version`,
+with internal `Root`, `Labels`, and `Observation`. Its refinements connect
+`Tree = Values(Labels)` and `Root = Top(Labels)`, require good labels, strict key
+ordering and red-black validity, and relate count to tree size within the machine
+bound. The comparer retains the development's existing non-nullness and ordering
+assumptions.
+
+### Why the observation is larger than the active tree
+
+An enumerator's `Current` performs no version check. Its original contract permits
+a retained node, not just one reachable from the current root; well-formedness and
+freshness are separate conditions. A model containing only the active tree would
+silently strengthen that contract.
+
+`SortedSetInductive.State.observe` records the number of represented node entries
+and a domain-restricted lookup of their current raw records. A non-node `Frame`
+does not contribute to this observation, but its ownership is still retained.
+Reassociating private retained witnesses preserves the actual observation value;
+the public model does not expose their representation identity.
+
+`tree_n` follows child pointers by looking up each step in the entire current
+state. `tree_at` uses the original node-count-plus-one fuel bound. Null or missing
+entries and exhausted fuel truncate the tree, so cyclic or otherwise non-wellformed
+stale links retain the original defined meaning. In particular, a removed node's
+link into a subsequently changed live subtree is not interpreted as a frozen copy
+of that subtree.
+
+`StateCorrespondence.bounded` proves bounded-tree equality and closure equivalence
+under pointwise lookup agreement. `current_tree` adds the shared count/fuel and
+proves current-tree equality and well-formedness equivalence;
+`state_current_tree` instantiates the recursive state's reference serialization.
+Pending sequences and walkability also agree with the earlier pure semantics.
+The serialization is proof-only: no ownership is converted into a flat region.
+`StateCases` checks retained-to-live updates,
+bounded cycles, missing links, and observation-preserving reassociation.
+`entry`, `pending`, and `walkable` remain state-wide rather than acquiring an
+unrequested freshness precondition.
+
+### Opening, changing, and restoring ownership
+
+Read protocols expose an actual cell and retain a checked trade for restoring the
+owner at the same permission and observable model. Active-tree reads can use a
+cursor context; state-wide reads can also find retained nodes. A pointer alone
+supplies no ownership, and a declared slot permission is not a substitute for the
+fraction actually held.
+
+Mutations expose the relevant contexts, perform the original stores, and rebuild
+the recursive predicates. Construction and cloning establish fresh recursive
+ownership. Adoption retains the previous active and retired resources.
+`RetainedHolder.transfer` accounts for the destination's old forest and retired
+state, the temporary's retired state and raw box, and the adopted active tree.
+Its C# binding marks the temporary `[Plain, Consumes]`: the checked transfer
+establishes the new ownership, while generic consumption bookkeeping prevents an
+automatic cleanup from discarding it.
+
+Dictionary item replacement rebuilds the labelled tree at exactly the found node,
+retaining the stored key representative, colors, shape, and retired resources.
+`Item.Spec`, `Item.Point`, `Item.Set`, and `Item` prove the exact key-index sequence
+update and the ownership transport. The emitted `CommitItemState` helper takes the
+exact `TreeSet` reference and updates only the erased ownership-state field.
+Its complete checked contract preserves the holder's other raw fields and restores
+the set invariant between the original item assignment and version update.
+
+| Library entry points | Role |
+|---|---|
+| `Ownership.owner`, `owns`, `retained` | Recursive ownership and fractional sharing/gathering. |
+| `State.observe`, `tree_at`, `wf`, `pending`, `walkable` | Current-state observation and full enumerator semantics. |
+| `StateRead.open_owner`/`close_owner`, `StateOwnerRead.open_set`/`close_set` | State-wide read leases and model correspondence. |
+| `Cursor.context`, `Read.begin_set`/`end_set`, `Read.Point.open_set`/`close_return` | Active-tree contexts and exact restoration trades. |
+| `Edit.begin_owner`/`end_owner`, `Insert`, `Remove`, `Successor`, `Relink` | Checked mutation and reconstruction around original node operations. |
+| `Construction.adopt`, `RetainedHolder.transfer` | Rebuilt-tree adoption and temporary-holder retention. |
+| `Item.Point`, `Item.Set`, `CommitItemState` | Exact dictionary item replacement and erased-state commit. |
+
+These are sample-library definitions, not additional compiler interpretations of
+trees. General compiler support is covered separately: explicit resource clauses,
+raw `[Plain]` arguments, checked ghost results and consumption (§12), current-model
+loop observations (R5.6a), borrowed callbacks, and explicit spatial joins (R30.36).
+
+### Erasure and verification scope
+
+Proof-only fields, helper declarations, calls and initializers are guarded by
+`#if PAL`. Where a proof needs to name a return value before restoring ownership,
+the PAL branch evaluates the original expression once, performs checked ghost
+restoration, and returns that value; the non-PAL return remains verbatim.
+Such proof boundaries do not authorize extra runtime reads, stores, comparer
+calls, or public fields. Retained proof resources do not introduce a runtime
+retired-node list or change CLR collection behavior.
+
+The same discipline applies to the PAL-only short-circuit normalizations in
+`Overlaps` and `IntersectWith`: statement-level joins and an immediate guarded
+loop exit expose the proof boundaries, with the original conditions retained
+verbatim in non-PAL code and the original evaluation order preserved.
+
+Two explicit-argument forms remain limited in the general compiler: supplying
+`Ghost<T>` arguments to ordinary methods whose F* binders are implicit, and
+supplying a modeled owner's field directly as a `[Plain]` lemma argument.
+The checked bindings here instead infer `GhostArg` owner/model/payload witnesses
+from actual ownership predicates. These source forms do not weaken contracts or
+assume missing resources.
+
+Run the normal dependency-driven sample build, including its translation-error
+sentinel and all included proof modules:
+
+```sh
+MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0 \
+  UseSharedCompilation=false make -s -k -C samples/dotnet-runtime/pal/SortedSet -j4 all
+```
+
+Zero translation diagnostics or the presence of all module names is not a complete
+verification result. Every original proof obligation and its dependent closure
+must check. The baseline includes the base set's enumerator family, but no
+specialized TreeSubSet enumerator proof modules; executable view-enumerator
+comparisons are not a proof of otherwise uncovered dynamic dispatch.
