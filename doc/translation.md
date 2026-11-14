@@ -969,10 +969,21 @@ permission and has no automatic sharing lemmas.
 
 The witness representation and its manipulation belong to the verified library.
 `OwnerState.fst` uses `erased I.t`; opening and closing `OwnerCells.holds` are explicit ghost
-operations. C# erasure needs separate care: a `[SpecOp]` initializer still executes under
-the stock C# compiler, even if its result is an empty marker struct. Guard proof-only
-initializers and updates with `#if PAL`; where runtime layout must remain unchanged, guard
-the witness field and its proof-only uses as well.
+operations. C# erasure needs separate care: an ordinary `[SpecOp]` initializer still
+executes even if its result is an empty marker struct. Use conditional `Pal.Capture`
+for immutable snapshots and `Pal.UpdateGhost` for erased fields or locals. A mutable
+erased local starts with `T state = default;` immediately followed by
+`Pal.UpdateGhost(ref state, initial);`; translation uses `initial` as its real initializer.
+Both operations erase their argument evaluation from stock C#.
+
+`UpdateGhost` accepts only direct instance-field or local references and pure
+specification values. It preserves ordinary write-permission checks. F* additionally
+checks `require_erased (id #T)`: the identity function's domain must unify with an
+erased type, without the automatic `hide` coercion that a value argument would permit.
+An informative `SpecType` binding therefore cannot authorize erased writes.
+Where CLR layout must remain unchanged, only the witness field needs `#if PAL`;
+a non-PAL `[Spec]` ref-returning property lets the conditional calls typecheck without
+adding storage or evaluating the property.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
@@ -4756,8 +4767,12 @@ full and fractional cell witnesses, their exact values, and retained permissions
 
 Ordinary runtime-valued lemma results remain PALCS0504. Lemma calls in pure specification
 expressions are rejected, and an erased result cannot control runtime computation.
-Keep result-bearing lemma declarations and call sites under `#if PAL` for stock-C#
-runtime erasure: C#'s `[Conditional]` is restricted to `void` methods.
+Keep result-bearing lemma declarations unguarded, but invoke them as the second argument
+of conditional `Pal.Capture(ref witness, Lemma(...))`, immediately after
+`Ghost<T> witness = default;`. C# erases the entire call, including the lemma invocation.
+The frontend lowers the pair to the same checked immutable ghost binding and rejects
+self-reference, recapture, later mutation, or nonadjacent capture. Void proof helpers
+use `[Conditional("PAL")]` directly.
 
 **R12.7d (consuming ghost calls).** A successful checked lemma call applies the same
 `[Consumes]` bookkeeping as an ordinary call, for both `void` and `Ghost<T>` results.
@@ -12827,18 +12842,16 @@ loop observations (R5.6a), borrowed callbacks, and explicit spatial joins (R30.3
 
 ### Erasure and verification scope
 
-Proof-only fields, helper declarations, calls and initializers are guarded by
-`#if PAL`. Where a proof needs to name a return value before restoring ownership,
-the PAL branch evaluates the original expression once, performs checked ghost
-restoration, and returns that value; the non-PAL return remains verbatim.
-Such proof boundaries do not authorize extra runtime reads, stores, comparer
-calls, or public fields. Retained proof resources do not introduce a runtime
-retired-node list or change CLR collection behavior.
+Executable method bodies are shared between PAL and stock C#. Void proof helpers
+are conditional; immutable witnesses use `Pal.Capture`, and erased ownership state,
+loop progress, and clone budgets use `Pal.UpdateGhost`. Helper declarations are
+unguarded. The sole PAL guard selects the ownership-state field versus a non-PAL
+ref-returning specification property, preserving CLR instance layout.
 
-The same discipline applies to the PAL-only short-circuit normalizations in
-`Overlaps` and `IntersectWith`: statement-level joins and an immediate guarded
-loop exit expose the proof boundaries, with the original conditions retained
-verbatim in non-PAL code and the original evaluation order preserved.
+Return-value temporaries, the short-circuit normalization in `Overlaps`, and the
+guarded loop exit in `IntersectWith` now have one shared source body. They preserve
+evaluation order rather than keeping separate executable and verified branches.
+Retained proof resources do not introduce a runtime retired-node list.
 
 Two explicit-argument forms remain limited in the general compiler: supplying
 `Ghost<T>` arguments to ordinary methods whose F* binders are implicit, and
@@ -12852,8 +12865,13 @@ sentinel and all included proof modules:
 
 ```sh
 MSBUILDDISABLENODEREUSE=1 DOTNET_CLI_USE_MSBUILD_SERVER=0 \
-  UseSharedCompilation=false make -s -k -C samples/dotnet-runtime/pal/SortedSet -j4 all
+  UseSharedCompilation=false make -s -k -C samples/dotnet-runtime/pal/SortedSet -j12 all
 ```
+
+The `all` target also runs the stock-C# runtime regression against the actual compiled
+sample assembly, without a proof-erasing source rewriter. It exercises erased loop
+state, cloning, callbacks, set operations, views, dictionary item replacement, and
+the original set field layout and replacement-method signature.
 
 Zero translation diagnostics or the presence of all module names is not a complete
 verification result. Every original proof obligation and its dependent closure

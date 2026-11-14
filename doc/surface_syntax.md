@@ -931,9 +931,18 @@ resource. A `Ghost<T>` local can bind the call's result and use it in subsequent
 steps. This is useful for exposing an existential witness from an ownership predicate.
 
 The call is not a pure specification expression, and its result cannot control runtime
-computation. Ordinary runtime-valued lemma results are still rejected. Use `#if PAL` to
-exclude result-bearing lemma declarations and calls from stock-C# execution;
-`[Conditional("PAL")]` cannot be applied to a non-`void` method.
+computation. Ordinary runtime-valued lemma results are still rejected. Keep the
+declaration unguarded and capture its result conditionally:
+
+```csharp
+Ghost<CellSnapshot> witness = default;
+Pal.Capture(ref witness, CellProof.Unpack(cell));
+```
+
+`Capture` erases the entire call and its arguments in stock C#; translation binds the
+checked lemma result. The capture must immediately follow the single default-initialized
+declaration; self-reference, later assignment, and recapture are rejected. Void proof
+helpers should carry `[System.Diagnostics.Conditional("PAL")]` themselves.
 
 ---
 
@@ -958,9 +967,20 @@ unwrapped. In a *statement*-position specification (`Pal.Invariant`, `Pal.Decrea
 `[Lemma]` argument) you are writing ordinary C#, where `Ghost<T>` is a real type, so write
 `xs.Value`. The `.Value` is transparent: it means exactly what `xs` means.
 
-A `Ghost<T>` *local*, initialised and never assigned, is a snapshot: `Ghost<Seq<int>> before
-= Pal.Contents(a);` names the contents at that point for later ghost statements, and has no
-run-time existence (translation.md R24.12).
+A `Ghost<T>` *local*, initialized and never assigned, is a snapshot (translation.md
+R24.12). Use `Ghost<Seq<int>> before = default;` followed immediately by
+`Pal.Capture(ref before, Pal.Contents(a));`. Unlike an ordinary initializer, the
+conditional call erases argument evaluation too. Capture accepts either a `T` value
+or a checked `Ghost<T>` result, including snapshots of interface-typed values.
+
+For mutable erased state use `Pal.UpdateGhost(ref state, value)`. Its target must be
+a direct instance field or local with a user specification type whose F* representation
+is erased; F* checks this, and ordinary field-write permissions still apply. The value
+must be a pure specification expression. Initialize an erased local with
+`State state = default;` followed immediately by `Pal.UpdateGhost(ref state, initial);`.
+Only the verified translation evaluates `initial` or subsequent updates. An erased
+field may still need a PAL field/non-PAL ref-property guard to preserve CLR layout;
+the calls and helper declarations do not.
 
 ---
 
