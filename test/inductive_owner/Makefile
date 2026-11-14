@@ -1,5 +1,10 @@
 include ../verify.mk
 
+.PHONY: check-conditional-ghost
+all: check-conditional-ghost
+check-conditional-ghost: verify
+	@python3 check_conditional_ghost.py "$(PALCS)"
+
 .PHONY: runtime check-borrow-fuel check-plain-definite-assignment check-plain-call-emission check-plain-null-safety check-plain-ghost-types check-ghost-results check-immutable-integers
 all: runtime check-borrow-fuel check-plain-definite-assignment check-plain-call-emission check-plain-null-safety check-plain-ghost-types check-ghost-results check-immutable-integers check-tuples-and-switch-joins
 .PHONY: check-tuples-and-switch-joins

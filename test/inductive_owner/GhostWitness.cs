@@ -8,7 +8,6 @@ namespace PalCSharp.Tests;
 
 public static class WitnessProof
 {
-#if PAL
     [Lemma, Requires("OwnerSpec.Cell(cell)")]
     [Ensures("OwnerSpec.Raw(cell, Result, Perm.Full)")]
     [PulseBody("GhostWitness.unpack $(cell)")]
@@ -28,7 +27,6 @@ public static class WitnessProof
     [PulseBody("GhostWitness.unpack_fraction $(cell) $(expected) $(permission)")]
     public static Ghost<CellSnapshot> UnpackFraction(OwnedCell cell, int expected, Ghost<Perm> permission) =>
         throw new InvalidOperationException();
-#endif
 
     [Lemma, Conditional("PAL")]
     [Requires("OwnerSpec.Raw(cell, record, Perm.Full)")]
@@ -51,14 +49,11 @@ public static class WitnessClient
     [Ensures("Result == expected")]
     public static int Read(OwnedCell cell, int expected)
     {
-#if PAL
-        Ghost<CellSnapshot> record = WitnessProof.UnpackKnown(cell, expected);
-#endif
+        Ghost<CellSnapshot> record = default;
+        Pal.Capture(ref record, WitnessProof.UnpackKnown(cell, expected));
         int value = cell.Current;
-#if PAL
         Pal.Assert(value == OwnerSpec.RawValue(record.Value));
         WitnessProof.Pack(cell, record);
-#endif
         return value;
     }
 
@@ -67,15 +62,13 @@ public static class WitnessClient
     [Ensures("Result == expected")]
     public static int ReadFraction(OwnedCell cell, int expected)
     {
-#if PAL
-        Ghost<Perm> fraction = Pal.Ghost<Perm>("permission");
-        Ghost<CellSnapshot> record = WitnessProof.UnpackFraction(cell, expected, fraction);
-#endif
+        Ghost<Perm> fraction = default;
+        Pal.Capture(ref fraction, Pal.Ghost<Perm>("permission"));
+        Ghost<CellSnapshot> record = default;
+        Pal.Capture(ref record, WitnessProof.UnpackFraction(cell, expected, fraction));
         int value = cell.Current;
-#if PAL
         Pal.Assert(value == OwnerSpec.RawValue(record.Value));
         WitnessProof.PackFraction(cell, record, expected, fraction);
-#endif
         return value;
     }
 }

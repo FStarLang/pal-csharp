@@ -24,6 +24,7 @@ public static class SpecRangeWalk
     /// A lemma: the range search's subtree of a sorted tree holds the tree's in-range keys, is
     /// sorted, and is no larger than the tree.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RangeWalk.range_root_filter")]
     public static void RootFilter<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive) => throw Ghost();
 
@@ -108,10 +109,12 @@ public static class SpecRangeWalk
     /// that of the left subtree, or the branch's key if there is none, and the key itself
     /// if it equals the bound.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RangeWalk.min_step")]
     public static void MinStep<T, TTag>(IComparer<T> comparer, T lower, T upper, bool lowerActive, SpecTree<(T, TTag)> tree, T otherwise) => throw Ghost();
 
     /// <summary>A lemma: <see cref="MinStep"/> for the greatest key within the upper bound.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RangeWalk.max_step")]
     public static void MaxStep<T, TTag>(IComparer<T> comparer, T lower, T upper, bool upperActive, SpecTree<(T, TTag)> tree, T otherwise) => throw Ghost();
 
@@ -120,6 +123,7 @@ public static class SpecRangeWalk
     /// bound is the tree's least in-range key, and the greatest within the upper bound its
     /// greatest.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RangeWalk.min_max_goal")]
     public static void MinMaxGoal<T, TTag>(IComparer<T> comparer, SpecTree<(T, TTag)> tree, T lower, T upper, bool lowerActive, bool upperActive, T otherwise) => throw Ghost();
 

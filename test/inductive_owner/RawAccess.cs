@@ -72,7 +72,7 @@ public sealed class RawOwner
     [Ensures("RawSpec.Raw(owner, RawSpec.WithState(before, payload), Perm.Full)")]
     public static void Commit([Plain] RawOwner owner, Ghost<RetainedPayload> payload)
     {
-        owner.state = RetainedSpec.State(payload.Value);
+        Pal.UpdateGhost(ref owner.state, RetainedSpec.State(payload.Value));
     }
 }
 #endif

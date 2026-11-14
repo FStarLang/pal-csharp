@@ -2,6 +2,8 @@ module Pulse.Lib.CSharp.Ownership
 
 open Pulse.Lib.Pervasives
 
+let require_erased (#a: Type0) (_: erased a -> Tot (erased a)) : Lemma True = ()
+
 // The capabilities needed by object aliases. Unlike arbitrary fraction
 // splitting, halving is provided by the public Box and Reference interfaces.
 // Each user's instance is a pair of checked ghost programs, not an axiom.

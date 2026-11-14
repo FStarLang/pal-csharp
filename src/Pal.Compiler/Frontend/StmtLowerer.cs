@@ -26,6 +26,7 @@ public sealed class StmtLowerer(
         {
             ObjectFields = objectFields ?? [], Borrow = borrow, BorrowBody = borrow is not null,
         };
+    private readonly HashSet<InvocationExpressionSyntax> _ghostInitializers = [];
 
     /// <summary>
     /// R4.12c. A constructor initializer is an expression that is not inside any statement,
@@ -818,19 +819,36 @@ public sealed class StmtLowerer(
                 });
                 continue;
             }
+            if (!known.IsGhost(symbol?.Type) && type is IrUserSpecType &&
+                GhostInitializer(node, v, symbol!, nameof(PalLang.Pal.UpdateGhost)) is { } initialize)
+            {
+                var initial = _spec.Lower(initialize.ArgumentList.Arguments[1].Expression);
+                if (ExprLowerer.HasEffect(initial))
+                    diagnostics.Unsupported(Locations.From(v), "An effectful ghost initializer");
+                statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type, initial)
+                {
+                    GhostOnly = true,
+                    Immutable = NeverWritten(symbol!, node.Parent ?? node, initialize.ArgumentList.Arguments[0]),
+                });
+                _ghostInitializers.Add(initialize);
+                continue;
+            }
             // R24.12. A `Ghost<T>` local is a snapshot: a ghost name for a specification
             // value (`Pal.Contents(a)`, a model), fixed at its declaration, that later ghost
             // statements can mention.
             if (known.IsGhost(symbol?.Type))
             {
-                if (v.Initializer is null || !NeverWritten(symbol!, node.Parent ?? node))
+                var capture = GhostInitializer(node, v, symbol!, nameof(PalLang.Pal.Capture));
+                if (v.Initializer is null ||
+                    !NeverWritten(symbol!, node.Parent ?? node, capture?.ArgumentList.Arguments[0]))
                 {
                     diagnostics.Unsupported(Locations.From(v),
                         "A `Ghost<T>` local without an initialiser, or one that is assigned",
                         "A ghost local names one specification value for its whole life.");
                     continue;
                 }
-                var initializer = ExprLowerer.Unparenthesized(v.Initializer.Value);
+                var initializer = ExprLowerer.Unparenthesized(
+                    capture?.ArgumentList.Arguments[1].Expression ?? v.Initializer.Value);
                 var namedGhost = initializer is InvocationExpressionSyntax retrievalCall &&
                     model.GetSymbolInfo(retrievalCall).Symbol is IMethodSymbol retrieval &&
                     known.IsPalIntrinsic(retrieval) && retrieval.Name == nameof(PalLang.Pal.Ghost);
@@ -840,9 +858,16 @@ public sealed class StmtLowerer(
                     ? LowerLemmaCall(invocation, lemma, Locations.From(v))
                     : namedGhost
                     ? _spec.Lower(initializer)
-                    : _code.Lower(v.Initializer.Value);
+                    : _code.Lower(initializer);
+                if (capture is not null && ExprLowerer.HasEffect(ghostValue))
+                {
+                    diagnostics.Unsupported(Locations.From(v), "An effectful ghost capture",
+                        "Capture a pure specification value or a checked ghost lemma result.");
+                    continue;
+                }
                 statements.Add(new IrGhostStmt(Locations.From(v), GhostKind.Let,
                     ghostValue, v.Identifier.ValueText) { Type = type, ErasedSource = namedGhost });
+                if (capture is not null) _ghostInitializers.Add(capture);
                 continue;
             }
             statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
@@ -858,6 +883,33 @@ public sealed class StmtLowerer(
 
         // `T a, b;` declares both names in the enclosing block: the enclosing block splices them.
         return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable()) { Splice = true };
+    }
+
+    private InvocationExpressionSyntax? GhostInitializer(LocalDeclarationStatementSyntax declaration,
+        VariableDeclaratorSyntax variable, ILocalSymbol local, string intrinsic)
+    {
+        if (declaration.Declaration.Variables.Count != 1 ||
+            variable.Initializer?.Value.IsKind(SyntaxKind.DefaultLiteralExpression) != true)
+            return null;
+        var siblings = declaration.Parent switch
+        {
+            BlockSyntax block => block.Statements,
+            SwitchSectionSyntax section => section.Statements,
+            _ => default,
+        };
+        var next = siblings.IndexOf(declaration) + 1;
+        if (next <= 0 || next >= siblings.Count ||
+            siblings[next] is not ExpressionStatementSyntax
+                { Expression: InvocationExpressionSyntax call } ||
+            model.GetSymbolInfo(call).Symbol is not IMethodSymbol method ||
+            !known.IsPalIntrinsic(method) || method.Name != intrinsic ||
+            call.ArgumentList.Arguments is not [var target, var value] ||
+            !target.RefKindKeyword.IsKind(SyntaxKind.RefKeyword) ||
+            !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(target.Expression).Symbol, local) ||
+            value.Expression.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Any(id =>
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local)))
+            return null;
+        return call;
     }
 
     /// <summary>
@@ -1553,10 +1605,11 @@ public sealed class StmtLowerer(
         return NeverWritten(local, scope);
     }
 
-    private bool NeverWritten(ILocalSymbol local, SyntaxNode scope)
+    private bool NeverWritten(ILocalSymbol local, SyntaxNode scope, SyntaxNode? initialization = null)
     {
         foreach (var n in scope.DescendantNodes())
         {
+            if (n == initialization) continue;
             var target = n switch
             {
                 AssignmentExpressionSyntax a => a.Left,
@@ -2005,6 +2058,26 @@ public sealed class StmtLowerer(
         {
             switch (method.Name)
             {
+                case nameof(PalLang.Pal.UpdateGhost):
+                    if (_ghostInitializers.Contains(node)) return new IrBlock(loc, []);
+                    if (args is [var field, var value] &&
+                        field.RefKindKeyword.IsKind(SyntaxKind.RefKeyword) &&
+                        field.Expression is IdentifierNameSyntax or
+                            MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax or ThisExpressionSyntax } &&
+                        model.GetSymbolInfo(field.Expression).Symbol is IFieldSymbol { IsStatic: false } or ILocalSymbol &&
+                        _code.Lower(field.Expression) is { Type: IrUserSpecType } target &&
+                        target is IrField or IrVar &&
+                        _spec.Lower(value.Expression) is { } replacement && !ExprLowerer.HasEffect(replacement))
+                        return new IrAssign(loc, target, replacement) { GhostOnly = true };
+                    diagnostics.Unsupported(loc, "A ghost update of anything other than an erased specification field or local",
+                        "Use a direct reference and a pure specification value; F* checks that its type is erased.");
+                    return new IrBlock(loc, []);
+                case nameof(PalLang.Pal.Capture):
+                    if (!_ghostInitializers.Contains(node))
+                        diagnostics.Unsupported(loc, "A ghost capture outside its initialization",
+                            "Pal.Capture must immediately follow a single default-initialized Ghost<T> local, " +
+                            "without self-reference or any other writes to that local.");
+                    return new IrBlock(loc, []);
                 case nameof(PalLang.Pal.Assert):
                     return new IrGhostStmt(loc, GhostKind.Assert, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Assume):

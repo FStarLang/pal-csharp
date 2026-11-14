@@ -112,6 +112,17 @@ public static class Pal
     /// <summary>Names an inferred GhostArg binder in a proof statement, never runtime code.</summary>
     public static T Ghost<T>(string name) => throw Ghost();
 
+    /// <summary>Bind a ghost snapshot immediately after its default-initialized declaration.</summary>
+    [Conditional(Cond)]
+    public static void Capture<T>(ref Ghost<T> target, Ghost<T> value) { }
+
+    [Conditional(Cond)]
+    public static void Capture<T>(ref Ghost<T> target, T value) { }
+
+    /// <summary>Update a field or local whose F* representation is erased, retaining the usual write permission checks.</summary>
+    [Conditional(Cond)]
+    public static void UpdateGhost<T>(ref T field, T value) { }
+
     /// <summary>
     /// Halve the permission held on <paramref name="location"/>, an array or an object,
     /// so that it can be observed through two names at once. Pulse never splits a
@@ -553,6 +564,7 @@ public static class Pal
     /// invariant the lambda keeps over the trace of its calls. It holds on the empty trace when
     /// the lambda is passed, each call extends it, and it holds after the call returns.
     /// </summary>
+    [Conditional(Cond)]
     public static void Protocol<TV, TR>(Func<Seq<(TV, TR)>, bool> invariant) => throw Ghost();
 
     /// <summary>
@@ -562,6 +574,7 @@ public static class Pal
     /// <c>[Callback(Bounded = true)]</c> parameter, whose callee requires what it needs of
     /// <c>Pal.CallBound(action)</c>.
     /// </summary>
+    [Conditional(Cond)]
     public static void Protocol<TV, TR>(Func<Seq<(TV, TR)>, bool> invariant, SpecInt maxCalls) => throw Ghost();
 
     /// <summary>

@@ -3,6 +3,20 @@ using System.Reflection;
 using PalCSharp.Tests;
 
 var owner = new CellOwner(17);
+PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Protocol callback executed"));
+PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Bounded protocol callback executed"), 0);
+PalLang.SpecSetOps.AddAllWhole<int>(ThrowingComparer(), default, default);
+static System.Collections.Generic.IComparer<int> ThrowingComparer() =>
+    throw new Exception("A void specification binding evaluated its arguments");
+var conditional = new ConditionalGhostOwner(19);
+if (conditional.Read() != 19)
+    throw new Exception("Conditional ghost initialization changed the runtime value");
+conditional.Replace(23);
+if (conditional.Read() != 23 ||
+    typeof(ConditionalGhostOwner).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Length != 1)
+    throw new Exception("Ghost capture or update changed runtime behavior or layout");
+if (WitnessClient.Read(new OwnedCell(29), 29) != 29)
+    throw new Exception("Conditional ghost-result capture evaluated a proof-only helper");
 if (new GhostFieldHolder(37, 41).ReadThroughLoan() != 37)
     throw new Exception("Selective ghost capture changed the holder's runtime read");
 if (new GhostFieldHolder(37, 41).ReadWithDistinctOwner(new GhostFieldHolder(3, 5)) != 37)

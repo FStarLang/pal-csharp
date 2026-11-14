@@ -3386,6 +3386,8 @@ public sealed class CodeEmitter(
     {
         var cell = Names.Local(d.Name);
         var init = d.Init is null ? Default(d.Type) : Quotient(Expr(d.Init));
+        if (d.GhostOnly)
+            Line($"Pulse.Lib.CSharp.Ownership.require_erased (id #{Types.Atom(d.Type)});");
         var nullableArray = d.Type is IrArrayType && d.Init is not null && IsNullableArray(d.Init);
         if (d.Immutable)
         {
@@ -3526,6 +3528,12 @@ public sealed class CodeEmitter(
     /// <summary>R5.3.</summary>
     private void Assign(IrAssign a)
     {
+        if (a.GhostOnly)
+        {
+            if (a.Target.Type is not IrUserSpecType ghostType)
+                throw new InvalidOperationException("A ghost update must retain its specification type.");
+            Line($"Pulse.Lib.CSharp.Ownership.require_erased (id #{Types.Atom(ghostType)});");
+        }
         Adopt(a);
         switch (a.Target)
         {

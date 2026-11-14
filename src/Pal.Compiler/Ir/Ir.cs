@@ -660,6 +660,7 @@ public sealed record IrBlock(IrLoc Loc, ImmutableArray<IrStmt> Statements) : IrS
 
 public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? Init) : IrStmt(Loc)
 {
+    public bool GhostOnly { get; init; }
     /// <summary>
     /// Set on R13.3's snapshot of an incremented variable. Such a binding is written
     /// once and read once, so it is an immutable <c>let</c> rather than R5.2's cell —
@@ -686,7 +687,10 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     public string? HeldOwner { get; init; }
 }
 
-public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
+public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc)
+{
+    public bool GhostOnly { get; init; }
+}
 
 public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc)
 {

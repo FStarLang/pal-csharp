@@ -22,6 +22,7 @@ public static class SpecSetInter
     public static Seq<T> Inter<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
     /// <summary>A lemma: one merge step over the strictly sorted suffixes <c>s[i..]</c> and <c>t[j..]</c>.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_step")]
     public static void InterStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
 
@@ -29,18 +30,22 @@ public static class SpecSetInter
     /// A lemma: the suffix intersection is empty when <c>s</c> or <c>t</c> is used up, or
     /// <c>t[j]</c> is above the last of <c>s</c>.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_done")]
     public static void InterDone<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
 
     /// <summary>A lemma: the whole sequences are their suffixes from 0.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_whole")]
     public static void InterWhole<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
     /// <summary>A lemma: the intersection with a strictly sorted <c>t</c> is strictly sorted and no longer than <c>t</c>.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_sorted")]
     public static void InterSorted<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
     /// <summary>A lemma: nothing intersects an empty <c>s</c>.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_left_empty")]
     public static void InterLeftEmpty<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
@@ -48,6 +53,7 @@ public static class SpecSetInter
     /// A lemma: when the merge has stopped (as for <see cref="InterDone{T}"/>), a prefix
     /// <c>p</c> followed by the suffix intersection is the intersection, so <c>p</c> is.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.inter_finish")]
     public static void InterFinish<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j, Seq<T> p) => throw Ghost();
 
@@ -55,6 +61,7 @@ public static class SpecSetInter
     /// A lemma: writing <paramref name="x"/> at <paramref name="k"/> of <paramref name="m"/>
     /// extends the prefix <c>m[0..k)</c> by <paramref name="x"/>, ahead of any rest <paramref name="r"/>.
     /// </summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetInter.push_prefix")]
     public static void PushPrefix<T>(Seq<T> m, SpecInt k, T x, Seq<T> r) => throw Ghost();
 }
