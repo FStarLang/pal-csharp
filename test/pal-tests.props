@@ -23,6 +23,10 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <!-- Match palcs's proof-only syntax; stock runtime projects do not import this file. -->
+    <DefineConstants>$(DefineConstants);PAL</DefineConstants>
+    <!-- Nested runtime projects have separate generated assembly attributes. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/bin/**;**/obj/**</DefaultItemExcludes>
     <!-- A test declares fields it never reads; that is the point of some of them. -->
     <NoWarn>$(NoWarn);CS0169;CS0414;CS0649</NoWarn>
     <PalRoot>$(MSBuildThisFileDirectory)..</PalRoot>
