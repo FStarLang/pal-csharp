@@ -14,8 +14,8 @@
 # Usage:  tools/install-fstar.sh [extra install-fstar.sh options]
 #         tools/install-fstar.sh --list      # show available nightlies
 #
-# A source build needs an OCaml switch with F*'s dependencies (see F*'s
-# INSTALL.md); FSTAR_SRC overrides where the checkout is kept, and FSTAR_JOBS the
+# A source build uses the selected opam switch (or OPAMSWITCH) with F*'s dependencies
+# (see F*'s INSTALL.md); FSTAR_SRC overrides where the checkout is kept, FSTAR_JOBS the
 # build parallelism, and FSTAR_OPAM_DEPS=1 installs F*'s opam dependencies first.
 
 set -euo pipefail
@@ -48,6 +48,11 @@ if [[ -n "$(pin result)" && -x "$TOOLS_DIR/fstar/bin/fstar.exe" &&
 fi
 JOBS="${FSTAR_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
+if ! command -v opam >/dev/null 2>&1; then
+  echo "error: building F* from source requires opam and an initialized OCaml switch (see README.md)" >&2
+  exit 1
+fi
+
 if [[ ! -d "$SRC/.git" ]]; then
   git clone --filter=blob:none "$REPO" "$SRC"
 fi
@@ -75,7 +80,7 @@ fi
 Z3_BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$Z3_BUILD_DIR"' EXIT
 "$SRC/.scripts/get_fstar_z3.sh" "$Z3_BUILD_DIR" >/dev/null
-PATH="$Z3_BUILD_DIR:$PATH" make -j"$JOBS" 3
+PATH="$Z3_BUILD_DIR:$PATH" opam exec -- make -j"$JOBS" 3
 
 rm -rf "$TOOLS_DIR/fstar"
 mkdir -p "$TOOLS_DIR/fstar"

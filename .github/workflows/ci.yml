@@ -50,9 +50,7 @@ jobs:
         if: steps.fstar-cache.outputs.cache-hit != 'true'
         env:
           FSTAR_OPAM_DEPS: '1'
-        run: |
-          if [ -f tools/fstar-source.txt ]; then eval "$(opam env)"; fi
-          make tools
+        run: make tools
 
       - name: Save F* toolchain
         if: steps.fstar-cache.outputs.cache-hit != 'true'
