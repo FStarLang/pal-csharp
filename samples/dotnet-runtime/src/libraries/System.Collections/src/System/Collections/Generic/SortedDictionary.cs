@@ -116,13 +116,30 @@ namespace System.Collections.Generic
                 return false;
             }
 
+#if PAL
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
+#endif
             if (keyValuePair.Value == null)
             {
+#if PAL
+                bool result = node.Item.Value == null;
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
+#else
                 return node.Item.Value == null;
+#endif
             }
             else
             {
+#if PAL
+                bool result = EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value);
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
+#else
                 return EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value);
+#endif
             }
         }
 
@@ -137,11 +154,22 @@ namespace System.Collections.Generic
                 return false;
             }
 
+#if PAL
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
+#endif
             if (EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value))
             {
+#if PAL
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+#endif
                 _set.Remove(keyValuePair);
                 return true;
             }
+#if PAL
+            SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+#endif
             return false;
         }
 
@@ -171,7 +199,16 @@ namespace System.Collections.Generic
                     throw new KeyNotFoundException(SR.Format(SR.Arg_KeyNotFoundWithKey, key.ToString()));
                 }
 
+#if PAL
+                Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                    SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot));
+                SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
+                TValue result = node.Item.Value;
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
+#else
                 return node.Item.Value;
+#endif
             }
             [Requires("!Pal.IsNull(key)")]
             [Requires("@this.SpecPairs.Length < int.MaxValue")]
@@ -188,7 +225,18 @@ namespace System.Collections.Generic
                 }
                 else
                 {
+#if PAL
+                    Ghost<SortedSetItemTicket<KeyValuePair<TKey, TValue>>> edit =
+                        SortedSetItemProof.Open(node);
+#endif
                     node.Item = new KeyValuePair<TKey, TValue>(node.Item.Key, value);
+#if PAL
+                    Ghost<SortedSetItemResult<KeyValuePair<TKey, TValue>>> replacement =
+                        SortedSetItemProof.Finish(node, edit,
+                            new KeyValuePair<TKey, TValue>(
+                                SortedSetOwnership.Item(SortedSetItem.Node(edit.Value)).Key, value));
+                    SortedSet<KeyValuePair<TKey, TValue>>.CommitItemState(_set);
+#endif
                     _set.UpdateVersion();
                 }
             }
@@ -360,7 +408,15 @@ namespace System.Collections.Generic
                 value = default;
                 return false;
             }
+#if PAL
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
+#endif
             value = node.Item.Value;
+#if PAL
+            SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+#endif
             return true;
         }
 
