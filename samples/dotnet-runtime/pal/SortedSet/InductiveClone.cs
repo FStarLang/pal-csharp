@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using System.Diagnostics;
 using PalLang;
@@ -217,4 +216,3 @@ namespace System.Collections.Generic
             Ghost<Seq<(SortedSet<T>.Node, SortedSet<T>.Node)>> pending, Ghost<SortedSetCloneBudget> budget) { }
     }
 }
-#endif

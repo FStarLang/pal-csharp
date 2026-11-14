@@ -61,10 +61,8 @@ namespace System.Collections.Generic
 #pragma warning disable CS0649 // Specification model field, initialized only in PAL builds.
         internal SortedSet<T>.Node? Root;
 #pragma warning restore CS0649
-#if PAL
         internal SortedSetLabels<T> Labels;
         internal SortedSetObservation<T> Observation;
-#endif
     }
 
     [DebuggerTypeProxy(typeof(ICollectionDebugView<>))]
@@ -82,9 +80,11 @@ namespace System.Collections.Generic
         [Wrapping] private int version;
 #if PAL
         private SortedSetOwnershipState<T> ownershipState = SortedSetOwnership.Empty<T>();
+#else
+        [Spec]
+        private ref SortedSetOwnershipState<T> ownershipState => throw new InvalidOperationException("Specification only");
 #endif
 
-#if PAL
         [Refine("Pal.StrictlySorted(Result.Comparer, SpecSearchTree.Keys(Result.Tree))")]
         [Refine("SpecSearchTree.IsRedBlack(Result.Tree)")]
         [Refine("Result.Count == Result.Tree.Size")]
@@ -104,10 +104,6 @@ namespace System.Collections.Generic
             Labels = SortedSetOwnership.Active(ownershipState),
             Observation = SortedSetState.Observe(ownershipState),
         };
-#else
-        [Model]
-        private SortedSetModel<T> Model => throw new InvalidOperationException("Specification only");
-#endif
 
         [Spec]
         public SpecInt SpecCount => Model.Count;
@@ -115,14 +111,12 @@ namespace System.Collections.Generic
         /// <summary>R32.10. The root pointer, in the set's region.</summary>
         [Spec]
         internal Node? SpecRoot => Model.Root;
-#if PAL
         [Spec]
         internal SortedSetLabels<T> SpecLabels => Model.Labels;
         [Spec]
         internal SortedSetObservation<T> SpecObservation => Model.Observation;
         [Spec]
         internal SortedSetModel<T> SpecSnapshot => Model;
-#endif
 
         [Spec]
         public IComparer<T> SpecComparer => Model.Comparer;
@@ -167,9 +161,7 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecComparer == Comparer<T>.Default")]
         public SortedSet()
         {
-#if PAL
             SortedSetOwnershipProof.Empty<T>();
-#endif
             comparer = Comparer<T>.Default;
         }
 
@@ -177,9 +169,7 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecComparer == (comparer == null ? Comparer<T>.Default : comparer)")]
         public SortedSet(IComparer<T>? comparer)
         {
-#if PAL
             SortedSetOwnershipProof.Empty<T>();
-#endif
             this.comparer = comparer ?? Comparer<T>.Default;
         }
 
@@ -219,22 +209,19 @@ namespace System.Collections.Generic
                 {
                     Debug.Assert(sortedSet.root != null);
                     this.count = sortedSet.count;
-#if PAL
-                    Ghost<Node?> previousRoot = root;
-                    Ghost<SortedSetLabels<T>> clonedSource = sortedSet.SpecLabels;
+                    Ghost<Node?> previousRoot = default;
+                    Pal.Capture(ref previousRoot, root);
+                    Ghost<SortedSetLabels<T>> clonedSource = default;
+                    Pal.Capture(ref clonedSource, sortedSet.SpecLabels);
                     Node cloneRoot = sortedSet.root;
                     SortedSetOwnershipProof.ReadSet(clonedSource, Perm.Full);
                     root = cloneRoot.DeepClone(this.count);
-#else
-                    root = sortedSet.root.DeepClone(this.count);
-#endif
-#if PAL
                     SortedSetOwnershipProof.EndSet(clonedSource, Perm.Full);
-                    Ghost<SortedSetLabels<T>> clonedLabels = SortedSetConstructionProof.Label(root,
-                        SortedSetOwnership.Values(clonedSource.Value), Perm.Full);
+                    Ghost<SortedSetLabels<T>> clonedLabels = default;
+                    Pal.Capture(ref clonedLabels, SortedSetConstructionProof.Label(root,
+                        SortedSetOwnership.Values(clonedSource.Value), Perm.Full));
                     SortedSetConstructionProof.Adopt(previousRoot, root, ownershipState, clonedLabels);
-                    ownershipState = SortedSetConstruction.Adopted(ownershipState, clonedLabels);
-#endif
+                    Pal.UpdateGhost(ref ownershipState, SortedSetConstruction.Adopted(ownershipState, clonedLabels));
                 }
                 SetOfSelf(((SortedSet<T>)collection).SpecComparer, ((SortedSet<T>)collection).SpecItems);
                 return;
@@ -266,22 +253,21 @@ namespace System.Collections.Generic
 
                 DedupeDone(comparer, ((SortedSet<T>)collection).SpecItems, Pal.Contents(elements), index, count);
                 count = index;
-#if PAL
-                Ghost<Node?> previousRoot = root;
-                Ghost<Seq<T>> builtItems = Pal.Contents(elements);
+                Ghost<Node?> previousRoot = default;
+                Pal.Capture(ref previousRoot, root);
+                Ghost<Seq<T>> builtItems = default;
+                Pal.Capture(ref builtItems, Pal.Contents(elements));
                 SortedSetConstructionProof.Empty<T>(null);
-#endif
                 root = ConstructRootFromSortedArray(elements, 0, count - 1, null);
-#if PAL
-                Ghost<SortedSetLabels<T>> builtLabels = SortedSetConstructionProof.Label(root,
-                    SpecSearchTree.Build(builtItems.Value, 0, count - 1, SpecTree.Leaf<(T, bool)>()), Perm.Full);
+                Ghost<SortedSetLabels<T>> builtLabels = default;
+                Pal.Capture(ref builtLabels, SortedSetConstructionProof.Label(root,
+                    SpecSearchTree.Build(builtItems.Value, 0, count - 1, SpecTree.Leaf<(T, bool)>()), Perm.Full));
                 Pal.Assert(SpecSortDedupe.SetOf(comparer, SpecSearchTree.Keys(SortedSetOwnership.Values(builtLabels.Value)), ((SortedSet<T>)collection).SpecItems));
                 Pal.Assert(Pal.StrictlySorted(comparer, SpecSearchTree.Keys(SortedSetOwnership.Values(builtLabels.Value))) && count == SpecSearchTree.Keys(SortedSetOwnership.Values(builtLabels.Value)).Length);
                 Pal.Assert(SpecSearchTree.IsRedBlack(SortedSetOwnership.Values(builtLabels.Value)));
                 SortedSetConstructionProof.Adopt(previousRoot, root, ownershipState, builtLabels);
-                ownershipState = SortedSetConstruction.Adopted(ownershipState, builtLabels);
-                Pal.Assert(this.comparer != null);
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetConstruction.Adopted(ownershipState, builtLabels));
+                Pal.Assert(!Pal.Same(this.comparer, (IComparer<T>?)null));
                 this.count = count;
             }
         }
@@ -402,12 +388,13 @@ namespace System.Collections.Generic
         [Frac("p")]
         internal virtual bool InOrderTreeWalk([Callback("SortedSetNodeSnapshot<T> snapshot", "SortedSetOwnership.Raw(argument, snapshot, permission)", "SortedSetOwnership.Entry(snapshot)", Bounded = true)] TreeWalkPredicate<T> action)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = this.SpecLabels;
-            Ghost<Seq<T>> items = this.SpecItems;
-            Ghost<SortedSetSnapshot<T>> snapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this.SpecLabels);
+            Ghost<Seq<T>> items = default;
+            Pal.Capture(ref items, this.SpecItems);
+            Ghost<SortedSetSnapshot<T>> snapshot = default;
+            Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
             SortedSetOwnershipProof.RootFacts(labels);
-#endif
             if (root == null)
             {
                 return true;
@@ -420,14 +407,11 @@ namespace System.Collections.Generic
 
             var stack = new Stack<Node?>(2 * (int)Log2(Count + 1));
             Node? current = root;
-#if PAL
             SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
             SortedSetWalkProof.Empty(false, labels, stack.Items);
-#endif
 
             while (current != null)
             {
-#if PAL
                 Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                 Pal.Invariant(SortedSetOwnership.OwnerLease(root, ownershipState, labels.Value, Pal.Permission()));
                 Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
@@ -443,17 +427,13 @@ namespace System.Collections.Generic
                 SortedSetWalkProof.Descend(false, labels, stack.Items, current);
                 Pal.Assert(stack.Items.Length < count);
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
                 stack.Push(current);
-                current = current.Left;
-#if PAL
+                current = current!.Left;
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
             }
 
             while (stack.Count != 0)
             {
-#if PAL
                 Pal.Decreases(items.Value.Length - Pal.Trace<(T, bool), bool>(action).Length);
                 Pal.Invariant(SortedSetOwnership.OwnerLease(root, ownershipState, labels.Value, Pal.Permission()));
                 Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
@@ -470,37 +450,28 @@ namespace System.Collections.Generic
                                     SortedSetWalk.Pending(false, labels.Value, stack.Items) ==
                                     Pal.Slice(items.Value, Pal.Trace<(T, bool), bool>(action).Length, count)));
                 SortedSetWalkProof.PopAt(false, labels, stack.Items, items, (SpecInt)Pal.Trace<(T, bool), bool>(action).Length);
-#endif
                 current = stack.Pop();
-#if PAL
                 SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-                Ghost<Seq<((T, bool), bool)>> before = Pal.Trace<(T, bool), bool>(action);
-#endif
+                Ghost<Seq<((T, bool), bool)>> before = default;
+                Pal.Capture(ref before, Pal.Trace<(T, bool), bool>(action));
                 if (!action(current!))
                 {
-#if PAL
                     SortedSetWalkProof.TraceStep(items, before, Pal.Trace<(T, bool), bool>(action), false);
                     SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                     return false;
                 }
-#if PAL
                 else
                 {
                     SortedSetWalkProof.TraceStep(items, before, Pal.Trace<(T, bool), bool>(action), true);
                     SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                 }
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
 
                 Node? node = current!.Right;
-#if PAL
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                 while (node != null)
                 {
-#if PAL
                     Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, node).Size);
                     Pal.Invariant(SortedSetOwnership.OwnerLease(root, ownershipState, labels.Value, Pal.Permission()));
                     Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
@@ -518,12 +489,9 @@ namespace System.Collections.Generic
                     SortedSetWalkProof.Descend(false, labels, stack.Items, node);
                     Pal.Assert(stack.Items.Length < count - Pal.Trace<(T, bool), bool>(action).Length);
                     SortedSetOwnershipProof.OpenRead(labels, node, Pal.Permission());
-#endif
                     stack.Push(node);
-                    node = node.Left;
-#if PAL
+                    node = node!.Left;
                     SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                 }
             }
 
@@ -550,12 +518,13 @@ namespace System.Collections.Generic
         [Frac("p")]
         internal virtual bool BreadthFirstTreeWalk([Callback("SortedSetNodeSnapshot<T> snapshot", "SortedSetOwnership.Raw(argument, snapshot, permission)", "SortedSetOwnership.Entry(snapshot)")] TreeWalkPredicate<T> action)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = this.SpecLabels;
-            Ghost<Seq<T>> items = this.SpecItems;
-            Ghost<SortedSetSnapshot<T>> snapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this.SpecLabels);
+            Ghost<Seq<T>> items = default;
+            Pal.Capture(ref items, this.SpecItems);
+            Ghost<SortedSetSnapshot<T>> snapshot = default;
+            Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
             SortedSetOwnershipProof.RootFacts(labels);
-#endif
             if (root == null)
             {
                 return true;
@@ -563,15 +532,12 @@ namespace System.Collections.Generic
 
             var processQueue = new Queue<Node?>();
             processQueue.Enqueue(root);
-#if PAL
             SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
             SortedSetBreadthProof.Start(labels, root, processQueue.Items, items, Pal.Trace<(T, bool), bool>(action));
-#endif
 
             Node? current;
             while (processQueue.Count != 0)
             {
-#if PAL
                 Pal.Decreases(items.Value.Length - Pal.Trace<(T, bool), bool>(action).Length);
                 Pal.Invariant(SortedSetOwnership.OwnerLease(root, ownershipState, labels.Value, Pal.Permission()));
                 Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
@@ -586,29 +552,23 @@ namespace System.Collections.Generic
                                     SpecWalk.BfWalked(items.Value, Pal.Trace<(T, bool), bool>(action), false)
                                   : SpecWalk.BfVisited(items.Value, Pal.Trace<(T, bool), bool>(action),
                                                        SortedSetBreadth.Pending(labels.Value, processQueue.Items))));
-                Ghost<Seq<Node?>> q0 = processQueue.Items;
+                Ghost<Seq<Node?>> q0 = default;
+                Pal.Capture(ref q0, processQueue.Items);
                 SortedSetBreadthProof.Dequeue(labels, q0, items, Pal.Trace<(T, bool), bool>(action));
-#endif
                 current = processQueue.Dequeue();
-#if PAL
                 SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
                 Pal.Assert(Pal.Trace<(T, bool), bool>(action).Length < int.MaxValue);
-#endif
                 if (!action(current!))
                 {
-#if PAL
                     SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                     return false;
                 }
-#if PAL
                 else
                 {
                     SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                 }
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
 
                 Pal.Assert(processQueue.SpecCount < int.MaxValue);
                 if (current!.Left != null)
@@ -620,10 +580,8 @@ namespace System.Collections.Generic
                 {
                     processQueue.Enqueue(current!.Right);
                 }
-#if PAL
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                 Pal.Assert(processQueue.Items == SortedSetBreadth.Next(labels.Value, q0.Value));
-#endif
             }
 
             return true;
@@ -712,30 +670,27 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecVersion == SpecWrap.Int32(Pal.Old(@this.SpecVersion) + 1)")]
         internal virtual bool AddIfNotPresent(T item)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> original = this.SpecLabels;
-            Ghost<Seq<T>> k0 = this.SpecItems;
-#endif
+            Ghost<SortedSetLabels<T>> original = default;
+            Pal.Capture(ref original, this.SpecLabels);
+            Ghost<Seq<T>> k0 = default;
+            Pal.Capture(ref k0, this.SpecItems);
             if (root == null)
             {
-#if PAL
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), original);
                 SortedSetLeafProof.ReleaseEmpty(original);
-#endif
                 // The tree is empty and this is the first item.
                 root = new Node(item, NodeColor.Black);
                 count = 1;
                 version++;
-#if PAL
                 SortedSetLeafProof.MakeBlack(root, item);
-                SortedSetInsert.Singleton(comparer, item, root);
-                Ghost<SortedSetLabels<T>> singleton = SortedSetLeaf.Black(root, item);
+                SortedSetInsert.Singleton(comparer, item!, root);
+                Ghost<SortedSetLabels<T>> singleton = default;
+                Pal.Capture(ref singleton, SortedSetLeaf.Black(root, item));
                 SortedSetEditProof.Change<T>(SortedSetLeaf.Black(root, item), singleton);
-                SortedSetInsert.ResultFacts(comparer, k0.Value, item, root, singleton.Value);
+                SortedSetInsert.ResultFacts(comparer, k0.Value, item!, root, singleton.Value);
                 SortedSetEditProof.EndOwner(root, ownershipState, singleton);
-                ownershipState = SortedSetEdit.ReplaceState(ownershipState, singleton);
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, singleton));
                 return true;
             }
 
@@ -751,66 +706,61 @@ namespace System.Collections.Generic
             // So update `_version` to disable any instances of Enumerator/TreeSubSet from working on it.
             version++;
 
-#if PAL
-            SortedSetInsert.Start(comparer, item, original.Value);
-            IComparer<T> ordering = comparer;
-            SortedSetOwnershipState<T> progress = ownershipState;
-#endif
+            SortedSetInsert.Start(comparer, item!, original.Value);
+            Ghost<IComparer<T>> ordering = default;
+            Pal.Capture(ref ordering, comparer);
+            SortedSetOwnershipState<T> progress = default;
+            Pal.UpdateGhost(ref progress, ownershipState);
 
             int order = 0;
             while (current != null)
             {
-#if PAL
-                Pal.Decreases(SortedSetInsert.Measure(ordering, item, SortedSetOwnership.Active(progress), current));
+                Pal.Decreases(SortedSetInsert.Measure(ordering.Value, item!, SortedSetOwnership.Active(progress), current));
                 Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                 Pal.Invariant(Pal.Same(SortedSetOwnership.Active(progress), SortedSetOwnership.Active(ownershipState)));
                 Pal.Invariant(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(),
-                    SortedSetInsert.Inv(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState),
+                    SortedSetInsert.Inv(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState),
                         current, parent, grandParent, greatGrandParent, order)));
                 Pal.Invariant(Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() &&
                     Pal.KeyIndex(comparer, k0.Value, item) >= 0 &&
-                    SortedSetInsert.Complete(comparer, k0.Value, item, root, SortedSetOwnership.Active(ownershipState))));
-                Ghost<SortedSetLabels<T>> before = SortedSetOwnership.Active(ownershipState);
-                Ghost<SpecInt> m0 = SortedSetInsert.Measure(comparer, item, before.Value, current);
-                Ghost<int> order0 = order;
-                SortedSetInsert.AtCur(comparer, k0.Value, item, before.Value, current, parent, grandParent, greatGrandParent, order);
+                    SortedSetInsert.Complete(comparer, k0.Value, item!, root, SortedSetOwnership.Active(ownershipState))));
+                Ghost<SortedSetLabels<T>> before = default;
+                Pal.Capture(ref before, SortedSetOwnership.Active(ownershipState));
+                Ghost<SpecInt> m0 = default;
+                Pal.Capture(ref m0, SortedSetInsert.Measure(comparer, item!, before.Value, current));
+                Ghost<int> order0 = default;
+                Pal.Capture(ref order0, order);
+                SortedSetInsert.AtCur(comparer, k0.Value, item!, before.Value, current, parent, grandParent, greatGrandParent, order);
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), before);
                 SortedSetOwnershipProof.OpenRead(before, current, Perm.Full);
-#endif
                 order = comparer.Compare(item, current.Item);
-#if PAL
                 SortedSetOwnershipProof.CloseRead(before, Perm.Full);
-                SortedSetInsert.Look(comparer, k0.Value, item, before.Value, current, parent, grandParent, greatGrandParent, order0.Value, order);
-#endif
+                SortedSetInsert.Look(comparer, k0.Value, item!, before.Value, current, parent, grandParent, greatGrandParent, order0.Value, order);
                 if (order == 0)
                 {
                     // We could have changed root node to red during the search process.
                     // We need to set it to black before we return.
-#if PAL
-                    SortedSetInsert.Finish(comparer, k0.Value, item, before.Value);
+                    SortedSetInsert.Finish(comparer, k0.Value, item!, before.Value);
                     SortedSetOwnershipProof.RootFacts(before);
                     SortedSetEditProof.OpenColor(before, root);
-#endif
                     root.ColorBlack();
-#if PAL
                     SortedSetEditProof.CloseBlack(before, root);
                     SortedSetBalance.TopColor(before.Value, root, false);
-                    Ghost<SortedSetLabels<T>> done = SortedSetInsert.Black(before.Value);
+                    Ghost<SortedSetLabels<T>> done = default;
+                    Pal.Capture(ref done, SortedSetInsert.Black(before.Value));
                     SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(before.Value, root, false), done);
-                    SortedSetInsert.ResultFacts(comparer, k0.Value, item, root, done.Value);
+                    SortedSetInsert.ResultFacts(comparer, k0.Value, item!, root, done.Value);
                     SortedSetEditProof.EndOwner(root, ownershipState, done);
-                    ownershipState = SortedSetEdit.ReplaceState(ownershipState, done);
-                    progress = ownershipState;
-#endif
+                    Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, done));
+                    Pal.UpdateGhost(ref progress, ownershipState);
                     return false;
                 }
-#if PAL
                 else
                 {
                     SortedSetEditProof.EndOwner(root, ownershipState, before);
-                    ownershipState = SortedSetEdit.ReplaceState(ownershipState, before);
+                    Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, before));
                 }
                 Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                 Pal.Join(Pal.Same(SortedSetOwnership.Active(progress), SortedSetOwnership.Active(ownershipState)));
@@ -818,173 +768,150 @@ namespace System.Collections.Generic
                     version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
                 Pal.Join(Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() &&
                     Pal.KeyIndex(comparer, k0.Value, item) >= 0 &&
-                    SortedSetInsert.Complete(comparer, k0.Value, item, root, SortedSetOwnership.Active(ownershipState))));
+                    SortedSetInsert.Complete(comparer, k0.Value, item!, root, SortedSetOwnership.Active(ownershipState))));
                 Pal.Join(Pal.Implies(!Pal.Returned(),
                     order != 0 && Pal.Same(SortedSetOwnership.Active(ownershipState), before.Value)));
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), before);
                 SortedSetFrontierProof.OpenRead(before, current);
                 SortedSetFrontier.ReadFacts(SortedSetEdit.Sub(before.Value, current));
-#endif
 
                 // Split a 4-node into two 2-nodes.
                 if (current.Is4Node)
                 {
-#if PAL
                     SortedSetFrontierProof.CloseRead(before, current);
                     SortedSetFrontierProof.OpenSplit(before, current);
-#endif
                     current.Split4Node();
-#if PAL
                     SortedSetFrontierProof.CloseSplit(before, current);
-                    SortedSetInsert.SplitStep(comparer, k0.Value, item, before.Value, current, parent, grandParent, greatGrandParent, order0.Value, order);
-                    Ghost<SortedSetLabels<T>> split = SortedSetFrontier.Split(before.Value, current);
+                    SortedSetInsert.SplitStep(comparer, k0.Value, item!, before.Value, current, parent, grandParent, greatGrandParent, order0.Value, order);
+                    Ghost<SortedSetLabels<T>> split = default;
+                    Pal.Capture(ref split, SortedSetFrontier.Split(before.Value, current));
                     SortedSetEditProof.Change<T>(SortedSetFrontier.Split(before.Value, current), split);
                     SortedSetFrontierProof.OpenOptional(split, parent);
-#endif
                     // We could have introduced two consecutive red nodes after split. Fix that by rotation.
                     if (Node.IsNonNullRed(parent))
                     {
-#if PAL
                         SortedSetFrontierProof.CloseOptional(split, parent);
                         SortedSetEditProof.EndOwner(root, ownershipState, split);
-                        ownershipState = SortedSetEdit.ReplaceState(ownershipState, split);
+                        Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, split));
                         SortedSetInsert.BalanceNodes(split.Value, current, parent, grandParent, greatGrandParent);
-#endif
                         InsertionBalance(current, ref parent!, grandParent!, greatGrandParent!);
                     }
-#if PAL
                     else
                     {
                         SortedSetFrontierProof.CloseOptional(split, parent);
                         SortedSetEditProof.EndOwner(root, ownershipState, split);
-                        ownershipState = SortedSetEdit.ReplaceState(ownershipState, split);
+                        Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, split));
                     }
                     Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
-                    Pal.Join(SortedSetInsert.Ready(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState),
+                    Pal.Join(SortedSetInsert.Ready(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState),
                         current, parent, grandParent, order, m0.Value));
                     Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) &&
                         version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
-#endif
                 }
-#if PAL
                 else
                 {
                     SortedSetFrontierProof.CloseRead(before, current);
                     SortedSetEditProof.EndOwner(root, ownershipState, before);
-                    ownershipState = SortedSetEdit.ReplaceState(ownershipState, before);
+                    Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, before));
                 }
                 Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
-                Pal.Join(SortedSetInsert.Ready(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState),
+                Pal.Join(SortedSetInsert.Ready(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState),
                     current, parent, grandParent, order, m0.Value));
                 Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) &&
                     version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
-                Ghost<SortedSetLabels<T>> after = SortedSetOwnership.Active(ownershipState);
+                Ghost<SortedSetLabels<T>> after = default;
+                Pal.Capture(ref after, SortedSetOwnership.Active(ownershipState));
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), after);
                 SortedSetOwnershipProof.OpenTreePoint(after, current, Perm.Full);
-#endif
 
                 greatGrandParent = grandParent;
                 grandParent = parent;
                 parent = current;
                 current = (order < 0) ? current.Left : current.Right;
-#if PAL
+                SortedSetInsert.Advance(comparer, k0.Value, item!, after.Value, parent, grandParent, greatGrandParent, current, order, m0.Value);
                 SortedSetOwnershipProof.CloseTreePoint(after, Perm.Full);
-                SortedSetInsert.Advance(comparer, k0.Value, item, after.Value, parent, grandParent, greatGrandParent, current, order, m0.Value);
                 SortedSetEditProof.EndOwner(root, ownershipState, after);
-                ownershipState = SortedSetEdit.ReplaceState(ownershipState, after);
-                progress = ownershipState;
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, after));
+                Pal.UpdateGhost(ref progress, ownershipState);
             }
 
-#if PAL
-            Ghost<SortedSetLabels<T>> descent = SortedSetOwnership.Active(ownershipState);
-            SortedSetInsert.AtEnd(comparer, k0.Value, item, descent.Value, parent, grandParent, greatGrandParent, order);
+            Ghost<SortedSetLabels<T>> descent = default;
+            Pal.Capture(ref descent, SortedSetOwnership.Active(ownershipState));
+            SortedSetInsert.AtEnd(comparer, k0.Value, item!, descent.Value, parent, grandParent, greatGrandParent, order);
             SortedSetEditProof.BeginOwner(root, ownershipState);
             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), descent);
-#endif
             Debug.Assert(parent != null);
             // We're ready to insert the new node.
             Node node = new Node(item, NodeColor.Red);
-#if PAL
             SortedSetLeafProof.MakeRed(node, item);
-            SortedSetLeafProof.Fresh(descent, node, item);
-            SortedSetInsert.Linked(comparer, k0.Value, item, descent.Value, node, parent, grandParent, greatGrandParent, order);
-            Ghost<SortedSetLabels<T>> linked = SortedSetLeaf.Linked(descent.Value, parent, node, item, order > 0);
+            SortedSetLeafProof.Fresh(descent, node, item!);
+            SortedSetInsert.Linked(comparer, k0.Value, item!, descent.Value, node, parent, grandParent, greatGrandParent, order);
+            Ghost<SortedSetLabels<T>> linked = default;
+            Pal.Capture(ref linked, SortedSetLeaf.Linked(descent.Value, parent, node, item!, order > 0));
             SortedSetLeafProof.OpenLink(descent, parent);
-#endif
             if (order > 0)
             {
                 parent.Right = node;
-#if PAL
-                SortedSetLeafProof.CloseRight(descent, parent, node, item);
-                SortedSetEditProof.Change<T>(SortedSetLeaf.Linked(descent.Value, parent, node, item, true), linked);
-#endif
+                SortedSetLeafProof.CloseRight(descent, parent, node, item!);
+                SortedSetEditProof.Change<T>(SortedSetLeaf.Linked(descent.Value, parent, node, item!, true), linked);
             }
             else
             {
                 parent.Left = node;
-#if PAL
-                SortedSetLeafProof.CloseLeft(descent, parent, node, item);
-                SortedSetEditProof.Change<T>(SortedSetLeaf.Linked(descent.Value, parent, node, item, false), linked);
-#endif
+                SortedSetLeafProof.CloseLeft(descent, parent, node, item!);
+                SortedSetEditProof.Change<T>(SortedSetLeaf.Linked(descent.Value, parent, node, item!, false), linked);
             }
-#if PAL
             Pal.Join(SortedSetOwnership.Owns(linked.Value, Perm.Full));
             Pal.Join(SortedSetEdit.Retained(ownershipState));
             Pal.Join(root == SortedSetOwnership.Top(linked.Value));
-            Pal.Join(Pal.Same(linked.Value, SortedSetLeaf.Linked(descent.Value, parent, node, item, order > 0)));
-            Pal.Join(SortedSetInsert.LinkedResult(comparer, k0.Value, item, descent.Value,
+            Pal.Join(Pal.Same(linked.Value, SortedSetLeaf.Linked(descent.Value, parent, node, item!, order > 0)));
+            Pal.Join(SortedSetInsert.LinkedResult(comparer, k0.Value, item!, descent.Value,
                 node, parent, grandParent, greatGrandParent, order));
             Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) &&
                 version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
             SortedSetOwnershipProof.OpenRead(linked, parent, Perm.Full);
-#endif
 
             // The new node will be red, so we will need to adjust colors if its parent is also red.
             if (parent.IsRed)
             {
-#if PAL
                 SortedSetOwnershipProof.CloseRead(linked, Perm.Full);
                 SortedSetEditProof.EndOwner(root, ownershipState, linked);
-                ownershipState = SortedSetEdit.ReplaceState(ownershipState, linked);
+                Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, linked));
                 SortedSetInsert.BalanceNodes(linked.Value, node, parent, grandParent, greatGrandParent);
-#endif
                 InsertionBalance(node, ref parent!, grandParent!, greatGrandParent!);
             }
-#if PAL
             else
             {
                 SortedSetOwnershipProof.CloseRead(linked, Perm.Full);
                 SortedSetEditProof.EndOwner(root, ownershipState, linked);
-                ownershipState = SortedSetEdit.ReplaceState(ownershipState, linked);
+                Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, linked));
             }
             Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
-            Pal.Join(SortedSetInsert.Ok(comparer, SortedSetInsert.Expected(comparer, k0.Value, item), SortedSetOwnership.Active(ownershipState)));
+            Pal.Join(SortedSetInsert.Ok(comparer, SortedSetInsert.Expected(comparer, k0.Value, item!), SortedSetOwnership.Active(ownershipState)));
             Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) &&
                 version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1) && Pal.KeyIndex(comparer, k0.Value, item) < 0);
-            Ghost<SortedSetLabels<T>> final = SortedSetOwnership.Active(ownershipState);
-            SortedSetInsert.Finish(comparer, k0.Value, item, final.Value);
-            SortedSetInsert.NewRoot(comparer, k0.Value, item, final.Value);
+            Ghost<SortedSetLabels<T>> final = default;
+            Pal.Capture(ref final, SortedSetOwnership.Active(ownershipState));
+            SortedSetInsert.Finish(comparer, k0.Value, item!, final.Value);
+            SortedSetInsert.NewRoot(comparer, k0.Value, item!, final.Value);
             SortedSetOwnershipProof.RootFacts(final);
             SortedSetEditProof.BeginOwner(root, ownershipState);
             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), final);
             SortedSetEditProof.OpenColor(final, root);
-#endif
 
             // The root node is always black.
             root.ColorBlack();
-#if PAL
             SortedSetEditProof.CloseBlack(final, root);
             SortedSetBalance.TopColor(final.Value, root, false);
-            Ghost<SortedSetLabels<T>> complete = SortedSetInsert.Black(final.Value);
+            Ghost<SortedSetLabels<T>> complete = default;
+            Pal.Capture(ref complete, SortedSetInsert.Black(final.Value));
             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(final.Value, root, false), complete);
-            SortedSetInsert.ResultFacts(comparer, k0.Value, item, root, complete.Value);
+            SortedSetInsert.ResultFacts(comparer, k0.Value, item!, root, complete.Value);
             SortedSetEditProof.EndOwner(root, ownershipState, complete);
-            ownershipState = SortedSetEdit.ReplaceState(ownershipState, complete);
+            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, complete));
             Pal.Assert(SortedSetOwnership.Valid(root, ownershipState, comparer, count + 1, version));
-#endif
             ++count;
             return true;
         }
@@ -1004,10 +931,10 @@ namespace System.Collections.Generic
         [Rlimit(10)]
         internal virtual bool DoRemove(T item)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> original = this.SpecLabels;
-            Ghost<Seq<T>> k0 = this.SpecItems;
-#endif
+            Ghost<SortedSetLabels<T>> original = default;
+            Pal.Capture(ref original, this.SpecLabels);
+            Ghost<Seq<T>> k0 = default;
+            Pal.Capture(ref k0, this.SpecItems);
             if (root == null)
             {
                 return false;
@@ -1031,123 +958,101 @@ namespace System.Collections.Generic
             Node? match = null;
             Node? parentOfMatch = null;
             bool foundMatch = false;
-#if PAL
-            SortedSetRemove.Start(comparer, item, original.Value);
-            SortedSetOwnershipState<T> progress = ownershipState;
-#endif
+            SortedSetRemove.Start(comparer, item!, original.Value);
+            SortedSetOwnershipState<T> progress = default;
+            Pal.UpdateGhost(ref progress, ownershipState);
             while (current != null)
             {
-#if PAL
                 Pal.Decreases(SortedSetRemove.Measure(SortedSetOwnership.Active(progress), current));
                 Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                 Pal.Invariant(Pal.Same(SortedSetOwnership.Active(progress), SortedSetOwnership.Active(ownershipState)));
                 Pal.Invariant(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
-                Pal.Invariant(SortedSetRemove.Inv(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState),
+                Pal.Invariant(SortedSetRemove.Inv(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState),
                     current, parent, grandParent, match, parentOfMatch, foundMatch));
-                Ghost<SortedSetLabels<T>> before = SortedSetOwnership.Active(ownershipState);
-                Ghost<SpecInt> m0 = SortedSetRemove.Measure(before.Value, current);
-                SortedSetRemove.AtCur(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                Ghost<SortedSetLabels<T>> before = default;
+                Pal.Capture(ref before, SortedSetOwnership.Active(ownershipState));
+                Ghost<SpecInt> m0 = default;
+                Pal.Capture(ref m0, SortedSetRemove.Measure(before.Value, current));
+                SortedSetRemove.AtCur(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), before);
                 SortedSetFrontierProof.OpenRead(before, current);
                 SortedSetFrontier.Read2Facts(SortedSetEdit.Sub(before.Value, current));
-#endif
                 if (current.Is2Node)
                 {
-#if PAL
                     SortedSetFrontierProof.CloseRead(before, current);
-#endif
                     // Fix up 2-node
                     if (parent == null)
                     {
                         // `current` is the root. Mark it red.
-#if PAL
                         SortedSetEditProof.OpenColor(before, current);
-#endif
                         current.ColorRed();
-#if PAL
                         SortedSetEditProof.CloseRed(before, current);
-                        SortedSetRemove.Root(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
-                        Ghost<SortedSetLabels<T>> redRoot = SortedSetEdit.Recolor(before.Value, current, true);
+                        SortedSetRemove.Root(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                        Ghost<SortedSetLabels<T>> redRoot = default;
+                        Pal.Capture(ref redRoot, SortedSetEdit.Recolor(before.Value, current, true));
                         SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(before.Value, current, true), redRoot);
                         SortedSetEditProof.EndOwner(root, ownershipState, redRoot);
-                        ownershipState = SortedSetEdit.ReplaceState(ownershipState, redRoot);
-#endif
+                        Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, redRoot));
                     }
                     else
                     {
-#if PAL
-                        SortedSetRemove.AtSibling(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                        SortedSetRemove.AtSibling(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
                         SortedSetOwnershipProof.OpenRead(before, parent, Perm.Full);
-#endif
                         Node sibling = parent.GetSibling(current);
-#if PAL
                         SortedSetOwnershipProof.CloseRead(before, Perm.Full);
                         SortedSetOwnershipProof.OpenRead(before, sibling, Perm.Full);
-#endif
                         if (sibling.IsRed)
                         {
-#if PAL
                             SortedSetOwnershipProof.CloseRead(before, Perm.Full);
-                            SortedSetRemove.Lift(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
-                            Ghost<SortedSetLabels<T>> sub = SortedSetEdit.Sub(before.Value, parent);
+                            SortedSetRemove.Lift(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                            Ghost<SortedSetLabels<T>> sub = default;
+                            Pal.Capture(ref sub, SortedSetEdit.Sub(before.Value, parent));
                             SortedSetLift.Layout(sub.Value, sibling);
                             SortedSetOwnershipProof.OpenRead(before, parent, Perm.Full);
-#endif
                             // If parent is a 3-node, flip the orientation of the red link.
                             // We can achieve this by a single rotation.
                             // This case is converted to one of the other cases below.
                             Debug.Assert(parent.IsBlack);
                             if (parent.Right == sibling)
                             {
-#if PAL
                                 SortedSetOwnershipProof.CloseRead(before, Perm.Full);
                                 SortedSetEditProof.Cut(before, parent);
                                 SortedSetEditProof.Change<T>(SortedSetEdit.Sub(before.Value, parent), sub);
                                 SortedSetBalanceProof.OpenLeft(parent, sub);
-#endif
                                 parent.RotateLeft();
-#if PAL
                                 SortedSetBalanceProof.CloseIgnoredLeft(parent, sub);
                                 SortedSetEditProof.Change<T>(SortedSetBalance.Single(sub.Value, true), SortedSetLift.Rotated(sub.Value, sibling));
-#endif
                             }
                             else
                             {
-#if PAL
                                 SortedSetOwnershipProof.CloseRead(before, Perm.Full);
                                 SortedSetEditProof.Cut(before, parent);
                                 SortedSetEditProof.Change<T>(SortedSetEdit.Sub(before.Value, parent), sub);
                                 SortedSetBalanceProof.OpenRight(parent, sub);
-#endif
                                 parent.RotateRight();
-#if PAL
                                 SortedSetBalanceProof.CloseIgnoredRight(parent, sub);
                                 SortedSetEditProof.Change<T>(SortedSetBalance.Single(sub.Value, false), SortedSetLift.Rotated(sub.Value, sibling));
-#endif
                             }
-#if PAL
-                            Ghost<SortedSetLabels<T>> rotated = SortedSetLift.Rotated(sub.Value, sibling);
+                            Ghost<SortedSetLabels<T>> rotated = default;
+                            Pal.Capture(ref rotated, SortedSetLift.Rotated(sub.Value, sibling));
                             SortedSetEditProof.Change<T>(SortedSetLift.Rotated(sub.Value, sibling), rotated);
                             SortedSetEditProof.Facts(rotated);
                             SortedSetEditProof.OpenColor(rotated, parent);
-#endif
                             parent.ColorRed();
-#if PAL
                             SortedSetEditProof.CloseRed(rotated, parent);
-                            Ghost<SortedSetLabels<T>> redParent = SortedSetEdit.Recolor(rotated.Value, parent, true);
+                            Ghost<SortedSetLabels<T>> redParent = default;
+                            Pal.Capture(ref redParent, SortedSetEdit.Recolor(rotated.Value, parent, true));
                             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(rotated.Value, parent, true), redParent);
                             SortedSetEditProof.Facts(redParent);
                             SortedSetOwnershipProof.RootFacts(redParent);
                             SortedSetEditProof.OpenColor(redParent, sibling);
-#endif
                             sibling.ColorBlack(); // The red parent can't have black children.
-#if PAL
                             SortedSetEditProof.CloseBlack(redParent, sibling);
                             SortedSetBalance.TopColor(redParent.Value, sibling, false);
-                            Ghost<SortedSetLabels<T>> replacement = SortedSetLift.Lifted(sub.Value, sibling);
+                            Ghost<SortedSetLabels<T>> replacement = default;
+                            Pal.Capture(ref replacement, SortedSetLift.Lifted(sub.Value, sibling));
                             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(redParent.Value, sibling, false), replacement);
-#endif
                             // `sibling` becomes the child of `grandParent` or `root` after rotation. Update the link from that node.
                             ReplaceChildOrRoot(grandParent, parent, sibling);
                             // `sibling` will become the grandparent of `current`.
@@ -1157,98 +1062,89 @@ namespace System.Collections.Generic
                                 parentOfMatch = sibling;
                             }
 
-#if PAL
-                            Ghost<SortedSetLabels<T>> lifted = SortedSetOwnership.Active(ownershipState);
-                            SortedSetRemove.AtMid(comparer, k0.Value, item, lifted.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
+                            Ghost<SortedSetLabels<T>> lifted = default;
+                            Pal.Capture(ref lifted, SortedSetOwnership.Active(ownershipState));
+                            SortedSetRemove.AtMid(comparer, k0.Value, item!, lifted.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
                             SortedSetEditProof.BeginOwner(root, ownershipState);
                             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), lifted);
                             SortedSetOwnershipProof.OpenRead(lifted, parent, Perm.Full);
-#endif
                             sibling = parent.GetSibling(current);
-#if PAL
                             SortedSetOwnershipProof.CloseRead(lifted, Perm.Full);
                             SortedSetEditProof.EndOwner(root, ownershipState, lifted);
-                            ownershipState = SortedSetEdit.ReplaceState(ownershipState, lifted);
-#endif
+                            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, lifted));
                         }
-#if PAL
                         else
                         {
                             SortedSetOwnershipProof.CloseRead(before, Perm.Full);
-                            SortedSetRemove.Direct(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                            SortedSetRemove.Direct(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
                             SortedSetEditProof.EndOwner(root, ownershipState, before);
-                            ownershipState = SortedSetEdit.ReplaceState(ownershipState, before);
+                            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, before));
                         }
                         Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                         Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
-                        Pal.Join(SortedSetRemove.Mid(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState), current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value));
+                        Pal.Join(SortedSetRemove.Mid(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState), current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value));
                         Pal.Join(current != null && parent != null && sibling != null);
                         Pal.Join(sibling == SortedSetRemove.Sibling(SortedSetOwnership.Active(ownershipState), parent, current));
-                        Ghost<SortedSetLabels<T>> middle = SortedSetOwnership.Active(ownershipState);
-                        SortedSetRemove.AtMid(comparer, k0.Value, item, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
+                        Ghost<SortedSetLabels<T>> middle = default;
+                        Pal.Capture(ref middle, SortedSetOwnership.Active(ownershipState));
+                        SortedSetRemove.AtMid(comparer, k0.Value, item!, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
                         SortedSetEditProof.BeginOwner(root, ownershipState);
                         SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), middle);
                         SortedSetFrontierProof.OpenRead(middle, sibling);
                         SortedSetFrontier.Read2Facts(SortedSetEdit.Sub(middle.Value, sibling));
-#endif
                         Debug.Assert(Node.IsNonNullBlack(sibling));
-                        if (sibling.Is2Node)
+                        if (sibling!.Is2Node)
                         {
-#if PAL
                             SortedSetFrontierProof.CloseRead(middle, sibling);
                             SortedSetFrontierProof.OpenMerge(middle, parent);
-#endif
-                            parent.Merge2Nodes();
-#if PAL
+                            parent!.Merge2Nodes();
                             SortedSetFrontierProof.CloseMerge(middle, parent);
-                            SortedSetRemove.Merge(comparer, k0.Value, item, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
-                            Ghost<SortedSetLabels<T>> merged = SortedSetFrontier.Merged(middle.Value, parent);
+                            SortedSetRemove.Merge(comparer, k0.Value, item!, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
+                            Ghost<SortedSetLabels<T>> merged = default;
+                            Pal.Capture(ref merged, SortedSetFrontier.Merged(middle.Value, parent));
                             SortedSetEditProof.Change<T>(SortedSetFrontier.Merged(middle.Value, parent), merged);
                             SortedSetEditProof.EndOwner(root, ownershipState, merged);
-                            ownershipState = SortedSetEdit.ReplaceState(ownershipState, merged);
-#endif
+                            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, merged));
                         }
                         else
                         {
                             // `current` is a 2-node and `sibling` is either a 3-node or a 4-node.
                             // We can change the color of `current` to red by some rotation.
-#if PAL
                             SortedSetFrontierProof.CloseRead(middle, sibling);
-                            SortedSetRemove.Borrow(comparer, k0.Value, item, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
+                            SortedSetRemove.Borrow(comparer, k0.Value, item!, middle.Value, current, parent, grandParent, match, parentOfMatch, foundMatch, m0.Value);
                             SortedSetRemove.Selection(middle.Value, parent, current);
-                            Ghost<SortedSetLabels<T>> sub = SortedSetEdit.Sub(middle.Value, parent);
-                            Ghost<TreeRotation> rotation = SortedSetRemove.Rotation(middle.Value, parent, current);
-                            Ghost<bool> direction = SortedSetLift.Right(sub.Value, sibling);
-                            SortedSetEditProof.Cut(middle, parent);
+                            Ghost<SortedSetLabels<T>> sub = default;
+                            Pal.Capture(ref sub, SortedSetEdit.Sub(middle.Value, parent));
+                            Ghost<TreeRotation> rotation = default;
+                            Pal.Capture(ref rotation, SortedSetRemove.Rotation(middle.Value, parent, current));
+                            Ghost<bool> direction = default;
+                            Pal.Capture(ref direction, SortedSetLift.Right(sub.Value, sibling));
+                            SortedSetEditProof.Cut(middle, parent!);
                             SortedSetEditProof.Change<T>(SortedSetEdit.Sub(middle.Value, parent), sub);
                             SortedSetEditProof.Facts(sub);
                             SortedSetDispatchProof.OpenSelector(parent, sibling, sub, direction);
-#endif
-                            Node newGrandParent = parent.Rotate(parent.GetRotation(current, sibling))!;
+                            Node newGrandParent = parent!.Rotate(parent.GetRotation(current!, sibling))!;
                             newGrandParent.Color = parent.Color;
-#if PAL
                             SortedSetDispatchProof.CloseRed(parent, newGrandParent, sub, rotation.Value);
-                            Ghost<SortedSetLabels<T>> colored = SortedSetDispatch.Colored(sub.Value, rotation.Value);
+                            Ghost<SortedSetLabels<T>> colored = default;
+                            Pal.Capture(ref colored, SortedSetDispatch.Colored(sub.Value, rotation.Value));
                             SortedSetEditProof.Change<T>(SortedSetDispatch.Colored(sub.Value, rotation.Value), colored);
                             SortedSetEditProof.Facts(colored);
                             SortedSetEditProof.OpenColor(colored, parent);
-#endif
                             parent.ColorBlack();
-#if PAL
                             SortedSetEditProof.CloseBlack(colored, parent);
                             SortedSetBalance.TopColor(colored.Value, parent, false);
-                            Ghost<SortedSetLabels<T>> blackened = SortedSetDispatch.Blackened(sub.Value, rotation.Value);
+                            Ghost<SortedSetLabels<T>> blackened = default;
+                            Pal.Capture(ref blackened, SortedSetDispatch.Blackened(sub.Value, rotation.Value));
                             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(colored.Value, parent, false), blackened);
                             SortedSetEditProof.Facts(blackened);
                             SortedSetEditProof.OpenColor(blackened, current);
-#endif
-                            current.ColorRed();
-#if PAL
+                            current!.ColorRed();
                             SortedSetEditProof.CloseRed(blackened, current);
                             SortedSetBalance.TopColor(blackened.Value, current, true);
-                            Ghost<SortedSetLabels<T>> replacement = SortedSetDispatch.Borrowed(sub.Value, current, rotation.Value);
+                            Ghost<SortedSetLabels<T>> replacement = default;
+                            Pal.Capture(ref replacement, SortedSetDispatch.Borrowed(sub.Value, current, rotation.Value));
                             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(blackened.Value, current, true), replacement);
-#endif
                             ReplaceChildOrRoot(grandParent, parent, newGrandParent);
                             if (parent == match)
                             {
@@ -1257,30 +1153,27 @@ namespace System.Collections.Generic
                         }
                     }
                 }
-#if PAL
                 else
                 {
                     SortedSetFrontierProof.CloseRead(before, current);
-                    SortedSetRemove.Not2(comparer, k0.Value, item, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
+                    SortedSetRemove.Not2(comparer, k0.Value, item!, before.Value, current, parent, grandParent, match, parentOfMatch, foundMatch);
                     SortedSetEditProof.EndOwner(root, ownershipState, before);
-                    ownershipState = SortedSetEdit.ReplaceState(ownershipState, before);
+                    Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, before));
                 }
                 Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                 Pal.Join(comparer == Pal.Old(this.SpecComparer) && count == Pal.Old(this.SpecCount) && version == SpecWrap.Int32(Pal.Old(this.SpecVersion) + 1));
                 Pal.Join(current != null);
-                Pal.Join(SortedSetRemove.Fixed(comparer, k0.Value, item, SortedSetOwnership.Active(ownershipState), current, parent, match, parentOfMatch, foundMatch, m0.Value));
-                Ghost<SortedSetLabels<T>> fixedTree = SortedSetOwnership.Active(ownershipState);
-                SortedSetRemove.AtFixed(comparer, k0.Value, item, fixedTree.Value, current, parent, match, parentOfMatch, foundMatch, m0.Value);
+                Pal.Join(SortedSetRemove.Fixed(comparer, k0.Value, item!, SortedSetOwnership.Active(ownershipState), current, parent, match, parentOfMatch, foundMatch, m0.Value));
+                Ghost<SortedSetLabels<T>> fixedTree = default;
+                Pal.Capture(ref fixedTree, SortedSetOwnership.Active(ownershipState));
+                SortedSetRemove.AtFixed(comparer, k0.Value, item!, fixedTree.Value, current, parent, match, parentOfMatch, foundMatch, m0.Value);
                 SortedSetEditProof.BeginOwner(root, ownershipState);
                 SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), fixedTree);
                 SortedSetOwnershipProof.OpenRead(fixedTree, current, Perm.Full);
-#endif
                 // We don't need to compare after we find the match.
-                int order = foundMatch ? -1 : comparer.Compare(item, current.Item);
-#if PAL
+                int order = foundMatch ? -1 : comparer.Compare(item, current!.Item);
                 SortedSetOwnershipProof.CloseRead(fixedTree, Perm.Full);
-                SortedSetRemove.Advance(comparer, k0.Value, item, fixedTree.Value, current, parent, match, parentOfMatch, foundMatch, m0.Value, order);
-#endif
+                SortedSetRemove.Advance(comparer, k0.Value, item!, fixedTree.Value, current, parent, match, parentOfMatch, foundMatch, m0.Value, order);
                 if (order == 0)
                 {
                     // Save the matching node.
@@ -1292,59 +1185,49 @@ namespace System.Collections.Generic
                 grandParent = parent;
                 parent = current;
                 // If we found a match, continue the search in the right sub-tree.
-#if PAL
                 SortedSetOwnershipProof.OpenRead(fixedTree, current, Perm.Full);
-#endif
-                current = order < 0 ? current.Left : current.Right;
-#if PAL
+                current = order < 0 ? current!.Left : current!.Right;
                 SortedSetOwnershipProof.CloseRead(fixedTree, Perm.Full);
                 SortedSetEditProof.EndOwner(root, ownershipState, fixedTree);
-                ownershipState = SortedSetEdit.ReplaceState(ownershipState, fixedTree);
-                progress = ownershipState;
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, fixedTree));
+                Pal.UpdateGhost(ref progress, ownershipState);
             }
-#if PAL
-            Ghost<SortedSetLabels<T>> searched = SortedSetOwnership.Active(ownershipState);
-            SortedSetRemove.End(comparer, k0.Value, item, searched.Value, parent, grandParent, match, parentOfMatch, foundMatch);
-            SortedSetRemove.Cardinality(comparer, k0.Value, item);
-            Ghost<Seq<T>> k1 = SpecTopDownRemove.Removed(comparer, k0.Value, item);
-#endif
+            Ghost<SortedSetLabels<T>> searched = default;
+            Pal.Capture(ref searched, SortedSetOwnership.Active(ownershipState));
+            SortedSetRemove.End(comparer, k0.Value, item!, searched.Value, parent, grandParent, match, parentOfMatch, foundMatch);
+            SortedSetRemove.Cardinality(comparer, k0.Value, item!);
+            Ghost<Seq<T>> k1 = default;
+            Pal.Capture(ref k1, SpecTopDownRemove.Removed(comparer, k0.Value, item!));
             // Move successor to the matching node position and replace links.
             if (match != null)
             {
                 ReplaceNode(match, parentOfMatch!, parent!, grandParent!);
                 --count;
             }
-#if PAL
-            Ghost<SortedSetLabels<T>> finalTree = SortedSetOwnership.Active(ownershipState);
-            SortedSetRemove.Finish(comparer, k0.Value, item, finalTree.Value);
+            Ghost<SortedSetLabels<T>> finalTree = default;
+            Pal.Capture(ref finalTree, SortedSetOwnership.Active(ownershipState));
+            SortedSetRemove.Finish(comparer, k0.Value, item!, finalTree.Value);
             SortedSetEditProof.BeginOwner(root, ownershipState);
             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), finalTree);
             SortedSetOwnershipProof.RootFacts(finalTree);
-#endif
             Node? rootForColor = root;
             if (rootForColor != null)
             {
-#if PAL
                 SortedSetEditProof.OpenColor(finalTree, rootForColor);
-#endif
                 rootForColor.ColorBlack();
-#if PAL
                 SortedSetEditProof.CloseBlack(finalTree, rootForColor);
                 SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(finalTree.Value, rootForColor, false),
                     SortedSetLocal.Color(finalTree.Value, false));
-#endif
             }
-#if PAL
             else
             {
                 SortedSetEditProof.Change<T>(finalTree, SortedSetLocal.Color(finalTree.Value, false));
             }
-            Ghost<SortedSetLabels<T>> done = SortedSetLocal.Color(finalTree.Value, false);
+            Ghost<SortedSetLabels<T>> done = default;
+            Pal.Capture(ref done, SortedSetLocal.Color(finalTree.Value, false));
             SortedSetEditProof.Change<T>(SortedSetLocal.Color(finalTree.Value, false), done);
             SortedSetEditProof.EndOwner(root, ownershipState, done);
-            ownershipState = SortedSetEdit.ReplaceState(ownershipState, done);
-#endif
+            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, done));
             return foundMatch;
         }
 
@@ -1352,10 +1235,8 @@ namespace System.Collections.Generic
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         public virtual void Clear()
         {
-#if PAL
             SortedSetOwnershipProof.RetainClear(root, ownershipState);
-            ownershipState = SortedSetOwnership.Cleared(ownershipState);
-#endif
+            Pal.UpdateGhost(ref ownershipState, SortedSetOwnership.Cleared(ownershipState));
             root = null;
             count = 0;
             ++version;
@@ -1405,8 +1286,10 @@ namespace System.Collections.Generic
             }
 
             count += index; // Make `count` the upper bound.
-            Ghost<SpecInt> i0 = (SpecInt)index;
-            Ghost<Seq<T>> a0 = Pal.Contents(array);
+            Ghost<SpecInt> i0 = default;
+            Pal.Capture(ref i0, (SpecInt)index);
+            Ghost<Seq<T>> a0 = default;
+            Pal.Capture(ref a0, Pal.Contents(array));
 
             InOrderTreeWalk(node =>
             {
@@ -1504,57 +1387,46 @@ namespace System.Collections.Generic
             Debug.Assert(parent != null);
             Debug.Assert(grandParent != null);
 
-#if PAL
-            Ghost<SortedSetLabels<T>> before = SortedSetOwnership.Active(ownershipState);
-            Ghost<Node> parent0 = parent;
+            Ghost<SortedSetLabels<T>> before = default;
+            Pal.Capture(ref before, SortedSetOwnership.Active(ownershipState));
+            Ghost<Node> parent0 = default;
+            Pal.Capture(ref parent0, parent);
             SortedSetEditProof.BeginOwner(root, ownershipState);
             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), before);
             SortedSetBalance.Layout(before.Value, current, parent, grandParent, greatGrandParent);
             SortedSetOwnershipProof.OpenRead(before, grandParent, Perm.Full);
-#endif
             bool parentIsOnRight = grandParent.Right == parent;
-#if PAL
             SortedSetOwnershipProof.CloseRead(before, Perm.Full);
             SortedSetOwnershipProof.OpenRead(before, parent, Perm.Full);
-#endif
             bool currentIsOnRight = parent.Right == current;
-#if PAL
             SortedSetOwnershipProof.CloseRead(before, Perm.Full);
-            Ghost<SortedSetLabels<T>> sub = SortedSetEdit.Sub(before.Value, grandParent);
-            Ghost<SortedSetLabels<T>> rotated = SortedSetBalance.Rotated(currentIsOnRight, parentIsOnRight, sub.Value);
+            Ghost<SortedSetLabels<T>> sub = default;
+            Pal.Capture(ref sub, SortedSetEdit.Sub(before.Value, grandParent));
+            Ghost<SortedSetLabels<T>> rotated = default;
+            Pal.Capture(ref rotated, SortedSetBalance.Rotated(currentIsOnRight, parentIsOnRight, sub.Value));
             SortedSetEditProof.Cut(before, grandParent);
             SortedSetEditProof.Change<T>(SortedSetEdit.Sub(before.Value, grandParent), sub);
-#endif
 
             Node newChildOfGreatGrandParent;
             if (parentIsOnRight == currentIsOnRight)
             {
                 // Same orientation, single rotation
-#if PAL
                 SortedSetBalanceProof.OpenSingle(grandParent, sub, currentIsOnRight);
-#endif
                 newChildOfGreatGrandParent = currentIsOnRight ? grandParent.RotateLeft() : grandParent.RotateRight();
-#if PAL
                 SortedSetBalanceProof.CloseSingle(grandParent, newChildOfGreatGrandParent, sub, currentIsOnRight);
                 SortedSetEditProof.Change<T>(SortedSetBalance.Single(sub.Value, currentIsOnRight), rotated);
-#endif
             }
             else
             {
                 // Different orientation, double rotation
-#if PAL
                 SortedSetBalanceProof.OpenDouble(grandParent, sub, currentIsOnRight);
-#endif
                 newChildOfGreatGrandParent = currentIsOnRight ? grandParent.RotateLeftRight() : grandParent.RotateRightLeft();
-#if PAL
                 SortedSetBalanceProof.CloseDouble(grandParent, newChildOfGreatGrandParent, sub, currentIsOnRight);
                 SortedSetEditProof.Change<T>(SortedSetBalance.Double(sub.Value, currentIsOnRight), rotated);
-#endif
                 // Current node now becomes the child of `greatGrandParent`
                 parent = greatGrandParent!;
             }
 
-#if PAL
             Pal.Join(SortedSetOwnership.Owns(rotated.Value, Perm.Full));
             Pal.Join(SortedSetEdit.Pending(before.Value, grandParent));
             Pal.Join(SortedSetEdit.Retained(ownershipState));
@@ -1563,26 +1435,23 @@ namespace System.Collections.Generic
             SortedSetEditProof.Facts(rotated);
             SortedSetBalance.RotatedFacts(sub.Value, currentIsOnRight, parentIsOnRight);
             SortedSetBalance.TopColor(rotated.Value, grandParent, true);
-            Ghost<SortedSetLabels<T>> redModel = SortedSetEdit.Recolor(rotated.Value, grandParent, true);
+            Ghost<SortedSetLabels<T>> redModel = default;
+            Pal.Capture(ref redModel, SortedSetEdit.Recolor(rotated.Value, grandParent, true));
             SortedSetEditProof.OpenColor(rotated, grandParent);
-#endif
 
             // `grandParent` will become a child of either `parent` of `current`.
             grandParent.ColorRed();
-#if PAL
             SortedSetEditProof.CloseRed(rotated, grandParent);
             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(rotated.Value, grandParent, true), redModel);
             SortedSetEditProof.Facts(redModel);
             SortedSetOwnershipProof.RootFacts(redModel);
             SortedSetEditProof.OpenColor(redModel, newChildOfGreatGrandParent);
-#endif
             newChildOfGreatGrandParent.ColorBlack();
-#if PAL
             SortedSetEditProof.CloseBlack(redModel, newChildOfGreatGrandParent);
             SortedSetBalance.Result(sub.Value, currentIsOnRight, parentIsOnRight);
-            Ghost<SortedSetLabels<T>> replacement = SortedSetBalance.SubBalanced(currentIsOnRight, parentIsOnRight, sub.Value);
+            Ghost<SortedSetLabels<T>> replacement = default;
+            Pal.Capture(ref replacement, SortedSetBalance.SubBalanced(currentIsOnRight, parentIsOnRight, sub.Value));
             SortedSetEditProof.Change<T>(SortedSetEdit.Recolor(redModel.Value, newChildOfGreatGrandParent, false), replacement);
-#endif
             ReplaceChildOrRoot(greatGrandParent, grandParent, newChildOfGreatGrandParent);
         }
 
@@ -1603,35 +1472,30 @@ namespace System.Collections.Generic
         [Ensures("SortedSetOwnership.Owner(@this.root, @this.ownershipState, Perm.Full)")]
         [Ensures("Pal.Same(SortedSetOwnership.Active(@this.ownershipState), SortedSetEdit.Replace(labels, child, replacement))")]
         [Ensures("@this.comparer == Pal.Old(@this.comparer) && @this.count == Pal.Old(@this.count) && @this.version == Pal.Old(@this.version)")]
-        private void ReplaceChildOrRoot(Node? parent, Node child, [System.Diagnostics.CodeAnalysis.AllowNull] Node newChild
-#if PAL
-            , Ghost<SortedSetLabels<T>> labels = default, Ghost<SortedSetLabels<T>> replacement = default
-#endif
-            )
+        [GhostArg("SortedSetLabels<T> labels")]
+        [GhostArg("SortedSetLabels<T> replacement")]
+        private void ReplaceChildOrRoot(Node? parent, Node child, [System.Diagnostics.CodeAnalysis.AllowNull] Node newChild)
         {
+            Ghost<SortedSetLabels<T>> original = default;
+            Pal.Capture(ref original, Pal.Ghost<SortedSetLabels<T>>("labels"));
+            Ghost<SortedSetLabels<T>> subtree = default;
+            Pal.Capture(ref subtree, Pal.Ghost<SortedSetLabels<T>>("replacement"));
             if (parent != null)
             {
-#if PAL
-                SortedSetEditProof.OpenParent(labels, child, parent);
-#endif
+                SortedSetEditProof.OpenParent(original, child, parent);
                 parent.ReplaceChild(child, newChild);
-#if PAL
-                SortedSetEditProof.CloseParent(labels, child, parent, replacement);
-#endif
+                SortedSetEditProof.CloseParent(original, child, parent, subtree);
             }
             else
             {
                 root = newChild;
-#if PAL
-                SortedSetEditProof.CloseRoot(labels, child, replacement);
-#endif
+                SortedSetEditProof.CloseRoot(original, child, subtree);
             }
-#if PAL
-            Ghost<SortedSetLabels<T>> updated = SortedSetEdit.Replace(labels.Value, child, replacement.Value);
-            SortedSetEditProof.Change<T>(SortedSetEdit.Replace(labels.Value, child, replacement.Value), updated);
+            Ghost<SortedSetLabels<T>> updated = default;
+            Pal.Capture(ref updated, SortedSetEdit.Replace(original.Value, child, subtree.Value));
+            SortedSetEditProof.Change<T>(SortedSetEdit.Replace(original.Value, child, subtree.Value), updated);
             SortedSetEditProof.EndOwner(root, ownershipState, updated);
-            ownershipState = SortedSetEdit.ReplaceState(ownershipState, updated);
-#endif
+            Pal.UpdateGhost(ref ownershipState, SortedSetEdit.ReplaceState(ownershipState, updated));
         }
 
         /// <summary>
@@ -1650,27 +1514,26 @@ namespace System.Collections.Generic
         {
             Debug.Assert(match != null);
 
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = SortedSetOwnership.Active(ownershipState);
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, SortedSetOwnership.Active(ownershipState));
             SortedSetEditProof.BeginOwner(root, ownershipState);
             SortedSetEditProof.Change<T>(SortedSetOwnership.Active(ownershipState), labels);
             SortedSetEditProof.Cut(labels, match);
-            Ghost<SortedSetLabels<T>> removed = SortedSetEdit.Sub(labels.Value, match);
+            Ghost<SortedSetLabels<T>> removed = default;
+            Pal.Capture(ref removed, SortedSetEdit.Sub(labels.Value, match));
             SortedSetEditProof.Change<T>(SortedSetEdit.Sub(labels.Value, match), removed);
             SortedSetEditProof.Facts(removed);
             SortedSetOwnershipProof.RootFacts(removed);
             SortedSetSuccessorProof.Layout(successor, parentOfSuccessor, removed);
-            Ghost<SortedSetNodeSnapshot<T>> originalCell = SortedSetSuccessor.Snapshot(removed.Value);
+            Ghost<SortedSetNodeSnapshot<T>> originalCell = default;
+            Pal.Capture(ref originalCell, SortedSetSuccessor.Snapshot(removed.Value));
             SortedSetLocalProof.Open(match, removed);
-#endif
             if (successor == match)
             {
                 // This node has no successor. This can only happen if the right child of the match is null.
                 Debug.Assert(match.Right == null);
                 successor = match.Left!;
-#if PAL
                 SortedSetSuccessorProof.NoRight(removed);
-#endif
             }
             else
             {
@@ -1678,9 +1541,10 @@ namespace System.Collections.Generic
                 Debug.Assert(successor.Left == null);
                 Debug.Assert((successor.Right == null && successor.IsRed) || (successor.Right!.IsRed && successor.IsBlack));
 
-#if PAL
-                Ghost<SortedSetLabels<T>> rightModel = SortedSetLocal.Right(removed.Value);
-                Ghost<SortedSetLabels<T>> minimum = SortedSetEdit.Sub(rightModel.Value, successor);
+                Ghost<SortedSetLabels<T>> rightModel = default;
+                Pal.Capture(ref rightModel, SortedSetLocal.Right(removed.Value));
+                Ghost<SortedSetLabels<T>> minimum = default;
+                Pal.Capture(ref minimum, SortedSetEdit.Sub(rightModel.Value, successor));
                 SortedSetEditProof.Change<T>(SortedSetLocal.Right(removed.Value), rightModel);
                 SortedSetEditProof.Cut(rightModel, successor);
                 SortedSetEditProof.Change<T>(SortedSetEdit.Sub(rightModel.Value, successor), minimum);
@@ -1688,41 +1552,29 @@ namespace System.Collections.Generic
                 SortedSetSuccessorProof.Empty<T>(SortedSetLocal.Left(minimum.Value));
                 SortedSetEditProof.Facts<T>(SortedSetLocal.Right(minimum.Value));
                 SortedSetOwnershipProof.RootFacts<T>(SortedSetLocal.Right(minimum.Value));
-#endif
                 Node? rightForColor = successor.Right;
                 if (rightForColor != null)
                 {
-#if PAL
                     SortedSetLocalProof.Open<T>(rightForColor, SortedSetLocal.Right(minimum.Value));
-#endif
                     rightForColor.ColorBlack();
-#if PAL
                     SortedSetLocalProof.BlackLeaves<T>(SortedSetLocal.Right(minimum.Value));
                     SortedSetLocalProof.Close<T>(rightForColor, SortedSetLocal.Color(SortedSetLocal.Right(minimum.Value), false));
-#endif
                 }
-#if PAL
                 else
                 {
                     SortedSetEditProof.Change<T>(SortedSetLocal.Right(minimum.Value),
                         SortedSetLocal.Color(SortedSetLocal.Right(minimum.Value), false));
                 }
-#endif
 
                 if (parentOfSuccessor != match)
                 {
                     // Detach the successor from its parent and set its right child.
-#if PAL
                     SortedSetEditProof.OpenParent(rightModel, successor, parentOfSuccessor);
-#endif
                     parentOfSuccessor.Left = successor.Right;
-#if PAL
                     SortedSetEditProof.CloseParent<T>(rightModel, successor, parentOfSuccessor,
                         SortedSetLocal.Color(SortedSetLocal.Right(minimum.Value), false));
-#endif
                     successor.Right = match.Right;
                 }
-#if PAL
                 else
                 {
                     SortedSetEditProof.CloseRoot<T>(rightModel, successor,
@@ -1731,46 +1583,34 @@ namespace System.Collections.Generic
                 SortedSetEditProof.Change<T>(
                     SortedSetEdit.Replace(rightModel.Value, successor, SortedSetLocal.Color(SortedSetLocal.Right(minimum.Value), false)),
                     SortedSetSuccessor.Remaining(removed.Value));
-#endif
                 successor.Left = match.Left;
-#if PAL
                 SortedSetSuccessorProof.Leaves(removed);
                 SortedSetLocalProof.Close<T>(successor, SortedSetSuccessor.PreColor(removed.Value));
-#endif
             }
-#if PAL
             Pal.Join(SortedSetOwnership.Owns(SortedSetSuccessor.PreColor(removed.Value), Perm.Full));
             Pal.Join(SortedSetSuccessor.Cell(match, removed.Value));
             Pal.Join(SortedSetEdit.Pending(labels.Value, match));
             Pal.Join(SortedSetEdit.Retained(ownershipState));
             Pal.Join(successor == SortedSetOwnership.Top(SortedSetSuccessor.PreColor(removed.Value)));
-#endif
             if (successor != null)
             {
-#if PAL
                 SortedSetLocalProof.Open<T>(successor, SortedSetSuccessor.PreColor(removed.Value));
-#endif
                 successor.Color = match.Color;
-#if PAL
                 SortedSetLocalProof.ColorLeaves<T>(SortedSetSuccessor.PreColor(removed.Value), SortedSetLocal.Red(removed.Value));
                 SortedSetLocalProof.Close<T>(successor, SortedSetSuccessor.Replacement(removed.Value));
-#endif
             }
-#if PAL
             else
             {
                 SortedSetEditProof.Change<T>(SortedSetSuccessor.PreColor(removed.Value),
                     SortedSetSuccessor.Replacement(removed.Value));
             }
-            Ghost<SortedSetLabels<T>> replacement = SortedSetSuccessor.Replacement(removed.Value);
+            Ghost<SortedSetLabels<T>> replacement = default;
+            Pal.Capture(ref replacement, SortedSetSuccessor.Replacement(removed.Value));
             SortedSetEditProof.Change<T>(SortedSetSuccessor.Replacement(removed.Value), replacement);
             SortedSetSuccessorProof.Canonical(match, removed, originalCell);
-#endif
             ReplaceChildOrRoot(parentOfMatch, match, successor!);
-#if PAL
             SortedSetOwnershipProof.RetainCell(root, match, ownershipState, originalCell);
-            ownershipState = SortedSetOwnership.RetiredCell(ownershipState, match, originalCell);
-#endif
+            Pal.UpdateGhost(ref ownershipState, SortedSetOwnership.RetiredCell(ownershipState, match, originalCell));
         }
 
         [Ensures("(Result != null) == (Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0)")]
@@ -1785,50 +1625,42 @@ namespace System.Collections.Generic
         [Frac("p")]
         internal virtual Node? FindNode(T item)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = this is TreeSubSet view ? view.ReadLabels : this.SpecLabels;
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this is TreeSubSet view ? view.ReadLabels : this.SpecLabels);
             SortedSetOwnershipProof.RootFacts(labels);
-            Ghost<SpecTree<(T, bool)>> searched = SortedSetOwnership.Lookup(labels.Value, root);
+            Ghost<SpecTree<(T, bool)>> searched = default;
+            Pal.Capture(ref searched, SortedSetOwnership.Lookup(labels.Value, root));
             if (this is TreeSubSet)
                 SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
             else
                 SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
-#endif
             Node? current = root;
             while (current != null)
             {
-#if PAL
                 Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                 Pal.Invariant(SortedSetOwnership.Owns(labels.Value, Pal.Permission()));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(),
-                              SpecSearchTree.Contains(comparer, SortedSetOwnership.Lookup(labels.Value, current), item) ==
-                              SpecSearchTree.Contains(comparer, searched.Value, item) &&
+                              SpecSearchTree.Contains(comparer, SortedSetOwnership.Lookup(labels.Value, current), item!) ==
+                              SpecSearchTree.Contains(comparer, searched.Value, item!) &&
                               (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
-                              Pal.Same(SpecSearchTree.Find(comparer, SortedSetOwnership.Lookup(labels.Value, current), item, item),
-                                       SpecSearchTree.Find(comparer, searched.Value, item, item))));
+                              Pal.Same(SpecSearchTree.Find(comparer, SortedSetOwnership.Lookup(labels.Value, current), item!, item!),
+                                       SpecSearchTree.Find(comparer, searched.Value, item!, item!))));
                 Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.ReturnValue<Node?>() != null &&
-                              SpecSearchTree.Contains(comparer, searched.Value, item) &&
+                              SpecSearchTree.Contains(comparer, searched.Value, item!) &&
                               SortedSetOwnership.Member(labels.Value, Pal.ReturnValue<Node?>()) &&
-                              Pal.Same(SpecSearchTree.RootKey(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), item),
-                                       SpecSearchTree.Find(comparer, searched.Value, item, item))));
+                              Pal.Same(SpecSearchTree.RootKey(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), item!),
+                                       SpecSearchTree.Find(comparer, searched.Value, item!, item!))));
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
-                int order = comparer.Compare(item, current.Item);
-#if PAL
+                int order = comparer.Compare(item, current!.Item);
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                 if (order == 0)
                 {
                     return current;
                 }
 
-#if PAL
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
                 current = order < 0 ? current.Left : current.Right;
-#if PAL
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
             }
 
             return null;
@@ -1863,47 +1695,39 @@ namespace System.Collections.Generic
         [Frac("p")]
         internal int InternalIndexOf(T item)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = this is TreeSubSet view ? view.ReadLabels : this.SpecLabels;
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this is TreeSubSet view ? view.ReadLabels : this.SpecLabels);
             SortedSetOwnershipProof.RootFacts(labels);
-            Ghost<SpecTree<(T, bool)>> searched = SortedSetOwnership.Lookup(labels.Value, root);
+            Ghost<SpecTree<(T, bool)>> searched = default;
+            Pal.Capture(ref searched, SortedSetOwnership.Lookup(labels.Value, root));
             if (this is TreeSubSet)
                 SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
             else
                 SortedSetOwnershipProof.ReadOwner(root, ownershipState, labels, Pal.Permission());
-#endif
             Node? current = root;
             int count = 0;
             while (current != null)
             {
-#if PAL
                 Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                 Pal.Invariant(SortedSetOwnership.Owns(labels.Value, Pal.Permission()));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(), (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
                               SpecSearchTree.IndexRoom(count, SortedSetOwnership.Lookup(labels.Value, current), searched.Value.Height) &&
-                              SpecSearchTree.HeapIndex(comparer, SortedSetOwnership.Lookup(labels.Value, current), item, count) ==
-                              SpecSearchTree.HeapIndex(comparer, searched.Value, item, 0)));
+                              SpecSearchTree.HeapIndex(comparer, SortedSetOwnership.Lookup(labels.Value, current), item!, count) ==
+                              SpecSearchTree.HeapIndex(comparer, searched.Value, item!, 0)));
                 Pal.Invariant(Pal.Implies(Pal.Returned(),
-                              Pal.ReturnValue<int>() == SpecSearchTree.HeapIndex(comparer, searched.Value, item, 0)));
+                              Pal.ReturnValue<int>() == SpecSearchTree.HeapIndex(comparer, searched.Value, item!, 0)));
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
                 SortedSetOwnershipProof.IndexBounds<T>(count, SortedSetOwnership.Lookup(labels.Value, current), searched.Value.Height);
-#endif
-                int order = comparer.Compare(item, current.Item);
-#if PAL
+                int order = comparer.Compare(item, current!.Item);
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                 if (order == 0)
                 {
                     return count;
                 }
 
-#if PAL
                 SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
-#endif
                 current = order < 0 ? current.Left : current.Right;
-#if PAL
                 SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
-#endif
                 count = order < 0 ? (2 * count + 1) : (2 * count + 2);
             }
 
@@ -1927,88 +1751,77 @@ namespace System.Collections.Generic
         [Fuel(4, 2)]
         internal Node? FindRange(T? from, T? to, bool lowerBoundActive, bool upperBoundActive, out int level)
         {
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = SortedSetOwnership.Active(ownershipState);
-            Ghost<SortedSetSnapshot<T>> snapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, SortedSetOwnership.Active(ownershipState));
+            Ghost<SortedSetSnapshot<T>> snapshot = default;
+            Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
             SortedSetOwnershipProof.RootFacts(labels);
-#endif
             Node? current = root;
             level = 0;
-#if PAL
-            SortedSetCount.RangeDepthLeSize(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive);
-#endif
+            SortedSetCount.RangeDepthLeSize<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive);
             while (current != null)
             {
-#if PAL
                 Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                 Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Pal.Permission()));
                 Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(),
-                              0 <= level && level + SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                              SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive)));
+                              0 <= level && level + SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                              SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive)));
                 Pal.Invariant(Pal.Implies(Pal.Returned(),
-                              level == SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive)));
+                              level == SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive)));
                 Pal.Invariant(Pal.Implies(!Pal.Returned(), (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
-                              SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                              SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
-                              SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                              SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive)));
+                              SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                              SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
+                              SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                              SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive)));
                 Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.ReturnValue<Node?>() != null &&
                               SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()) ==
-                              SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
-                              SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
+                              SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
+                              SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
                               SortedSetOwnership.Member(labels.Value, Pal.ReturnValue<Node?>()) &&
-                              SpecSearchTree.InRange(comparer, from, to, lowerBoundActive, upperBoundActive,
-                                                     SpecSearchTree.RootKey(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), from))));
-                Ghost<SpecInt> beforeSize = SortedSetOwnership.Lookup(labels.Value, current).Size;
+                              SpecSearchTree.InRange<T>(comparer, from!, to!, lowerBoundActive, upperBoundActive,
+                                                     SpecSearchTree.RootKey<T, bool>(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), from!)!)));
+                Ghost<SpecInt> beforeSize = default;
+                Pal.Capture(ref beforeSize, SortedSetOwnership.Lookup(labels.Value, current).Size);
                 SortedSetOwnershipProof.OpenNode(root, ownershipState, current, Pal.Permission());
-#endif
-                if (lowerBoundActive && comparer.Compare(from, current.Item) > 0)
+                if (lowerBoundActive && comparer.Compare(from, current!.Item) > 0)
                 {
                     current = current.Right;
-#if PAL
                     SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
-#endif
                 }
                 else
                 {
-                    if (upperBoundActive && comparer.Compare(to, current.Item) < 0)
+                    if (upperBoundActive && comparer.Compare(to, current!.Item) < 0)
                     {
                         current = current.Left;
-#if PAL
                         SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
-#endif
                     }
                     else
                     {
-#if PAL
                         SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
-#endif
                         return current;
                     }
                 }
-#if PAL
                 Pal.Join(SortedSetOwnership.Owner(root, ownershipState, Pal.Permission()));
                 Pal.Join(Pal.Implies(!Pal.Returned(),
                     0 <= level &&
-                    level + 1 + SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                    SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
+                    level + 1 + SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                    SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
                     SortedSetOwnership.Lookup(labels.Value, current).Size < beforeSize.Value &&
                     (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
-                    SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                    SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
-                    SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Lookup(labels.Value, current), from, to, lowerBoundActive, upperBoundActive) ==
-                    SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive)));
+                    SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                    SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
+                    SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Lookup(labels.Value, current), from!, to!, lowerBoundActive, upperBoundActive) ==
+                    SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive)));
                 Pal.Join(Pal.Implies(Pal.Returned(),
-                    level == SortedSetCount.RangeDepth(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
+                    level == SortedSetCount.RangeDepth<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
                     Pal.ReturnValue<Node?>() != null &&
                     SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()) ==
-                    SpecSearchTree.RangeRoot(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
-                    SpecSearchTree.RangeHit(comparer, SortedSetOwnership.Values(labels.Value), from, to, lowerBoundActive, upperBoundActive) &&
+                    SpecSearchTree.RangeRoot<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
+                    SpecSearchTree.RangeHit<T, bool>(comparer, SortedSetOwnership.Values(labels.Value), from!, to!, lowerBoundActive, upperBoundActive) &&
                     SortedSetOwnership.Member(labels.Value, Pal.ReturnValue<Node?>()) &&
-                    SpecSearchTree.InRange(comparer, from, to, lowerBoundActive, upperBoundActive,
-                        SpecSearchTree.RootKey(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), from))));
-#endif
+                    SpecSearchTree.InRange<T>(comparer, from!, to!, lowerBoundActive, upperBoundActive,
+                        SpecSearchTree.RootKey<T, bool>(SortedSetOwnership.Lookup(labels.Value, Pal.ReturnValue<Node?>()), from!))));
                 level++;
             }
 
@@ -2115,9 +1928,8 @@ namespace System.Collections.Generic
         public void UnionWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
-#if PAL
-            Ghost<SortedSetSnapshot<T>> originalSnapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
-#endif
+            Ghost<SortedSetSnapshot<T>> originalSnapshot = default;
+            Pal.Capture(ref originalSnapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
 
             SortedSet<T>? asSorted = other as SortedSet<T>;
             TreeSubSet? treeSubset = this as TreeSubSet;
@@ -2135,11 +1947,10 @@ namespace System.Collections.Generic
                 SortedSet<T> dummy = new SortedSet<T>(asSorted, comparer);
                 root = dummy.root;
                 count = dummy.count;
-#if PAL
                 Ghost<SortedSetRetainedPayload<T>> transferred =
-                    SortedSetRetainedHolderProof.Transfer(root, ownershipState, dummy);
-                ownershipState = SortedSetRetainedHolder.State(transferred.Value);
-#endif
+                    default;
+                Pal.Capture(ref transferred, SortedSetRetainedHolderProof.Transfer(root, ownershipState, dummy));
+                Pal.UpdateGhost(ref ownershipState, SortedSetRetainedHolder.State(transferred.Value));
                 version++;
                 return;
             }
@@ -2163,19 +1974,17 @@ namespace System.Collections.Generic
                 SpecSetOps.UnionSorted(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 while (!mineEnded && !theirsEnded)
                 {
-#if PAL
                     Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                     Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, originalSnapshot.Value));
-#endif
                     Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
                                   Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
                                   Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
                                   SortedSetMerge.Suffix(this.SpecItems, mine.SpecPending) && SortedSetMerge.Suffix(asSorted.SpecItems, theirs.SpecPending) &&
                                   Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
-                                      Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                      Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]!),
                                                this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
                                   Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < asSorted.SpecItems.Length &&
-                                      Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                      Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!),
                                                asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
                                   merged.Length == this.SpecItems.Length + asSorted.SpecItems.Length && 0 <= c &&
                                   c <= this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1) +
@@ -2191,7 +2000,7 @@ namespace System.Collections.Generic
                     int comp = Comparer.Compare(mine.Current, theirs.Current);
                     if (comp < 0)
                     {
-                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1],
+                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]!,
                             SpecSetOps.Union(this.SpecComparer,
                                 SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
                                 SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1)));
@@ -2201,7 +2010,7 @@ namespace System.Collections.Generic
                     }
                     else if (comp == 0)
                     {
-                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
+                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!,
                             SpecSetOps.Union(this.SpecComparer,
                                 SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
                                 SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
@@ -2213,7 +2022,7 @@ namespace System.Collections.Generic
                     }
                     else
                     {
-                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
+                        SpecSetOps.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!,
                             SpecSetOps.Union(this.SpecComparer,
                                 SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - 1),
                                 SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
@@ -2231,18 +2040,16 @@ namespace System.Collections.Generic
                     Enumerator remaining = (mineEnded ? theirs : mine);
                     do
                     {
-#if PAL
                         Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                         Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, originalSnapshot.Value));
-#endif
                         Pal.Invariant(remaining.SpecReady &&
                                       SortedSetMerge.Suffix(mineEnded ? asSorted.SpecItems : this.SpecItems, remaining.SpecPending) &&
                                       Pal.Implies(!Pal.Broke(), remaining.SpecCurrentIn &&
                                           remaining.SpecPending.Length < (mineEnded ? asSorted.SpecItems.Length : this.SpecItems.Length) &&
                                           (mineEnded
-                                              ? Pal.Same(SpecSearchTree.RootKey(remaining.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - remaining.SpecPending.Length - 1]),
+                                              ? Pal.Same(SpecSearchTree.RootKey(remaining.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - remaining.SpecPending.Length - 1]!),
                                                          asSorted.SpecItems[asSorted.SpecItems.Length - remaining.SpecPending.Length - 1])
-                                              : Pal.Same(SpecSearchTree.RootKey(remaining.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - remaining.SpecPending.Length - 1]),
+                                              : Pal.Same(SpecSearchTree.RootKey(remaining.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - remaining.SpecPending.Length - 1]!),
                                                          this.SpecItems[this.SpecItems.Length - remaining.SpecPending.Length - 1]))) &&
                                       Pal.Implies(Pal.Broke(), remaining.SpecPending.Length == 0) &&
                                       merged.Length == this.SpecItems.Length + asSorted.SpecItems.Length && 0 <= c &&
@@ -2267,21 +2074,21 @@ namespace System.Collections.Generic
                 // now merged has all c elements
 
                 // safe to gc the root, we  have all the elements
-#if PAL
-                Ghost<Node?> previousRoot = root;
-                Ghost<Seq<T>> unionItems = SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
-                Ghost<SpecTree<(T, bool)>> builtTree = SpecSearchTree.Build(Pal.Contents(merged), 0, c - 1, SpecTree.Leaf<(T, bool)>());
+                Ghost<Node?> previousRoot = default;
+                Pal.Capture(ref previousRoot, root);
+                Ghost<Seq<T>> unionItems = default;
+                Pal.Capture(ref unionItems, SpecSetOps.Union(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
+                Ghost<SpecTree<(T, bool)>> builtTree = default;
+                Pal.Capture(ref builtTree, SpecSearchTree.Build(Pal.Contents(merged), 0, c - 1, SpecTree.Leaf<(T, bool)>()));
                 SortedSetConstructionProof.Empty<T>(null);
-#endif
                 root = null;
 
                 root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
-#if PAL
-                Ghost<SortedSetLabels<T>> builtLabels = SortedSetConstructionProof.Label(root, builtTree, Perm.Full);
+                Ghost<SortedSetLabels<T>> builtLabels = default;
+                Pal.Capture(ref builtLabels, SortedSetConstructionProof.Label(root, builtTree, Perm.Full));
                 Pal.Assert(SpecSearchTree.Keys(SortedSetOwnership.Values(builtLabels.Value)) == unionItems.Value);
                 SortedSetConstructionProof.Adopt(previousRoot, root, ownershipState, builtLabels);
-                ownershipState = SortedSetConstruction.Adopted(ownershipState, builtLabels);
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetConstruction.Adopted(ownershipState, builtLabels));
                 count = c;
                 version++;
             }
@@ -2321,25 +2128,22 @@ namespace System.Collections.Generic
             // This is done recursively because the iterative way to do this ends up wasting more space than it saves in stack frames
             // Only some base cases are handled below.
 
-#if PAL
-            Ghost<Seq<T>> buildItems = Pal.Contents(arr);
-            Ghost<SpecTree<(T, bool)>> red = Pal.Ghost<SpecTree<(T, bool)>>("redTree");
+            Ghost<Seq<T>> buildItems = default;
+            Pal.Capture(ref buildItems, Pal.Contents(arr));
+            Ghost<SpecTree<(T, bool)>> red = default;
+            Pal.Capture(ref red, Pal.Ghost<SpecTree<(T, bool)>>("redTree"));
             SortedSetConstructionProof.Cases<T>(redNode, red);
-#endif
             int size = endIndex - startIndex + 1;
             Pal.Assert(size == endIndex - startIndex + 1);
-#if PAL
-            Ghost<SpecTree<(T, bool)>> built = SpecSearchTree.Build(buildItems.Value, startIndex, endIndex, red.Value);
-#endif
+            Ghost<SpecTree<(T, bool)>> built = default;
+            Pal.Capture(ref built, SpecSearchTree.Build(buildItems.Value, startIndex, endIndex, red.Value));
             Node root;
 
             switch (size)
             {
                 case 0:
-#if PAL
                     SortedSetConstructionProof.EmptyBuild<T>(redNode, red, buildItems, (SpecInt)startIndex, (SpecInt)endIndex);
                     SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
-#endif
                     return null;
                 case 1:
                     root = new Node(arr[startIndex], NodeColor.Black);
@@ -2347,34 +2151,24 @@ namespace System.Collections.Generic
                     {
                         root.Left = redNode;
                     }
-#if PAL
                     SortedSetConstructionProof.Empty<T>(null);
                     SortedSetConstructionProof.SealLeftInput<T>(root, redNode, red, SpecTree.Leaf<(T, bool)>(), built);
                     SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
                     return root;
-#else
-                    break;
-#endif
                 case 2:
                     Pal.Assert(endIndex == startIndex + 1);
                     root = new Node(arr[startIndex], NodeColor.Black);
                     root.Right = new Node(arr[endIndex], NodeColor.Black);
                     root.Right.ColorRed();
-#if PAL
-                    SortedSetConstructionProof.SealRightLeaf<T>(root, SortedSetConstruction.Leaf(buildItems.Value[endIndex], true));
-#endif
+                    SortedSetConstructionProof.SealRightLeaf<T>(root, SortedSetConstruction.Leaf(buildItems.Value[endIndex]!, true));
                     if (redNode != null)
                     {
                         root.Left = redNode;
                     }
-#if PAL
                     SortedSetConstructionProof.SealLeftInput<T>(root, redNode, red,
-                        SortedSetConstruction.Leaf(buildItems.Value[endIndex], true), built);
+                        SortedSetConstruction.Leaf(buildItems.Value[endIndex]!, true), built);
                     SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
                     return root;
-#else
-                    break;
-#endif
                 case 3:
                     Pal.Assert(endIndex == startIndex + 2);
                     root = new Node(arr[startIndex + 1], NodeColor.Black);
@@ -2384,41 +2178,35 @@ namespace System.Collections.Generic
                     {
                         root.Left.Left = redNode;
                     }
-#if PAL
                     SortedSetConstructionProof.Empty<T>(null);
                     SortedSetConstructionProof.SealLeftChild<T>(root, redNode, red,
                         SpecTree.Leaf<(T, bool)>(),
                         SpecTree.Branch(red.Value, (buildItems.Value[startIndex], false), SpecTree.Leaf<(T, bool)>()));
-                    SortedSetConstructionProof.SealRightLeaf<T>(root, SortedSetConstruction.Leaf(buildItems.Value[endIndex], false));
+                    SortedSetConstructionProof.SealRightLeaf<T>(root, SortedSetConstruction.Leaf(buildItems.Value[endIndex]!, false));
                     SortedSetConstructionProof.SealAs<T>(root,
                         SpecTree.Branch(red.Value, (buildItems.Value[startIndex], false), SpecTree.Leaf<(T, bool)>()),
-                        SortedSetConstruction.Leaf(buildItems.Value[endIndex], false), built);
+                        SortedSetConstruction.Leaf(buildItems.Value[endIndex]!, false), built);
                     SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
                     return root;
-#else
-                    break;
-#endif
                 default:
                     int midpt = ((startIndex + endIndex) / 2);
                     Pal.Assert(2 * midpt <= startIndex + endIndex && startIndex + endIndex <= 2 * midpt + 1);
                     Pal.Assert(startIndex + 1 <= midpt && midpt + 1 < endIndex);
                     Pal.Assert(size % 2 != 0 || midpt + 2 <= endIndex);
-#if PAL
                     Pal.Assert(size >= 4);
                     SortedSetConstruction.BuildStep(buildItems.Value, startIndex, endIndex, midpt, size % 2 == 0, red.Value);
-#endif
                     root = new Node(arr[midpt], NodeColor.Black);
                     root.Left = ConstructRootFromSortedArray(arr, startIndex, midpt - 1, redNode);
-#if PAL
                     // root is a local, unchanged by either static recursive call;
                     // evaluating this receiver after the condition has no effects.
                     if (size % 2 == 0)
                     {
-                        root.Right = ConstructRootFromSortedArray(arr, midpt + 2, endIndex,
-                            SortedSetConstructionProof.PrepareFresh(new Node(arr[midpt + 1], NodeColor.Red)));
+                        Node extra = new Node(arr[midpt + 1], NodeColor.Red);
+                        SortedSetConstructionProof.SealFresh<T>(extra);
+                        root.Right = ConstructRootFromSortedArray(arr, midpt + 2, endIndex, extra);
                         SortedSetConstructionProof.SealAs<T>(root,
                             SpecSearchTree.Build(buildItems.Value, startIndex, midpt - 1, red.Value),
-                            SpecSearchTree.Build(buildItems.Value, midpt + 2, endIndex, SortedSetConstruction.Leaf(buildItems.Value[midpt + 1], true)),
+                            SpecSearchTree.Build(buildItems.Value, midpt + 2, endIndex, SortedSetConstruction.Leaf(buildItems.Value[midpt + 1]!, true)),
                             built);
                         Pal.Assert(Pal.Contents(arr) == Pal.Old(Pal.Contents(arr)));
                         SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
@@ -2436,19 +2224,9 @@ namespace System.Collections.Generic
                         SortedSetConstruction.BuildFacts(buildItems.Value, startIndex, endIndex, red.Value);
                         return root;
                     }
-#else
-                    root.Right = size % 2 == 0 ?
-                        ConstructRootFromSortedArray(arr, midpt + 2, endIndex, new Node(arr[midpt + 1], NodeColor.Red)) :
-                        ConstructRootFromSortedArray(arr, midpt + 1, endIndex, null);
-                    Pal.Assert(Pal.Contents(arr) == Pal.Old(Pal.Contents(arr)));
-                    break;
-#endif
 
             }
 
-#if !PAL
-            return root;
-#endif
         }
 
         // The merge keeps the elements of `other` that compare equal to one of this set's
@@ -2463,9 +2241,8 @@ namespace System.Collections.Generic
         public virtual void IntersectWith([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
-#if PAL
-            Ghost<SortedSetSnapshot<T>> originalSnapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
-#endif
+            Ghost<SortedSetSnapshot<T>> originalSnapshot = default;
+            Pal.Capture(ref originalSnapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
 
             SpecSetInter.InterLeftEmpty(this.SpecComparer, this.SpecItems, ((SortedSet<T>)other).SpecItems);
             if (Count == 0)
@@ -2502,25 +2279,19 @@ namespace System.Collections.Generic
                 T? max = Max;
                 SpecSetInter.InterWhole(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
 
-#if PAL
                 while (!mineEnded && !theirsEnded)
-#else
-                while (!mineEnded && !theirsEnded && Comparer.Compare(theirs.Current, max) <= 0)
-#endif
                 {
-#if PAL
                     Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                     Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, originalSnapshot.Value));
-#endif
                     Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
                                   Pal.Implies(mineEnded, mine.SpecPending.Length == 0) &&
                                   Pal.Implies(theirsEnded, theirs.SpecPending.Length == 0) &&
                                   SortedSetMerge.Suffix(this.SpecItems, mine.SpecPending) && SortedSetMerge.Suffix(asSorted.SpecItems, theirs.SpecPending) &&
                                   Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
-                                      Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                      Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]!),
                                                this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
                                   Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < asSorted.SpecItems.Length &&
-                                      Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                      Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!),
                                                asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
                                   this.SpecItems.Length > 0 && Pal.Same(max, this.SpecItems[this.SpecItems.Length - 1]) &&
                                   merged.Length == this.SpecItems.Length && 0 <= c &&
@@ -2530,21 +2301,17 @@ namespace System.Collections.Generic
                                           SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length - (mineEnded ? 0 : 1)),
                                           SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length - (theirsEnded ? 0 : 1)))) ==
                                   SpecSetInter.Inter(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
-#if PAL
                     Pal.Invariant(Pal.Implies(Pal.Broke(),
                         !mineEnded && !theirsEnded &&
                         Pal.Compare(this.SpecComparer,
                             asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1], max!) > 0));
-#endif
                     Pal.Decreases(mine.SpecPending.Length + (mineEnded ? 0 : 1) + theirs.SpecPending.Length + (theirsEnded ? 0 : 1));
-#if PAL
                     // The final original guard operand is evaluated exactly once,
                     // before any executable action from the original loop body.
                     if (Comparer.Compare(theirs.Current, max) > 0)
                     {
                         break;
                     }
-#endif
                     SpecSetInter.InterStep(this.SpecComparer, this.SpecItems, asSorted.SpecItems,
                         this.SpecItems.Length - mine.SpecPending.Length - 1, asSorted.SpecItems.Length - theirs.SpecPending.Length - 1);
                     int comp = Comparer.Compare(mine.Current, theirs.Current);
@@ -2555,7 +2322,7 @@ namespace System.Collections.Generic
                     }
                     else if (comp == 0)
                     {
-                        SpecSetInter.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1],
+                        SpecSetInter.PushPrefix(Pal.Contents(merged), c, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!,
                             SpecSetInter.Inter(this.SpecComparer,
                                 SortedSetMerge.Drop(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length),
                                 SortedSetMerge.Drop(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length)));
@@ -2580,21 +2347,21 @@ namespace System.Collections.Generic
                 SpecSetInter.InterSorted(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
 
                 // safe to gc the root, we  have all the elements
-#if PAL
-                Ghost<Node?> previousRoot = root;
-                Ghost<Seq<T>> intersectionItems = SpecSetInter.Inter(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
-                Ghost<SpecTree<(T, bool)>> builtTree = SpecSearchTree.Build(Pal.Contents(merged), 0, c - 1, SpecTree.Leaf<(T, bool)>());
+                Ghost<Node?> previousRoot = default;
+                Pal.Capture(ref previousRoot, root);
+                Ghost<Seq<T>> intersectionItems = default;
+                Pal.Capture(ref intersectionItems, SpecSetInter.Inter(this.SpecComparer, this.SpecItems, asSorted.SpecItems));
+                Ghost<SpecTree<(T, bool)>> builtTree = default;
+                Pal.Capture(ref builtTree, SpecSearchTree.Build(Pal.Contents(merged), 0, c - 1, SpecTree.Leaf<(T, bool)>()));
                 SortedSetConstructionProof.Empty<T>(null);
-#endif
                 root = null;
 
                 root = ConstructRootFromSortedArray(merged, 0, c - 1, null);
-#if PAL
-                Ghost<SortedSetLabels<T>> builtLabels = SortedSetConstructionProof.Label(root, builtTree, Perm.Full);
+                Ghost<SortedSetLabels<T>> builtLabels = default;
+                Pal.Capture(ref builtLabels, SortedSetConstructionProof.Label(root, builtTree, Perm.Full));
                 Pal.Assert(SpecSearchTree.Keys(SortedSetOwnership.Values(builtLabels.Value)) == intersectionItems.Value);
                 SortedSetConstructionProof.Adopt(previousRoot, root, ownershipState, builtLabels);
-                ownershipState = SortedSetConstruction.Adopted(ownershipState, builtLabels);
-#endif
+                Pal.UpdateGhost(ref ownershipState, SortedSetConstruction.Adopted(ownershipState, builtLabels));
                 count = c;
                 version++;
             }
@@ -2654,14 +2421,13 @@ namespace System.Collections.Generic
                 {
                     T? min = Min;
                     T? max = Max;
-                    Ghost<Seq<T>> s0 = this.SpecItems;
+                    Ghost<Seq<T>> s0 = default;
+                    Pal.Capture(ref s0, this.SpecItems);
                     SpecSetOps.ExceptWhole(this.SpecComparer, s0.Value, asSorted.SpecItems);
                     foreach (T item in other)
                     {
-#if PAL
                         Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
                         Pal.Invariant(SortedSetOwnership.Valid(root, ownershipState, comparer, count, version));
-#endif
                         Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
                                       Pal.Enumerator<Enumerator>(item).SpecPending ==
                                           Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length, asSorted.SpecItems.Length) &&
@@ -3036,10 +2802,10 @@ namespace System.Collections.Generic
                                         mine.SpecPending == Pal.Slice(this.SpecItems, this.SpecItems.Length - mine.SpecPending.Length, this.SpecItems.Length) &&
                                         theirs.SpecPending == Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - theirs.SpecPending.Length, asSorted.SpecItems.Length) &&
                                         Pal.Implies(!mineEnded, mine.SpecCurrentIn && mine.SpecPending.Length < this.SpecItems.Length &&
-                                            Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]),
+                                            Pal.Same(SpecSearchTree.RootKey(mine.SpecCurrentTree, this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1]!),
                                                      this.SpecItems[this.SpecItems.Length - mine.SpecPending.Length - 1])) &&
                                         Pal.Implies(!theirsEnded, theirs.SpecCurrentIn && theirs.SpecPending.Length < asSorted.SpecItems.Length &&
-                                            Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]),
+                                            Pal.Same(SpecSearchTree.RootKey(theirs.SpecCurrentTree, asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1]!),
                                                      asSorted.SpecItems[asSorted.SpecItems.Length - theirs.SpecPending.Length - 1])) &&
                                         SpecSetCompare.SameKeys(this.SpecComparer, this.SpecItems, asSorted.SpecItems) ==
                                         SpecSetCompare.SameKeys(this.SpecComparer,
@@ -3078,9 +2844,8 @@ namespace System.Collections.Generic
         public bool Overlaps([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
-#if PAL
-            Ghost<SortedSetSnapshot<T>> originalSnapshot = SortedSetOwnership.Snapshot(this.SpecSnapshot);
-#endif
+            Ghost<SortedSetSnapshot<T>> originalSnapshot = default;
+            Pal.Capture(ref originalSnapshot, SortedSetOwnership.Snapshot(this.SpecSnapshot));
 
             if (Count == 0)
                 return false;
@@ -3089,8 +2854,8 @@ namespace System.Collections.Generic
                 return false;
 
             SortedSet<T>? asSorted = other as SortedSet<T>;
-#if PAL
-            Ghost<SortedSetSnapshot<T>> originalOtherSnapshot = SortedSetOwnership.Snapshot(asSorted!.SpecSnapshot);
+            Ghost<SortedSetSnapshot<T>> originalOtherSnapshot = default;
+            Pal.Capture(ref originalOtherSnapshot, SortedSetOwnership.Snapshot(asSorted!.SpecSnapshot));
             bool rangesDisjoint = false;
             if (asSorted != null && HasEqualComparer(asSorted))
             {
@@ -3116,9 +2881,6 @@ namespace System.Collections.Generic
                 Pal.Compare(this.SpecComparer, this.SpecItems[0], asSorted!.SpecItems[asSorted.SpecItems.Length - 1]) > 0 ||
                 Pal.Compare(this.SpecComparer, this.SpecItems[this.SpecItems.Length - 1], asSorted.SpecItems[0]) < 0));
             if (rangesDisjoint)
-#else
-            if (asSorted != null && HasEqualComparer(asSorted) && (comparer.Compare(Min, asSorted.Max) > 0 || comparer.Compare(Max, asSorted.Min) < 0))
-#endif
             {
                 SpecSetOps.OverlapsDisjoint(this.SpecComparer, this.SpecItems, asSorted.SpecItems);
                 return false;
@@ -3127,10 +2889,8 @@ namespace System.Collections.Generic
             SpecSetOps.OverlapsWhole(this.SpecComparer, this.SpecItems, asSorted!.SpecItems);
             foreach (T item in other)
             {
-#if PAL
                 Pal.Invariant(SortedSetOwnership.Owner(root, ownershipState, Pal.Permission()));
                 Pal.Invariant(SortedSetState.Matches(root, ownershipState, comparer, count, version, originalSnapshot.Value));
-#endif
                 Pal.Invariant(Pal.Enumerator<Enumerator>(item).SpecReady &&
                               Pal.Enumerator<Enumerator>(item).SpecPending ==
                                   Pal.Slice(asSorted.SpecItems, asSorted.SpecItems.Length - Pal.Enumerator<Enumerator>(item).SpecPending.Length, asSorted.SpecItems.Length) &&
@@ -3211,15 +2971,17 @@ namespace System.Collections.Generic
             }
 
             int maxHeight = GetApproximateMaxHeight();
-#if PAL
-            Ghost<SortedSetLabels<T>> labels = this is TreeSubSet view ? view.ReadLabels : this.SpecLabels;
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this is TreeSubSet view ? view.ReadLabels : this.SpecLabels);
             SortedSetOwnershipProof.RootFacts(labels);
-            Ghost<SpecTree<(T, bool)>> indexTree = SortedSetOwnership.Lookup(labels.Value, root);
-            Ghost<SortedSetSnapshot<T>> snapshot = this is TreeSubSet subset
+            Ghost<SpecTree<(T, bool)>> indexTree = default;
+            Pal.Capture(ref indexTree, SortedSetOwnership.Lookup(labels.Value, root));
+            Ghost<SortedSetSnapshot<T>> snapshot = default;
+            Pal.Capture(ref snapshot, this is TreeSubSet subset
                 ? subset.ReadSnapshot
-                : SortedSetOwnership.Snapshot(this.SpecSnapshot);
-            Ghost<SortedSetRetainedPayload<T>> preservedViewState = SortedSetRetainedHolder.Payload(ownershipState);
-#endif
+                : SortedSetOwnership.Snapshot(this.SpecSnapshot));
+            Ghost<SortedSetRetainedPayload<T>> preservedViewState = default;
+            Pal.Capture(ref preservedViewState, SortedSetRetainedHolder.Payload(ownershipState));
 
             // maxHeight = 12 needs 8kb for bitHelper, use fallback with HashSet if maxHeight > 12 to mitigate
             // this by limiting memory complexity to O(n).
@@ -3245,16 +3007,13 @@ namespace System.Collections.Generic
             int uniqueFoundCount = 0;
 
             SortedSetCount.LookupIntro(comparer, this.SpecRangeTree, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa);
-#if PAL
             SortedSetCount.FitsPow2(comparer, indexTree.Value, maxHeight);
             BitHelperBits.ZeroBits(Pal.Contents(bitHelper.Span));
             SortedSetCount.LoopStart(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, indexTree.Value, SpecSearchTree.Keys(this.SpecRangeTree), BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other));
             if (this is TreeSubSet)
                 SortedSetOwnershipProof.Empty<T>();
-#endif
             foreach (T item in other)
             {
-#if PAL
                 Pal.Invariant(this is TreeSubSet
                     ? SortedSetOwnership.Owner(null, SortedSetOwnership.Empty<T>(), Perm.Full)
                     : SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
@@ -3274,14 +3033,11 @@ namespace System.Collections.Generic
                                                          BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount)) &&
                               Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
                                   SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
-#endif
                 // pal: FIX for #133116. `InternalIndexOf` searches the view's range-root subtree, which may hold
                 // out-of-range nodes; without the range check, an out-of-range item counts as found.
                 int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
-#if PAL
                 SortedSetCount.LoopStep(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, indexTree.Value, SpecSearchTree.Keys(this.SpecRangeTree),
                                         BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
-#endif
                 if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"
                 {
                     BitHelperBits.MarkedBits(Pal.Contents(bitHelper.Span), index);
@@ -3298,10 +3054,8 @@ namespace System.Collections.Generic
                     unfoundCount++;
                     if (returnIfUnfound)
                     {
-#if PAL
                         SortedSetCount.LoopDone(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, indexTree.Value, SpecSearchTree.Keys(this.SpecRangeTree),
                                                 BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount);
-#endif
                         break;
                     }
                 }
@@ -3318,12 +3072,10 @@ namespace System.Collections.Generic
                 }
             }
 
-#if PAL
             if (this is TreeSubSet)
                 SortedSetOwnershipProof.ConsumeEmpty<T>();
             SortedSetCount.LoopEnd(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, indexTree.Value, SpecSearchTree.Keys(this.SpecRangeTree),
                                    BitHelperBits.Bits(Pal.Contents(bitHelper.Span)), Pal.Contents(other), uniqueFoundCount, unfoundCount, returnIfUnfound && unfoundCount > 0);
-#endif
             SortedSetCount.Counts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa, SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other));
             result.UniqueCount = uniqueFoundCount;
             result.UnfoundCount = unfoundCount;
@@ -3389,7 +3141,8 @@ namespace System.Collections.Generic
             ArgumentNullException.ThrowIfNull(match);
 
             List<T> matches = new List<T>(this.Count);
-            Ghost<Seq<T>> s0 = this.SpecItems;
+            Ghost<Seq<T>> s0 = default;
+            Pal.Capture(ref s0, this.SpecItems);
 
             BreadthFirstTreeWalk(n =>
             {
@@ -3401,7 +3154,8 @@ namespace System.Collections.Generic
                 return true;
             });
 
-            Ghost<Seq<T>> m0 = matches.Items;
+            Ghost<Seq<T>> m0 = default;
+            Pal.Capture(ref m0, matches.Items);
             SpecSetFilter.RemovingStart(this.SpecComparer, s0.Value, m0.Value);
 
             // Enumerate the results of the breadth-first walk in reverse in an attempt to lower cost.
@@ -3412,8 +3166,8 @@ namespace System.Collections.Generic
                 Pal.Invariant(matches.Items == m0.Value && this.SpecComparer == Pal.Old(this.SpecComparer));
                 Pal.Invariant(SpecSetFilter.Removing(this.SpecComparer, s0.Value, this.SpecItems, m0.Value, i));
                 Pal.Invariant(actuallyRemoved == s0.Value.Length - this.SpecItems.Length);
-                Pal.Invariant(Pal.Forall((T y) => Pal.Implies(SpecSetFilter.Contains(m0.Value, y), SpecSetFilter.Contains(s0.Value, y) && match(y)) &&
-                                                  Pal.Implies(SpecSetFilter.Contains(s0.Value, y) && match(y), SpecSetFilter.Contains(m0.Value, y))));
+                Pal.Invariant(Pal.Forall((T y) => Pal.Implies(SpecSetFilter.Contains(m0.Value, y!), SpecSetFilter.Contains(s0.Value, y!) && match(y)) &&
+                                                  Pal.Implies(SpecSetFilter.Contains(s0.Value, y!) && match(y), SpecSetFilter.Contains(m0.Value, y!))));
                 Pal.Decreases(i + 1);
                 SpecSetFilter.RemovingStep(this.SpecComparer, s0.Value, this.SpecItems, m0.Value, i);
                 if (Remove(matches[i]))
@@ -3442,33 +3196,26 @@ namespace System.Collections.Generic
         {
             get
             {
-#if PAL
-                Ghost<SortedSetLabels<T>> labels = SortedSetOwnership.Active(ownershipState);
+                Ghost<SortedSetLabels<T>> labels = default;
+                Pal.Capture(ref labels, SortedSetOwnership.Active(ownershipState));
                 SortedSetOwnershipProof.RootFacts(labels);
-#endif
                 if (root == null)
                 {
                     return default;
                 }
 
                 Node current = root;
-#if PAL
                 SortedSetOwnershipProof.OpenNode(root, ownershipState, current, Pal.Permission());
-#endif
                 while (current.Left != null)
                 {
-#if PAL
                     Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                     Pal.Invariant(SortedSetOwnership.Window(root, ownershipState, current, Pal.Permission())!);
                     Pal.Invariant(current != null && SortedSetOwnership.Member(labels.Value, current));
-                    Pal.Invariant(Pal.Forall((T d) => Pal.Same(SpecSearchTree.Leftmost(SortedSetOwnership.Lookup(labels.Value, current), d),
-                                                               SpecSearchTree.Leftmost(SortedSetOwnership.Values(labels.Value), d))));
-#endif
-                    current = current.Left;
-#if PAL
+                    Pal.Invariant(Pal.Forall((T d) => Pal.Same(SpecSearchTree.Leftmost(SortedSetOwnership.Lookup(labels.Value, current), d!),
+                                                               SpecSearchTree.Leftmost(SortedSetOwnership.Values(labels.Value), d!))));
+                    current = current!.Left;
                     SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
                     SortedSetOwnershipProof.OpenNode(root, ownershipState, current, Pal.Permission());
-#endif
                 }
 
                 return current.Item;
@@ -3487,33 +3234,26 @@ namespace System.Collections.Generic
         {
             get
             {
-#if PAL
-                Ghost<SortedSetLabels<T>> labels = SortedSetOwnership.Active(ownershipState);
+                Ghost<SortedSetLabels<T>> labels = default;
+                Pal.Capture(ref labels, SortedSetOwnership.Active(ownershipState));
                 SortedSetOwnershipProof.RootFacts(labels);
-#endif
                 if (root == null)
                 {
                     return default;
                 }
 
                 Node current = root;
-#if PAL
                 SortedSetOwnershipProof.OpenNode(root, ownershipState, current, Pal.Permission());
-#endif
                 while (current.Right != null)
                 {
-#if PAL
                     Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                     Pal.Invariant(SortedSetOwnership.Window(root, ownershipState, current, Pal.Permission())!);
                     Pal.Invariant(current != null && SortedSetOwnership.Member(labels.Value, current));
-                    Pal.Invariant(Pal.Forall((T d) => Pal.Same(SpecSearchTree.Rightmost(SortedSetOwnership.Lookup(labels.Value, current), d),
-                                                               SpecSearchTree.Rightmost(SortedSetOwnership.Values(labels.Value), d))));
-#endif
-                    current = current.Right;
-#if PAL
+                    Pal.Invariant(Pal.Forall((T d) => Pal.Same(SpecSearchTree.Rightmost(SortedSetOwnership.Lookup(labels.Value, current), d!),
+                                                               SpecSearchTree.Rightmost(SortedSetOwnership.Values(labels.Value), d!))));
+                    current = current!.Right;
                     SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
                     SortedSetOwnershipProof.OpenNode(root, ownershipState, current, Pal.Permission());
-#endif
                 }
 
                 return current.Item;
@@ -3640,13 +3380,9 @@ namespace System.Collections.Generic
             {
                 if (node != null)
                 {
-#if PAL
                     SortedSetOwnershipProof.OpenNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                     bool result = node.IsBlack;
-#if PAL
                     SortedSetOwnershipProof.CloseNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                     return result;
                 }
                 return false;
@@ -3659,18 +3395,12 @@ namespace System.Collections.Generic
             {
                 if (node != null)
                 {
-#if PAL
                     SortedSetOwnershipProof.OpenNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                     bool result = node.IsRed;
-#if PAL
                     SortedSetOwnershipProof.CloseNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                     return result;
                 }
-#if PAL
                 SortedSetOwnershipProof.NullCase(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                 return false;
             }
 
@@ -3681,18 +3411,12 @@ namespace System.Collections.Generic
             {
                 if (node == null)
                 {
-#if PAL
                     SortedSetOwnershipProof.NullCase(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                     return true;
                 }
-#if PAL
                 SortedSetOwnershipProof.OpenNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                 bool result = node.IsBlack;
-#if PAL
                 SortedSetOwnershipProof.CloseNullable(node, Pal.Ghost<SortedSetNullableSnapshot<T>>("snapshot"), Pal.Ghost<Perm>("permission"));
-#endif
                 return result;
             }
 
@@ -3748,52 +3472,41 @@ namespace System.Collections.Generic
 #if DEBUG
                 Debug.Assert(count == GetCount());
 #endif
-#if PAL
-                Ghost<SortedSetLabels<T>> source = Pal.Ghost<SortedSetLabels<T>>("labels");
+                Ghost<SortedSetLabels<T>> source = default;
+                Pal.Capture(ref source, Pal.Ghost<SortedSetLabels<T>>("labels"));
                 SortedSetCloneProof.OpenSource(source, this);
-#endif
                 Node newRoot = ShallowClone();
-#if PAL
                 SortedSetCloneProof.Seed(source, this, newRoot);
-                SortedSetCloneBudget remaining = SortedSetClone.Initial(source);
-#endif
+                SortedSetCloneBudget remaining = default;
+                Pal.UpdateGhost(ref remaining, SortedSetClone.Initial(source));
 
                 var pendingNodes = new Stack<(Node source, Node target)>(2 * Log2(count) + 2);
                 pendingNodes.Push((this, newRoot));
-#if PAL
                 SortedSetCloneProof.Start(source, this, newRoot, pendingNodes.Items, remaining);
                 SortedSetCloneProof.Facts(source, newRoot, pendingNodes.Items, remaining);
-#endif
 
                 while (pendingNodes.TryPop(out var next))
                 {
-#if PAL
                     Pal.Decreases(SortedSetClone.Value(remaining));
                     Pal.Invariant(SortedSetClone.Cloning(source.Value, newRoot, pendingNodes.Items, SortedSetClone.Value(remaining), Perm.Full));
                     Pal.Invariant(SortedSetClone.Size(source.Value) <= count);
                     Pal.Invariant(pendingNodes.Items.Length <= SortedSetClone.Value(remaining) && SortedSetClone.Value(remaining) <= SortedSetClone.Size(source.Value));
-                    Ghost<Seq<(Node, Node)>> prefix = pendingNodes.Items;
-                    Ghost<SortedSetCloneWitness<T>> job = SortedSetCloneProof.Pop(source, newRoot, prefix, next, remaining);
+                    Ghost<Seq<(Node, Node)>> prefix = default;
+                    Pal.Capture(ref prefix, pendingNodes.Items);
+                    Ghost<SortedSetCloneWitness<T>> job = default;
+                    Pal.Capture(ref job, SortedSetCloneProof.Pop(source, newRoot, prefix, next, remaining));
                     SortedSetCloneProof.OpenJob(SortedSetClone.Focus(job.Value), next.source, next.target);
-#endif
                     Node clonedNode;
 
                     if (next.source.Left is Node left)
                     {
-#if PAL
                         SortedSetCloneProof.OpenSource(SortedSetClone.LeftTree(SortedSetClone.Focus(job.Value)), left);
-#endif
                         clonedNode = left.ShallowClone();
                         next.target.Left = clonedNode;
-#if PAL
                         SortedSetCloneProof.Seed(SortedSetClone.LeftTree(SortedSetClone.Focus(job.Value)), left, clonedNode);
-#endif
                         pendingNodes.Push((left, clonedNode));
-#if PAL
                         SortedSetCloneProof.CloseLeft(SortedSetClone.Focus(job.Value), next.source, next.target, prefix, pendingNodes.Items);
-#endif
                     }
-#if PAL
                     else
                     {
                         SortedSetCloneProof.EmptySource<T>(SortedSetClone.LeftTree(SortedSetClone.Focus(job.Value)));
@@ -3802,24 +3515,16 @@ namespace System.Collections.Generic
                     Pal.Join(SortedSetClone.LeftStage(SortedSetClone.Focus(job.Value), next.target, prefix.Value, pendingNodes.Items, Perm.Full));
                     Pal.Join(SortedSetClone.Restore(source.Value, newRoot, prefix.Value, SortedSetClone.Offset(job.Value), SortedSetClone.Focus(job.Value), next.target, Perm.Full));
                     SortedSetCloneProof.OpenLeft(SortedSetClone.Focus(job.Value), next.source, next.target, prefix, pendingNodes.Items);
-#endif
 
                     if (next.source.Right is Node right)
                     {
-#if PAL
                         SortedSetCloneProof.OpenSource(SortedSetClone.RightTree(SortedSetClone.Focus(job.Value)), right);
-#endif
                         clonedNode = right.ShallowClone();
                         next.target.Right = clonedNode;
-#if PAL
                         SortedSetCloneProof.Seed(SortedSetClone.RightTree(SortedSetClone.Focus(job.Value)), right, clonedNode);
-#endif
                         pendingNodes.Push((right, clonedNode));
-#if PAL
                         SortedSetCloneProof.CloseComplete(SortedSetClone.Focus(job.Value), next.source, next.target, prefix, pendingNodes.Items);
-#endif
                     }
-#if PAL
                     else
                     {
                         SortedSetCloneProof.EmptySource<T>(SortedSetClone.RightTree(SortedSetClone.Focus(job.Value)));
@@ -3829,14 +3534,11 @@ namespace System.Collections.Generic
                     Pal.Join(SortedSetClone.Restore(source.Value, newRoot, prefix.Value, SortedSetClone.Offset(job.Value), SortedSetClone.Focus(job.Value), next.target, Perm.Full));
 
                     SortedSetCloneProof.FinishTask(source, newRoot, job, next.target, prefix, pendingNodes.Items, remaining);
-                    remaining = SortedSetClone.Previous(remaining);
+                    Pal.UpdateGhost(ref remaining, SortedSetClone.Previous(remaining));
                     SortedSetCloneProof.Facts(source, newRoot, pendingNodes.Items, remaining);
-#endif
                 }
 
-#if PAL
                 SortedSetCloneProof.Finish(source, newRoot, pendingNodes.Items, remaining);
-#endif
                 return newRoot;
             }
 
@@ -3910,46 +3612,34 @@ namespace System.Collections.Generic
             [Ensures("Result != null")]
             public Node? Rotate(TreeRotation rotation)
             {
-#if PAL
                 SortedSetDispatchProof.CloseSelector(this, Pal.Ghost<Node?>("sibling"), Pal.Ghost<SortedSetLabels<T>>("labels"), Pal.Ghost<bool>("direction"));
                 SortedSetDispatchProof.Open(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation);
-#endif
                 Node removeRed;
                 switch (rotation)
                 {
                     case TreeRotation.Right:
-#if PAL
                         SortedSetDispatchProof.Specialize(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation, TreeRotation.Right);
-#endif
                         removeRed = Left!.Left!;
                         Debug.Assert(removeRed.IsRed);
                         removeRed.ColorBlack();
                         return RotateRight();
                     case TreeRotation.Left:
-#if PAL
                         SortedSetDispatchProof.Specialize(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation, TreeRotation.Left);
-#endif
                         removeRed = Right!.Right!;
                         Debug.Assert(removeRed.IsRed);
                         removeRed.ColorBlack();
                         return RotateLeft();
                     case TreeRotation.RightLeft:
-#if PAL
                         SortedSetDispatchProof.Specialize(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation, TreeRotation.RightLeft);
-#endif
                         Debug.Assert(Right!.Left!.IsRed);
                         return RotateRightLeft();
                     case TreeRotation.LeftRight:
-#if PAL
                         SortedSetDispatchProof.Specialize(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation, TreeRotation.LeftRight);
-#endif
                         Debug.Assert(Left!.Right!.IsRed);
                         return RotateLeftRight();
                     default:
                         Debug.Fail($"{nameof(rotation)}: {rotation} is not a defined {nameof(TreeRotation)} value.");
-#if PAL
                         SortedSetDispatchProof.Impossible(this, Pal.Ghost<SortedSetLabels<T>>("labels"), rotation);
-#endif
                         return null;
                 }
             }
@@ -4112,7 +3802,6 @@ namespace System.Collections.Generic
 
             private readonly bool _reverse;
 
-#if PAL
             [Spec] internal Seq<T> SpecPending => SortedSetState.Pending(_reverse, _tree.SpecObservation, _stack.Items);
             [Spec] internal SpecTree<(T, bool)> SpecCurrentTree => SortedSetState.Tree(_tree.SpecObservation, _current);
             [Spec] internal bool SpecCurrentIn => _current != null && SortedSetState.Member(_tree.SpecObservation, _current);
@@ -4128,19 +3817,6 @@ namespace System.Collections.Generic
             [Spec] internal bool SpecEnded => _current == null;
             [Spec] internal bool SpecCurrentWf => _current != null && SortedSetState.WellFormed(_tree.SpecObservation, _current);
             [Spec] internal Seq<T> SpecInitial => SpecWalk.Keys(_reverse, _tree.SpecNodes);
-#else
-            [Spec] internal Seq<T> SpecPending => throw new InvalidOperationException("Specification only");
-            [Spec] internal SpecTree<(T, bool)> SpecCurrentTree => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecCurrentIn => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecReady => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecWalking => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecWalkable => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecFresh => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecCurrentOk => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecEnded => throw new InvalidOperationException("Specification only");
-            [Spec] internal bool SpecCurrentWf => throw new InvalidOperationException("Specification only");
-            [Spec] internal Seq<T> SpecInitial => throw new InvalidOperationException("Specification only");
-#endif
 
             [Ensures("ReferenceEquals(@this._tree, set) && @this._version == set.SpecVersion && !@this._reverse")]
             [Ensures("@this.SpecWalkable")]
@@ -4185,20 +3861,17 @@ namespace System.Collections.Generic
             [Ensures("@this.SpecPending == @this.SpecInitial")]
             private void Initialize()
             {
-#if PAL
-                Ghost<SortedSetObservation<T>> state = _tree.SpecObservation;
-                Ghost<SortedSetSnapshot<T>> snapshot = SortedSetOwnership.Snapshot(_tree.SpecSnapshot);
+                Ghost<SortedSetObservation<T>> state = default;
+                Pal.Capture(ref state, _tree.SpecObservation);
+                Ghost<SortedSetSnapshot<T>> snapshot = default;
+                Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(_tree.SpecSnapshot));
                 SortedSetStateProof.Active(_tree.ownershipState);
-#endif
                 _current = null;
                 Node? node = _tree.root;
                 Node? next, other;
-#if PAL
                 SortedSetStateProof.Empty<T>(_reverse, state, _stack.Items);
-#endif
                 while (node != null)
                 {
-#if PAL
                     Pal.Decreases(SortedSetState.Tree(state.Value, node).Size);
                     Pal.Invariant(SortedSetOwnership.Owner(_tree.root, _tree.ownershipState, Pal.Permission()));
                     Pal.Invariant(SortedSetState.Matches(_tree.root, _tree.ownershipState,
@@ -4213,7 +3886,6 @@ namespace System.Collections.Generic
                     Pal.Assert(SortedSetState.Tree(state.Value, _tree.root).Size == _tree.count);
                     Pal.Assert(_stack.Items.Length < _tree.count);
                     SortedSetStateProof.OpenOwner(_tree.root, _tree.ownershipState, node, Pal.Permission());
-#endif
                     next = (_reverse ? node.Right : node.Left);
                     other = (_reverse ? node.Left : node.Right);
                     if (_tree.IsWithinRange(node.Item))
@@ -4230,12 +3902,10 @@ namespace System.Collections.Generic
                         node = next;
                     }
                 }
-#if PAL
                 SortedSetStateProof.Null<T>(state, node);
                 Pal.Assert(Pal.Concat(SpecWalk.Keys(_reverse, SortedSetState.Tree(state.Value, node)),
                                       SortedSetState.Pending(_reverse, state.Value, _stack.Items)) ==
                            SortedSetState.Pending(_reverse, state.Value, _stack.Items));
-#endif
             }
 
             [Requires("@this.SpecWalking")]
@@ -4263,25 +3933,21 @@ namespace System.Collections.Generic
                     return false;
                 }
 
-#if PAL
-                Ghost<SortedSetObservation<T>> state = _tree.SpecObservation;
-                Ghost<SortedSetSnapshot<T>> snapshot = SortedSetOwnership.Snapshot(_tree.SpecSnapshot);
-                Ghost<Seq<T>> p0 = SortedSetState.Pending(_reverse, state.Value, _stack.Items);
+                Ghost<SortedSetObservation<T>> state = default;
+                Pal.Capture(ref state, _tree.SpecObservation);
+                Ghost<SortedSetSnapshot<T>> snapshot = default;
+                Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(_tree.SpecSnapshot));
+                Ghost<Seq<T>> p0 = default;
+                Pal.Capture(ref p0, SortedSetState.Pending(_reverse, state.Value, _stack.Items));
                 Pal.Assert(SortedSetState.Pending(_reverse, state.Value, _stack.Items) == Pal.Slice(p0.Value, 0, p0.Value.Length));
                 SortedSetStateProof.PopAt<T>(_reverse, state, _stack.Items, p0, 0);
-#endif
                 _current = _stack.Pop();
-#if PAL
                 SortedSetStateProof.OpenOwner(_tree.root, _tree.ownershipState, _current, Pal.Permission());
-#endif
                 Node? node = (_reverse ? _current!.Left : _current!.Right);
-#if PAL
                 SortedSetStateProof.CloseOwner(_tree.root, _tree.ownershipState, _current, Pal.Permission());
-#endif
                 Node? next, other;
                 while (node != null)
                 {
-#if PAL
                     Pal.Decreases(SortedSetState.Tree(state.Value, node).Size);
                     Pal.Invariant(SortedSetOwnership.Owner(_tree.root, _tree.ownershipState, Pal.Permission()));
                     Pal.Invariant(SortedSetState.Matches(_tree.root, _tree.ownershipState,
@@ -4297,7 +3963,6 @@ namespace System.Collections.Generic
                         SortedSetState.Pending(_reverse, state.Value, _stack.Items)).Length == p0.Value.Length - 1);
                     Pal.Assert(_stack.Items.Length < p0.Value.Length);
                     SortedSetStateProof.OpenOwner(_tree.root, _tree.ownershipState, node, Pal.Permission());
-#endif
                     next = (_reverse ? node.Right : node.Left);
                     other = (_reverse ? node.Left : node.Right);
                     if (_tree.IsWithinRange(node.Item))
@@ -4314,12 +3979,10 @@ namespace System.Collections.Generic
                         node = other;
                     }
                 }
-#if PAL
                 SortedSetStateProof.Null<T>(state, node);
                 Pal.Assert(Pal.Concat(SpecWalk.Keys(_reverse, SortedSetState.Tree(state.Value, node)),
                                       SortedSetState.Pending(_reverse, state.Value, _stack.Items)) ==
                            SortedSetState.Pending(_reverse, state.Value, _stack.Items));
-#endif
                 return true;
             }
 
@@ -4334,10 +3997,9 @@ namespace System.Collections.Generic
                 {
                     if (_current != null)
                     {
-#if PAL
-                        Ghost<SortedSetObservation<T>> state = _tree.SpecObservation;
+                        Ghost<SortedSetObservation<T>> state = default;
+                        Pal.Capture(ref state, _tree.SpecObservation);
                         SortedSetStateProof.Open<T>(state, _current, Pal.Permission());
-#endif
                         return _current.Item;
                     }
                     return default(T)!; // Should only happen when accessing Current is undefined behavior
@@ -4356,10 +4018,9 @@ namespace System.Collections.Generic
                         throw new InvalidOperationException(SR.InvalidOperation_EnumOpCantHappen);
                     }
 
-#if PAL
-                    Ghost<SortedSetObservation<T>> state = _tree.SpecObservation;
+                    Ghost<SortedSetObservation<T>> state = default;
+                    Pal.Capture(ref state, _tree.SpecObservation);
                     SortedSetStateProof.Open<T>(state, _current, Pal.Permission());
-#endif
                     return _current.Item;
                 }
             }
@@ -4418,13 +4079,9 @@ namespace System.Collections.Generic
             Node? node = FindNode(equalValue);
             if (node != null)
             {
-#if PAL
                 SortedSetOwnershipProof.OpenNode(root, ownershipState, node, Pal.Permission());
-#endif
                 actualValue = node.Item;
-#if PAL
                 SortedSetOwnershipProof.CloseNode(root, ownershipState, Pal.Permission());
-#endif
                 return true;
             }
             actualValue = default;

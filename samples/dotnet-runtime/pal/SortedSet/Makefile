@@ -18,3 +18,8 @@ export EXTRA_INCLUDES := .
 default: verify
 
 include ../../../../test/verify.mk
+
+.PHONY: runtime
+all: runtime
+runtime: cs
+	dotnet run --project runtime/Runtime.csproj -p:UseSharedCompilation=false

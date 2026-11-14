@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -46,12 +45,14 @@ namespace System.Collections.Generic
 
     internal static class SortedSetEditProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Preserves("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Ensures("SortedSetOwnership.Good(labels)")]
         [PulseBody("SortedSetInductive.Edit.facts $(labels)")]
         internal static void Facts<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Member(labels, node)")]
@@ -60,6 +61,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Relink.cut $(labels) $(node)")]
         internal static void Cut<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(before, Perm.Full)")]
         [Requires("Pal.Same(before, after)")]
@@ -67,6 +69,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Edit.change $(before) $(after)")]
         internal static void Change<T>(Ghost<SortedSetLabels<T>> before, Ghost<SortedSetLabels<T>> after) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetOwnership.Member(labels, node)")]
@@ -75,6 +78,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Mutation.open_color $(labels) $(node)")]
         internal static void OpenColor<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.ColorOpened(labels, node, red)")]
         [Requires("node != null")]
@@ -82,6 +86,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Mutation.close_color $(labels) $(node) $(red)")]
         internal static void CloseColor<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node, bool red) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.ColorOpened(labels, node, true)")]
         [Requires("node != null")]
@@ -89,6 +94,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Mutation.close_color $(labels) $(node) true")]
         internal static void CloseRed<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.ColorOpened(labels, node, false)")]
         [Requires("node != null")]
@@ -96,6 +102,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Mutation.close_color $(labels) $(node) false")]
         internal static void CloseBlack<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.Pending(labels, child)")]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetOwnership.Member(labels, child)")]
@@ -105,6 +112,7 @@ namespace System.Collections.Generic
         internal static void OpenParent<T>(Ghost<SortedSetLabels<T>> labels,
             SortedSet<T>.Node child, SortedSet<T>.Node parent) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.ParentCell(labels, child, parent, SortedSetOwnership.Top(replacement))")]
         [Requires("SortedSetOwnership.Owns(replacement, Perm.Full)")]
@@ -114,6 +122,7 @@ namespace System.Collections.Generic
         internal static void CloseParent<T>(Ghost<SortedSetLabels<T>> labels,
             SortedSet<T>.Node child, SortedSet<T>.Node parent, Ghost<SortedSetLabels<T>> replacement) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetEdit.Pending(labels, child)")]
         [Requires("SortedSetOwnership.Owns(replacement, Perm.Full)")]
@@ -125,6 +134,7 @@ namespace System.Collections.Generic
         internal static void CloseRoot<T>(Ghost<SortedSetLabels<T>> labels,
             SortedSet<T>.Node child, Ghost<SortedSetLabels<T>> replacement) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owner(root, state, Perm.Full)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetOwnership.Active(state), Perm.Full)")]
@@ -133,6 +143,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Edit.begin_owner $(root) $(state)")]
         internal static void BeginOwner<T>(SortedSet<T>.Node? root, SortedSetOwnershipState<T> state) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetEdit.Retained(state)")]
@@ -143,4 +154,3 @@ namespace System.Collections.Generic
             SortedSetOwnershipState<T> state, Ghost<SortedSetLabels<T>> labels) { }
     }
 }
-#endif

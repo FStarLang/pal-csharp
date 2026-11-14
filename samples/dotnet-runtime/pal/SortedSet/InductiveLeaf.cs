@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -29,6 +28,7 @@ namespace System.Collections.Generic
 
     internal static class SortedSetLeafProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetOwnership.Top(labels) == null")]
@@ -36,18 +36,21 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Leaf.release_empty $(labels)")]
         internal static void ReleaseEmpty<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Fresh(node, item, NodeColor.Black)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetLeaf.Black(node, item), Perm.Full)")]
         [PulseBody("SortedSetInductive.Leaf.make_leaf $(node) $(item) false")]
         internal static void MakeBlack<T>(SortedSet<T>.Node node, T item) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Fresh(node, item, NodeColor.Red)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetLeaf.Red(node, item), Perm.Full)")]
         [PulseBody("SortedSetInductive.Leaf.make_leaf $(node) $(item) true")]
         internal static void MakeRed<T>(SortedSet<T>.Node node, T item) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Preserves("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Preserves("SortedSetOwnership.Owns(SortedSetLeaf.Red(node, item), Perm.Full)")]
@@ -55,6 +58,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Leaf.fresh $(labels) $(node) $(item)")]
         internal static void Fresh<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node node, T item) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetOwnership.Member(labels, parent)")]
@@ -63,6 +67,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Leaf.open_link $(labels) $(parent)")]
         internal static void OpenLink<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? parent) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetLeaf.Slot(parent, SortedSetEdit.Sub(labels, parent), node, true)")]
         [Requires("SortedSetOwnership.Owns(SortedSetLeaf.Red(node, item), Perm.Full)")]
@@ -73,6 +78,7 @@ namespace System.Collections.Generic
         internal static void CloseRight<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? parent,
             SortedSet<T>.Node node, T item) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetLeaf.Slot(parent, SortedSetEdit.Sub(labels, parent), node, false)")]
         [Requires("SortedSetOwnership.Owns(SortedSetLeaf.Red(node, item), Perm.Full)")]
@@ -84,4 +90,3 @@ namespace System.Collections.Generic
             SortedSet<T>.Node node, T item) { }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using System.Diagnostics;
 using PalLang;
@@ -123,19 +122,20 @@ namespace System.Collections.Generic
     {
         // This is an emitted stateful helper, not a SpecOp. Its only source store
         // updates the erased ownership witness after the real Item write.
+        [System.Diagnostics.Conditional("PAL")]
         [GhostArg("SortedSetHolderSnapshot<T> before"), GhostArg("SortedSetSnapshot<T> model")]
         [GhostArg("SortedSetRetainedPayload<T> payload")]
         [Requires("SortedSetItem.Pending(owner, before, payload, model)")]
         [Ensures("SortedSetOwnership.SetInv(owner, model, Perm.Full)")]
         internal static void CommitItemState([Plain] TreeSet<T> owner)
         {
-            Ghost<SortedSetRetainedPayload<T>> payload = Pal.Ghost<SortedSetRetainedPayload<T>>("payload");
+            Ghost<SortedSetRetainedPayload<T>> payload = default;
+            Pal.Capture(ref payload, Pal.Ghost<SortedSetRetainedPayload<T>>("payload"));
             SortedSetItemProof.OpenPending(owner, payload, Pal.Ghost<SortedSetHolderSnapshot<T>>("before"),
                 Pal.Ghost<SortedSetSnapshot<T>>("model"));
-            owner.ownershipState = SortedSetRetainedHolder.State(payload.Value);
+            Pal.UpdateGhost(ref owner.ownershipState, SortedSetRetainedHolder.State(payload.Value));
             SortedSetItemProof.CloseCommitted(owner, Pal.Ghost<SortedSetHolderSnapshot<T>>("before"),
                 payload, Pal.Ghost<SortedSetSnapshot<T>>("model"));
         }
     }
 }
-#endif

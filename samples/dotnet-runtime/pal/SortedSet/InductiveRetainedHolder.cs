@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -32,4 +31,3 @@ namespace System.Collections.Generic
             [Plain, Consumes] SortedSet<T> dummy) => throw new InvalidOperationException();
     }
 }
-#endif

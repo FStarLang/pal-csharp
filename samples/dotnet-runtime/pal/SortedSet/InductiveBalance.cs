@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -33,16 +32,20 @@ namespace System.Collections.Generic
         [SpecOp("SortedSetInductive.Balance.can_rotate")]
         internal static bool CanRotate<T>(bool currentRight, bool parentRight, SortedSetLabels<T> labels) =>
             throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Balance.layout")]
         internal static void Layout<T>(SortedSetLabels<T> labels, SortedSet<T>.Node current,
             SortedSet<T>.Node? parent, SortedSet<T>.Node grandParent, SortedSet<T>.Node? greatGrandParent) =>
             throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Balance.rotated_facts")]
         internal static void RotatedFacts<T>(SortedSetLabels<T> labels, bool currentRight, bool parentRight) =>
             throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Balance.top_color")]
         internal static void TopColor<T>(SortedSetLabels<T> labels, SortedSet<T>.Node? node, bool red) =>
             throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Balance.balance_result")]
         internal static void Result<T>(SortedSetLabels<T> labels, bool currentRight, bool parentRight) =>
             throw new InvalidOperationException();
@@ -67,18 +70,21 @@ namespace System.Collections.Generic
 
     internal static class SortedSetBalanceProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.SingleIgnored(root, labels, true)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Single(labels, true), Perm.Full)")]
         [PulseBody("SortedSetInductive.Rotation.close_ignored $(root) $(labels) true")]
         internal static void CloseIgnoredLeft<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.SingleIgnored(root, labels, false)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Single(labels, false), Perm.Full)")]
         [PulseBody("SortedSetInductive.Rotation.close_ignored $(root) $(labels) false")]
         internal static void CloseIgnoredRight<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && SortedSetBalance.CanRotate(true, true, labels)")]
@@ -86,6 +92,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.open_single $(root) $(labels) true")]
         internal static void OpenLeft<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.SingleAfter(root, pivot, labels, true)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Single(labels, true), Perm.Full)")]
@@ -93,6 +100,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.close_single $(root) $(pivot) $(labels) true")]
         internal static void CloseLeft<T>(SortedSet<T>.Node root, SortedSet<T>.Node pivot, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && SortedSetBalance.CanRotate(false, false, labels)")]
@@ -100,6 +108,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.open_single $(root) $(labels) false")]
         internal static void OpenRight<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.SingleAfter(root, pivot, labels, false)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Single(labels, false), Perm.Full)")]
@@ -107,6 +116,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.close_single $(root) $(pivot) $(labels) false")]
         internal static void CloseRight<T>(SortedSet<T>.Node root, SortedSet<T>.Node pivot, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && SortedSetBalance.CanRotate(right, right, labels)")]
@@ -114,6 +124,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.open_single $(root) $(labels) $(right)")]
         internal static void OpenSingle<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels, bool right) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.SingleAfter(root, pivot, labels, right)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Single(labels, right), Perm.Full)")]
@@ -122,6 +133,7 @@ namespace System.Collections.Generic
         internal static void CloseSingle<T>(SortedSet<T>.Node root, SortedSet<T>.Node pivot,
             Ghost<SortedSetLabels<T>> labels, bool right) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && SortedSetBalance.CanRotate(right, !right, labels)")]
@@ -129,6 +141,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Rotation.open_double $(root) $(labels) $(right)")]
         internal static void OpenDouble<T>(SortedSet<T>.Node root, Ghost<SortedSetLabels<T>> labels, bool right) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetBalance.DoubleAfter(root, pivot, labels, right)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetBalance.Double(labels, right), Perm.Full)")]
@@ -138,4 +151,3 @@ namespace System.Collections.Generic
             Ghost<SortedSetLabels<T>> labels, bool right) { }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -30,6 +29,7 @@ namespace System.Collections.Generic
 
     internal static class SortedSetDispatchProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetDispatch.AfterColor(root, pivot, labels, rotation, true)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetDispatch.Colored(labels, rotation), Perm.Full)")]
@@ -38,6 +38,7 @@ namespace System.Collections.Generic
         internal static void CloseRed<T>(SortedSet<T>.Node? root, SortedSet<T>.Node? pivot,
             Ghost<SortedSetLabels<T>> labels, TreeRotation rotation) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && sibling == SortedSetOwnership.Top(SortedSetDispatch.Child(labels, direction)) && SortedSetLocal.Branch(labels) && SortedSetLocal.Branch(SortedSetDispatch.Child(labels, direction))")]
@@ -46,6 +47,7 @@ namespace System.Collections.Generic
         internal static void OpenSelector<T>(SortedSet<T>.Node? root, SortedSet<T>.Node? sibling,
             Ghost<SortedSetLabels<T>> labels, Ghost<bool> direction) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetDispatch.Selector(root, sibling, labels, direction)")]
         [Ensures("SortedSetOwnership.Owns(labels, Perm.Full)")]
@@ -53,6 +55,7 @@ namespace System.Collections.Generic
         internal static void CloseSelector<T>(SortedSet<T>.Node? root, Ghost<SortedSet<T>.Node?> sibling,
             Ghost<SortedSetLabels<T>> labels, Ghost<bool> direction) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetDispatch.Before(root, labels, rotation)")]
         [Requires("false")]
@@ -62,6 +65,7 @@ namespace System.Collections.Generic
         internal static void Impossible<T>(SortedSet<T>.Node? root, Ghost<SortedSetLabels<T>> labels,
             TreeRotation rotation) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetDispatch.Before(root, labels, from)")]
         [Requires("from == into")]
@@ -70,6 +74,7 @@ namespace System.Collections.Generic
         internal static void Specialize<T>(SortedSet<T>.Node? root, Ghost<SortedSetLabels<T>> labels,
             TreeRotation from, TreeRotation into) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("root == SortedSetOwnership.Top(labels) && SortedSetDispatch.CanRotate(rotation, labels)")]
@@ -77,6 +82,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.RemoveDispatch.open_dispatch $(root) $(labels) $(rotation)")]
         internal static void Open<T>(SortedSet<T>.Node? root, Ghost<SortedSetLabels<T>> labels, TreeRotation rotation) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetDispatch.After(root, pivot, labels, rotation)")]
         [Ensures("SortedSetOwnership.Owns(SortedSetDispatch.Rotated(rotation, labels), Perm.Full)")]
@@ -86,4 +92,3 @@ namespace System.Collections.Generic
             Ghost<SortedSetLabels<T>> labels, TreeRotation rotation) { }
     }
 }
-#endif

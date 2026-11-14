@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -22,6 +21,7 @@ namespace System.Collections.Generic
 
     internal static class SortedSetLocalProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetLocal.Branch(labels) && node == SortedSetOwnership.Top(labels)")]
@@ -30,6 +30,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Local.open_node $(node) $(labels)")]
         internal static void Open<T>(SortedSet<T>.Node? node, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetLocal.Opened(node, labels)")]
         [Ensures("SortedSetOwnership.Owns(labels, Perm.Full)")]
@@ -37,6 +38,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Local.close_node $(node) $(labels)")]
         internal static void Close<T>(SortedSet<T>.Node? node, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Left(labels), Perm.Full)")]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Right(labels), Perm.Full)")]
@@ -46,6 +48,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Local.color_leaves $(labels) false")]
         internal static void BlackLeaves<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Left(labels), Perm.Full)")]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Right(labels), Perm.Full)")]
@@ -82,6 +85,7 @@ namespace System.Collections.Generic
 
     internal static class SortedSetSuccessorProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetLocal.Branch(labels)")]
         [Requires("successor == SortedSetSuccessor.Successor(labels)")]
@@ -90,6 +94,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Successor.layout_lemma $(labels) $(successor) $(parent)")]
         internal static void Layout<T>(SortedSet<T>.Node successor, SortedSet<T>.Node? parent, Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("!SortedSetLocal.Branch(labels)")]
@@ -97,6 +102,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Successor.empty $(labels)")]
         internal static void Empty<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Left(labels), Perm.Full)")]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Right(labels), Perm.Full)")]
@@ -105,6 +111,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Successor.no_right $(labels)")]
         internal static void NoRight<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(SortedSetLocal.Left(labels), Perm.Full)")]
         [Requires("SortedSetOwnership.Owns(SortedSetSuccessor.Remaining(labels), Perm.Full)")]
@@ -114,6 +121,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Successor.successor_leaves $(labels)")]
         internal static void Leaves<T>(Ghost<SortedSetLabels<T>> labels) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetSuccessor.Cell(node, labels)")]
         [Requires("SortedSetSuccessor.Matches(labels, snapshot)")]
@@ -123,4 +131,3 @@ namespace System.Collections.Generic
             Ghost<SortedSetLabels<T>> labels, Ghost<SortedSetNodeSnapshot<T>> snapshot) { }
     }
 }
-#endif

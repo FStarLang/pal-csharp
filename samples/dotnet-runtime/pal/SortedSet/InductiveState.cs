@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using System.Diagnostics;
 using PalLang;
@@ -137,4 +136,3 @@ namespace System.Collections.Generic
         internal static void Close<T>(Ghost<SortedSetObservation<T>> state, SortedSet<T>.Node? node, Ghost<Perm> permission) { }
     }
 }
-#endif

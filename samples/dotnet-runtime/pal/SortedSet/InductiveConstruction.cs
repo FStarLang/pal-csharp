@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using System.Diagnostics;
 using PalLang;
@@ -25,10 +24,12 @@ namespace System.Collections.Generic
         internal static SlProp Opened<T>(SortedSet<T>.Node? root, SpecTree<(T, bool)> tree) =>
             throw new InvalidOperationException();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Construction.build_facts")]
         internal static void BuildFacts<T>(Seq<T> items, SpecInt lo, SpecInt hi, SpecTree<(T, bool)> red) =>
             throw new InvalidOperationException();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Construction.build_step")]
         internal static void BuildStep<T>(Seq<T> items, SpecInt lo, SpecInt hi, SpecInt mid,
             bool even, SpecTree<(T, bool)> red) => throw new InvalidOperationException();
@@ -173,4 +174,3 @@ namespace System.Collections.Generic
             Ghost<SortedSetOwnershipState<T>> old, Ghost<SortedSetLabels<T>> labels) { }
     }
 }
-#endif

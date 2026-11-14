@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using PalLang;
 
@@ -6,6 +5,7 @@ namespace System.Collections.Generic
 {
     internal static class SortedSetFrontier
     {
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.MergeFrontier.read_facts")]
         internal static void Read2Facts<T>(SortedSetLabels<T> labels) => throw new InvalidOperationException();
         [SpecOp("Pulse.Lib.CSharp.TopDownRemove.is2")]
@@ -33,6 +33,7 @@ namespace System.Collections.Generic
         [SpecOp("SortedSetInductive.Insert.split_tree")]
         internal static SortedSetLabels<T> Split<T>(SortedSetLabels<T> labels, SortedSet<T>.Node? node) =>
             throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Frontier.read_facts")]
         internal static void ReadFacts<T>(SortedSetLabels<T> labels) => throw new InvalidOperationException();
         [SpecOp("SortedSetInductive.Frontier.optional_at")]
@@ -45,6 +46,7 @@ namespace System.Collections.Generic
 
     internal static class SortedSetFrontierProof
     {
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Member(labels, node) && SortedSetLocal.Branch(SortedSetLocal.Left(SortedSetEdit.Sub(labels, node))) && SortedSetLocal.Branch(SortedSetLocal.Right(SortedSetEdit.Sub(labels, node)))")]
@@ -53,6 +55,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.MergeFrontier.open_merge $(labels) $(node)")]
         internal static void OpenMerge<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetFrontier.MergeAfter(node, SortedSetEdit.Sub(labels, node))")]
         [Requires("SortedSetEdit.Pending(labels, node)")]
@@ -61,6 +64,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.MergeFrontier.close_merge $(labels) $(node)")]
         internal static void CloseMerge<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Good(labels) && (node == null || SortedSetOwnership.Member(labels, node))")]
@@ -70,6 +74,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Frontier.open_optional_at $(labels) $(node)")]
         internal static void OpenOptional<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.NullableRaw(node, SortedSetFrontier.OptionalAt(labels, node), Perm.Full)")]
         [Requires("SortedSetFrontier.OptionalRest(labels, node)")]
@@ -78,6 +83,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Frontier.close_optional_at $(labels) $(node)")]
         internal static void CloseOptional<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Good(labels) && SortedSetOwnership.Member(labels, node)")]
@@ -86,6 +92,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Frontier.open_read $(labels) $(node)")]
         internal static void OpenRead<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetFrontier.ReadCells(node, SortedSetEdit.Sub(labels, node))")]
         [Requires("SortedSetEdit.Pending(labels, node)")]
@@ -94,6 +101,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Frontier.close_read $(labels) $(node)")]
         internal static void CloseRead<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetOwnership.Owns(labels, Perm.Full)")]
         [Requires("SortedSetOwnership.Member(labels, node) && SortedSetFrontier.Is4(SortedSetEdit.Sub(labels, node))")]
@@ -102,6 +110,7 @@ namespace System.Collections.Generic
         [PulseBody("SortedSetInductive.Frontier.open_split $(labels) $(node)")]
         internal static void OpenSplit<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
 
+        [System.Diagnostics.Conditional("PAL")]
         [Lemma]
         [Requires("SortedSetFrontier.SplitAfter(node, SortedSetEdit.Sub(labels, node))")]
         [Requires("SortedSetEdit.Pending(labels, node)")]
@@ -111,4 +120,3 @@ namespace System.Collections.Generic
         internal static void CloseSplit<T>(Ghost<SortedSetLabels<T>> labels, SortedSet<T>.Node? node) { }
     }
 }
-#endif

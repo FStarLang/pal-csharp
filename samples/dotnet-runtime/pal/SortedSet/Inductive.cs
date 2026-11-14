@@ -1,4 +1,3 @@
-#if PAL
 using System;
 using System.Diagnostics;
 using PalLang;
@@ -72,6 +71,7 @@ namespace System.Collections.Generic
 
         [SpecOp("SortedSetInductive.Read.handle_of_view")]
         internal static SortedSetReadHandle<T> ViewHandle<T>(SortedSet<T>.TreeSubSet view, SortedSetSnapshot<T> snapshot) => throw new InvalidOperationException();
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetInductive.Read.handle_of_view_facts")]
         internal static void ViewHandleFacts<T>(SortedSet<T>.TreeSubSet view, SortedSetSnapshot<T> snapshot) => throw new InvalidOperationException();
         [SpecOp("SortedSetInductive.Read.handle_matches_view")]
@@ -584,4 +584,3 @@ namespace System.Collections.Generic
             SortedSetOwnershipState<T> state, Ghost<SortedSetNodeSnapshot<T>> snapshot) { }
     }
 }
-#endif
