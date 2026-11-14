@@ -10,19 +10,76 @@ using PalLang;
 public struct RbModel<T>
 {
     public SpecTree<(T, bool)> Nodes;
+    public IComparer<T> Comparer;
+    public SpecInt Count;
+    public SpecInt Version;
 }
 
 [SpecType("Pulse.Lib.CSharp.SearchTree.node_color")]
 public enum NodeColor : byte { Black, Red }
 
-public sealed class RbTree<T>
+public sealed partial class RbTree<T>
 {
     private Node? root;
+    private readonly IComparer<T> comparer;
+    private int count;
+    [Wrapping] private int version;
 
+    [Refine("Pal.StrictlySorted(Result.Comparer, SpecSearchTree.Keys(Result.Nodes))")]
+    [Refine("SpecSearchTree.IsRedBlack(Result.Nodes)")]
+    [Refine("Result.Count == Result.Nodes.Size")]
+    [Refine("Result.Comparer != null")]
     [Model]
-    private RbModel<T> Model => new RbModel<T> { Nodes = Pal.Tree<(T, bool)>(root) };
+    private RbModel<T> Model => new RbModel<T>
+    {
+        Nodes = Pal.Tree<(T, bool)>(root), Comparer = comparer, Count = count, Version = version
+    };
 
     [Spec] public SpecTree<(T, bool)> SpecNodes => Model.Nodes;
+    [Spec] public IComparer<T> SpecComparer => Model.Comparer;
+    [Spec] public SpecInt SpecCount => Model.Count;
+    [Spec] public SpecInt SpecVersion => Model.Version;
+    [Spec] public Seq<T> SpecItems => SpecSearchTree.Keys(Model.Nodes);
+
+    [Ensures("@this.SpecItems.Length == 0 && @this.SpecComparer == Comparer<T>.Default")]
+    public RbTree()
+    {
+        comparer = Comparer<T>.Default;
+    }
+
+    [Ensures("@this.SpecItems.Length == 0")]
+    [Ensures("@this.SpecComparer == (comparer == null ? Comparer<T>.Default : comparer)")]
+    public RbTree(IComparer<T>? comparer)
+    {
+        this.comparer = comparer ?? Comparer<T>.Default;
+    }
+
+    [Ensures("Result == @this.SpecCount")]
+    public int Count => count;
+
+    [Ensures("Result == SpecSearchTree.Contains(@this.SpecComparer, @this.SpecNodes, item)")]
+    [Ensures("Result == (Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0)")]
+    [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+    [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+    [Frac("p")]
+    public bool Contains(T item)
+    {
+        Node? current = root;
+        while (current != null)
+        {
+            Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
+            Pal.Invariant(Pal.Implies(!Pal.Returned(), Pal.WellFormed(current) &&
+                SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(current), item) ==
+                SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item)));
+            Pal.Invariant(Pal.Implies(Pal.Returned(), Pal.ReturnValue<bool>() &&
+                SpecSearchTree.Contains(comparer, Pal.Tree<(T, bool)>(root), item)));
+            int order = comparer.Compare(item, current.Item);
+            if (order == 0)
+                return true;
+            current = order < 0 ? current.Left : current.Right;
+        }
+        return false;
+    }
 
     [Ensures("Result == (!@this.SpecNodes.IsLeaf && SpecSearchTree.IsRed(@this.SpecNodes))")]
     [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
@@ -32,7 +89,14 @@ public sealed class RbTree<T>
         return Node.IsNonNullRed(root);
     }
 
-    public void Clear() => root = null;
+    [Ensures("@this.SpecItems.Length == 0")]
+    [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+    public void Clear()
+    {
+        root = null;
+        count = 0;
+        version++;
+    }
 
     [Ensures("@this.SpecNodes.IsLeaf == Pal.Old(@this.SpecNodes.IsLeaf)")]
     public void BlackenRoot()
@@ -49,11 +113,12 @@ public sealed class RbTree<T>
         if (root == null)
         {
             root = new Node(item, NodeColor.Black);
+            count = 1;
         }
     }
 
     [Region]
-    internal sealed class Node
+    internal sealed partial class Node
     {
         public Node(T item, NodeColor color)
         {
@@ -83,7 +148,8 @@ public sealed class RbTree<T>
         [Requires("Pal.Unshared(@this)")]
         [Ensures("Pal.Unshared(@this) && Pal.Reshaped(@this, @this)")]
         [Ensures("Pal.Tree<(T, bool)>(@this) == SpecSearchTree.Recolor(Pal.Old(Pal.Tree<(T, bool)>(@this)), false)")]
-        [Rlimit(40)]
+        [Ensures("SpecTopDown.Recolored<RbTree<T>.Node, T>(Pal.Old(Pal.Heap<RbTree<T>.Node>()), Pal.Heap<RbTree<T>.Node>(), @this, false)")]
+        [Rlimit(10)]
         public void ColorBlack() => Color = NodeColor.Black;
 
         [Requires("node == null || Pal.InRegion(node)")]
@@ -109,11 +175,13 @@ public sealed class RbTree<T>
         [Requires("Pal.Unshared(@this)")]
         [Ensures("Pal.Unshared(@this) && Pal.Reshaped(@this, @this)")]
         [Ensures("Pal.Tree<(T, bool)>(@this) == SpecSearchTree.Recolor(Pal.Old(Pal.Tree<(T, bool)>(@this)), true)")]
+        [Ensures("SpecTopDown.Recolored<RbTree<T>.Node, T>(Pal.Old(Pal.Heap<RbTree<T>.Node>()), Pal.Heap<RbTree<T>.Node>(), @this, true)")]
         public void ColorRed() => Color = NodeColor.Red;
 
         [Requires("Pal.Unshared(@this) && !Pal.Tree<(T, bool)>(@this).Left.IsLeaf && !Pal.Tree<(T, bool)>(@this).Right.IsLeaf")]
         [Ensures("Pal.Unshared(@this) && Pal.Reshaped(@this, @this)")]
         [Ensures("Pal.Tree<(T, bool)>(@this) == SpecSearchTree.Split4(Pal.Old(Pal.Tree<(T, bool)>(@this)))")]
+        [Ensures("SpecTopDown.Split4ed<RbTree<T>.Node, T>(Pal.Old(Pal.Heap<RbTree<T>.Node>()), Pal.Heap<RbTree<T>.Node>(), @this)")]
         public void Split4Node()
         {
             Debug.Assert(Left != null);
@@ -132,6 +200,8 @@ public sealed class RbTree<T>
         [Requires("Pal.Unshared(@this) && !Pal.Tree<(T, bool)>(@this).Right.IsLeaf")]
         [Ensures("Pal.Unshared(Result) && Pal.Reshaped(@this, Result)")]
         [Ensures("Pal.Tree<(T, bool)>(Result) == SpecSearchTree.RotateLeft(Pal.Old(Pal.Tree<(T, bool)>(@this)))")]
+        [Ensures("SpecTopDown.Rotated<RbTree<T>.Node, T>(Pal.Old(Pal.Heap<RbTree<T>.Node>()), Pal.Heap<RbTree<T>.Node>(), @this, Result, true, true)")]
+        [Ensures("Result == Pal.Old(Pal.RightOf(@this))")]
         public Node RotateLeft()
         {
             Node child = Right!;
