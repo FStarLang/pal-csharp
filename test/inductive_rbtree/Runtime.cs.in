@@ -1,0 +1,359 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using PalCSharp.Tests.Inductive;
+using InductiveTree = PalCSharp.Tests.Inductive.RbTree;
+
+public sealed partial class RbTree<T>
+{
+    internal Node? RuntimeRoot => root;
+}
+
+// Stock C#, deliberately without PAL: no ghost arguments or specification
+// functions are evaluated. This adapter does not replace any verified algorithm.
+internal sealed class TestSet
+{
+    internal RbNode<int>? Root;
+    internal readonly IComparer<int> Comparer;
+    private readonly RecordingComparer inductiveComparer;
+    private readonly RecordingComparer regionComparer;
+    private readonly RbTree<int> region;
+    private readonly Dictionary<RbNode<int>, RbTree<int>.Node> pairedNodes = new();
+    private Snapshot? clearedTree;
+
+    internal TestSet(IComparer<int>? comparer = null)
+    {
+        Comparer = comparer ?? System.Collections.Generic.Comparer<int>.Default;
+        inductiveComparer = new RecordingComparer(Comparer);
+        regionComparer = new RecordingComparer(Comparer);
+        region = new RbTree<int>(regionComparer);
+        Root = InductiveTree.Empty<int>();
+    }
+
+    private sealed class RecordingComparer(IComparer<int> inner) : IComparer<int>
+    {
+        internal readonly List<(int Left, int Right)> Calls = new();
+
+        public int Compare(int left, int right)
+        {
+            Calls.Add((left, right));
+            return inner.Compare(left, right);
+        }
+    }
+
+    private void StartOperation()
+    {
+        inductiveComparer.Calls.Clear();
+        regionComparer.Calls.Clear();
+    }
+
+    private void CheckComparisons(string operation)
+    {
+        if (!inductiveComparer.Calls.SequenceEqual(regionComparer.Calls))
+            throw new Exception($"{operation}: comparison traces differ: " +
+                $"inductive [{string.Join(", ", inductiveComparer.Calls)}]; " +
+                $"region [{string.Join(", ", regionComparer.Calls)}]");
+    }
+
+    private void CheckShape()
+    {
+        var seenInductive = new HashSet<RbNode<int>>();
+        var seenRegion = new HashSet<RbTree<int>.Node>();
+        void Walk(RbNode<int>? inductive, RbTree<int>.Node? other)
+        {
+            if (inductive == null || other == null)
+            {
+                if (inductive != null || other != null)
+                    throw new Exception("Inductive and region tree shapes differ");
+                return;
+            }
+            if (!seenInductive.Add(inductive) || !seenRegion.Add(other))
+                throw new Exception("Cycle or shared node while comparing shapes");
+            if (inductive.key != other.Item || inductive.red != (other.Color == NodeColor.Red))
+                throw new Exception("Inductive and region keys/colors differ at the same position");
+            if (pairedNodes.TryGetValue(inductive, out var previous))
+            {
+                if (!ReferenceEquals(previous, other))
+                    throw new Exception("Inductive and region rotations/replacements differ in node identity");
+            }
+            else
+            {
+                if (pairedNodes.ContainsValue(other))
+                    throw new Exception("Inductive and region node correspondence is not one-to-one");
+                pairedNodes.Add(inductive, other);
+            }
+            Walk(inductive.left, other.Left);
+            Walk(inductive.right, other.Right);
+        }
+        Walk(Root, region.RuntimeRoot);
+    }
+
+    // Snapshot pointer identity and every field, not just logical contents.
+    // It checks node retention and interference with an old tree whose
+    // ownership Clear returned to the caller.
+    internal sealed class Snapshot
+    {
+        internal readonly RbNode<int>? Root;
+        internal readonly Dictionary<RbNode<int>, (int Key, bool Red, RbNode<int>? Left, RbNode<int>? Right)> Nodes = new();
+
+        internal Snapshot(RbNode<int>? root)
+        {
+            Root = root;
+            void Walk(RbNode<int>? node)
+            {
+                if (node == null)
+                    return;
+                if (!Nodes.TryAdd(node, (node.key, node.red, node.left, node.right)))
+                    throw new Exception("Cycle or shared node while snapshotting");
+                Walk(node.left);
+                Walk(node.right);
+            }
+            Walk(root);
+        }
+
+        internal void Unchanged(RbNode<int>? root)
+        {
+            if (!ReferenceEquals(Root, root))
+                throw new Exception("Retained tree changed root identity");
+            var now = new Snapshot(root);
+            if (Nodes.Count != now.Nodes.Count)
+                throw new Exception("Retained tree changed reachable nodes");
+            foreach (var item in Nodes)
+                if (!now.Nodes.TryGetValue(item.Key, out var fields) || fields != item.Value)
+                    throw new Exception("Later operation changed a retained node");
+        }
+    }
+
+    internal bool Contains(int key)
+    {
+        StartOperation();
+        bool result = InductiveTree.Contains(Root, key, inductiveComparer);
+        if (result != region.Contains(key))
+            throw new Exception("Inductive and region Contains results differ");
+        CheckComparisons("Contains");
+        return result;
+    }
+
+    internal bool Add(int key)
+    {
+        var before = new Snapshot(Root);
+        bool existed = Contains(key);
+        StartOperation();
+        Root = InductiveTree.Add(Root, key, inductiveComparer);
+        if (region.Add(key) == existed)
+            throw new Exception("Inductive and region Add results differ");
+        CheckComparisons("Add");
+        var after = new Snapshot(Root);
+        if (after.Nodes.Count != before.Nodes.Count + (existed ? 0 : 1) ||
+            before.Nodes.Keys.Any(node => !after.Nodes.ContainsKey(node)))
+            throw new Exception("Insertion did not retain nodes and allocate exactly when absent");
+        CheckShape();
+        return !existed;
+    }
+
+    internal bool Remove(int key)
+    {
+        var before = new Snapshot(Root);
+        StartOperation();
+        Root = InductiveTree.Remove(Root, key, inductiveComparer, out var removed);
+        if (region.Remove(key) != (removed != null))
+            throw new Exception("Inductive and region Remove results differ");
+        CheckComparisons("Remove");
+        CheckShape();
+        var after = new Snapshot(Root);
+        if (removed == null)
+        {
+            if (after.Nodes.Count != before.Nodes.Count ||
+                before.Nodes.Keys.Any(node => !after.Nodes.ContainsKey(node)))
+                throw new Exception("Missing deletion allocated or lost nodes");
+            return false;
+        }
+        if (removed.left != null || removed.right != null ||
+            !before.Nodes.ContainsKey(removed) || after.Nodes.ContainsKey(removed))
+            throw new Exception("Returned detached node is not isolated from the result");
+        if (after.Nodes.Count + 1 != before.Nodes.Count ||
+            after.Nodes.Keys.Any(node => !before.Nodes.ContainsKey(node)) ||
+            before.Nodes.Keys.Any(node => !ReferenceEquals(node, removed) && !after.Nodes.ContainsKey(node)))
+            throw new Exception("Deletion rebuilt, lost or introduced nodes");
+        if (Comparer.Compare(removed.key, key) != 0)
+            throw new Exception("Top-down deletion detached the successor instead of the match");
+        return true;
+    }
+
+    internal void Clear()
+    {
+        var before = new Snapshot(Root);
+        Root = InductiveTree.Clear(Root, out var detached);
+        region.Clear();
+        if (Root != null || !ReferenceEquals(detached, before.Root))
+            throw new Exception("Clear did not return empty plus the old root");
+        before.Unchanged(detached);
+        clearedTree = before;
+        CheckShape();
+    }
+
+    internal void Validate(SortedSet<int> expected)
+    {
+        var seen = ValidateTree(Root, Comparer, expected);
+        if (region.Count != expected.Count)
+            throw new Exception("Region Count differs from the reference");
+        CheckShape();
+        if (clearedTree != null)
+        {
+            clearedTree.Unchanged(clearedTree.Root);
+            if (clearedTree.Nodes.Keys.Any(seen.Contains))
+                throw new Exception("New tree aliases the tree detached by Clear");
+        }
+    }
+
+    internal static HashSet<RbNode<T>> ValidateTree<T>(RbNode<T>? root, IComparer<T> comparer,
+        SortedSet<T> expected)
+    {
+        var seen = new HashSet<RbNode<T>>();
+        var items = new List<T>();
+        int Walk(RbNode<T>? node)
+        {
+            if (node == null)
+                return 0;
+            if (!seen.Add(node))
+                throw new Exception("Cycle or shared node");
+            int leftHeight = Walk(node.left);
+            items.Add(node.key);
+            int rightHeight = Walk(node.right);
+            if (leftHeight != rightHeight)
+                throw new Exception("Unequal black heights");
+            if (node.red && (node.left?.red == true || node.right?.red == true))
+                throw new Exception("Red parent and child");
+            return leftHeight + (node.red ? 0 : 1);
+        }
+        Walk(root);
+        if (root?.red == true)
+            throw new Exception("Red root");
+        if (InductiveTree.Count(root) != expected.Count || seen.Count != items.Count ||
+            !items.SequenceEqual(expected))
+            throw new Exception("Exact contents/count differ from SortedSet");
+        for (int i = 1; i < items.Count; ++i)
+            if (comparer.Compare(items[i - 1], items[i]) >= 0)
+                throw new Exception("Tree is not strictly ordered");
+        return seen;
+    }
+}
+
+internal static class Program
+{
+    private static int operations;
+
+    private static IEnumerable<int[]> Permutations(int[] values, int start = 0)
+    {
+        if (start == values.Length)
+        {
+            yield return (int[])values.Clone();
+            yield break;
+        }
+        for (int i = start; i < values.Length; ++i)
+        {
+            (values[start], values[i]) = (values[i], values[start]);
+            foreach (var result in Permutations(values, start + 1))
+                yield return result;
+            (values[start], values[i]) = (values[i], values[start]);
+        }
+    }
+
+    private static void Check(TestSet tree, SortedSet<int> expected)
+    {
+        ++operations;
+        tree.Validate(expected);
+        foreach (int key in new[] { int.MinValue, -1, 0, 1, 2, 3, 4, 5, 6, 31, int.MaxValue })
+            if (tree.Contains(key) != expected.Contains(key))
+                throw new Exception($"Contains differs at {key}");
+    }
+
+    private static void Add(TestSet tree, SortedSet<int> expected, int key)
+    {
+        if (tree.Add(key) != expected.Add(key))
+            throw new Exception($"Add differs at {key}");
+        Check(tree, expected);
+    }
+
+    private static void Remove(TestSet tree, SortedSet<int> expected, int key)
+    {
+        if (tree.Remove(key) != expected.Remove(key))
+            throw new Exception($"Remove differs at {key}");
+        Check(tree, expected);
+    }
+
+    private static void VerifiedClients<T>(T key, T replacement, IComparer<T> comparer)
+    {
+        var empty = RbClients.SingletonRoundTrip(key, comparer, out var detachedNode);
+        if (empty != null || detachedNode == null || detachedNode.left != null || detachedNode.right != null)
+            throw new Exception("Verified round-trip client disagrees at runtime");
+        TestSet.ValidateTree(empty, comparer, new SortedSet<T>(comparer));
+
+        RbNode<T>? original = InductiveTree.Empty<T>();
+        original = InductiveTree.Add(original, key, comparer);
+        var reused = RbClients.ClearAndReuse(original, replacement, comparer, out var detachedTree);
+        if (!ReferenceEquals(original, detachedTree))
+            throw new Exception("Verified clear/reuse client lost old ownership");
+        var oldNodes = TestSet.ValidateTree(detachedTree, comparer, new SortedSet<T>(comparer) { key });
+        var newNodes = TestSet.ValidateTree(reused, comparer, new SortedSet<T>(comparer) { replacement });
+        if (newNodes.Overlaps(oldNodes))
+            throw new Exception("Verified clear/reuse client aliased the detached tree");
+    }
+
+    private static void Main()
+    {
+        VerifiedClients(42, -42, Comparer<int>.Default);
+        VerifiedClients("original", "replacement", StringComparer.OrdinalIgnoreCase);
+        var permutations = Permutations(new[] { 0, 1, 2, 3, 4 }).ToArray();
+        if (permutations.Length != 120)
+            throw new Exception("Permutation generator is incomplete");
+        foreach (int[] insertion in permutations)
+            foreach (int[] deletion in permutations)
+            {
+                var tree = new TestSet();
+                var expected = new SortedSet<int>();
+                Remove(tree, expected, 0);
+                foreach (int key in insertion)
+                    Add(tree, expected, key);
+                foreach (int key in insertion)
+                    Add(tree, expected, key);
+                Remove(tree, expected, 10);
+                foreach (int key in deletion)
+                    Remove(tree, expected, key);
+                Remove(tree, expected, 0);
+                Add(tree, expected, int.MinValue);
+                Add(tree, expected, int.MaxValue);
+            }
+
+        foreach (IComparer<int>? comparer in new IComparer<int>?[]
+        {
+            null,
+            Comparer<int>.Create((x, y) => y.CompareTo(x)),
+            Comparer<int>.Create((x, y) => (x / 10).CompareTo(y / 10))
+        })
+        {
+            var tree = new TestSet(comparer);
+            var expected = new SortedSet<int>(comparer);
+            var random = new Random(1729);
+            for (int i = 0; i < 10000; ++i)
+            {
+                int key = random.Next(-128, 128);
+                if (i % 997 == 0)
+                {
+                    tree.Clear();
+                    expected.Clear();
+                    Check(tree, expected);
+                }
+                else if (random.Next(2) == 0)
+                    Add(tree, expected, key);
+                else
+                    Remove(tree, expected, key);
+            }
+        }
+        if (operations != 318000)
+            throw new Exception($"Workload differs from regionops: {operations} mutations");
+        Console.WriteLine($"inductive_rbtree: {operations} mutations agree with SortedSet; structure checked after each");
+        Console.WriteLine("Region comparison traces, exact shapes/colors, and persistent node correspondence match");
+        Console.WriteLine("Detached ownership, node retention, and generic verified clients checked");
+    }
+}
