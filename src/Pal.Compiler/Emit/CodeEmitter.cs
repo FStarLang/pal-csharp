@@ -3481,6 +3481,28 @@ public sealed class CodeEmitter(
         // R5.12. Everything R4.10 opened has to be carried across the loop.
         var pure = ImmutableArray.CreateBuilder<string>();
         var repFixed = new List<(string Name, string Resource)>();
+        // R5.8e. Mutable contents do not change an immutable array reference's length.
+        var arrays = live.Where(s => s.Kind == SlotKind.Array && !unassigned.Contains(s.Name)).ToImmutableArray();
+        static IEnumerable<string> ArraysHanded(IEnumerable<IrExpr> expressions) =>
+            expressions.SelectMany(Check.Subexpressions).OfType<IrCall>()
+                .SelectMany(c => c.Args.Concat(c.Args.SelectMany(Check.Subexpressions)
+                    .OfType<IrLambdaRef>().SelectMany(l => l.Captures)))
+                .Where(a => a.Type is IrArrayType)
+                .SelectMany(Check.Subexpressions).OfType<IrVar>().Select(v => v.Name);
+        var handed = ArraysHanded(Check.Statements(w.Body).Concat(w.Step.SelectMany(Check.Statements))
+            .SelectMany(Check.Expressions).Append(w.Cond)).ToImmutableHashSet();
+        var guardHanded = ArraysHanded([w.Cond]).ToImmutableHashSet();
+        var calledArrays = arrays.Where(s => handed.Contains(s.Name)).ToImmutableArray();
+        void Lengths()
+        {
+            foreach (var slot in calledArrays)
+                Line($"A.pts_to_len {slot.Binder} {slot.PermArg};");
+        }
+        foreach (var slot in arrays)
+        {
+            Line($"A.pts_to_len {slot.Binder} {slot.PermArg};");
+            pure.Add($"Seq.length {fixedNames[slot.Name]} == A.length {slot.Binder}");
+        }
         foreach (var receiver in _objects)
             Representation(receiver, w.Body, scope, measureScope, resources, existentials, pure, repFixed);
 
@@ -3586,7 +3608,13 @@ public sealed class CodeEmitter(
             scope.Bind(Frontend.StmtLowerer.BrokeFlag, new Term(value, TermKind.Bool, IrPrim.Bool));
         }
 
-        var guard = Capture(() => Expr(w.Cond));
+        var guard = Capture(() =>
+        {
+            var term = Expr(w.Cond);
+            foreach (var slot in arrays.Where(s => guardHanded.Contains(s.Name)))
+                Line($"A.pts_to_len {slot.Binder} {slot.PermArg};");
+            return term;
+        });
         Line("while (");
         _indent++;
         _lines.AddRange(guard.Lines);
@@ -3662,7 +3690,8 @@ public sealed class CodeEmitter(
             w.Step.IsEmpty && _receiverRenamed)
         {
             UnitTail(w.Step.IsEmpty ? w.Body
-                : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan);
+                : new IrBlock(w.Body.Loc, [.. ((IrBlock)w.Body).Statements, .. w.Step]), plan,
+                calledArrays.IsEmpty ? null : Lengths);
             _indent--;
             Line("};");
             _escape = outerEscape;
@@ -3691,6 +3720,7 @@ public sealed class CodeEmitter(
                 Sequence(w.Step, plan);
             }
         }
+        Lengths();
         Line("()");
         _indent--;
         Line("};");
@@ -4071,12 +4101,12 @@ public sealed class CodeEmitter(
     /// checked against the invariant rather than joined first: Pulse joins the record as a
     /// <c>match</c>, through whose projection no array field can then be found.
     /// </summary>
-    private void UnitTailSequence(ImmutableArray<IrStmt> statements, MethodPlan plan)
+    private void UnitTailSequence(ImmutableArray<IrStmt> statements, MethodPlan plan, Action? epilogue)
     {
         for (var k = 0; k < statements.Length; k++)
         {
             var rest = statements.RemoveRange(0, k + 1);
-            if (rest.IsEmpty) { UnitTail(statements[k], plan); return; }
+            if (rest.IsEmpty) { UnitTail(statements[k], plan, epilogue); return; }
             // R27.31. So does one whose arm moves a region (R22.12): the heap each arm leaves
             // is a fresh existential at the join, and what the arm proved about it is lost.
             // R27.40. And so, in a loop that may escape, does one that calls a method on a local
@@ -4088,7 +4118,7 @@ public sealed class CodeEmitter(
             {
                 IrBlock Arm(IrStmt? arm, IrLoc loc) =>
                     new(loc, [.. arm is IrBlock ab ? ab.Statements : arm is null ? [] : [arm], .. rest]);
-                UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan);
+                UnitTail(i with { Then = Arm(i.Then, i.Then.Loc), Else = Arm(i.Else, i.Else?.Loc ?? i.Loc) }, plan, epilogue);
                 return;
             }
             // R27.53. A local initialized by a conditional one of whose arms calls a method
@@ -4102,7 +4132,7 @@ public sealed class CodeEmitter(
             {
                 UnitTail(new IrIf(d.Loc, ce.Cond,
                     new IrBlock(ce.Then.Loc, [d with { Init = ce.Then }, .. rest]),
-                    new IrBlock(ce.Else.Loc, [d with { Init = ce.Else }, .. rest])), plan);
+                    new IrBlock(ce.Else.Loc, [d with { Init = ce.Else }, .. rest])), plan, epilogue);
                 return;
             }
             // R27.27. An escaping `if` whose join would lose a moved region (R22.12): the rest
@@ -4116,7 +4146,7 @@ public sealed class CodeEmitter(
                 }
                 static bool Jumps(IrStmt t) =>
                     t is IrBreak or IrContinue or IrThrow or IrReturn || t is IrBlock { Statements: [.., var l] } && Jumps(l);
-                UnitTail(ei with { Then = Arm(ei.Then, ei.Then.Loc), Else = Arm(ei.Else, ei.Else?.Loc ?? ei.Loc) }, plan);
+                UnitTail(ei with { Then = Arm(ei.Then, ei.Then.Loc), Else = Arm(ei.Else, ei.Else?.Loc ?? ei.Loc) }, plan, epilogue);
                 return;
             }
             Statement(statements[k], plan);
@@ -4124,12 +4154,25 @@ public sealed class CodeEmitter(
             {
                 Line($"if ({EscapeTest()}) {{");
                 _indent++;
-                UnitTailSequence(rest, plan);
+                UnitTailSequence(rest, plan, epilogue);
                 _indent--;
-                Line("} else { () }");
+                if (epilogue is null)
+                {
+                    Line("} else { () }");
+                }
+                else
+                {
+                    Line("} else {");
+                    _indent++;
+                    epilogue();
+                    Line("()");
+                    _indent--;
+                    Line("}");
+                }
                 return;
             }
         }
+        epilogue?.Invoke();
         Line("()");
     }
 
@@ -4151,11 +4194,12 @@ public sealed class CodeEmitter(
         body is IrBlock b && b.Statements.Length > 1 &&
         b.Statements.RemoveAt(b.Statements.Length - 1).Any(s => s is IrIf i && WritesRecordInArm(i));
 
-    private void UnitTail(IrStmt stmt, MethodPlan plan)
+    private void UnitTail(IrStmt stmt, MethodPlan plan, Action? epilogue)
     {
         switch (stmt)
         {
             case IrBlock { Statements.IsEmpty: true }:
+                epilogue?.Invoke();
                 Line("()");
                 return;
 
@@ -4181,13 +4225,13 @@ public sealed class CodeEmitter(
                     {
                         Then = new IrBlock(split.Then.Loc, Arm(split.Then)),
                         Else = new IrBlock(split.Else?.Loc ?? split.Loc, Arm(split.Else)),
-                    }, plan);
+                    }, plan, epilogue);
                 }, dropAtEnd: false);
                 return;
             }
 
             case IrBlock b:
-                Scoped(() => UnitTailSequence(b.Statements, plan), dropAtEnd: false);
+                Scoped(() => UnitTailSequence(b.Statements, plan, epilogue), dropAtEnd: false);
                 return;
 
             // R27.54. `if (c) S` last in a loop body, where `S` calls a method that changes its
@@ -4195,24 +4239,24 @@ public sealed class CodeEmitter(
             // the receiver, so the arms are tails, each proving the invariant.
             case IrIf { Else: null } bare when NullTest(bare.Cond) is null &&
                                               Check.Statements(bare.Then).SelectMany(Check.Expressions).Any(MovesReceiver):
-                UnitTail(bare with { Else = new IrBlock(bare.Loc, []) }, plan);
+                UnitTail(bare with { Else = new IrBlock(bare.Loc, []) }, plan, epilogue);
                 return;
 
             case IrIf { Else: not null } i when NullTest(i.Cond) is null:
             {
                 if (i.Cond is IrBinary pnb && PlainNullTest(pnb) is { } ptest)
                 {
-                    PlainNullWindow(ptest, i, branch => UnitTail(branch!, plan), tail: true);
+                    PlainNullWindow(ptest, i, branch => UnitTail(branch!, plan, epilogue), tail: true);
                     return;
                 }
                 var cond = Expr(i.Cond);
                 Line($"if ({cond}) {{");
                 _indent++;
-                UnitTail(i.Then, plan);
+                UnitTail(i.Then, plan, epilogue);
                 _indent--;
                 Line("} else {");
                 _indent++;
-                UnitTail(i.Else, plan);
+                UnitTail(i.Else, plan, epilogue);
                 _indent--;
                 Line("}");
                 return;
@@ -4220,6 +4264,7 @@ public sealed class CodeEmitter(
 
             default:
                 Statement(stmt, plan);
+                epilogue?.Invoke();
                 Line("()");
                 return;
         }

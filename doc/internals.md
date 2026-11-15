@@ -229,7 +229,7 @@ exit status, which `set -o pipefail` in `test/verify.mk` preserves through the p
 
 | Module | Contents |
 |---|---|
-| `Array` | `arr_length`, `read`, `write`, `alloc`, and the array-length modelling axiom |
+| `Array` | `arr_length`, `read`, `write`, `alloc`, and proved length operations over the length-carrying `Array.Base` representation |
 | `Span` | the borrowed window: `is_range_of`, and the borrow/restore operations |
 | `Seq` | `FStar.Seq` / `FStar.Seq.Permutation` wrappers and the general lemmas about them |
 | `List`, `Tree` | the spec-level `SpecList<T>` and `SpecTree<T>` models |

@@ -1632,6 +1632,34 @@ level up, as the defect R4.11c describes — a loop that dispatches a reader on 
 was handed must still be able to return that shape to its caller with the model the caller
 named.
 
+**R5.8e (length of a loop-carried array).** An ordinary array whose contents the loop
+may change still has the same length: R3.3 makes length a property of the array reference,
+not of its mutable elements. For each live array owned through `A.pts_to` whose contents
+the loop may change and whose reference is an immutable binder, the emitter adds
+`Seq.length s == A.length a` to the invariant's pure facts. The contents `s` remain
+existential when the loop may write them.
+This applies to array parameters and freshly allocated array locals, including arrays
+passed to helpers; it does not assert that their contents are unchanged.
+
+The emitter invokes the general-purpose ghost lemma `A.pts_to_len a #p` before
+the loop and, for arrays passed as array arguments (including callback captures) to calls
+in its guard, body or step, at each normal iteration exit. It connects both the entry and current
+contents to the same immutable `A.length a`, proving the equality even after a helper
+returns arbitrary contents with no explicit length postcondition. Each tail branch
+establishes this fact before meeting the invariant; escape paths that re-enter the loop's
+guard do likewise. Direct element updates already preserve sequence length and need no
+back-edge lemma call. Arrays passed to calls in the guard also get the bridge after guard
+evaluation, including when it returns false and the body does not run. The lemma is proved
+by the support library, not assumed.
+
+Like R5.12's array-field length fact, this is derived from the C# type, not an
+algorithm-specific invariant. Naming only the immutable array length avoids carrying an
+unneeded snapshot of the entire entry sequence; nested and successive loops use the same
+reference's length. A cell holding an array reference is not an array ownership slot and
+gets no such fact: rebinding a reference can select an array of a different length.
+Mutable collection counts are likewise not
+covered. Array fields continue to follow R5.12's separate reference-stability rule.
+
 **R5.8c (an invariant that owns).** A `Pal.Invariant` clause is sorted by exactly the test
 R12.2 applies to a contract: a clause of type `SlProp` is a **resource** and joins the
 `pts_to`s; anything else is a proposition and joins the single `pure`. There is no third

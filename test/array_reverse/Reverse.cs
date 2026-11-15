@@ -22,7 +22,6 @@ public static class Arrays
             // Keeps the measure below non-negative, which a `decreases` needs.
             Pal.Invariant(lo <= hi + 1);
             Pal.Invariant(lo + hi == Pal.Contents(a).Length - 1);
-            Pal.Invariant(Pal.Contents(a).Length == Pal.Old(Pal.Contents(a)).Length);
             // Outside the window, every cell already holds its mirror image.
             Pal.Invariant(Pal.Forall((int k) => Pal.Implies(
                 (0 <= k && k < lo) || (hi < k && k < Pal.Contents(a).Length),
@@ -39,5 +38,85 @@ public static class Arrays
             lo++;
             hi--;
         }
+    }
+
+    [Requires("a.Length > 0")]
+    public static void Touch(int[] a)
+    {
+        a[0] = 0;
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallRepeatedly(int[] a)
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2);
+            Touch(a);
+        }
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallNested(int[] a)
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2);
+            for (int j = 0; j < 2; j++)
+            {
+                Pal.Invariant(0 <= j && j <= 2);
+                Touch(a);
+            }
+        }
+        CallRepeatedly(a);
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallWithExits(int[] a)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 3);
+            if (i == 0) continue;
+            Touch(a);
+            if (i == 1) break;
+        }
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("!Result")]
+    public static bool TouchCondition(int[] a)
+    {
+        a[0] = 0;
+        return false;
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallInGuard(int[] a)
+    {
+        while (TouchCondition(a))
+        {
+            Pal.Decreases(0);
+        }
+    }
+
+    [Requires("n >= 0")]
+    [Ensures("Result == n")]
+    public static int AllocateAndFill(int n)
+    {
+        int[] a = new int[n];
+        int i = 0;
+        while (i < n)
+        {
+            Pal.Invariant(0 <= i && i <= n);
+            Pal.Decreases(n - i);
+            a[i] = 0;
+            i++;
+        }
+        return a.Length;
     }
 }
