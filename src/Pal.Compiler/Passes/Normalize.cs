@@ -414,7 +414,7 @@ public static class Normalize
         Assigned(cond, assigned);
 
         // R4.11, inside a loop. `Assigned` answers "which names need a cell", and answers
-        // it by assuming a call writes everything it is handed. For an object that is
+        // it by assuming a call writes through every non-scalar it is handed. For an object that is
         // ruinous rather than merely conservative: the loop would re-quantify its model on
         // every turn, so a method whose postcondition names the model it was *given* could
         // not prove it after the loop, and the shape a client passed in would come back
@@ -771,6 +771,7 @@ public static class Normalize
     /// write through any array it is handed and through every by-reference argument, so
     /// those names must be existentially quantified in an enclosing loop's invariant —
     /// otherwise the invariant would silently assert that the call changed nothing.
+    /// R5.8b: a primitive scalar passed by value, including a capture, cannot be written.
     /// </summary>
     private static void AssignedByCalls(IrExpr? expr, HashSet<string> into)
     {
@@ -782,7 +783,7 @@ public static class Normalize
                 {
                     switch (arg)
                     {
-                        case IrVar v: into.Add(v.Name); break;
+                        case IrVar v when v.Type is not IrPrim: into.Add(v.Name); break;
                         case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
                     }
                     AssignedByCalls(arg, into);
@@ -792,7 +793,11 @@ public static class Normalize
             case IrLambdaRef l:
                 foreach (var c in l.Captures)
                 {
-                    if (c is IrVar or IrRefArg { Operand: IrVar }) into.Add(c is IrVar v ? v.Name : ((IrVar)((IrRefArg)c).Operand).Name);
+                    switch (c)
+                    {
+                        case IrVar v when v.Type is not IrPrim: into.Add(v.Name); break;
+                        case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
+                    }
                     AssignedByCalls(c, into);
                 }
                 return;

@@ -128,8 +128,8 @@ public sealed class MethodPlan
         //
         // This is deliberately *not* `Normalize.Assigned`, which answers a different
         // question — which names need a mutable cell (R4.2) — and answers it by assuming
-        // every argument of every call is written. That assumption is free for an `int`
-        // and ruinous for an object: it re-quantifies the object's model in the
+        // every non-scalar argument of every call may be written through. For an object,
+        // that assumption is ruinous: it re-quantifies the object's model in the
         // postcondition, so a caller learns nothing about the shape it just passed, and
         // `Result == a.TheArea` becomes a statement about a model no one can name.
         var mutatedObjects = new HashSet<string>();
