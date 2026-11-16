@@ -456,6 +456,7 @@ public static class Types
     {
         IrPrim p => Machine(p.Kind),
         IrArrayType a => $"array {Atom(a.Element)}",
+        IrTaskType t => $"Pulse.Lib.CSharp.Async.task {Atom(t.Result)} _",
         // R17.1. A span is a `Pulse.Lib.Slice.slice`, which is a first-class value
         // with a length and a `pts_to` -- an array-shaped slot that need not be a
         // whole array.

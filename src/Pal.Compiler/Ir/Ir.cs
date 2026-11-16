@@ -76,6 +76,11 @@ public sealed record IrArrayType(IrType Element) : IrType
     protected override string Describe() => $"{Element}[]";
 }
 
+public sealed record IrTaskType(IrType Result) : IrType
+{
+    protected override string Describe() => $"Task<{Result}>";
+}
+
 /// <summary>The spec-only ghost sequence <c>Seq&lt;T&gt;</c>.</summary>
 public sealed record IrSeqType(IrType Element) : IrType
 {
@@ -518,6 +523,9 @@ public sealed record IrLambdaInfo(string Trace, string Node, IrCallback Callback
 /// <summary>An explicit numeric conversion, <c>(long)e</c>.</summary>
 public sealed record IrConvert(IrLoc Loc, IrType Target, IrExpr Operand) : IrExpr(Loc);
 
+public enum AsyncOp { Await, Completed, Delay }
+public sealed record IrAsync(IrLoc Loc, AsyncOp Op, IrExpr Operand) : IrExpr(Loc);
+
 /// <summary>
 /// An expression whose evaluation performs an effect first (R13.3): <c>Prelude</c> runs,
 /// then <c>Value</c> is the result. Produced only by an increment or decrement in
@@ -841,6 +849,8 @@ public sealed record IrMethod(
     IrStmt? Body) : IrDecl(Loc, Name)
 {
     public bool IsLemma { get; init; }
+    public bool ReturnsTask { get; init; }
+    public bool IsAsync { get; init; }
 
     /// <summary>
     /// R27.42. An iterator method: its body is one whole enumeration, and it returns the

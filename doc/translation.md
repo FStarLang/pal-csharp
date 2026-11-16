@@ -10350,3 +10350,51 @@ allocate) are the case.
   `ThrowConcurrentOperation`, `ThrowIndexArgumentOutOfRange` and `ThrowVersionCheckFailed`
   carry `[Throws]` and `[Ensures("false")]`; their bodies (a `throw`) are translated and
   checked against these contracts.
+
+## 34. Tasks and normal-completion async
+
+**R34.1.** `async Task` and `async Task<T>` retain the ordinary method contract,
+but `Result` denotes the completed value (`unit` for `Task`), not the task.
+`Old` denotes the invocation state. The generated function takes the ordinary
+precondition and returns `Async.task T Q` with `Async.pending result`, where `Q`
+is the entire ordinary postcondition, including inferred ownership.
+
+**R34.2.** The body is checked as a nested divergent Pulse function from `P` to
+`Q`, then passed to `Pulse.Lib.CSharp.Async.start`. Scheduling is abstract:
+this is not an assertion that C# defers its synchronous prefix, nor a translation
+to OS threads. Interleavings are constrained by resource ownership, not by
+completion timing. `start` requires `is_send P` and `is_send (Q x)`.
+The C# array instance is proved from the underlying Pulse array instance.
+
+**R34.3.** `await t` consumes `pending t` and produces the value and `Q`.
+The task value may be aliased; its permission cannot be duplicated. A second
+resource-redeeming await fails even through an alias. This is a deliberately
+restricted verified subset of C#'s repeatable awaits. `Task.FromResult`,
+`Task.CompletedTask`, and nonnegative millisecond `Task.Delay` are supported.
+
+**R34.4.** A non-async task-returning method forwards a completion contract.
+Its returned task is logically awaited in the nested proof to check that the
+forwarded promise implies its declared contract. This does not insert a runtime
+await: the original C# runs unchanged. Task identity and state observations,
+custom awaitables, `ValueTask`, `async void`, virtual async methods, task
+parameters, modelled receivers, and ref/span/object parameters are not supported.
+Discarded task calls are refused. Tasks can be held in locals and forwarded.
+
+**R34.5.** Postconditions indexed into a task are ordinary F* functions, not
+just Pulse `ensures` clauses. Inferred array post-state witnesses therefore
+carry the invariant that their length equals the input length. This both
+preserves C#'s fixed array length and makes guarded specifications well formed
+inside the deferred predicate.
+
+**R34.6.** This first fragment proves partial correctness on normal completion.
+Await is divergent; no termination or scheduler fairness is assumed. Faulted
+or cancelled tasks do not return through the model's await. Async `try`, `throw`,
+`lock`, and exceptional contracts are refused, not erased. Exception recovery,
+cancellation protocols, thread-affine resources, and fire-and-forget ownership
+are outside this fragment. Runtime I/O wrappers must still clean up on failure.
+
+**Trust boundary.** `Pulse.Lib.CSharp.Async.fsti` is an explicit, inventoried
+model of CLR tasks, following Pulse's `Async` example and `Pulse.Lib.Task`.
+It is not a verified implementation of the CLR scheduler. `[Implements]` on a
+task-returning I/O binder checks its normal-completion contract against the
+named model; its actual I/O remains trusted, just as SQL does in Petstore.

@@ -560,6 +560,7 @@ public static class Check
             IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
+            IrAsync a => [a.Operand],
             IrStmtExpr se => [se.Value],
             IrRaise ra => [ra.Exception],
             IrOld o => [o.Operand],

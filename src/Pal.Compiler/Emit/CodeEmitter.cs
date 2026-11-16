@@ -4898,6 +4898,12 @@ public sealed class CodeEmitter(
                 return Branch(cond, whenTrue, whenFalse);
             }
 
+            case IrAsync a:
+                var asyncOperand = a.Operand.Type == IrPrim.Void ? "()" : Expr(a.Operand);
+                var asyncResult = Fresh();
+                var operation = a.Op switch { AsyncOp.Await => "await", AsyncOp.Completed => "completed", _ => "delay" };
+                Line($"let {asyncResult} = Pulse.Lib.CSharp.Async.{operation} {asyncOperand};");
+                return asyncResult;
             case IrCall { Kind: CalleeKind.Method } call:
                 return Call(call, Fresh());
 

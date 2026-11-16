@@ -507,6 +507,7 @@ public static class Normalize
             case IrLambdaRef l: foreach (var c in l.Captures) Free(c, into); return;
             case IrCall call: foreach (var a in call.Args) Free(a, into); return;
             case IrConvert cv: Free(cv.Operand, into); return;
+            case IrAsync a: Free(a.Operand, into); return;
             case IrStmtExpr se: foreach (var s in se.Prelude) Free(s, into); Free(se.Value, into); return;
             case IrOld o: Free(o.Operand, into); return;
             case IrLive lv: Free(lv.Operand, into); return;
@@ -679,6 +680,7 @@ public static class Normalize
                 MutatedIn(c2.Else, into);
                 return;
             case IrConvert cv: MutatedIn(cv.Operand, into); return;
+            case IrAsync a: MutatedIn(a.Operand, into); return;
             case IrStmtExpr se: foreach (var s in se.Prelude) Mutated(s, into); MutatedIn(se.Value, into); return;
             case IrRefArg ra: MutatedIn(ra.Operand, into); return;
             // R27.39. The lifted lambda is called by the callee: what it captures, it may change.
@@ -806,6 +808,7 @@ public static class Normalize
             case IrElement el: AssignedByCalls(el.Array, into); AssignedByCalls(el.Index, into); return;
             case IrField f: AssignedByCalls(f.Receiver, into); return;
             case IrConvert cv: AssignedByCalls(cv.Operand, into); return;
+            case IrAsync a: AssignedByCalls(a.Operand, into); return;
             // R13.3. An expression can now perform a write, so the question "what does
             // this statement assign" is no longer answered by looking at statements
             // alone.

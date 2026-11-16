@@ -257,7 +257,9 @@ public sealed class MethodPlan
                     if (p.Fraction is null)
                     {
                         postResources.Add($"A.pts_to {name} {postValue}");
-                        postExistentials.Add(postValue);
+                        postExistentials.Add(method.ReturnsTask
+                            ? $"({postValue}: Seq.seq {Types.Atom(array.Element)}{{Seq.length {postValue} == Seq.length (reveal {preValue})}})"
+                            : postValue);
                         post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
                     }
                     else

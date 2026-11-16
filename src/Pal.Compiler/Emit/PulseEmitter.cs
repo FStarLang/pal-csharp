@@ -1993,10 +1993,14 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // they did write is the whole difference between a usable message and a puzzle.
         origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Requires) ?? method.Loc));
         sb.AppendLine($"  requires {plan.Requires}");
-        if (method.ReturnType is not IrPrim { Kind: PrimKind.Void })
+        if (method.ReturnsTask)
+            sb.AppendLine($"  returns  {Names.Result}: Pulse.Lib.CSharp.Async.task {Types.Atom(method.ReturnType)} (fun ({Names.Result}: {Types.Render(method.ReturnType)}) -> {plan.Ensures})");
+        else if (method.ReturnType is not IrPrim { Kind: PrimKind.Void })
             sb.AppendLine($"  returns  {Names.Result}: {Types.Render(method.ReturnType)}");
         origins.Add(new LineOrigin(Lines(sb) + 1, Clause(method.Ensures) ?? method.Loc));
-        sb.AppendLine($"  ensures  {plan.Ensures}");
+        sb.AppendLine(method.ReturnsTask
+            ? $"  ensures  Pulse.Lib.CSharp.Async.pending {Names.Result}"
+            : $"  ensures  {plan.Ensures}");
         if (plan.Raises is { } raises)
         {
             origins.Add(new LineOrigin(Lines(sb) + 1, method.Throws[0].Loc));
@@ -2014,6 +2018,16 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
         origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
         sb.AppendLine("{");
+        var startsTask = method.ReturnsTask;
+        if (startsTask)
+        {
+            sb.AppendLine("  divergent");
+            sb.AppendLine("  fn __pal_async_body ()");
+            sb.AppendLine($"    requires {plan.Requires}");
+            sb.AppendLine($"    returns {Names.Result}: {Types.Render(method.ReturnType)}");
+            sb.AppendLine($"    ensures {plan.Ensures}");
+            sb.AppendLine("  {");
+        }
 
         if (method.Admit)
         {
@@ -2038,6 +2052,11 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 origins.Add(o with { Line = o.Line + offset });
         }
 
+        if (startsTask)
+        {
+            sb.AppendLine("  };");
+            sb.AppendLine("  Pulse.Lib.CSharp.Async.start __pal_async_body");
+        }
         sb.AppendLine("}");
         if (method.Lambda is { } lambda) EmitLambdaWrapper(sb, method, lambda, plan);
 
@@ -2293,6 +2312,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 case IrObserve ob: CollectExpr(ob.Receiver); return;
                 case IrQuantifier q: CollectExpr(q.Body); return;
                 case IrConvert cv: CollectExpr(cv.Operand); return;
+                case IrAsync a: CollectExpr(a.Operand); return;
                 case IrStmtExpr se: foreach (var s in se.Prelude) Collect(s); CollectExpr(se.Value); return;
                 case IrOptionOp oo: CollectExpr(oo.Operand); return;
                 case IrRaise ra: CollectExpr(ra.Exception); return;

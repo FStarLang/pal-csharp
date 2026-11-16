@@ -612,6 +612,9 @@ public sealed class WellKnown
         {
             case null:
                 return null;
+            case INamedTypeSymbol task when Async.IsTask(task):
+                return task.TypeArguments.IsEmpty ? new IrTaskType(IrPrim.Void)
+                    : MapType(task.TypeArguments[0]) is { } result ? new IrTaskType(result) : null;
             case IArrayTypeSymbol { Rank: 1 } array when MapType(array.ElementType) is { } e:
                 return new IrArrayType(e);
             // R20.4. `List<T>`, `IList<T>` and `IReadOnlyList<T>` are an array: an indexed

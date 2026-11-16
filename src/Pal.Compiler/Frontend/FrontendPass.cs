@@ -1934,6 +1934,7 @@ public static partial class FrontendPass
                 case IrField f: Walk(f.Receiver); return;
                 case IrObserve o: Walk(o.Receiver); return;
                 case IrConvert cv: Walk(cv.Operand); return;
+                case IrAsync a: Walk(a.Operand); return;
                 case IrStmtExpr se: Walk(se.Value); return;
                 case IrRaise ra: Walk(ra.Exception); return;
                 case IrOld o2: Walk(o2.Operand); return;
@@ -2631,8 +2632,9 @@ public static partial class FrontendPass
         foreach (var f in ContextNames(symbol, compilation, known).Values)
             result.Add(new SpecParam(f.Name, Declarations.ContextType(f)));
 
-        if (wantsResult && !symbol.ReturnsVoid)
-            result.Add(new SpecParam(SpecBinder.ResultParameter, ExactReturn(symbol, known) ?? symbol.ReturnType));
+        var resultType = Async.Result(ExactReturn(symbol, known) ?? symbol.ReturnType, compilation);
+        if (wantsResult && resultType.SpecialType != SpecialType.System_Void)
+            result.Add(new SpecParam(SpecBinder.ResultParameter, resultType));
 
         return result.ToImmutable();
     }
@@ -2650,6 +2652,7 @@ public static partial class FrontendPass
     {
         var symbol = candidate.Symbol;
         var loc = Locations.From(candidate.Identifier);
+        if (!Async.Admissible(symbol, candidate.Syntax, known, diagnostics, loc)) return null;
 
         // §28. A member of a borrowing struct is a member of the borrowed object's class.
         // R27.41. Its `[Spec]` properties are abbreviations, expanded where they are read.
@@ -2693,7 +2696,7 @@ public static partial class FrontendPass
             ? known.MapType(symbol.ContainingType) ?? new IrClassType(symbol.ContainingType.Name)
             : iterated is not null ? new IrSeqType(iterated)
             // R32.13. A method returning a view exactly returns its record.
-            : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+            : known.MapType(Async.Result(ExactReturn(symbol, known) ?? symbol.ReturnType, model.Compilation));
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -2784,8 +2787,12 @@ public static partial class FrontendPass
             specs.Decreases,
             admitted || verbatim || implemented ? null
             : iterated is not null && (trimmed ?? body) is { } iteratorBody ? lowerer.WrapIterator(iteratorBody)
-            : trimmed ?? body)
+            : Async.IsTask(symbol.ReturnType) && !symbol.IsAsync
+                ? Async.ForwardedBody(trimmed ?? body)
+                : trimmed ?? body)
         {
+            ReturnsTask = Async.IsTask(symbol.ReturnType),
+            IsAsync = symbol.IsAsync,
             IsIterator = iterated is not null,
             IsLemma = candidate.Kind == CalleeKind.Lemma,
             PulseBody = pulseBody,

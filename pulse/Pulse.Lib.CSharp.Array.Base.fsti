@@ -22,6 +22,9 @@ let is_null (#t: Type0) (a: array t) : bool = Raw.is_null (storage a)
 val pts_to (#t: Type0) ([@@@mkey] a: array t)
   (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop
 
+instance val is_send_pts_to #t (a:array t) #p s :
+  Pulse.Lib.Send.is_send (pts_to a #p s)
+
 [@@pulse_unfold]
 instance has_pts_to_array (t: Type0) : Pulse.Class.PtsTo.has_pts_to (array t) (Seq.seq t) = {
   pts_to = pts_to
