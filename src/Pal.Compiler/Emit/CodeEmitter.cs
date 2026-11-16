@@ -61,7 +61,8 @@ public sealed class CodeEmitter(
 
     private bool DirtiesReceiver(IrStmt stmt)
     {
-        if (ReceiverWrites(stmt).Record) return true;
+        var (record, arrays) = ReceiverWrites(stmt);
+        if (record || arrays.Count > 0) return true;
         if (_method?.DeclaringClass is { } dc && classes is not null && classes.TryGetValue(dc, out var owner) &&
             RegionsOf(owner).Any(k => WritesRegion(stmt, k.Name, skipReadOnly: true)))
             return true;
@@ -1572,7 +1573,9 @@ public sealed class CodeEmitter(
         // R27.50. Entered with the receiver unchanged since the method began, and leaving it
         // alone: the receiver is still at its model on entry.
         var unchanged = receiver.PostModel == receiver.PreModel ||
-                        _pristineLoops.Count > 0 && _pristineLoops.Peek();
+                        _pristineLoops.Count > 0 && _pristineLoops.Peek() ||
+                        !loop && _pristineLoops.Count == 0 && !_receiverDirty &&
+                        receiver.Name == Names.This && receiver.PreModel is not null;
         // R27.38. A call that closes the receiver around itself (R22.15's self-call, or a
         // raising callee's bracket) reopens it at a fresh record: the record cannot be
         // named before the loop. A read-only receiver says instead that the record is still
@@ -1776,7 +1779,7 @@ public sealed class CodeEmitter(
                 decl.Fields.Any(f => f.Type is IrArrayType || f.Type is IrClassType { Plain: false }))
             {
                 if (!unchanged)
-                    diagnostics.Unsupported(decl.Loc, "Current model observations of this open mutable representation",
+                    diagnostics.Unsupported(body.Loc, "Current model observations of this open mutable representation",
                         "Current observations require a model determined by ordinary raw fields; " +
                         "array contents and owned-object models are not raw fields. Use an explicitly checked model binding.");
                 return;

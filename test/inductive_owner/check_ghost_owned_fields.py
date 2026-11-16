@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote
 
 here = Path(__file__).resolve().parent
 root = here.parent.parent
@@ -64,7 +65,7 @@ for name, observation in (
         assert checked.returncode == 0, checked.stdout + checked.stderr
         target = directory / ("Func_" + owner + "_ReadThroughLoan.fst")
         checked = subprocess.run(command + [str(target)], text=True, capture_output=True)
-        failure = " ".join((checked.stdout + checked.stderr).split())
+        failure = " ".join(unquote(checked.stdout + checked.stderr).split())
         assert checked.returncode != 0, name + " observation read a missing owned-field model"
         assert "Cannot prove: Class_CellOwner.class_CellOwner__inv" in failure, failure
         assert "OwnerLease.opened" in failure, failure

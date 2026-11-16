@@ -71,4 +71,35 @@ with tempfile.TemporaryDirectory(prefix="pal-unsupported-current-model-") as tem
     unsupported_origins = json.loads((Path(temporary) / "source_range_info.json").read_text())
     assert not any("__abs_model_current" in entry["construct"] for entry in unsupported_origins)
 
+array_source = (here / "UnsupportedCurrentModel.cs.in").read_text()
+loop_start = array_source.index("        int i = 0;")
+array_source = array_source[:loop_start] + "{body}\n    }\n}\n"
+for name, body, accepted in (
+    ("pristine", "Pal.Assert(this.Length == 1); items[0] = 42;", True),
+    ("mutated", "items[0] = 42; Pal.Assert(this.Length == 1);", False),
+    ("alias", "var alias = items; alias[0] = 42; Pal.Assert(this.Length == 1);", False),
+):
+    with tempfile.TemporaryDirectory(prefix="pal-current-array-" + name) as temporary:
+        directory = Path(temporary)
+        fixture = directory / "CurrentArray.cs"
+        fixture.write_text(array_source.replace("{body}", body))
+        translated = subprocess.run(
+            [compiler, "-o", temporary, str(fixture)], text=True, capture_output=True,
+        )
+        diagnostics = translated.stdout + translated.stderr
+        assert (translated.returncode == 0) == accepted, diagnostics
+        if not accepted:
+            assert "Current model observations of this open mutable representation" in diagnostics, diagnostics
+            continue
+        command = [
+            str(root / "tools/run-fstar.sh"), "--include", temporary,
+            "--include", str(root / "pulse/_cache"), "--cache_checked_modules",
+            "--cache_dir", temporary, "--already_cached", "*",
+        ]
+        for module in ("Class_UnsupportedCurrentModel", "Func_UnsupportedCurrentModel_Mutate"):
+            checked = subprocess.run(
+                command + [str(directory / (module + ".fst"))], text=True, capture_output=True,
+            )
+            assert checked.returncode == 0, checked.stdout + checked.stderr
+
 print("Current models: projections/decreases and Old checked; stale assertion and unsupported shape rejected")
