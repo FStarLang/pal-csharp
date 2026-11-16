@@ -1,0 +1,3 @@
+petstore.db*
+*.db-wal
+*.db-shm
