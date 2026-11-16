@@ -173,6 +173,13 @@ public static partial class FrontendPass
                     ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
                         { Type = IrPrim.Bool });
                 }
+                foreach (var p in Borrowing.InheritedGhostState(self, known))
+                {
+                    if (written.Contains(p.Name) || known.MapType(p.Type) is not { } fieldType) continue;
+                    var field = new IrField(loc, selfVar, p.Name) { Type = fieldType };
+                    ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
+                        { Type = IrPrim.Bool });
+                }
             }
         }
 
@@ -204,7 +211,7 @@ public static partial class FrontendPass
         }
         else
         {
-            body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+            body = admitted ? null : LowerBody(candidate.Syntax, lowerer, known, bound, diagnostics);
             var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
             bodyRequires = br;
             bodyEnsures = be;

@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="../Owner.cs" />
     <Compile Include="../ConditionalGhost.cs" />
+    <Compile Include="../GhostStorage.cs" />
     <Compile Include="../GhostWitness.cs" />
     <Compile Include="../Views.cs" />
     <Compile Include="../Callbacks.cs" />

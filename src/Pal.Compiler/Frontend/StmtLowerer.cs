@@ -856,7 +856,7 @@ public sealed class StmtLowerer(
                     model.GetSymbolInfo(invocation).Symbol is IMethodSymbol lemma &&
                     Declarations.KindOf(lemma, known) == CalleeKind.Lemma
                     ? LowerLemmaCall(invocation, lemma, Locations.From(v))
-                    : namedGhost
+                    : namedGhost || capture is not null
                     ? _spec.Lower(initializer)
                     : _code.Lower(initializer);
                 if (capture is not null && ExprLowerer.HasEffect(ghostValue))
@@ -2064,8 +2064,9 @@ public sealed class StmtLowerer(
                         field.RefKindKeyword.IsKind(SyntaxKind.RefKeyword) &&
                         field.Expression is IdentifierNameSyntax or
                             MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax or ThisExpressionSyntax } &&
-                        model.GetSymbolInfo(field.Expression).Symbol is IFieldSymbol { IsStatic: false } or ILocalSymbol &&
-                        _code.Lower(field.Expression) is { Type: IrUserSpecType } target &&
+                        (model.GetSymbolInfo(field.Expression).Symbol is IFieldSymbol { IsStatic: false } or ILocalSymbol ||
+                         GhostStorage.Is(model.GetSymbolInfo(field.Expression).Symbol, known)) &&
+                        _spec.Lower(field.Expression) is { Type: IrUserSpecType } target &&
                         target is IrField or IrVar &&
                         _spec.Lower(value.Expression) is { } replacement && !ExprLowerer.HasEffect(replacement))
                         return new IrAssign(loc, target, replacement) { GhostOnly = true };

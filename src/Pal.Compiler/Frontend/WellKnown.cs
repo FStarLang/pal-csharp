@@ -15,6 +15,7 @@ public sealed class WellKnown
 {
     internal Dictionary<IParameterSymbol, IrCallback?> CallbackTypes { get; } =
         new(SymbolEqualityComparer.Default);
+    internal Dictionary<string, IrExpr> GhostInitializers { get; } = [];
 
     public const string Namespace = "PalLang";
 
@@ -53,6 +54,7 @@ public sealed class WellKnown
         RefineAttribute = Type("RefineAttribute");
         RefineAlwaysAttribute = Type("RefineAlwaysAttribute");
         SpecAttribute = Type("SpecAttribute");
+        GhostFieldAttribute = Type("GhostFieldAttribute");
         ModelAttribute = Type("ModelAttribute");
         InvariantAttribute = Type("InvariantAttribute");
         LemmaAttribute = Type("LemmaAttribute");
@@ -114,6 +116,7 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecListOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
+    public INamedTypeSymbol GhostFieldAttribute { get; }
     public INamedTypeSymbol ThrowsAttribute { get; }
     public INamedTypeSymbol TranslateAnnotatedOnlyAttribute { get; }
 

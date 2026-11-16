@@ -1032,6 +1032,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R22.6. A generic `[Spec]` struct's parameters are explicit on the two types and
         // implicit on the predicate, as R15.2 has them for a class.
         var binders = new TypeBinders(s.TypeParameters);
+        GhostStorageEmitter.Checks(sb, s.Name, s.Fields, s.TypeParameters);
         sb.Append("noeq type ").Append(Names.StructRaw(s.Name)).Append(binders.Explicit).AppendLine(" = {");
         foreach (var f in s.Fields)
             sb.AppendLine($"  {Names.Field(f.Name)}: {Types.Render(f.Type)};");
@@ -1157,6 +1158,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R31.2. An owner that its region's nodes point back to has its record in this
         // group, so neither module depends on the other.
         var group = CycleOwners(c);
+        GhostStorageEmitter.Checks(sb, c);
+        foreach (var owner in group) GhostStorageEmitter.Checks(sb, owner);
         string Local(string t) => group.Aggregate(t.Replace(Names.ClassModule(c.Name) + ".", ""),
             (acc, d) => acc.Replace(Names.ClassModule(d.Name) + ".", ""));
         sb.Append("noeq type ").Append(Names.ClassRaw(c.Name)).Append(tb.Explicit).AppendLine(" = {");
@@ -1672,6 +1675,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         var tb = TypeBinders.Of(c);
         // R31.2. A record its region's module declares is included from there.
+        GhostStorageEmitter.Checks(sb, c);
         if (CycleRegionOf(c) is { } home)
         {
             sb.AppendLine($"include {Names.ClassModule(home.Name)}");

@@ -2,6 +2,18 @@ using System;
 
 namespace PalLang;
 
+/// <summary>
+/// A specification-only logical instance field, with no CLR storage. Apply to a
+/// nonvirtual ref-returning throwing property. The initializer is an independent
+/// pure specification expression; F* checks that the field's actual type is erased.
+/// Read only in specifications and update only through Pal.UpdateGhost.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class GhostFieldAttribute(string initializer) : Attribute
+{
+    public string Initializer { get; } = initializer;
+}
+
 // ---------------------------------------------------------------------------
 // Contracts on declarations.
 //

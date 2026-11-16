@@ -456,6 +456,9 @@ public sealed partial class ExprLowerer
                 return BorrowedObject(loc);
             case IFieldSymbol f when bw.IsOwner(f):
                 return BorrowedObject(loc);
+            case IPropertySymbol p when GhostStorage.Is(p, known) && bw.ViewBase is { } ghostBase &&
+                SymbolEqualityComparer.Default.Equals(p.ContainingType.OriginalDefinition, ghostBase.OriginalDefinition):
+                return new IrField(loc, SelfExpr(loc), p.Name) { Type = known.MapType(p.Type) };
             // R27.41. A `[Spec]` property of the struct, in a contract.
             case IPropertySymbol { IsStatic: false } sp when SpecPosition && Declarations.Has(sp, known.SpecAttribute) &&
                 SymbolEqualityComparer.Default.Equals(sp.ContainingType.OriginalDefinition, bw.Struct.OriginalDefinition):
@@ -499,6 +502,11 @@ public sealed partial class ExprLowerer
     /// </summary>
     private IrExpr? BorrowedMember(MemberAccessExpressionSyntax node, ISymbol? symbol, IrLoc loc)
     {
+        if (GhostStorage.Is(symbol, known) && Borrow is { ViewBase: { } ghostBase } &&
+            SymbolEqualityComparer.Default.Equals(symbol!.ContainingType.OriginalDefinition, ghostBase.OriginalDefinition) &&
+            (node.Expression is ThisExpressionSyntax || BorrowingSelfAlias(node.Expression) ||
+             model.GetSymbolInfo(node.Expression).Symbol is IParameterSymbol { Name: Names.This } gp && IsShim(gp.ContainingSymbol)))
+            return new IrField(loc, SelfExpr(loc), symbol.Name);
         // R32.13. The base's `[Spec]` members describe an object of the base by its model; a
         // view has none of its own.
         if (Borrow is { ViewBase: { } vbase } && SpecPosition && symbol is IPropertySymbol { IsStatic: false } bsp &&
@@ -957,7 +965,13 @@ public sealed partial class ExprLowerer
             if (expr is InvocationExpressionSyntax inv &&
                 model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: true } m &&
                 known.IsPalIntrinsic(m))
+            {
+                if (m.Name == nameof(PalLang.Pal.UpdateGhost))
+                    diagnostics.Unsupported(Locations.From(inv),
+                        "A ghost update in a borrowing-view constructor",
+                        "Use the logical field's independent initializer; view constructors build a value record.");
                 continue;
+            }
             if (tail.Count == 0 && expr is InvocationExpressionSyntax proof &&
                 model.GetSymbolInfo(proof).Symbol is IMethodSymbol proofMethod &&
                 Declarations.Has(proofMethod, known.LemmaAttribute))
@@ -1073,6 +1087,13 @@ public sealed partial class ExprLowerer
             }
         }
         var assignedInBody = new HashSet<string>();
+        foreach (var property in target.ContainingType.GetMembers().OfType<IPropertySymbol>()
+                     .Where(p => GhostStorage.Is(p, known)))
+            if (known.GhostInitializers.TryGetValue(GhostStorage.Key(property), out var initial))
+            {
+                given.Add(new IrFieldInit(property.Name, initial));
+                _ctorGiven[property.Name] = initial;
+            }
         foreach (var st in body)
         {
             // A proof call contributes its checked resources just as it does in

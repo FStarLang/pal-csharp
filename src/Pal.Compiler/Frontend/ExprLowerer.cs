@@ -1197,6 +1197,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R32.13. A view's record holds the state it inherits, after its own.
         foreach (var x in OwnFields(symbol)) yield return x;
         foreach (var f in Borrowing.InheritedState(symbol, known)) yield return (f.Name, f.Type);
+        foreach (var p in Borrowing.InheritedGhostState(symbol, known)) yield return (p.Name, p.Type);
     }
 
     private static IEnumerable<(string Name, ITypeSymbol Type)> OwnFields(INamedTypeSymbol symbol)
@@ -1555,6 +1556,18 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private IrExpr LowerIdentifier(IdentifierNameSyntax node, IrLoc loc)
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
+        if (GhostStorage.Is(symbol, known))
+        {
+            if (!SpecPosition)
+            {
+                diagnostics.Error("PALCS0771", loc, "A [GhostField] can only be read in erased proof/specification contexts.");
+                return new IrLiteral(loc, null);
+            }
+            if (BorrowedIdentifier(symbol, node, loc) is { } borrowedGhost) return borrowedGhost;
+            if (ClassMembers.Contains(symbol!.Name)) return new IrVar(loc, symbol.Name);
+            return new IrField(loc, known.IsPlainLike(symbol!.ContainingType)
+                ? RegionThis(loc, symbol.ContainingType) : new IrVar(loc, Names.This), symbol.Name);
+        }
 
         // A postcondition's `Result` is a parameter of the generated shim, not a name in
         // the user's program; it denotes the value the method returns.
@@ -1749,6 +1762,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+        if (GhostStorage.Is(symbol, known))
+        {
+            if (!SpecPosition)
+            {
+                diagnostics.Error("PALCS0771", loc, "A [GhostField] can only be read in erased proof/specification contexts.");
+                return new IrLiteral(loc, null);
+            }
+            if (BorrowedMember(node, symbol, loc) is { } borrowedGhost) return borrowedGhost;
+            if (node.Expression is ThisExpressionSyntax)
+            {
+                if (ClassMembers.Contains(symbol!.Name)) return new IrVar(loc, symbol.Name);
+                return new IrField(loc, known.IsPlainLike(symbol!.ContainingType)
+                    ? RegionThis(loc, symbol.ContainingType) : new IrVar(loc, Names.This), symbol.Name);
+            }
+            return new IrField(loc, Lower(node.Expression), symbol!.Name);
+        }
         // R27.51. An interface's property read off an object of a class translated at its
         // exact type is the class's implementation of it.
         if (symbol is IPropertySymbol { IsStatic: false, ContainingType.TypeKind: TypeKind.Interface } ip &&

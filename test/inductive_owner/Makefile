@@ -1,5 +1,10 @@
 include ../verify.mk
 
+.PHONY: check-ghost-storage
+all: check-ghost-storage
+check-ghost-storage: verify
+	@python3 check_ghost_storage.py "$(PALCS)"
+
 .PHONY: check-conditional-ghost
 all: check-conditional-ghost
 check-conditional-ghost: verify

@@ -1054,6 +1054,9 @@ public sealed record IrSpecFunction(
 
 public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
 {
+    /// <summary>Logical storage only: the actual F* type must be structurally erased.</summary>
+    public bool IsGhost { get; init; }
+
     /// <summary>R10.10. A back pointer: constrained by the invariant, not owned by it.</summary>
     public bool IsBackward { get; init; }
 

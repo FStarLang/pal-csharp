@@ -26,14 +26,14 @@ public static class RawSpec
 public sealed class RawOwner
 {
     private int value;
-    private RetainedState state;
+    [GhostField("RetainedSpec.Empty()")]
+    private ref RetainedState state => throw new InvalidOperationException("Specification only");
     [Model] private int Model => value;
     [Spec] public int Value => Model;
 
     public RawOwner(int initial)
     {
         value = initial;
-        state = RetainedSpec.Empty();
     }
 
     [GhostArg("RawSnapshot before"), GhostArg("Perm permission")]

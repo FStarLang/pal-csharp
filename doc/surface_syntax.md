@@ -974,13 +974,39 @@ conditional call erases argument evaluation too. Capture accepts either a `T` va
 or a checked `Ghost<T>` result, including snapshots of interface-typed values.
 
 For mutable erased state use `Pal.UpdateGhost(ref state, value)`. Its target must be
-a direct instance field or local with a user specification type whose F* representation
+a direct instance field, `[GhostField]` property, or local with a user specification type whose F* representation
 is erased; F* checks this, and ordinary field-write permissions still apply. The value
 must be a pure specification expression. Initialize an erased local with
 `State state = default;` followed immediately by `Pal.UpdateGhost(ref state, initial);`.
-Only the verified translation evaluates `initial` or subsequent updates. An erased
-field may still need a PAL field/non-PAL ref-property guard to preserve CLR layout;
-the calls and helper declarations do not.
+Only the verified translation evaluates `initial` or subsequent updates.
+
+Use a logical property when the state must occupy **no CLR storage**:
+
+```csharp
+[GhostField("OwnerSpec.Make(0)")]
+private ref OwnerState state => throw new InvalidOperationException("Specification only");
+```
+
+Unlike `[Spec]` (a pure model observation), `[GhostField]` declares a real field of
+the object's logical representation. Its initializer is a pure, independently bound
+specification expression, typechecked against the property type. It cannot depend on
+constructor parameters or other instance fields. It runs once in the verified
+constructor chain; neither it nor the getter runs in ordinary C#. No `#if PAL` is needed.
+
+Initially supported shapes are nonvirtual instance `ref` (not `ref readonly`) properties
+of translated classes, with only `throw new InvalidOperationException(...)` in the
+getter (constant arguments) and no backing field. Interfaces,
+indexers, setters, static/virtual properties, and effectful accessors are rejected.
+F* checks structural erasedness **at the declaration**, even without any update;
+`[SpecType]` alone does not establish erasedness.
+
+Reads are restricted to proof/specification contexts (including conditional
+`Pal.Capture`); writes must use conditional `Pal.UpdateGhost`. Ordinary reads, even
+discarded ones, direct writes, and escaping references are rejected. Updates use the
+same object's existing ownership and require full write permission, including through
+aliases. A ghost-only update counts as a model mutation, not a read-only method.
+Borrowing views may inherit, but not declare, logical storage in their value record; their constructors
+use its initializer, but explicit `UpdateGhost` in a view constructor is not supported.
 
 ---
 

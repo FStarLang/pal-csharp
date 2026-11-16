@@ -264,6 +264,15 @@ public static class Declarations
 
             if (node is InvocationExpressionSyntax call)
             {
+                // Conditional at runtime, but a real logical write in the proof.
+                // Do this before the general "proof intrinsics only read" case.
+                if (known is not null &&
+                    model.GetSymbolInfo(call).Symbol is IMethodSymbol update &&
+                    known.IsPalIntrinsic(update) && update.Name == nameof(PalLang.Pal.UpdateGhost) &&
+                    call.ArgumentList.Arguments.FirstOrDefault() is { } destination &&
+                    (model.GetSymbolInfo(destination.Expression).Symbol is IFieldSymbol { IsStatic: false } ||
+                     GhostStorage.Is(model.GetSymbolInfo(destination.Expression).Symbol, known)))
+                    return true;
                 // R30.29. `Unsafe.IsNullRef(ref r)` only tests the reference.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol isNull && RefSnapshots.IsIsNullRef(isNull))
                     continue;
@@ -587,6 +596,7 @@ public static class Declarations
     public static bool IsAnnotatedDeclaration(ISymbol symbol, WellKnown known) =>
         Has(symbol, known.ModelAttribute)
         || Has(symbol, known.SpecAttribute)
+        || Has(symbol, known.GhostFieldAttribute)
         || Has(symbol, known.LemmaAttribute)
         || Has(symbol, known.PlainAttribute)
         || Has(symbol, known.RegionAttribute);

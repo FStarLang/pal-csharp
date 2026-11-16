@@ -35,6 +35,9 @@ public sealed record SpecSite(
     /// </summary>
     public bool Private { get; init; }
 
+    /// <summary>An initializer's expected type, checked by the ordinary C# binder.</summary>
+    public ITypeSymbol? ExpectedType { get; init; }
+
     /// <summary>Parsed, syntax-validated ghost parameter declarations; Roslyn binds their types.</summary>
     public ImmutableArray<string> GhostParameters { get; init; } = [];
 
@@ -245,7 +248,8 @@ public static class SpecBinder
 
         foreach (var site in sites)
         {
-            sb.Append("    internal static object ").Append(site.ShimName);
+            sb.Append("    internal static ").Append(site.ExpectedType is { } expected
+                ? RenderType(expected) : "object").Append(' ').Append(site.ShimName);
             if (site.TypeParameters.Length > 0)
                 sb.Append('<').Append(string.Join(", ", site.TypeParameters)).Append('>');
             sb.Append('(');

@@ -3,6 +3,15 @@ using System.Reflection;
 using PalCSharp.Tests;
 
 var owner = new CellOwner(17);
+var storage = new GhostStorageOwner<string>();
+storage.AdvanceProof(12);
+storage.ViaAlias(23);
+if (storage.Read() != 7 || new GhostStorageDerived<string>().Read() != 7)
+    throw new Exception("Logical ghost initialization or update executed at runtime");
+if (typeof(GhostStorageOwner<string>).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Length != 1 ||
+    typeof(GhostStoragePlain).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Length != 0)
+    throw new Exception("A ghost property allocated CLR backing storage");
+_ = new GhostStoragePlain();
 PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Protocol callback executed"));
 PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Bounded protocol callback executed"), 0);
 PalLang.SpecSetOps.AddAllWhole<int>(ThrowingComparer(), default, default);

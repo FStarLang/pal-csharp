@@ -935,12 +935,11 @@ teaching the compiler that predicate's shape. `test/inductive_owner` is a non-tr
 public sealed class CellOwner
 {
     private OwnedCell cell;      // OwnedCell is [Plain].
-#if PAL
-    private OwnerState state;    // [SpecType] bound to an erased F* witness.
+    [GhostField("OwnerSpec.Make(0)")]
+    private ref OwnerState state => throw new InvalidOperationException("Specification only");
 
     [Model]
     private SpecInt Model => OwnerSpec.Value(state);
-#endif
 }
 ```
 
@@ -976,14 +975,44 @@ erased local starts with `T state = default;` immediately followed by
 `Pal.UpdateGhost(ref state, initial);`; translation uses `initial` as its real initializer.
 Both operations erase their argument evaluation from stock C#.
 
-`UpdateGhost` accepts only direct instance-field or local references and pure
+`UpdateGhost` accepts only direct instance-field, `[GhostField]` property, or local references and pure
 specification values. It preserves ordinary write-permission checks. F* additionally
 checks `require_erased (id #T)`: the identity function's domain must unify with an
 erased type, without the automatic `hide` coercion that a value argument would permit.
 An informative `SpecType` binding therefore cannot authorize erased writes.
-Where CLR layout must remain unchanged, only the witness field needs `#if PAL`;
-a non-PAL `[Spec]` ref-returning property lets the conditional calls typecheck without
-adding storage or evaluating the property.
+Where CLR layout must remain unchanged, use a single logical storage property:
+
+```csharp
+[GhostField("OwnerSpec.Make(0)")]
+private ref OwnerState witness => throw new InvalidOperationException("Specification only");
+```
+
+This is distinct from a `[Spec]` observation: it contributes `fld_witness` to the
+ordinary raw representation and uses the existing field/box ownership rules. There is
+no CLR backing field, getter call in the IR, fresh permission, or assumed inhabitant.
+The annotation's initializer is bound through the normal specification binder with
+the property's expected type and enclosing type parameters, but no receiver or field
+parameters. It must be pure and independent. Constructors initialize their declared
+logical fields once, at the terminal `this` chain; inherited storage remains the base
+constructor's responsibility. Borrowing views retain inherited logical fields in their
+value record and initialize them through the existing base-constructor path; declaring
+new logical storage on a borrowing view is not yet supported.
+
+The raw declaration emits `require_erased (id #ActualFieldType)`, including generic
+binders, so an informative binding is rejected even if no constructor or update is
+translated. Updates retain the existing structural check and full-write-permission
+obligations. Mutation analysis counts ghost-only field/property updates; it cannot
+advertise an unchanged model merely because the CLR erases the operation.
+
+Only nonvirtual instance `ref` throwing properties of translated classes are supported.
+The getter must consist of `throw new InvalidOperationException(...)` with constant arguments.
+No `ref readonly`, static, interface, indexer, setter, backing field, or effectful getter
+is accepted. Runtime reads (including discarded getters), direct assignments, and ref
+escapes are rejected before normalization can discard them. Reads in actual
+proof/specification contexts and conditional proof calls are allowed; updates use
+`Pal.UpdateGhost`. Explicit ghost updates in borrowing-view constructors are rejected
+rather than silently discarded. Neither source preprocessor rewriting nor a
+PAL/non-PAL declaration pair is involved.
 
 **R3.11 (null).** `Box` already models a nullable CLR reference, so `null` needs no new
 machinery: `Box.null` is `null`, `Box.is_null` is a *pure* boolean (so it may appear in a
@@ -12874,8 +12903,8 @@ loop observations (R5.6a), borrowed callbacks, and explicit spatial joins (R30.3
 Executable method bodies are shared between PAL and stock C#. Void proof helpers
 are conditional; immutable witnesses use `Pal.Capture`, and erased ownership state,
 loop progress, and clone budgets use `Pal.UpdateGhost`. Helper declarations are
-unguarded. The sole PAL guard selects the ownership-state field versus a non-PAL
-ref-returning specification property, preserving CLR instance layout.
+unguarded. Ownership state is a single `[GhostField("SortedSetOwnership.Empty<T>()")]`
+ref-returning throwing property, preserving CLR instance layout without a PAL guard.
 
 Return-value temporaries, the short-circuit normalization in `Overlaps`, and the
 guarded loop exit in `IntersectWith` now have one shared source body. They preserve

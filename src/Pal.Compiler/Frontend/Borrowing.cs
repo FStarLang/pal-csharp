@@ -82,6 +82,10 @@ public static class Borrowing
                 !IsBorrowingClass(f.Type, known))
             : [];
 
+    public static IEnumerable<IPropertySymbol> InheritedGhostState(INamedTypeSymbol self, WellKnown known) =>
+        ViewBase(self, known)?.GetMembers().OfType<IPropertySymbol>()
+            .Where(p => GhostStorage.Is(p, known)) ?? [];
+
     /// <summary>
     /// R29.3b. Whether <paramref name="a"/> fills a view cache: <c>f ??= new V(this)</c>,
     /// where <c>f</c> is an instance field typed at a borrowing class <c>V</c> whose owner is
@@ -327,7 +331,8 @@ public static class Borrowing
             {
                 while (target is ParenthesizedExpressionSyntax pe) target = pe.Expression;
                 if (target is IdentifierNameSyntax or MemberAccessExpressionSyntax { Expression: ThisExpressionSyntax or BaseExpressionSyntax } &&
-                    model.GetSymbolInfo(target).Symbol is IFieldSymbol { IsStatic: false } f && Ours(f))
+                    model.GetSymbolInfo(target).Symbol is { } f &&
+                    (f is IFieldSymbol { IsStatic: false } || GhostStorage.Is(f, known)) && Ours(f))
                     written.Add(f.Name);
             }
             // A member of the view reached on itself: an invocation, or a property read or written.
@@ -341,7 +346,7 @@ public static class Borrowing
                 case IMethodSymbol { IsStatic: false } m when Ours(m):
                     Into(m, viaBase);
                     break;
-                case IPropertySymbol { IsStatic: false } prop when Ours(prop):
+                case IPropertySymbol { IsStatic: false } prop when Ours(prop) && !GhostStorage.Is(prop, known):
                     Into(prop.GetMethod, viaBase);
                     Into(prop.SetMethod, viaBase);
                     break;

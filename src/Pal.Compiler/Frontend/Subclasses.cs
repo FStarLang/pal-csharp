@@ -31,6 +31,7 @@ internal static class Subclasses
             Declarations.Has(d, known.InvariantAttribute))
             return null;
         if (d.GetMembers().Any(m => m is IFieldSymbol { IsStatic: false, IsConst: false } ||
+                                    GhostStorage.Is(m, known) ||
                                     Declarations.Has(m, known.ModelAttribute) ||
                                     Declarations.Has(m, known.InvariantAttribute)))
             return null;

@@ -72,6 +72,7 @@ with tempfile.TemporaryDirectory(prefix="pal-conditional-ghost-") as temporary:
         translated = translate(source, output / name)
         diagnostics = translated.stdout + translated.stderr
         assert translated.returncode != 0, "Accepted invalid ghost operation: " + name
-        assert "ghost capture" in diagnostics or "ghost update" in diagnostics, diagnostics
+        assert ("ghost capture" in diagnostics or "ghost update" in diagnostics or
+                name == "effectful-capture" and "PALCS0576" in diagnostics), diagnostics
 
 print("Conditional ghost operations: immutable captures, erased writes, and no runtime leaks")
