@@ -21,6 +21,7 @@ for path in sorted((root / "pulse").glob("*.fst*")):
     if interface_only or explicit_trust:
         sources.append(path)
 sources.extend(root / "tools" / name for name in ("fstar-version.txt", "fstar-source.txt"))
+sources.append(root / "demo/downloads/Verified/DownloadIO.fst")
 expected = "".join(
     f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n"
     for path in sorted(sources)

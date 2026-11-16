@@ -30,6 +30,17 @@ enclosing call. Calling one directly is a programming error and throws.
 
 Add a reference to `Pal.Annotations` and `using PalLang;`.
 
+Ordinary `async Task` and `async Task<T>` methods are supported with
+normal-completion contracts: `Result` denotes the eventual `T`, and resource
+postconditions become available only at `await`. Task handles can alias, but the
+permission to await cannot be duplicated. Await-containing loops still require
+resource invariants, but cannot claim termination with `Pal.Decreases`.
+See [the task examples](../test/task_ownership),
+[the HTTP download demo](../demo/downloads), and
+[`translation.md` §34](translation.md#34-tasks-and-normal-completion-async).
+Async exception recovery, thread-affine locks, and custom awaitables are not
+part of this fragment.
+
 ---
 
 ## 1. Contracts
@@ -1519,7 +1530,7 @@ That moves `Pal.Contents(a)` out of the lambda and into an argument, which C# al
 
 Currently outside the supported subset: `stackalloc`, a span-typed return, `goto`,
 `try`/`catch`/`throw`, **constrained** type parameters (unconstrained ones are supported,
-as are generic classes), C# `interface` declarations, delegates, `async`, `foreach` and
+as are generic classes), C# `interface` declarations, delegates, custom async awaitables, `foreach` and
 `IEnumerable<T>`, `string`, floating point, struct fields that are not values,
 user-written struct constructors, static mutable fields, a class that is neither `sealed`
 nor `abstract`, a `return` that is not in tail position **inside a loop**, an increment or
