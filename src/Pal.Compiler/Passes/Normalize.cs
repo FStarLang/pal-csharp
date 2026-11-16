@@ -399,6 +399,11 @@ public static class Normalize
 
     private static IrStmt Loop(IrWhile loop, ImmutableHashSet<string> outer, DiagnosticBag diagnostics)
     {
+        var divergent = Check.Statements(loop).SelectMany(Check.Expressions)
+            .SelectMany(Check.Subexpressions).Any(e => e is IrAsync { Op: AsyncOp.Await });
+        if (divergent && loop.Decreases is not null)
+            diagnostics.Unsupported(loop.Loc, "A termination measure on a loop containing await",
+                "Await may diverge. Remove Pal.Decreases; the loop's resource invariant is still verified.");
         var mentioned = new HashSet<string>();
         Free(loop.Cond, mentioned);
         foreach (var i in loop.Invariants) Free(i, mentioned);
@@ -437,7 +442,8 @@ public static class Normalize
         {
             Live = live,
             Unassigned = unassigned,
-            Decreases = loop.Decreases ?? InferMeasure(loop, diagnostics),
+            IsDivergent = divergent,
+            Decreases = divergent ? null : loop.Decreases ?? InferMeasure(loop, diagnostics),
         };
     }
 
@@ -784,7 +790,10 @@ public static class Normalize
                 {
                     switch (arg)
                     {
-                        case IrVar v: into.Add(v.Name); break;
+                        // Task calls cannot rebind value parameters; only the array's
+                        // contents move. Ref parameters are refused by the frontend.
+                        case IrVar v when call.Type is not IrTaskType || v.Type is IrArrayType:
+                            into.Add(v.Name); break;
                         case IrRefArg { Operand: IrVar rv }: into.Add(rv.Name); break;
                     }
                     AssignedByCalls(arg, into);

@@ -2038,7 +2038,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             // Raw Pulse is the user's own text, so every line of it is theirs. There is
             // no finer answer available: the block is opaque to the translator by
             // construction (R4.8).
-            foreach (var line in Antiquotation.Expand(raw, plan.PreScope).Split('\n'))
+            foreach (var line in Antiquotation.Expand(raw, plan.PreScope,
+                         name => plan.Slots.TryGetValue(name, out var slot) ? slot.Binder : null).Split('\n'))
             {
                 origins.Add(new LineOrigin(Lines(sb) + 1, method.Loc));
                 sb.AppendLine("  " + line.TrimEnd());

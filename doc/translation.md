@@ -10384,7 +10384,9 @@ Discarded task calls are refused. Tasks can be held in locals and forwarded.
 just Pulse `ensures` clauses. Inferred array post-state witnesses therefore
 carry the invariant that their length equals the input length. This both
 preserves C#'s fixed array length and makes guarded specifications well formed
-inside the deferred predicate.
+inside the deferred predicate. Input witnesses record their equality to the
+array's immutable length; calls establish this using `A.pts_to_len`, so the
+fact remains available across loops without a redundant user invariant.
 
 **R34.6.** This first fragment proves partial correctness on normal completion.
 Await is divergent; no termination or scheduler fairness is assumed. Faulted
@@ -10392,6 +10394,9 @@ or cancelled tasks do not return through the model's await. Async `try`, `throw`
 `lock`, and exceptional contracts are refused, not erased. Exception recovery,
 cancellation protocols, thread-affine resources, and fire-and-forget ownership
 are outside this fragment. Runtime I/O wrappers must still clean up on failure.
+Loops containing an await are likewise divergent and verify their resource
+invariants without a termination measure. An explicit `Pal.Decreases` on such
+a loop is refused rather than silently discarded.
 
 **Trust boundary.** `Pulse.Lib.CSharp.Async.fsti` is an explicit, inventoried
 model of CLR tasks, following Pulse's `Async` example and `Pulse.Lib.Task`.

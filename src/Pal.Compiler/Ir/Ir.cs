@@ -661,6 +661,7 @@ public sealed record IrWhile(
     IrExpr? Decreases,
     IrStmt Body) : IrStmt(Loc)
 {
+    public bool IsDivergent { get; init; }
     /// <summary>
     /// Set by Normalize when this loop came from a counted <c>for</c>: the counter's
     /// name and whether it increases. Consumed by R5.9 case 2.
