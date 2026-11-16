@@ -27,14 +27,17 @@ public static class SpecSetFilter
     public static bool Removing<T>(IComparer<T> c, Seq<T> s0, Seq<T> s, Seq<T> m, SpecInt i) => throw Ghost();
 
     /// <summary>A lemma: nothing removed yet.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetFilter.removing_start")]
     public static void RemovingStart<T>(IComparer<T> c, Seq<T> s0, Seq<T> m) => throw Ghost();
 
     /// <summary>A lemma: removing <c>m[i]</c> from <paramref name="s"/> (if present) continues the removal.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetFilter.removing_step")]
     public static void RemovingStep<T>(IComparer<T> c, Seq<T> s0, Seq<T> s, Seq<T> m, SpecInt i) => throw Ghost();
 
     /// <summary>A lemma: the strictly sorted set of <paramref name="s0"/>'s members <paramref name="match"/> rejects is <c>Pal.RemoveAll(s0, match)</c>.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetFilter.filter_unique")]
     public static void FilterUnique<T>(IComparer<T> c, Seq<T> s0, Seq<T> s, Predicate<T> match) => throw Ghost();
 }

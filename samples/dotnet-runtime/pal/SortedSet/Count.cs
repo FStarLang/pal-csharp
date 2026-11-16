@@ -58,52 +58,65 @@ namespace System.Collections.Generic
         internal static bool Fits<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> tr, SpecInt lim) => throw Ghost();
 
         // Lemmas.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.red_black_height")]
         internal static void RedBlackHeight<T>(SpecTree<(T, bool)> t) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.range_root_height")]
         internal static void RangeRootHeight<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> t, T lo, T hi, bool la, bool ua) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.shift_one")]
         internal static void ShiftOne(SpecInt h) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.fits_pow2")]
         internal static void FitsPow2<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> tr, SpecInt h) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.range_depth_le_size")]
         internal static void RangeDepthLeSize<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> t, T lo, T hi, bool la, bool ua) => throw Ghost();
 
         // `lookup` of the tree a set (no bound active) or a view searches: the range root of
         // the set's tree, which is the whole tree when no bound is active.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.lookup_intro_s")]
         internal static void LookupIntro<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> t, Seq<T> los, Seq<T> his, bool la, bool ua) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.loop_start_s")]
         internal static void LoopStart<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                 Seq<bool> m, Seq<T> all) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.loop_step_s")]
         internal static void LoopStep<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();
 
         // Used only by the experiment that checks the body before dotnet/runtime#133116
         // (samples/dotnet-runtime/SORTEDSET-PR133116.md).
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.loop_step_beyond_s")]
         internal static void LoopStepBeyond<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                      Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.loop_done_s")]
         internal static void LoopDone<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                                Seq<bool> m, Seq<T> all, SpecInt i, SpecInt uniq, SpecInt unf) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.loop_end_s")]
         internal static void LoopEnd<T, TTag>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, SpecTree<(T, TTag)> tr, Seq<T> ks,
                                               Seq<bool> m, Seq<T> all, SpecInt uniq, SpecInt unf, bool stopped) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.empty_counts_s")]
         internal static void EmptyCounts<T>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, Seq<T> ks, Seq<T> s) => throw Ghost();
 
         // The counts the contracts state, from the body's: the set's, or the view's range's.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.counts_s")]
         internal static void Counts<T>(IComparer<T> c, Seq<T> los, Seq<T> his, bool la, bool ua, Seq<T> ks, Seq<T> s) => throw Ghost();
 
@@ -114,11 +127,13 @@ namespace System.Collections.Generic
 
         // On a strictly sorted `ks`: `FoundAll == |ks|` iff `s` holds every key, and
         // `UnfoundAll == 0` iff the keys hold every item of `s`.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.counts_decide")]
         internal static void CountsDecide<T>(IComparer<T> c, Seq<T> ks, Seq<T> s) => throw Ghost();
 
         // On two sequences strictly sorted under `c`: `AllIn` is `AllHit`, a subset no shorter is
         // the whole, and `SameKeys` is inclusion both ways.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.sorted_hits")]
         internal static void SortedHits<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
     }

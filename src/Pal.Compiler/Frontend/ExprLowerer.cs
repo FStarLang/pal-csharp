@@ -25,12 +25,20 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     /// </summary>
     public bool SpecPosition { get; } = specPosition;
 
+    internal ImmutableDictionary<string, IrType> GhostArguments { get; set; } =
+        ImmutableDictionary<string, IrType>.Empty;
+
     private static ExpressionSyntax Unbanged(ExpressionSyntax e) => e switch
     {
         PostfixUnaryExpressionSyntax { RawKind: (int)SyntaxKind.SuppressNullableWarningExpression } sn => Unbanged(sn.Operand),
         ParenthesizedExpressionSyntax pe => Unbanged(pe.Expression),
         _ => e,
     };
+
+    private bool ExplicitPlainParameter(ExpressionSyntax expression) =>
+        Unbanged(expression) is IdentifierNameSyntax name &&
+        model.GetSymbolInfo(name).Symbol is IParameterSymbol parameter &&
+        Declarations.Has(parameter, known.PlainAttribute);
 
     /// <summary>
     /// §3.4. The members of the class being lowered, which a body inside that class names
@@ -520,7 +528,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 known.MapType(info.ConvertedType ?? info.Type) is IrUserSpecType { FStar: WellKnown.TupleType } pair =>
                 Pair(loc, pair, t.Arguments[0].Expression, t.Arguments[1].Expression),
             ThisExpressionSyntax when model.GetEnclosingSymbol(node.SpanStart)?.ContainingType is { } rself &&
-                                      known.IsRegionClass(rself) => RegionThis(loc, rself),
+                                      known.IsPlainLike(rself) => RegionThis(loc, rself),
             ThisExpressionSyntax => Borrow is not null ? SelfExpr(loc) : new IrVar(loc, Names.This),
             // R27.57. In a representation-sharing subclass, `base` is the same object.
             BaseExpressionSyntax when Subclasses.IsAlias(model.GetEnclosingSymbol(node.SpanStart)?.ContainingType, known) =>
@@ -550,8 +558,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                                               a.Left is IdentifierNameSyntax &&
                                               model.GetSymbolInfo(a.Left).Symbol is ILocalSymbol =>
                 LowerAssignmentValue(a, loc),
-            ConditionalExpressionSyntax c =>
-                new IrConditional(loc, Lower(c.Condition), Lower(c.WhenTrue), Lower(c.WhenFalse)),
+            ConditionalExpressionSyntax c => LowerChoice(c, loc),
             ConditionalAccessExpressionSyntax ca => LowerConditionalAccess(ca, loc),
             // R30.14. `a?.Length` at an array: the bound array's length.
             MemberBindingExpressionSyntax mb when _bound is { } abound && mb.Name.Identifier.ValueText == "Length" &&
@@ -1021,9 +1028,13 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // a struct, a class has a constructor *body* — it allocates — so there is a
         // function to call rather than a record to build.
         if (model.GetTypeInfo(node).Type is INamedTypeSymbol { TypeKind: TypeKind.Class } klass &&
-            known.HasModel(klass) && !Borrowing.IsView(klass, known))
+            (known.HasModel(klass) || known.IsPlainLike(klass) &&
+                model.GetSymbolInfo(node).Symbol is IMethodSymbol { IsImplicitlyDeclared: false }) &&
+            !Borrowing.IsView(klass, known))
         {
             if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol ctor)
+                return Unsupported(node, loc);
+            if (node.Initializer is not null && known.IsPlainLike(klass))
                 return Unsupported(node, loc);
 
             return new IrCall(loc, Naming.Of(ctor),
@@ -1186,6 +1197,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R32.13. A view's record holds the state it inherits, after its own.
         foreach (var x in OwnFields(symbol)) yield return x;
         foreach (var f in Borrowing.InheritedState(symbol, known)) yield return (f.Name, f.Type);
+        foreach (var p in Borrowing.InheritedGhostState(symbol, known)) yield return (p.Name, p.Type);
     }
 
     private static IEnumerable<(string Name, ITypeSymbol Type)> OwnFields(INamedTypeSymbol symbol)
@@ -1231,9 +1243,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 new IrLiteral(loc, 0) { Type = mapped },
             IrNamedType n when type is INamedTypeSymbol named =>
                 Construct(loc, n.Name, named, []) is IrNew nested ? nested with { Type = mapped } : null,
-            // R27.6. A reference to a `[Region]` class is a value, and its default is null.
-            IrClassType k when type is INamedTypeSymbol rn && known.IsPlainLike(rn.OriginalDefinition) &&
-                               Declarations.Has(rn.OriginalDefinition, known.RegionAttribute) =>
+            // A raw pointer is a value; its default is null, without pointee ownership.
+            IrClassType k when type is INamedTypeSymbol rn && known.IsPlainLike(rn.OriginalDefinition) =>
                 new IrNull(loc) { Type = k with { Nullable = true } },
             _ => null,
         };
@@ -1545,6 +1556,18 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private IrExpr LowerIdentifier(IdentifierNameSyntax node, IrLoc loc)
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
+        if (GhostStorage.Is(symbol, known))
+        {
+            if (!SpecPosition)
+            {
+                diagnostics.Error("PALCS0771", loc, "A [GhostField] can only be read in erased proof/specification contexts.");
+                return new IrLiteral(loc, null);
+            }
+            if (BorrowedIdentifier(symbol, node, loc) is { } borrowedGhost) return borrowedGhost;
+            if (ClassMembers.Contains(symbol!.Name)) return new IrVar(loc, symbol.Name);
+            return new IrField(loc, known.IsPlainLike(symbol!.ContainingType)
+                ? RegionThis(loc, symbol.ContainingType) : new IrVar(loc, Names.This), symbol.Name);
+        }
 
         // A postcondition's `Result` is a parameter of the generated shim, not a name in
         // the user's program; it denotes the value the method returns.
@@ -1594,16 +1617,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 when known.AnnotatedOnly && !known.HasModel(owner) &&
                      Declarations.ContextFields(owner, model.Compilation, known)
                          .Contains(f, SymbolEqualityComparer.Default) => ContextRead(f),
-            IFieldSymbol { IsStatic: false } when ObjectFields.Contains(node.Identifier.ValueText) =>
-                new IrField(loc, new IrVar(loc, Names.This), node.Identifier.ValueText),
+            IFieldSymbol { IsStatic: false } ownField when ObjectFields.Contains(node.Identifier.ValueText) =>
+                new IrField(loc, known.IsPlainLike(ownField.ContainingType)
+                    ? RegionThis(loc, ownField.ContainingType) : new IrVar(loc, Names.This), node.Identifier.ValueText),
             // R27.16. A region object's auto-property, read on the implicit receiver.
-            IPropertySymbol { IsStatic: false } rp when known.IsRegionClass(rp.ContainingType) &&
+            IPropertySymbol { IsStatic: false } rp when known.IsPlainLike(rp.ContainingType) &&
                                                          ObjectFields.Contains(node.Identifier.ValueText) =>
                 new IrField(loc, RegionThis(loc, rp.ContainingType), node.Identifier.ValueText),
             // R9.20a. `Span` and `this.Span` are the same reference, so they lower to the
             // same node -- writing the receiver out is a style choice, and §7.2 requires
             // that style choices do not reach the emitter.
-            IPropertySymbol rcp when known.IsRegionClass(rcp.ContainingType) &&
+            IPropertySymbol rcp when known.IsPlainLike(rcp.ContainingType) &&
                                      ComputedRead(rcp, loc, RegionThis(loc, rcp.ContainingType)) is { } rcall => rcall,
             IPropertySymbol { GetMethod: { } selfGetter } when BorrowingSelfCall(selfGetter, [], loc) is { } selfRead
                 => selfRead,
@@ -1738,6 +1762,22 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
+        if (GhostStorage.Is(symbol, known))
+        {
+            if (!SpecPosition)
+            {
+                diagnostics.Error("PALCS0771", loc, "A [GhostField] can only be read in erased proof/specification contexts.");
+                return new IrLiteral(loc, null);
+            }
+            if (BorrowedMember(node, symbol, loc) is { } borrowedGhost) return borrowedGhost;
+            if (node.Expression is ThisExpressionSyntax)
+            {
+                if (ClassMembers.Contains(symbol!.Name)) return new IrVar(loc, symbol.Name);
+                return new IrField(loc, known.IsPlainLike(symbol!.ContainingType)
+                    ? RegionThis(loc, symbol.ContainingType) : new IrVar(loc, Names.This), symbol.Name);
+            }
+            return new IrField(loc, Lower(node.Expression), symbol!.Name);
+        }
         // R27.51. An interface's property read off an object of a class translated at its
         // exact type is the class's implementation of it.
         if (symbol is IPropertySymbol { IsStatic: false, ContainingType.TypeKind: TypeKind.Interface } ip &&
@@ -1902,8 +1942,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         {
             var member = node.Name.Identifier.ValueText;
             if (ClassMembers.Contains(member)) return new IrVar(loc, member);
-            if (symbol is IFieldSymbol { IsStatic: false } && ObjectFields.Contains(member))
-                return new IrField(loc, new IrVar(loc, Names.This), member);
+            if (symbol is IFieldSymbol { IsStatic: false } ownField && ObjectFields.Contains(member))
+                return new IrField(loc, known.IsPlainLike(ownField.ContainingType)
+                    ? RegionThis(loc, ownField.ContainingType) : new IrVar(loc, Names.This), member);
         }
 
         // R12.3. A field of a `[Plain]` class. There is no model to read instead and no
@@ -1922,7 +1963,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
         // R27.16. A region object's computed property is a call, as R9.20a's is.
         if (receiverType is INamedTypeSymbol { TypeKind: TypeKind.Class } regionOwner &&
-            known.IsRegionClass(regionOwner) && symbol is IPropertySymbol rprop &&
+            known.IsPlainLike(regionOwner) && symbol is IPropertySymbol rprop &&
             ComputedRead(rprop, loc, Lower(node.Expression)) is { } rcall)
             return rcall;
 
@@ -1930,9 +1971,14 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // class (a parameter or local) is read through that object's own invariant, which
         // the emitter opens around the read.
         if (!SpecPosition && symbol is IFieldSymbol { IsStatic: false } peerField &&
-            ObjectFields.Contains(peerField.Name) && node.Expression is IdentifierNameSyntax &&
+            ObjectFields.Contains(peerField.Name) &&
+            (node.Expression is IdentifierNameSyntax ||
+             ExplicitPlainParameter(node.Expression)) &&
             receiverType is INamedTypeSymbol peerType &&
-            SymbolEqualityComparer.Default.Equals(peerType.OriginalDefinition, peerField.ContainingType.OriginalDefinition))
+            (SymbolEqualityComparer.Default.Equals(peerType.OriginalDefinition, peerField.ContainingType.OriginalDefinition) ||
+             ExplicitPlainParameter(node.Expression) &&
+             Subclasses.AliasBase(peerType, known) is { } representation &&
+             SymbolEqualityComparer.Default.Equals(representation, peerField.ContainingType)))
             return new IrField(loc, Lower(node.Expression), peerField.Name) { Peer = true };
 
         if (symbol is IFieldSymbol { IsStatic: false } openField && OpenFields.Contains(openField.Name) &&
@@ -2131,6 +2177,10 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             {
                 ParamTypes = Declarations.ParamTypes(uop, known, receiver: false),
             };
+        if (op is BinOp.Eq or BinOp.Ne &&
+            model.GetSymbolInfo(node).Symbol is IMethodSymbol { MethodKind: MethodKind.UserDefinedOperator } equality &&
+            Declarations.Has(equality.ContainingType.OriginalDefinition, known.PlainAttribute))
+            return Unsupported(node, loc);
         if (op is null) return Unsupported(node, loc);
         var left = Lower(node.Left);
         var right = Lower(node.Right);
@@ -2211,7 +2261,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     private bool NeverNull(ExpressionSyntax e, IrExpr lowered) =>
         lowered.Type is IrClassType { Nullable: false } &&
         model.GetTypeInfo(e).Type is INamedTypeSymbol { TypeKind: TypeKind.Class, NullableAnnotation: not NullableAnnotation.Annotated } t &&
-        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsRegionClass(t) &&
+        !WellKnown.IsRecursive(t.OriginalDefinition) && !known.IsPlainLike(t) &&
         // R31.13. A spec function declared to return `O?` may return null, whatever
         // nullable context the attribute string was bound in.
         !(model.GetSymbolInfo(e).Symbol is IMethodSymbol { OriginalDefinition.ReturnType.NullableAnnotation: NullableAnnotation.Annotated });
@@ -2400,7 +2450,11 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     internal static bool SameType(IrType a, IrType b) =>
         a.Equals(b) ||
         a is IrUserSpecType x && b is IrUserSpecType y && x.FStar == y.FStar &&
-        x.Args.Length == y.Args.Length && x.Args.Zip(y.Args, SameType).All(same => same);
+        x.Args.Length == y.Args.Length && x.Args.Zip(y.Args, SameType).All(same => same) ||
+        a is IrClassType c && b is IrClassType d &&
+        c.Name == d.Name && c.Nullable == d.Nullable && c.Plain == d.Plain &&
+        c.TypeArguments.Length == d.TypeArguments.Length &&
+        c.TypeArguments.Zip(d.TypeArguments, SameType).All(same => same);
 
     public IrExpr ToDeclared(IrExpr value, IrType? declared) =>
         declared is IrOptionType option && value is not IrNull &&
@@ -2606,7 +2660,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                                        or IrStmtExpr or IrNew or IrNewArray or IrRaise
                                        or IrEnumOp { Op: EnumOpKind.MoveNext });
 
-    private static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
+    internal static IEnumerable<IrExpr> Subexpressions(IrExpr expr)
     {
         yield return expr;
         IEnumerable<IrExpr> kids = expr switch
@@ -3252,7 +3306,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             var ops = ImmutableArray.CreateBuilder<IrExpr>();
             if (!method.IsStatic && Receiver(node.Expression) is { } recv)
                 ops.Add(NonNull(recv));
-            foreach (var a in args) ops.Add(Lower(a.Expression));
+            foreach (var (a, i) in args.Select((a, i) => (a, i)))
+                ops.Add(LowerGhostArgument(a.Expression, method.Parameters[i]));
             return SpecMember(method, ops.ToImmutable(), node, loc);
         }
 
@@ -3325,7 +3380,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
                 : new IrVar(loc, Names.This) { Type = Enclosing(node) }
             // R27.16. A region object's method takes the object first, as any instance method does.
             : method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
-              known.IsRegionClass(method.ContainingType)
+              method.ContainingType is { } plainType && known.IsPlainLike(plainType)
             ? node.Expression is MemberAccessExpressionSyntax rm && rm.Expression is not ThisExpressionSyntax
                 ? NonNull(Lower(rm.Expression))
                 : node.Expression is MemberBindingExpressionSyntax && _bound is { } rb
@@ -3519,6 +3574,17 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         switch (method.Name)
         {
             case nameof(PalLang.Pal.Old): return new IrOld(loc, Arg(0));
+            case nameof(PalLang.Pal.Permission): return new IrVar(loc, "$permission");
+            case nameof(PalLang.Pal.Ghost):
+                if (!SpecPosition || args.Count != 1 ||
+                    ConstantString(args[0].Expression) is not { } ghostName ||
+                    !GhostArguments.TryGetValue(ghostName, out var ghostType) ||
+                    method.TypeArguments.Length != 1 ||
+                    known.MapType(method.TypeArguments[0]) is not { } requestedType ||
+                    !SameType(ghostType, requestedType))
+                    return Refused("PALCS0885", loc,
+                        "`Pal.Ghost<T>(name)` must name an enclosing GhostArg binder of exactly type T, in a proof expression.");
+                return new IrVar(loc, ghostName) { Type = ghostType };
             // R24.14. Inside a loop, the method's result is the cell its `return` stored to.
             case nameof(PalLang.Pal.Result) or nameof(PalLang.Pal.ResultRef) when InLoop(node):
                 return new IrVar(loc, StmtLowerer.ReturnedValue)

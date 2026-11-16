@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Pal.Compiler.Diagnostics;
+using Pal.Compiler.Emit;
 using Pal.Compiler.Ir;
 
 namespace Pal.Compiler.Frontend;
@@ -29,6 +30,26 @@ public sealed partial class ExprLowerer
     private static IrExpr False(IrLoc loc) => new IrLiteral(loc, false) { Type = Bool };
 
     private static bool IsFalse(IrExpr e) => e is IrLiteral { Value: false };
+
+    private static bool HasTypeVariable(ITypeSymbol type) => type switch
+    {
+        ITypeParameterSymbol => true,
+        IArrayTypeSymbol array => HasTypeVariable(array.ElementType),
+        INamedTypeSymbol named => named.TypeArguments.Any(HasTypeVariable) ||
+            named.ContainingType is { } enclosing && HasTypeVariable(enclosing),
+        _ => false,
+    };
+
+    private static bool TypeTestDependsOnArguments(INamedTypeSymbol exact, ITypeSymbol target)
+    {
+        if (target is not INamedTypeSymbol named ||
+            !(HasTypeVariable(exact) || HasTypeVariable(target))) return false;
+        bool SameDefinition(INamedTypeSymbol type) =>
+            SymbolEqualityComparer.Default.Equals(type.OriginalDefinition, named.OriginalDefinition);
+        for (INamedTypeSymbol? parent = exact; parent is not null; parent = parent.BaseType)
+            if (SameDefinition(parent)) return true;
+        return exact.AllInterfaces.Any(SameDefinition);
+    }
 
     /// <summary>R27.1. A translated class all of whose translated objects are of it exactly.</summary>
     private INamedTypeSymbol? ExactClassType(ITypeSymbol? type) =>
@@ -71,6 +92,28 @@ public sealed partial class ExprLowerer
 
         var value = Lower(node);
         var type = model.GetTypeInfo(node).Type;
+        // An inherited body verified at a borrowing view has the view's receiver,
+        // not the base type Roslyn sees in the original declaration.
+        if (node is ThisExpressionSyntax && Borrow is { ViewBase: not null } view)
+        {
+            type = view.Struct;
+            value = value with { Type = view.StructType };
+        }
+        else if ((node is ThisExpressionSyntax ||
+                  model.GetSymbolInfo(node).Symbol is IParameterSymbol { Name: Names.This } shimSelf &&
+                  IsShim(shimSelf.ContainingSymbol)) && known.Replica is { } replica)
+        {
+            var definition = replica.At.OriginalDefinition;
+            // The body is generic in the base declaration's parameters, not in the
+            // distinct Roslyn symbols for the subclass's identically forwarded ones.
+            type = type is INamedTypeSymbol source && definition.Arity > 0 &&
+                source.Arity == definition.Arity && definition.BaseType is { } parent &&
+                parent.TypeArguments.Length == definition.Arity &&
+                parent.TypeArguments.Select((arg, i) =>
+                    SymbolEqualityComparer.Default.Equals(arg, definition.TypeParameters[i])).All(same => same)
+                ? definition.Construct(source.TypeArguments.ToArray())
+                : replica.At;
+        }
         // R27.46. An `[Exactly]` parameter is an object of its class.
         if (model.GetSymbolInfo(node).Symbol is IParameterSymbol ep &&
             FrontendPass.ExactParameter(ep, model.Compilation, known) is { } exact)
@@ -85,6 +128,14 @@ public sealed partial class ExprLowerer
 
     private IrExpr WithPrelude(IrLoc loc, ImmutableArray<IrStmt>.Builder prelude, IrExpr value) =>
         prelude.Count == 0 ? value : new IrStmtExpr(loc, prelude.ToImmutable(), value) { Type = value.Type };
+
+    private IrExpr LowerChoice(ConditionalExpressionSyntax choice, IrLoc loc)
+    {
+        var condition = Lower(choice.Condition);
+        return condition is IrLiteral { Value: bool taken }
+            ? Lower(taken ? choice.WhenTrue : choice.WhenFalse)
+            : new IrConditional(loc, condition, Lower(choice.WhenTrue), Lower(choice.WhenFalse));
+    }
 
     /// <summary>R21.3. <c>e is P</c>.</summary>
     private IrExpr LowerIsPattern(IsPatternExpressionSyntax node, IrLoc loc)
@@ -213,6 +264,13 @@ public sealed partial class ExprLowerer
                                           model.GetTypeInfo(t.Type).Type is { } tt:
                 return TypeTest(t, tt, subject, out _);
 
+            // Mutable pointer subjects need a real local, not a pure expression alias.
+            // The supported statement form is captured by PointerPatternIf.
+            case DeclarationPatternSyntax { Designation: SingleVariableDesignationSyntax }
+                when subject.Value?.Type is IrClassType { Plain: true } &&
+                                               !known.IsRegionClass(subject.Type):
+                return UnsupportedPattern(pattern, loc);
+
             case DeclarationPatternSyntax d when subject.Value is not null &&
                                                  model.GetTypeInfo(d.Type).Type is { } dt:
             {
@@ -230,6 +288,8 @@ public sealed partial class ExprLowerer
 
     private IrExpr Recursive(RecursivePatternSyntax r, Subject subject, IrLoc loc)
     {
+        if (subject.Value?.Type is IrClassType { Plain: true } && !known.IsRegionClass(subject.Type))
+            return UnsupportedPattern(r, loc);
         // A positional pattern over a tuple literal matches it component by component.
         if (subject.Value is null)
         {
@@ -344,6 +404,8 @@ public sealed partial class ExprLowerer
         IrExpr cond = True(loc);
         if (value.Type is IrOptionType)
             cond = new IrOptionOp(loc, OptionOpKind.HasValue, value) { Type = Bool };
+        else if (value.Type is IrClassType { Plain: true } pointer)
+            cond = new IrBinary(loc, BinOp.Ne, value, new IrNull(loc) { Type = pointer }) { Type = Bool };
         narrowed = NonNull(value);
 
         if (subject.Type is { } from && SymbolEqualityComparer.Default.Equals(
@@ -365,9 +427,14 @@ public sealed partial class ExprLowerer
         // R27.46. A translated class whose objects all have it as their dynamic type (R27.1)
         // is a `D` exactly when the class converts to `D`; the test is then the null test.
         if (ExactClassType(subject.Type) is { } exact)
-            return model.Compilation.ClassifyCommonConversion(exact, target) is { IsImplicit: true, IsReference: true } or { IsIdentity: true }
-                ? cond
-                : False(loc);
+        {
+            if (model.Compilation.ClassifyCommonConversion(exact, target) is
+                { IsImplicit: true, IsReference: true } or { IsIdentity: true })
+                return cond;
+            // No static conversion does not imply a failed runtime test when a
+            // generic argument can specialize, e.g. C<T> tested against C<int>.
+            if (!TypeTestDependsOnArguments(exact, target)) return False(loc);
+        }
 
         // R30.6. A library class whose test is bound: the predicate, of the non-null value.
         if (known.TypeTestBinding(target) is { } test)

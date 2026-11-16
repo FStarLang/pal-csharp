@@ -13,6 +13,10 @@ namespace Pal.Compiler.Frontend;
 /// </summary>
 public sealed class WellKnown
 {
+    internal Dictionary<IParameterSymbol, IrCallback?> CallbackTypes { get; } =
+        new(SymbolEqualityComparer.Default);
+    internal Dictionary<string, IrExpr> GhostInitializers { get; } = [];
+
     public const string Namespace = "PalLang";
 
     private WellKnown(Compilation c)
@@ -50,6 +54,7 @@ public sealed class WellKnown
         RefineAttribute = Type("RefineAttribute");
         RefineAlwaysAttribute = Type("RefineAlwaysAttribute");
         SpecAttribute = Type("SpecAttribute");
+        GhostFieldAttribute = Type("GhostFieldAttribute");
         ModelAttribute = Type("ModelAttribute");
         InvariantAttribute = Type("InvariantAttribute");
         LemmaAttribute = Type("LemmaAttribute");
@@ -111,6 +116,7 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecListOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
+    public INamedTypeSymbol GhostFieldAttribute { get; }
     public INamedTypeSymbol ThrowsAttribute { get; }
     public INamedTypeSymbol TranslateAnnotatedOnlyAttribute { get; }
 
@@ -568,9 +574,9 @@ public sealed class WellKnown
     private IrType RegionArgument(ITypeSymbol argument, IrType mapped) =>
         mapped is IrClassType { Nullable: false } k && IsRegionClass(argument) ? k with { Nullable = true } : mapped;
 
-    /// <summary>R31.2. A pair's component: a region pointer or a ring owner is the nullable pointer.</summary>
+    /// <summary>A pair's pointer component is nullable, including Plain pointers, so the pair has C#'s default.</summary>
     private IrType PairComponent(ITypeSymbol argument, IrType mapped) =>
-        mapped is IrClassType { Nullable: false } k && IsRingOwner(argument) ? k with { Nullable = true } : RegionArgument(argument, mapped);
+        mapped is IrClassType { Nullable: false } k && (k.Plain || IsRingOwner(argument)) ? k with { Nullable = true } : RegionArgument(argument, mapped);
 
     /// <summary>
     /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
@@ -583,13 +589,12 @@ public sealed class WellKnown
         // R15.1. The declaring type's arguments come first, matching the order the
         // callee's binders were emitted in: a method of `Node<T>` is a function of `T`
         // exactly as a generic method is a function of the parameter it declares itself.
-        var all = method.ContainingType is { } rowner && IsRegionDeclaration(rowner)
+        var all = method.ContainingType is { } rowner
             ? [.. OuterAndOwnTypeArguments(rowner), .. method.TypeArguments]
-            : method.ContainingType is { TypeArguments.IsEmpty: false } owner
-            ? owner.TypeArguments.AddRange(method.TypeArguments)
             : method.TypeArguments;
         if (all.IsEmpty) return ImmutableArray<IrType>.Empty;
-        var classArgs = method.ContainingType is { } c && !IsRegionDeclaration(c) ? c.TypeArguments.Length : 0;
+        var classArgs = method.ContainingType is { } c && !IsPlainLike(c)
+            ? OuterAndOwnTypeArguments(c).Count() : 0;
         var mapped = ImmutableArray.CreateBuilder<IrType>();
         foreach (var a in all)
         {
@@ -748,11 +753,15 @@ public sealed class WellKnown
             // like a type argument, it is the nullable pointer, so the pair has C#'s default.
             case INamedTypeSymbol { IsTupleType: true, TupleElements.Length: 2 } tuple
                 when MapType(tuple.TupleElements[0].Type) is { } t1 &&
-                     (IsPlainValue(t1) || IsRegionClass(tuple.TupleElements[0].Type) || IsRingOwner(tuple.TupleElements[0].Type)) &&
+                     (IsPlainValue(t1) || t1 is IrClassType { Plain: true } || IsRegionClass(tuple.TupleElements[0].Type) || IsRingOwner(tuple.TupleElements[0].Type)) &&
                      MapType(tuple.TupleElements[1].Type) is { } t2 &&
-                     (IsPlainValue(t2) || IsRegionClass(tuple.TupleElements[1].Type) || IsRingOwner(tuple.TupleElements[1].Type)):
+                     (IsPlainValue(t2) || t2 is IrClassType { Plain: true } || IsRegionClass(tuple.TupleElements[1].Type) || IsRingOwner(tuple.TupleElements[1].Type)):
                 return new IrUserSpecType("ValueTuple", TupleType,
                     [PairComponent(tuple.TupleElements[0].Type, t1), PairComponent(tuple.TupleElements[1].Type, t2)]);
+            // Do not fall through to the ordinary struct rule: an unsupported tuple
+            // (notably one containing an invariant-owning object) has no representation.
+            case INamedTypeSymbol { IsTupleType: true }:
+                return null;
             // R29.1. `KeyValuePair<K, V>` is the same pair: a readonly struct of two values.
             case INamedTypeSymbol kvp when IsKeyValuePair(kvp) &&
                      MapType(kvp.TypeArguments[0]) is { } k && IsPlainValue(k) &&
@@ -857,14 +866,14 @@ public sealed class WellKnown
                 // refusal lands on the class type rather than silently dropping a
                 // parameter and emitting a term with a free variable in it.
                 var classArgs = ImmutableArray.CreateBuilder<IrType>();
-                foreach (var a in Declarations.Has(named.OriginalDefinition, RegionAttribute)
+                foreach (var a in IsPlainLike(named.OriginalDefinition)
                              ? OuterAndOwnTypeArguments(named) : named.TypeArguments)
                 {
                     if (MapType(a) is not { } mapped) return null;
                     // R27.35. A region class as the argument of another class (`Stack<Node>`)
                     // is its nullable pointer: the elements are plain boxes, and `default` --
                     // what `new T[n]` fills an array with -- is null.
-                    classArgs.Add(Declarations.Has(named.OriginalDefinition, RegionAttribute) ? mapped : RegionArgument(a, mapped));
+                    classArgs.Add(IsPlainLike(named.OriginalDefinition) ? mapped : RegionArgument(a, mapped));
                 }
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {

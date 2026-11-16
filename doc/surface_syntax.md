@@ -884,13 +884,13 @@ admitted lemma is assumed rather than proved.
 
 | Attribute | Meaning |
 |---|---|
-| `[Lemma]` | this method is a proof step; must return `void` |
+| `[Lemma]` | this method is a proof step; returns `void` or `Ghost<T>` |
 | `[PulseBody(s)]` | supply the proof as raw F\*/Pulse |
 | `[Admit]` | assume the contract; warned about |
 | `[Rlimit(n)]` | give the method's proof `n` times the solver budget (R22.31) |
 | `[Fuel(f, i)]` | start the method's queries at `f` unfoldings of recursive definitions and `i` of inductive types, retrying with more (R30.44) |
 | `[OpaqueSpecs("S", ...)]` | the solver does not unfold the declaring type's `[Spec]`s `S`, ... while checking the method (R30.40) |
-| `[GhostArg(d)]` | an extra erased parameter, for ghost types with no C# surface |
+| `[GhostArg("G g")]` | an inferred erased contract parameter on a method or property; `G` is a Roslyn-bound C# type and `g` its name (R4.5) |
 
 Inside a `[PulseBody]`, `$(x)` is the Pulse term standing for the C# name `x`. A **type**
 parameter is such a name: `$(T)` is how a generic lemma says which type it is about, and it
@@ -923,6 +923,27 @@ Two conventions matter here and nowhere else:
 
 This is the shape §9 uses to give a user-defined ownership predicate a C# face.
 
+### 5.2 Lemmas that return ghost witnesses
+
+A `[Lemma]` returning `Ghost<T>` is a checked Pulse ghost function with an erased result.
+Its postcondition names the revealed value as `Result` and must account for every owned
+resource. A `Ghost<T>` local can bind the call's result and use it in subsequent proof
+steps. This is useful for exposing an existential witness from an ownership predicate.
+
+The call is not a pure specification expression, and its result cannot control runtime
+computation. Ordinary runtime-valued lemma results are still rejected. Keep the
+declaration unguarded and capture its result conditionally:
+
+```csharp
+Ghost<CellSnapshot> witness = default;
+Pal.Capture(ref witness, CellProof.Unpack(cell));
+```
+
+`Capture` erases the entire call and its arguments in stock C#; translation binds the
+checked lemma result. The capture must immediately follow the single default-initialized
+declaration; self-reference, later assignment, and recapture are rejected. Void proof
+helpers should carry `[System.Diagnostics.Conditional("PAL")]` themselves.
+
 ---
 
 ## 6. Ghost data
@@ -946,9 +967,46 @@ unwrapped. In a *statement*-position specification (`Pal.Invariant`, `Pal.Decrea
 `[Lemma]` argument) you are writing ordinary C#, where `Ghost<T>` is a real type, so write
 `xs.Value`. The `.Value` is transparent: it means exactly what `xs` means.
 
-A `Ghost<T>` *local*, initialised and never assigned, is a snapshot: `Ghost<Seq<int>> before
-= Pal.Contents(a);` names the contents at that point for later ghost statements, and has no
-run-time existence (translation.md R24.12).
+A `Ghost<T>` *local*, initialized and never assigned, is a snapshot (translation.md
+R24.12). Use `Ghost<Seq<int>> before = default;` followed immediately by
+`Pal.Capture(ref before, Pal.Contents(a));`. Unlike an ordinary initializer, the
+conditional call erases argument evaluation too. Capture accepts either a `T` value
+or a checked `Ghost<T>` result, including snapshots of interface-typed values.
+
+For mutable erased state use `Pal.UpdateGhost(ref state, value)`. Its target must be
+a direct instance field, `[GhostField]` property, or local with a user specification type whose F* representation
+is erased; F* checks this, and ordinary field-write permissions still apply. The value
+must be a pure specification expression. Initialize an erased local with
+`State state = default;` followed immediately by `Pal.UpdateGhost(ref state, initial);`.
+Only the verified translation evaluates `initial` or subsequent updates.
+
+Use a logical property when the state must occupy **no CLR storage**:
+
+```csharp
+[GhostField("OwnerSpec.Make(0)")]
+private ref OwnerState state => throw new InvalidOperationException("Specification only");
+```
+
+Unlike `[Spec]` (a pure model observation), `[GhostField]` declares a real field of
+the object's logical representation. Its initializer is a pure, independently bound
+specification expression, typechecked against the property type. It cannot depend on
+constructor parameters or other instance fields. It runs once in the verified
+constructor chain; neither it nor the getter runs in ordinary C#. No `#if PAL` is needed.
+
+Initially supported shapes are nonvirtual instance `ref` (not `ref readonly`) properties
+of translated classes, with only `throw new InvalidOperationException(...)` in the
+getter (constant arguments) and no backing field. Interfaces,
+indexers, setters, static/virtual properties, and effectful accessors are rejected.
+F* checks structural erasedness **at the declaration**, even without any update;
+`[SpecType]` alone does not establish erasedness.
+
+Reads are restricted to proof/specification contexts (including conditional
+`Pal.Capture`); writes must use conditional `Pal.UpdateGhost`. Ordinary reads, even
+discarded ones, direct writes, and escaping references are rejected. Updates use the
+same object's existing ownership and require full write permission, including through
+aliases. A ghost-only update counts as a model mutation, not a read-only method.
+Borrowing views may inherit, but not declare, logical storage in their value record; their constructors
+use its initializer, but explicit `UpdateGhost` in a view constructor is not supported.
 
 ---
 
@@ -1192,6 +1250,14 @@ A `[Plain]` reference behaves the way the encoding does and no more:
   only** — a constructor call is refused, because reading a constructor body to learn which
   argument lands in which field is exactly the deriving `[Plain]` opts out of.
 * Proof steps are **ordinary C# calls** to the ghost lemmas your predicate publishes (§5.1).
+
+`if (expression is DNode node)` also tests for non-null, evaluating `expression`
+once. The tested constructed type must match the source type, ignoring nullable
+annotations. Direct declaration bindings support an optional `else`; negated or
+compound bindings and recursive/property patterns are not supported. The binding
+does not supply ownership, and ordinary C# scope and definite-assignment rules apply.
+An explicit `Pal.Join` after a Plain-pointer null test must prove its stated
+resources in both branches.
 
 ### One lemma per step
 

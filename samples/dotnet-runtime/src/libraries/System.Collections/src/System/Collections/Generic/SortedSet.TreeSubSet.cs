@@ -32,30 +32,33 @@ namespace System.Collections.Generic
             private readonly bool _lBoundActive, _uBoundActive;
             // used to see if the count is out of date
 
-            // pal: R32.13. A view of `_underlying`: its record borrows the set's region, and its
+            // pal: R32.13. A view of `_underlying`: each operation borrows its recursive tree, and its
             // `root` is the subtree `FindRange` returns (R32.14) whenever its version is the set's.
             [Spec] internal T? SpecMin => _min;
             [Spec] internal T? SpecMax => _max;
             [Spec] internal bool SpecLowerActive => _lBoundActive;
             [Spec] internal bool SpecUpperActive => _uBoundActive;
+            [Spec] internal SortedSetLabels<T> ReadLabels => _underlying.SpecLabels;
+            [Spec] internal SortedSetSnapshot<T> ReadSnapshot => SortedSetOwnership.Snapshot(_underlying.SpecSnapshot);
+            [Spec] internal Seq<T> ReadItems => SpecRangeWalk.Filter<T>(_underlying.SpecComparer,
+                _min!, _max!, _lBoundActive, _uBoundActive, _underlying.SpecItems);
 
             // §37. The view's range, and the set's tree whose range root it searches.
-            [Spec] internal override Seq<T> SpecRangeLo => SortedSetCount.One(_min);
-            [Spec] internal override Seq<T> SpecRangeHi => SortedSetCount.One(_max);
+            [Spec] internal override Seq<T> SpecRangeLo => SortedSetCount.One(_min!);
+            [Spec] internal override Seq<T> SpecRangeHi => SortedSetCount.One(_max!);
             [Spec] internal override bool SpecRangeLa => _lBoundActive;
             [Spec] internal override bool SpecRangeUa => _uBoundActive;
             [Spec] internal override SpecTree<(T, bool)> SpecRangeTree => _underlying.SpecNodes;
             [Spec] internal override IComparer<T> SpecRangeComparer => comparer;
+            [Spec] internal override bool SpecRangeReady => SpecCoherent && SpecCountOk && SpecRootOk;
 
             /// <summary>
             /// R32.14. The root is the subtree the range search stops at in the set's tree. §37:
             /// a non-null root is `_rootLevel` below the set's root.
             /// </summary>
             [Spec] internal bool SpecRootOk =>
-                (root == null || Pal.Unshared(root)) &&
-                Pal.Tree<(T, bool)>(root) == SpecSearchTree.RangeRoot(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive) &&
-                0 <= _rootLevel &&
-                (root == null || _rootLevel == SortedSetCount.RangeDepth(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive));
+                SortedSetOwnership.ViewRoot<T>(_underlying.SpecLabels, _underlying.SpecComparer,
+                    root, _rootLevel, _min!, _max!, _lBoundActive, _uBoundActive);
 
             /// <summary>
             /// R32.14. The view shares the set's comparer, and its root is the set's range
@@ -70,7 +73,7 @@ namespace System.Collections.Generic
             /// set's (a stale one is re-counted by <see cref="VersionCheckImpl"/>).
             /// </summary>
             [Spec] internal bool SpecCountOk =>
-                Pal.Implies(_countVersion == _underlying.SpecVersion, count == SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length);
+                Pal.Implies(_countVersion == _underlying.SpecVersion, count == SpecRangeWalk.Filter(_underlying.SpecComparer, _min!, _max!, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length);
 
 #if DEBUG
             internal override bool versionUpToDate()
@@ -85,6 +88,7 @@ namespace System.Collections.Generic
             public TreeSubSet(SortedSet<T> Underlying, T? Min, T? Max, bool lowerBoundActive, bool upperBoundActive)
                 : base(Underlying.Comparer)
             {
+                SortedSetOwnershipProof.ConsumeEmpty<T>();
                 _underlying = Underlying;
                 _min = Min;
                 _max = Max;
@@ -175,6 +179,9 @@ namespace System.Collections.Generic
 
                 for (int i = toRemove.Count - 1; i >= 0; i--)
                 {
+                    Pal.Invariant(SortedSetOwnership.Owner(_underlying.root, _underlying.ownershipState, Perm.Full));
+                    Pal.Invariant(SortedSetOwnership.Valid(_underlying.root, _underlying.ownershipState,
+                        _underlying.comparer, _underlying.count, _underlying.version));
                     Pal.Invariant(i < toRemove.SpecCount);
                     _underlying.Remove(toRemove[i]);
                 }
@@ -209,30 +216,48 @@ namespace System.Collections.Generic
                 get
                 {
                     VersionCheck();
-                    SpecRangeWalk.MinMaxGoal(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive, default(T));
+                    SpecRangeWalk.MinMaxGoal(_underlying.SpecComparer, _underlying.SpecNodes, _min!, _max!, _lBoundActive, _uBoundActive, default(T)!);
+                    Ghost<SortedSetLabels<T>> labels = default;
+                    Pal.Capture(ref labels, _underlying.SpecLabels);
+                    Ghost<Seq<T>> items = default;
+                    Pal.Capture(ref items, _underlying.SpecItems);
+                    Ghost<SpecInt> checkedVersion = default;
+                    Pal.Capture(ref checkedVersion, _underlying.SpecVersion);
+                    SortedSetOwnershipProof.RootFacts(labels);
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
                     Node? current = root;
                     T? result = default;
 
                     while (current != null)
                     {
-                        Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
-                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && comparer == _underlying.SpecComparer && Pal.WellFormed(current) && Pal.StrictlySorted(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(current))) &&
-                                      Pal.Same(SpecRangeWalk.FirstOr(SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, false, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(current))), result), SpecRangeWalk.FirstOr(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), default(T))) &&
-                                      Pal.Implies(Pal.Broke(), Pal.Same(result, SpecRangeWalk.FirstOr(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), default(T)))));
-                        SpecRangeWalk.MinStep(comparer, _min, _max, _lBoundActive, Pal.Tree<(T, bool)>(current), result);
-                        int comp = _lBoundActive ? Comparer.Compare(_min, current.Item) : -1;
+                        Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
+                        Pal.Invariant(SortedSetOwnership.Owns(labels.Value, Pal.Permission()));
+                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                            version == checkedVersion.Value && comparer == Pal.Old(comparer) &&
+                            SortedSetOwnership.ViewRoot<T>(labels.Value, comparer, root, _rootLevel, _min!, _max!, _lBoundActive, _uBoundActive) &&
+                            (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
+                            Pal.StrictlySorted(comparer, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, current))) &&
+                            Pal.Same(SpecRangeWalk.FirstOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, false, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, current))), result!), SpecRangeWalk.FirstOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive, items.Value), default(T)!)) &&
+                            Pal.Implies(Pal.Broke(), Pal.Same(result, SpecRangeWalk.FirstOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive, items.Value), default(T)!))));
+                        SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                        SpecRangeWalk.MinStep<T, bool>(comparer, _min!, _max!, _lBoundActive, SortedSetOwnership.Lookup(labels.Value, current), result!);
+                        int comp = _lBoundActive ? Comparer.Compare(_min, current!.Item) : -1;
                         if (comp > 0)
                         {
-                            current = current.Right;
+                            current = current!.Right;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         }
                         else
                         {
-                            result = current.Item;
+                            result = current!.Item;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                             if (comp == 0)
                             {
                                 break;
                             }
+                            SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
                             current = current.Left;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         }
                     }
 
@@ -251,30 +276,48 @@ namespace System.Collections.Generic
                 get
                 {
                     VersionCheck();
-                    SpecRangeWalk.MinMaxGoal(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive, default(T));
+                    SpecRangeWalk.MinMaxGoal(_underlying.SpecComparer, _underlying.SpecNodes, _min!, _max!, _lBoundActive, _uBoundActive, default(T)!);
+                    Ghost<SortedSetLabels<T>> labels = default;
+                    Pal.Capture(ref labels, _underlying.SpecLabels);
+                    Ghost<Seq<T>> items = default;
+                    Pal.Capture(ref items, _underlying.SpecItems);
+                    Ghost<SpecInt> checkedVersion = default;
+                    Pal.Capture(ref checkedVersion, _underlying.SpecVersion);
+                    SortedSetOwnershipProof.RootFacts(labels);
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
                     Node? current = root;
                     T? result = default;
 
                     while (current != null)
                     {
-                        Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
-                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && comparer == _underlying.SpecComparer && Pal.WellFormed(current) && Pal.StrictlySorted(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(current))) &&
-                                      Pal.Same(SpecRangeWalk.LastOr(SpecRangeWalk.Filter(comparer, _min, _max, false, _uBoundActive, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(current))), result), SpecRangeWalk.LastOr(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), default(T))) &&
-                                      Pal.Implies(Pal.Broke(), Pal.Same(result, SpecRangeWalk.LastOr(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), default(T)))));
-                        SpecRangeWalk.MaxStep(comparer, _min, _max, _uBoundActive, Pal.Tree<(T, bool)>(current), result);
-                        int comp = _uBoundActive ? Comparer.Compare(_max, current.Item) : 1;
+                        Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
+                        Pal.Invariant(SortedSetOwnership.Owns(labels.Value, Pal.Permission()));
+                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                            version == checkedVersion.Value && comparer == Pal.Old(comparer) &&
+                            SortedSetOwnership.ViewRoot<T>(labels.Value, comparer, root, _rootLevel, _min!, _max!, _lBoundActive, _uBoundActive) &&
+                            (current == null || SortedSetOwnership.Member(labels.Value, current)) &&
+                            Pal.StrictlySorted(comparer, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, current))) &&
+                            Pal.Same(SpecRangeWalk.LastOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, false, _uBoundActive, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, current))), result!), SpecRangeWalk.LastOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive, items.Value), default(T)!)) &&
+                            Pal.Implies(Pal.Broke(), Pal.Same(result, SpecRangeWalk.LastOr<T>(SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive, items.Value), default(T)!))));
+                        SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                        SpecRangeWalk.MaxStep<T, bool>(comparer, _min!, _max!, _uBoundActive, SortedSetOwnership.Lookup(labels.Value, current), result!);
+                        int comp = _uBoundActive ? Comparer.Compare(_max, current!.Item) : 1;
                         if (comp < 0)
                         {
-                            current = current.Left;
+                            current = current!.Left;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         }
                         else
                         {
-                            result = current.Item;
+                            result = current!.Item;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                             if (comp == 0)
                             {
                                 break;
                             }
+                            SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
                             current = current.Right;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         }
                     }
 
@@ -289,12 +332,21 @@ namespace System.Collections.Generic
             [Ensures("SpecWalk.Walked(SpecRangeWalk.Filter(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), Result)")]
             [Ensures("@this.SpecCoherent && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk")]
             [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
-            [Rlimit(16)]
+            [Rlimit(8)]
+            [Fuel(1, 0)]
             [Wrapping]
-            internal override bool InOrderTreeWalk([Callback(Bounded = true)] TreeWalkPredicate<T> action)
+            internal override bool InOrderTreeWalk([Callback("SortedSetNodeSnapshot<T> snapshot", "SortedSetOwnership.Raw(argument, snapshot, permission)", "SortedSetOwnership.Entry(snapshot)", Bounded = true)] TreeWalkPredicate<T> action)
             {
                 VersionCheck();
-                SpecRangeWalk.RootFilter(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+                SpecRangeWalk.RootFilter(_underlying.SpecComparer, _underlying.SpecNodes, _min!, _max!, _lBoundActive, _uBoundActive);
+                Ghost<SortedSetLabels<T>> labels = default;
+                Pal.Capture(ref labels, _underlying.SpecLabels);
+                Ghost<Seq<T>> items = default;
+                Pal.Capture(ref items, _underlying.SpecItems);
+                Ghost<Seq<T>> selected = default;
+                Pal.Capture(ref selected, SpecRangeWalk.Filter<T>(_underlying.SpecComparer,
+                    _min!, _max!, _lBoundActive, _uBoundActive, _underlying.SpecItems));
+                SortedSetOwnershipProof.RootFacts(labels);
 
                 if (root == null)
                 {
@@ -303,76 +355,166 @@ namespace System.Collections.Generic
 
                 // The maximum height of a red-black tree is 2*lg(n+1).
                 // See page 264 of "Introduction to algorithms" by Thomas H. Cormen
-                Stack<Node> stack = new Stack<Node>(2 * (int)SortedSet<T>.Log2(count + 1)); // this is not exactly right if count is out of date, but the stack can grow
+                Stack<Node?> stack = new Stack<Node?>(2 * (int)SortedSet<T>.Log2(count + 1)); // this is not exactly right if count is out of date, but the stack can grow
                 Node? current = root;
-                SpecRangeWalk.Empty<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items);
+                SortedSetRangeProof.Empty<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items);
+                SortedSetRangeProof.Start<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                    current, stack.Items, selected);
                 while (current != null)
                 {
-                    Pal.Decreases(Pal.Tree<(T, bool)>(current).Size);
-                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && Pal.WellFormed(current) && Pal.StrictlySorted(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(current))) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) && SpecRangeWalk.Walkable<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items) && comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue && SpecWalk.Keys(false, Pal.Tree<(T, bool)>(current)).Length + SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items).Length <= _underlying.SpecItems.Length &&
-                                  Pal.Trace<(T, bool), bool>(action).Length == 0 &&
-                                  SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(current)), SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items))) == Pal.Slice(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), 0, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length));
-                    if (IsWithinRange(current.Item))
+                    Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
+                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                        Pal.Same(ownershipState, Pal.Old(ownershipState)) &&
+                        SpecCoherent && version == _underlying.SpecVersion && SpecRootOk &&
+                        Pal.Same(_underlying.SpecLabels, labels.Value) && _underlying.SpecItems == items.Value &&
+                        this.ReadItems == selected.Value);
+                    Pal.Invariant((current == null || SortedSetOwnership.Member(labels.Value, current)) &&
+                        Pal.StrictlySorted(comparer, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, current))) &&
+                        SortedSetWalk.Walkable(labels.Value, stack.Items) &&
+                        SortedSetRange.Walkable<T>(labels.Value, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items) &&
+                        SpecWalk.Keys(false, SortedSetOwnership.Lookup(labels.Value, current)).Length +
+                            SortedSetWalk.Pending(false, labels.Value, stack.Items).Length <= items.Value.Length &&
+                        Pal.Trace<(T, bool), bool>(action).Length == 0 &&
+                        SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                            Pal.Concat(SpecWalk.Keys(false, SortedSetOwnership.Lookup(labels.Value, current)),
+                                SortedSetWalk.Pending(false, labels.Value, stack.Items))) == selected.Value);
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                    SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                    var item = current!.Item;
+                    SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
+                    if (IsWithinRange(item))
                     {
-                        SpecWalk.Descend<Node, T>(false, Pal.Heap<Node>(), stack.Items, current);
-                        SpecRangeWalk.Push<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items, current);
+                        SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                        SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                        SortedSetWalkProof.Descend(false, labels, stack.Items, current);
+                        SortedSetRangeProof.Push<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items, current);
                         stack.Push(current);
                         current = current.Left;
-                    }
-                    else if (_lBoundActive && Comparer.Compare(_min, current.Item) > 0)
-                    {
-                        SpecRangeWalk.SkipRight<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, current, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items));
-                        current = current.Right;
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                     }
                     else
                     {
-                        SpecRangeWalk.SkipLeft<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, current, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items));
+                        SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                        SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                    if (_lBoundActive && Comparer.Compare(_min, current.Item) > 0)
+                    {
+                        SortedSetRangeProof.SkipRight<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                            current, SortedSetWalk.Pending(false, labels.Value, stack.Items));
+                        current = current.Right;
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    }
+                    else
+                    {
+                        SortedSetRangeProof.SkipLeft<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                            current, SortedSetWalk.Pending(false, labels.Value, stack.Items));
                         current = current.Left;
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    }
                     }
                 }
 
                 while (stack.Count != 0)
                 {
-                    Pal.Decreases(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length - Pal.Trace<(T, bool), bool>(action).Length);
-                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) && SpecRangeWalk.Walkable<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items) &&
-                                  comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue &&
-                                  SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items).Length <= _underlying.SpecItems.Length &&
-                                  0 <= Pal.Trace<(T, bool), bool>(action).Length && Pal.Trace<(T, bool), bool>(action).Length <= SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length &&
-                                  Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() && SpecWalk.Walked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)) &&
-                                  Pal.Implies(!Pal.Returned(), SpecWalk.Visited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action)) &&
-                                        SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items)) == Pal.Slice(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action).Length, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length)));
+                    Pal.Decreases(selected.Value.Length - Pal.Trace<(T, bool), bool>(action).Length);
+                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                        Pal.Same(ownershipState, Pal.Old(ownershipState)) &&
+                        SpecCoherent && version == _underlying.SpecVersion && SpecRootOk &&
+                        Pal.Same(_underlying.SpecLabels, labels.Value) && _underlying.SpecItems == items.Value &&
+                        this.ReadItems == selected.Value);
+                    Pal.Invariant(SortedSetWalk.Walkable(labels.Value, stack.Items) &&
+                        SortedSetRange.Walkable<T>(labels.Value, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items) &&
+                        SortedSetWalk.Pending(false, labels.Value, stack.Items).Length <= items.Value.Length &&
+                        0 <= Pal.Trace<(T, bool), bool>(action).Length &&
+                        Pal.Trace<(T, bool), bool>(action).Length <= selected.Value.Length &&
+                        Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() &&
+                            SpecWalk.Walked(selected.Value, Pal.Trace<(T, bool), bool>(action), false)) &&
+                        Pal.Implies(!Pal.Returned(), SpecWalk.Visited(selected.Value, Pal.Trace<(T, bool), bool>(action)) &&
+                            SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                                SortedSetWalk.Pending(false, labels.Value, stack.Items)) ==
+                                Pal.Slice(selected.Value, Pal.Trace<(T, bool), bool>(action).Length, selected.Value.Length)));
+                    Pal.Assert(!Pal.Returned());
+                    Pal.Assert(stack.SpecCount != 0);
+                    Pal.Assert(stack.SpecCount == stack.Items.Length);
                     Pal.Assert(stack.Items.Length > 0);
-                    SpecRangeWalk.PopAt<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action).Length);
+                    SortedSetRangeProof.PopAt<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                        stack.Items, selected, (SpecInt)Pal.Trace<(T, bool), bool>(action).Length);
                     current = stack.Pop();
-                    Pal.Assert(Pal.Trace<(T, bool), bool>(action).Length < SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length);
-                    if (!action(current))
+                    Pal.Assert(Pal.Trace<(T, bool), bool>(action).Length < selected.Value.Length);
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                    SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                    Ghost<Seq<((T, bool), bool)>> before = default;
+                    Pal.Capture(ref before, Pal.Trace<(T, bool), bool>(action));
+                    if (!action(current!))
                     {
+                        SortedSetWalkProof.TraceStep(selected, before, Pal.Trace<(T, bool), bool>(action), false);
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         return false;
                     }
+                    else
+                    {
+                        SortedSetWalkProof.TraceStep(selected, before, Pal.Trace<(T, bool), bool>(action), true);
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    }
+                    SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
 
-                    Node? node = current.Right;
+                    Node? node = current!.Right;
+                    SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
                     while (node != null)
                     {
-                        Pal.Decreases(Pal.Tree<(T, bool)>(node).Size);
-                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && Pal.WellFormed(node) && Pal.StrictlySorted(comparer, SpecSearchTree.Keys(Pal.Tree<(T, bool)>(node))) && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), stack.Items) && SpecRangeWalk.Walkable<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items) && comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue && SpecWalk.Keys(false, Pal.Tree<(T, bool)>(node)).Length + SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items).Length <= _underlying.SpecItems.Length &&
-                                      0 < Pal.Trace<(T, bool), bool>(action).Length && Pal.Trace<(T, bool), bool>(action).Length <= SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length && SpecWalk.Visited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action)) &&
-                                      SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, Pal.Concat(SpecWalk.Keys(false, Pal.Tree<(T, bool)>(node)), SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items))) == Pal.Slice(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action).Length, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems).Length));
-                        if (IsWithinRange(node.Item))
+                        Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, node).Size);
+                        Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                            Pal.Same(ownershipState, Pal.Old(ownershipState)) &&
+                            SpecCoherent && version == _underlying.SpecVersion && SpecRootOk &&
+                            Pal.Same(_underlying.SpecLabels, labels.Value) && _underlying.SpecItems == items.Value &&
+                            this.ReadItems == selected.Value);
+                        Pal.Invariant((node == null || SortedSetOwnership.Member(labels.Value, node)) &&
+                            Pal.StrictlySorted(comparer, SpecSearchTree.Keys(SortedSetOwnership.Lookup(labels.Value, node))) &&
+                            SortedSetWalk.Walkable(labels.Value, stack.Items) &&
+                            SortedSetRange.Walkable<T>(labels.Value, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items) &&
+                            SpecWalk.Keys(false, SortedSetOwnership.Lookup(labels.Value, node)).Length +
+                                SortedSetWalk.Pending(false, labels.Value, stack.Items).Length <= items.Value.Length &&
+                            0 < Pal.Trace<(T, bool), bool>(action).Length &&
+                            Pal.Trace<(T, bool), bool>(action).Length <= selected.Value.Length &&
+                            SpecWalk.Visited(selected.Value, Pal.Trace<(T, bool), bool>(action)) &&
+                            SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                                Pal.Concat(SpecWalk.Keys(false, SortedSetOwnership.Lookup(labels.Value, node)),
+                                    SortedSetWalk.Pending(false, labels.Value, stack.Items))) ==
+                                    Pal.Slice(selected.Value, Pal.Trace<(T, bool), bool>(action).Length, selected.Value.Length));
+                        SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                        SortedSetOwnershipProof.OpenRead(labels, node, Pal.Permission());
+                        var item = node!.Item;
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                        SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
+                        if (IsWithinRange(item))
                         {
-                            SpecWalk.Descend<Node, T>(false, Pal.Heap<Node>(), stack.Items, node);
-                            SpecRangeWalk.Push<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, stack.Items, node);
+                            SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                            SortedSetOwnershipProof.OpenRead(labels, node, Pal.Permission());
+                            SortedSetWalkProof.Descend(false, labels, stack.Items, node);
+                            SortedSetRangeProof.Push<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive, stack.Items, node);
                             stack.Push(node);
                             node = node.Left;
-                        }
-                        else if (_lBoundActive && Comparer.Compare(_min, node.Item) > 0)
-                        {
-                            SpecRangeWalk.SkipRight<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, node, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items));
-                            node = node.Right;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
                         }
                         else
                         {
-                            SpecRangeWalk.SkipLeft<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, node, SpecWalk.Pending<Node, T>(false, Pal.Heap<Node>(), stack.Items));
+                            SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                            SortedSetOwnershipProof.OpenRead(labels, node, Pal.Permission());
+                        if (_lBoundActive && Comparer.Compare(_min, node.Item) > 0)
+                        {
+                            SortedSetRangeProof.SkipRight<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                                node, SortedSetWalk.Pending(false, labels.Value, stack.Items));
+                            node = node.Right;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                        }
+                        else
+                        {
+                            SortedSetRangeProof.SkipLeft<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                                node, SortedSetWalk.Pending(false, labels.Value, stack.Items));
                             node = node.Left;
+                            SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                        }
                         }
                     }
                 }
@@ -387,59 +529,122 @@ namespace System.Collections.Generic
             [Ensures("SpecWalk.BfWalked(SpecRangeWalk.Filter(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), Result)")]
             [Ensures("@this.SpecCoherent && @this.version == @this._underlying.SpecVersion && @this.SpecRootOk")]
             [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
-            [Rlimit(16)]
+            [Rlimit(8), Fuel(1, 0)]
             [Wrapping]
-            internal override bool BreadthFirstTreeWalk([Callback(Bounded = true)] TreeWalkPredicate<T> action)
+            internal override bool BreadthFirstTreeWalk([Callback("SortedSetNodeSnapshot<T> snapshot", "SortedSetOwnership.Raw(argument, snapshot, permission)", "SortedSetOwnership.Entry(snapshot)", Bounded = true)] TreeWalkPredicate<T> action)
             {
                 VersionCheck();
-                SpecRangeWalk.RootFilter(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+                SpecRangeWalk.RootFilter(_underlying.SpecComparer, _underlying.SpecNodes, _min!, _max!, _lBoundActive, _uBoundActive);
+                Ghost<SortedSetSnapshot<T>> snapshot = default;
+                Pal.Capture(ref snapshot, SortedSetOwnership.Snapshot(_underlying.SpecSnapshot));
+                Ghost<SortedSetReadHandle<T>> lease = default;
+                Pal.Capture(ref lease, SortedSetOwnership.ViewHandle(this, snapshot.Value));
+                SortedSetOwnership.ViewHandleFacts(this, snapshot.Value);
+                Ghost<SortedSetLabels<T>> labels = default;
+                Pal.Capture(ref labels, _underlying.SpecLabels);
+                Ghost<Seq<T>> items = default;
+                Pal.Capture(ref items, _underlying.SpecItems);
+                Ghost<Seq<T>> selected = default;
+                Pal.Capture(ref selected, SpecRangeWalk.Filter<T>(_underlying.SpecComparer,
+                    _min!, _max!, _lBoundActive, _uBoundActive, _underlying.SpecItems));
+                SortedSetOwnershipProof.RootFacts(labels);
 
                 if (root == null)
                 {
                     return true;
                 }
 
-                Queue<Node> processQueue = new Queue<Node>();
+                Queue<Node?> processQueue = new Queue<Node?>();
                 processQueue.Enqueue(root);
-                SpecRangeWalk.BfStart<Node, T, bool>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, processQueue.Items, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action));
-                Node current;
+                SortedSetRangeBreadthProof.Start<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                    root, processQueue.Items, selected, Pal.Trace<(T, bool), bool>(action));
+                Node? current;
 
                 while (processQueue.Count != 0)
                 {
-                    Pal.Decreases(SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items).Length);
-                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) && SpecCoherent && version == _underlying.SpecVersion && SpecRootOk && SpecWalk.Walkable<Node, T>(Pal.Heap<Node>(), processQueue.Items) && SpecRangeWalk.Queue<Node, T>(Pal.Heap<Node>(), comparer, processQueue.Items) &&
-                                  comparer == _underlying.SpecComparer && _underlying.SpecItems.Length <= int.MaxValue &&
-                                  SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items).Length <= _underlying.SpecItems.Length &&
-                                  Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() && SpecWalk.BfWalked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)) &&
-                                  Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), processQueue.Items)))));
-                    Ghost<Seq<Node>> q0 = processQueue.Items;
-                    SpecRangeWalk.BfDequeue<Node, T, bool>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value, SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action));
+                    Pal.Decreases(SortedSetBreadth.Pending(labels.Value, processQueue.Items).Length);
+                    Pal.Invariant(Pal.Same(_min, Pal.Old(_min)) && Pal.Same(_max, Pal.Old(_max)) &&
+                        Pal.Same(SortedSetOwnership.Snapshot(_underlying.SpecSnapshot), snapshot.Value) &&
+                        SortedSetOwnership.HandleMatchesView(lease.Value, this, snapshot.Value) &&
+                        Pal.Same(ownershipState, Pal.Old(ownershipState)) &&
+                        SpecCoherent && version == _underlying.SpecVersion && SpecRootOk &&
+                        Pal.Same(_underlying.SpecLabels, labels.Value) && _underlying.SpecItems == items.Value &&
+                        this.ReadItems == selected.Value &&
+                        SortedSetWalk.Walkable(labels.Value, processQueue.Items) &&
+                        SortedSetRangeBreadth.Queue(labels.Value, comparer, processQueue.Items) &&
+                        SortedSetBreadth.Pending(labels.Value, processQueue.Items).Length <= items.Value.Length &&
+                        Pal.Implies(Pal.Returned(), !Pal.ReturnValue<bool>() &&
+                            SpecWalk.BfWalked(selected.Value, Pal.Trace<(T, bool), bool>(action), false)) &&
+                        Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(selected.Value, Pal.Trace<(T, bool), bool>(action),
+                            SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                                SortedSetBreadth.Pending(labels.Value, processQueue.Items)))));
+                    Pal.Assert(!Pal.Returned());
+                    Pal.Assert(processQueue.SpecCount != 0);
+                    Pal.Assert(processQueue.Items.Length > 0);
+                    Ghost<Seq<Node?>> q0 = default;
+                    Pal.Capture(ref q0, processQueue.Items);
+                    SortedSetRangeBreadthProof.Dequeue<T>(labels, comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                        q0, selected, Pal.Trace<(T, bool), bool>(action));
                     current = processQueue.Dequeue();
-                    if (IsWithinRange(current.Item) && !action(current))
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                    SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                    var item = current!.Item;
+                    SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
+                    bool inRange = IsWithinRange(item);
+                    SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
+                    SortedSetOwnershipProof.OpenRead(labels, current, Pal.Permission());
+                    SortedSetOwnershipProof.WindowToHandle(lease, labels, current, Pal.Permission());
+                    if (inRange && !action(current!))
                     {
+                        SortedSetOwnershipProof.WindowFromHandle(_underlying,
+                            SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                            lease, labels, current, Pal.Permission());
+                        SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                        SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
                         return false;
                     }
+                    Pal.Join(SortedSetOwnership.HandleOrClosed(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease.Value, labels.Value, current, Pal.Permission(), Pal.Returned()));
+                    Pal.Join(processQueue.Items == Pal.Slice(q0.Value, 1, q0.Value.Length));
                     Pal.Join(current == q0.Value[0]);
-                    Pal.Join(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() && SpecWalk.BfWalked(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), false)));
-                    Pal.Join(Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(SpecRangeWalk.Filter(_underlying.SpecComparer, _min, _max, _lBoundActive, _uBoundActive, _underlying.SpecItems), Pal.Trace<(T, bool), bool>(action), SpecRangeWalk.Filter(comparer, _min, _max, _lBoundActive, _uBoundActive, SpecWalk.BfPending<Node, T>(Pal.Heap<Node>(), SpecRangeWalk.BfNext<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value))))));
+                    Pal.Join(Pal.Implies(Pal.Returned(), !Pal.Result<bool>() &&
+                        SpecWalk.BfWalked(selected.Value, Pal.Trace<(T, bool), bool>(action), false)));
+                    Pal.Join(Pal.Implies(!Pal.Returned(), SpecWalk.BfVisited(selected.Value, Pal.Trace<(T, bool), bool>(action),
+                        SpecRangeWalk.Filter<T>(comparer, _min!, _max!, _lBoundActive, _uBoundActive,
+                            SortedSetBreadth.Pending(labels.Value,
+                                SortedSetRangeBreadth.Next<T>(labels.Value, comparer, _min!, _max!, _lBoundActive, _uBoundActive, q0.Value))))));
+                    SortedSetOwnershipProof.ContinueHandle(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease, labels, current, Pal.Permission(), Pal.Returned());
                     Pal.Assert(processQueue.SpecCount < int.MaxValue);
-                    if (current.Left != null && (!_lBoundActive || Comparer.Compare(_min, current.Item) < 0))
+                    if (current!.Left != null && (!_lBoundActive || Comparer.Compare(_min, current!.Item) < 0))
                     {
-                        processQueue.Enqueue(current.Left);
+                        processQueue.Enqueue(current!.Left);
                     }
-                    Pal.Join(processQueue.Items == (Pal.LeftOf(current) != null && (!_lBoundActive || Pal.Compare(comparer, _min, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(current), _min)) < 0)
-                        ? Pal.Snoc(Pal.Slice(q0.Value, 1, q0.Value.Length), Pal.LeftOf(current))
+                    Pal.Join(SortedSetOwnership.HandleWindow(lease.Value, labels.Value, current, Pal.Permission()));
+                    Pal.Join(processQueue.Items == (SortedSetRangeBreadth.TakeLeft<T>(labels.Value, comparer, _min!, _lBoundActive, current)
+                        ? Pal.Snoc(Pal.Slice(q0.Value, 1, q0.Value.Length), SortedSetWalk.Near(false, labels.Value, current))
                         : Pal.Slice(q0.Value, 1, q0.Value.Length)));
-                    Ghost<Seq<Node>> q1 = processQueue.Items;
+                    Ghost<Seq<Node?>> q1 = default;
+                    Pal.Capture(ref q1, processQueue.Items);
                     Pal.Assert(processQueue.SpecCount < int.MaxValue);
-                    if (current.Right != null && (!_uBoundActive || Comparer.Compare(_max, current.Item) > 0))
+                    if (current!.Right != null && (!_uBoundActive || Comparer.Compare(_max, current!.Item) > 0))
                     {
-                        processQueue.Enqueue(current.Right);
+                        processQueue.Enqueue(current!.Right);
                     }
-                    Pal.Join(processQueue.Items == (Pal.RightOf(current) != null && (!_uBoundActive || Pal.Compare(comparer, _max, SpecSearchTree.RootKey(Pal.Tree<(T, bool)>(current), _min)) > 0)
-                        ? Pal.Snoc(q1.Value, Pal.RightOf(current))
+                    Pal.Join(SortedSetOwnership.HandleWindow(lease.Value, labels.Value, current, Pal.Permission()));
+                    Pal.Join(processQueue.Items == (SortedSetRangeBreadth.TakeRight<T>(labels.Value, comparer, _min!, _max!, _uBoundActive, current)
+                        ? Pal.Snoc(q1.Value, SortedSetWalk.Far(false, labels.Value, current))
                         : q1.Value));
-                    Pal.Assert(processQueue.Items == SpecRangeWalk.BfNext<Node, T>(Pal.Heap<Node>(), comparer, _min, _max, _lBoundActive, _uBoundActive, q0.Value));
+                    Pal.Assert(processQueue.Items == SortedSetRangeBreadth.Next<T>(labels.Value, comparer,
+                        _min!, _max!, _lBoundActive, _uBoundActive, q0.Value));
+                    SortedSetOwnershipProof.WindowFromHandle(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease, labels, current, Pal.Permission());
+                    SortedSetOwnershipProof.CloseRead(labels, Pal.Permission());
+                    SortedSetOwnershipProof.EndSet(labels, Pal.Permission());
                 }
                 return true;
             }
@@ -504,7 +709,10 @@ namespace System.Collections.Generic
 
             internal override int GetApproximateMaxHeight()
             {
-                SortedSetCount.RangeRootHeight(_underlying.SpecComparer, _underlying.SpecNodes, _min, _max, _lBoundActive, _uBoundActive);
+                SortedSetCount.RangeRootHeight(_underlying.SpecComparer, _underlying.SpecNodes, _min!, _max!, _lBoundActive, _uBoundActive);
+                    SortedSetOwnershipProof.RootFacts<T>(_underlying.SpecLabels);
+                    Pal.Assert(SortedSetOwnership.Lookup(_underlying.SpecLabels, root).IsLeaf ||
+                        SortedSetOwnership.Lookup(_underlying.SpecLabels, root).Height + _rootLevel <= _underlying.SpecNodes.Height);
                 // pal: R23.12. `Math.Max` of effect-free arguments: the call is bound first.
                 int underlyingHeight = _underlying.GetApproximateMaxHeight();
                 return Math.Max(underlyingHeight - _rootLevel, 0);

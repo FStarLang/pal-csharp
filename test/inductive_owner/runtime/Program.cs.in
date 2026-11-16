@@ -1,0 +1,209 @@
+using System;
+using System.Reflection;
+using PalCSharp.Tests;
+
+var owner = new CellOwner(17);
+var storage = new GhostStorageOwner<string>();
+storage.AdvanceProof(12);
+storage.ViaAlias(23);
+if (storage.Read() != 7 || new GhostStorageDerived<string>().Read() != 7)
+    throw new Exception("Logical ghost initialization or update executed at runtime");
+if (typeof(GhostStorageOwner<string>).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Length != 1 ||
+    typeof(GhostStoragePlain).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).Length != 0)
+    throw new Exception("A ghost property allocated CLR backing storage");
+_ = new GhostStoragePlain();
+PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Protocol callback executed"));
+PalLang.Pal.Protocol<int, bool>(_ => throw new Exception("Bounded protocol callback executed"), 0);
+PalLang.SpecSetOps.AddAllWhole<int>(ThrowingComparer(), default, default);
+static System.Collections.Generic.IComparer<int> ThrowingComparer() =>
+    throw new Exception("A void specification binding evaluated its arguments");
+var conditional = new ConditionalGhostOwner(19);
+if (conditional.Read() != 19)
+    throw new Exception("Conditional ghost initialization changed the runtime value");
+conditional.Replace(23);
+if (conditional.Read() != 23 ||
+    typeof(ConditionalGhostOwner).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Length != 1)
+    throw new Exception("Ghost capture or update changed runtime behavior or layout");
+if (WitnessClient.Read(new OwnedCell(29), 29) != 29)
+    throw new Exception("Conditional ghost-result capture evaluated a proof-only helper");
+if (new GhostFieldHolder(37, 41).ReadThroughLoan() != 37)
+    throw new Exception("Selective ghost capture changed the holder's runtime read");
+if (new GhostFieldHolder(37, 41).ReadWithDistinctOwner(new GhostFieldHolder(3, 5)) != 37)
+    throw new Exception("Distinct holder ownership was confused with a receiver alias");
+for (int initial = 0; initial <= 100; initial++)
+{
+    var counter = new CurrentModelOwner(initial);
+    if (counter.Drain() != initial || counter.Drain() != 0)
+        throw new Exception("Current-model loop changed its mutation count or final state");
+    if (initial > 0)
+    {
+        var fixedLoop = new CurrentModelOwner(initial);
+        if (fixedLoop.StepThenCount() != initial - 1 || fixedLoop.Drain() != initial - 1)
+            throw new Exception("Fixed-record loop observed the method-entry model after mutation");
+    }
+}
+var holder = new OwnedCallHolder(17, 29);
+var unrelated = new OwnedCallChild(41);
+foreach (bool fail in new[] { false, true })
+{
+    int calls = 0, observations = 0;
+    bool propagated = false;
+    try
+    {
+        if (holder.ReadObserved(fail, ref calls, ref observations) != 17 || fail)
+            throw new Exception("Owned child call returned incorrectly");
+    }
+    catch (InvalidOperationException)
+    {
+        propagated = true;
+    }
+    if (propagated != fail || calls != 1 || observations != 1)
+        throw new Exception("Owned child call changed propagation or evaluation count");
+    calls = 0;
+    if (OwnedCallHolder.Recover(holder, unrelated, fail, ref calls) != (fail ? 0 : 17) || calls != 1)
+        throw new Exception("Owned child recovery changed result or call count");
+    calls = 0;
+    if (holder.Read(false, ref calls) != 17 ||
+        (int)typeof(OwnedCallHolder).GetField("stamp", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(holder)! != 29)
+        throw new Exception("Owned holder model changed after recovery");
+    calls = 0;
+    if (unrelated.Read(false, ref calls) != 41)
+        throw new Exception("Unrelated owner changed after recovery");
+}
+foreach (CallbackCell<int>? cell in new CallbackCell<int>?[] { null, new CallbackCell<int>() })
+{
+    int calls = 0, completed = 0;
+    try
+    {
+        if (!PlainThrowGuards.Require(cell) || cell is null)
+            throw new Exception("Plain guard accepted null");
+    }
+    catch (ArgumentNullException) when (cell is null) { }
+    try
+    {
+        if (!PlainThrowGuards.Effectful(cell, ref calls, ref completed) || cell is null)
+            throw new Exception("Effectful guard accepted null");
+    }
+    catch (ArgumentNullException) when (cell is null) { }
+    if (calls != 1 || completed != (cell is null ? 0 : 1))
+        throw new Exception("Throw guard changed evaluation or continuation count");
+}
+if (owner.Read() != 17 || owner.ReadWithLease() != 17 || !OwnerClients.Same(owner))
+    throw new Exception("Constructor/read/self-alias failed");
+owner.Set(-42);
+if (owner.Read() != -42 || owner.ReadWithLease() != -42 || !OwnerClients.Same(owner))
+    throw new Exception("Mutation/read/self-alias failed");
+foreach (bool choose in new[] { false, true })
+{
+    owner.SetJoinedTail(choose, 13, 29);
+    if (owner.Read() != (choose ? 13 : 29))
+        throw new Exception("Resource-carrying tail join changed owner state");
+}
+if (typeof(CellOwner).GetFields(BindingFlags.Instance | BindingFlags.NonPublic).Length != 1)
+    throw new Exception("Proof-only witness changed runtime layout");
+var node = new OwnedCell(8);
+PlainPatterns.ResourceLoop(node, 8, false);
+PlainPatterns.ResourceLoop(node, 8, true);
+foreach (bool left in new[] { false, true })
+{
+    int calls = 0;
+    var fresh = ImmutableIntegers.Make(left, ref calls);
+    if (fresh.Current != (left ? 7 : 11) || calls != 1)
+        throw new Exception("Immutable initialization changed allocation data or evaluation count");
+    if (ImmutableIntegers.Once(left, ref calls) != (left ? 7 : 11) || calls != 2)
+        throw new Exception("Immutable initialization was duplicated or skipped");
+}
+if (ImmutableIntegers.ByRef() != 8 || ImmutableIntegers.Assigned() != 8 ||
+    ImmutableIntegers.Nested(true) != 8 || ImmutableIntegers.Nested(false) != 7 ||
+    ImmutableIntegers.InCall() != 7 || ImmutableIntegers.OutCall() != 8 || ImmutableIntegers.RawScope() != 7)
+    throw new Exception("A mutable/addressed local was incorrectly treated as immutable");
+foreach (int selector in new[] { 0, 1, -1 })
+{
+    int bareVisits = 4;
+    int bare = MixedSwitch.Bare(selector, ref bareVisits);
+    if (bare != (selector == 0 ? 10 : 20) || bareVisits != 4 + (selector == 0 ? 1 : 4))
+        throw new Exception("Mixed switch continuation ran on the wrong path");
+    int proofVisits = 4;
+    int withProof = MixedSwitch.WithWitness(selector, ref proofVisits, node, 8);
+    if (withProof != 8 || proofVisits != 4 + (selector == 0 ? 2 : 4))
+        throw new Exception("Proof-prefixed switch changed its runtime prefix or continuation");
+    foreach (bool choose in new[] { false, true })
+    {
+        int joinedVisits = 4;
+        if (MixedSwitch.Joined(selector, choose, ref joinedVisits, node, 8) != 8 ||
+            joinedVisits != 4 + (selector == 0 && choose ? 3 : 4))
+            throw new Exception("Switch ownership join changed evaluation or continuation count");
+    }
+}
+if (node.Current != 8) throw new Exception("Plain getter failed");
+node.Replace(9);
+if (node.Current != 9) throw new Exception("Plain instance method failed");
+var cleanupOwner = new PlainCleanupOwner();
+foreach (OwnedCell? replacement in new OwnedCell?[] { null, node })
+{
+    int calls = 0;
+    if (PlainLocals.NullTests(node, replacement, ref calls) != (replacement != null) || calls != 1)
+        throw new Exception("Plain null test trusted ! or duplicated its operand");
+    calls = 0;
+    if (PlainPatterns.Present(replacement) != (replacement != null) ||
+        PlainPatterns.TypeOnly(replacement) != (replacement != null) ||
+        PlainPatterns.Observed(replacement, ref calls) != (replacement != null) || calls != 1 ||
+        PlainPatterns.Joined(replacement, ref calls) != (replacement != null) || calls != 2)
+        throw new Exception("Plain pattern lost null rejection, capture, or exactly-once evaluation");
+}
+foreach (bool chooseLeft in new[] { false, true })
+{
+    var chosen = PlainLocals.Create(chooseLeft, 13, 29);
+    if (chosen.Current != (chooseLeft ? 13 : 29))
+        throw new Exception("Definitely assigned non-null Plain local failed");
+    int calls = 0;
+    var called = PlainLocals.FromCalls(chooseLeft, 31, 47, ref calls);
+    if (called.Current != (chooseLeft ? 31 : 47) || calls != 1)
+        throw new Exception("Owned conditional call changed evaluation count or result");
+    calls = 0;
+    if (!cleanupOwner.Conditional(chooseLeft, called, ref calls) || calls != 1)
+        throw new Exception("Conditional call lost its owner cleanup or duplicated evaluation");
+}
+if (BorrowedCallbacks.ReadOnce(node) != 9 || node.Current != 9)
+    throw new Exception("Borrowed callback changed its snapshot");
+var generic = new CallbackCell<int> { item = 37 };
+var secondGeneric = new CallbackCell<int> { item = 41 };
+if (PlainPatterns.Generic(generic) != generic || PlainPatterns.Generic<int>(null) != null)
+    throw new Exception("Generic Plain pattern lost its captured pointer");
+int returnCalls = 0;
+if (PlainReturns.NonNull(generic, ref returnCalls, default) != generic || returnCalls != 1)
+    throw new Exception("Opaque non-null return changed identity or evaluation count");
+foreach (CallbackCell<int>? input in new CallbackCell<int>?[] { null, generic })
+{
+    int calls = 0;
+    if (PlainReturns.Nullable(input, ref calls, default) != input || calls != 1 ||
+        PlainReturns.EffectfulReturn(input, ref calls, default) != input || calls != 2)
+        throw new Exception("Opaque nullable return changed identity or evaluation count");
+}
+int tupleCalls = 0;
+var pair = PlainTuples.Pair(generic, secondGeneric);
+var nullablePair = PlainTuples.NullablePair<int>(null, secondGeneric);
+if (pair.Item1 != generic || pair.Item2 != secondGeneric ||
+    nullablePair.Item1 != null || nullablePair.Item2 != secondGeneric ||
+    PlainTuples.Empty<int>() != (null, null) ||
+    PlainTuples.RoundTrip(generic, secondGeneric, ref tupleCalls) != generic || tupleCalls != 1)
+    throw new Exception("Plain tuple mapping changed pointer identity, default, or evaluation count");
+if (CallbackCells.Read(generic) != 37 || CallbackCells.ReadInt(generic) != 37 || generic.item != 37)
+    throw new Exception("Generic callback snapshot instantiation failed");
+var viewOwner = new ViewOwner<int>(7, 42);
+var window = new ViewOwner<int>.Window(viewOwner, 3);
+if (window.ReadWhileOpened() != 3 || viewOwner.RetainedView() != 3 ||
+    viewOwner.Read() != 11 || viewOwner.ReadDependent() != 11 || window.ReadWhileOpened() != 3 ||
+    window.ReadLoopWhileOpened() != 3 || window.ReadOwnerLoop() != 11)
+    throw new Exception("A view prevented mutation between operation-local borrows");
+foreach (bool first in new[] { false, true })
+foreach (bool answer in new[] { false, true })
+{
+    int calls = 0;
+    if (window.CloseAnd(first, answer, ref calls) != 3 || calls != (first ? 1 : 0))
+        throw new Exception("Spatial && join duplicated or failed to skip its RHS");
+    calls = 0;
+    if (window.CloseOr(first, answer, ref calls) != 3 || calls != (first ? 0 : 1))
+        throw new Exception("Spatial || join duplicated or failed to skip its RHS");
+}
+Console.WriteLine("Inductive owner runtime, layout, and alias tests passed.");

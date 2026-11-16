@@ -305,6 +305,17 @@ namespace System.Collections.Generic
         private static bool PushWrites(Seq<int> bs, Seq<int> bs2, Seq<Entry> es, Seq<Entry> es2, SpecInt i) => throw new InvalidOperationException();
 
         [Lemma]
+        [Requires("0 <= i && i < es.Length && es.Length == bs.Length && bs.Length <= int.MaxValue && bs2.Length == bs.Length")]
+        [Requires("entry.HashCode == es[i].HashCode && Pal.Same(entry.Key, es[i].Key) && Pal.Same(entry.Value, es[i].Value)")]
+        [Requires("entry.Next == bs[(int)(entry.HashCode % (uint)bs.Length)] - 1")]
+        [Requires("bs2[(int)(entry.HashCode % (uint)bs.Length)] == i + 1")]
+        [Requires("Pal.Forall((int b) => Pal.Implies(0 <= b && b < bs.Length && b != (int)(entry.HashCode % (uint)bs.Length), bs2[b] == bs[b]))")]
+        [Ensures("OrderedDictionary<TKey, TValue>.PushWrites(bs, bs2, es, Pal.SetAt(es, i, entry), i)")]
+        [PulseBody("OrderedDictionaryChain.push_writes_entry $(bs) $(bs2) $(es) $(entry) $(i)")]
+        [Conditional("PAL")]
+        private static void RecordPushWrites(Seq<int> bs, Seq<int> bs2, Seq<Entry> es, Entry entry, SpecInt i) { }
+
+        [Lemma]
         [Requires("0 <= n && n <= entries.Length && n <= old.Length && Pal.Slice(entries, 0, n) == Pal.Slice(old, 0, n)")]
         [Ensures("OrderedDictionary<TKey, TValue>.SameKvh(entries, old, n)")]
         [PulseBody("OrderedDictionaryChain.same_kvh_copy $(entries) $(old) $(n)")]
@@ -957,6 +968,8 @@ namespace System.Collections.Generic
             Ghost<Seq<Entry>> e3 = Pal.Contents(_entries);
             WfmHead(Pal.Contents(_buckets), Pal.Contents(_entries), count + 1, index, _comparer, Bof(Pal.Contents(_entries), index));
             PushEntryIntoBucket(ref entry, index);
+            RecordPushWrites(b3.Value, Pal.Contents(_buckets), e3.Value, entry, index);
+            Pal.Assert(Pal.Contents(_entries) == Pal.SetAt(e3.Value, index, entry));
             FillStep(b3.Value, Pal.Contents(_buckets), e3.Value, Pal.Contents(_entries), count + 1, index, _comparer);
             Pal.Assert(Keysh(e3.Value, count + 1, index) == keys0.Value);
             Pal.Assert(Pal.Same(e3.Value[index].Key, key));

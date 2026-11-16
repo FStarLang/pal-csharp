@@ -14,7 +14,7 @@ public struct PileModel<T>
 
 public class Pile<T>
 {
-    internal System.Collections.Generic.IComparer<T> comparer;
+    internal System.Collections.Generic.IComparer<T> comparer = default!;
     internal int count;
     internal int version;
 
@@ -107,6 +107,44 @@ public class Pile<T>
         return 0;
     }
 
+    [Ensures("Result == 0")]
+    [Ensures("Result == 1", At = typeof(Pile<>.Top))]
+    public int PatternKind() => this is Top ? 1 : 0;
+
+    [Ensures("Result == @this.SpecCount")]
+    [Ensures("Result == @this._underlying.SpecCount", At = typeof(Pile<>.Top))]
+    public int SourceCount()
+    {
+#if PAL
+        Ghost<SpecInt> snapshot = this is Top selected ? selected.SourceSize : this.SpecCount;
+#endif
+        if (this is Top top)
+        {
+            Pal.Assert(top.SourceSize == top._underlying.SpecCount);
+#if PAL
+            Pal.Assert(snapshot.Value == top.SourceSize);
+#endif
+            return top._underlying.Count;
+        }
+        else return count;
+    }
+
+    [Requires("lo >= 0")]
+    [Ensures("Result == 1")]
+    public int AboveKind(int lo)
+    {
+        Pile<T> view = Above(lo);
+        return view.PatternKind();
+    }
+
+    [Requires("lo >= 0")]
+    [Ensures("Result == @this.SpecCount")]
+    public int AboveSourceCount(int lo)
+    {
+        Pile<T> view = Above(lo);
+        return view.SourceCount();
+    }
+
     // R32.14. A view of another object of the class, named in a loop invariant through a
     // cast to the view's type.
     [Requires("lo >= 0 && other.SpecCount < 1000")]
@@ -143,11 +181,12 @@ public class Pile<T>
     {
         private int _hi;
 
-        private readonly Pile<T> _underlying;
+        internal readonly Pile<T> _underlying;
         private readonly int _lo;
         private int _countVersion;
 
         [Spec] internal SpecInt SpecLo => _lo;
+        [Spec] internal SpecInt SourceSize => _underlying.SpecCount;
         [Spec] internal SpecInt SpecCountVersion => _countVersion;
         [Spec] internal SpecInt SpecViewCount => _underlying.SpecCount > _lo ? _underlying.SpecCount - _lo : 0;
         [Spec] internal bool SpecCoherent =>

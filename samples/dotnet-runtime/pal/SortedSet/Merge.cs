@@ -25,12 +25,14 @@ namespace System.Collections.Generic
         internal static Seq<T> Take<T>(Seq<T> s, SpecInt j) => throw Ghost();
 
         // The whole of `s` is a suffix of `s`. Called on a fresh enumerator's items.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetMerge.suffix_whole")]
         internal static void Whole<T>(Seq<T> s) => throw Ghost();
 
         // An enumerator over `s` whose pending items `p0` are a suffix of `s`: what holds of the
         // pending items `MoveNext` leaves, stated as the merge loops' invariants state it.
         // Called before the `MoveNext`.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetMerge.pending_next")]
         internal static void PendingNext<T>(Seq<T> s, Seq<T> p0) => throw Ghost();
     }

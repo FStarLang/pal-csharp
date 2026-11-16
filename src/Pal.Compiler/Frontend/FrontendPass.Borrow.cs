@@ -173,6 +173,13 @@ public static partial class FrontendPass
                     ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
                         { Type = IrPrim.Bool });
                 }
+                foreach (var p in Borrowing.InheritedGhostState(self, known))
+                {
+                    if (written.Contains(p.Name) || known.MapType(p.Type) is not { } fieldType) continue;
+                    var field = new IrField(loc, selfVar, p.Name) { Type = fieldType };
+                    ensures.Add(new IrBinary(loc, BinOp.Eq, field, new IrOld(loc, field) { Type = fieldType })
+                        { Type = IrPrim.Bool });
+                }
             }
         }
 
@@ -204,7 +211,7 @@ public static partial class FrontendPass
         }
         else
         {
-            body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+            body = admitted ? null : LowerBody(candidate.Syntax, lowerer, known, bound, diagnostics);
             var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
             bodyRequires = br;
             bodyEnsures = be;
@@ -218,6 +225,25 @@ public static partial class FrontendPass
 
         ImmutableArray<string> typeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
+        // A direct getter of the borrowing record's own field does not read the
+        // borrowed object. Its pointer still identifies the owner, but ownership is
+        // needed only if a contract observes that owner's model.
+        var returned = body switch
+        {
+            IrReturn ret => ret.Value,
+            IrBlock { Statements: [IrReturn ret] } => ret.Value,
+            _ => null,
+        };
+        var clauses = specs.Requires.Concat(specs.Ensures).Concat(specs.Preserves)
+            .Concat(bodyRequires).Concat(bodyEnsures)
+            .Concat(specs.Throws.Select(t => t.When).OfType<IrExpr>())
+            .Concat(specs.Decreases is { } measure ? [measure] : []);
+        if (symbol.MethodKind == MethodKind.PropertyGet &&
+            returned is IrField { Receiver: IrVar { Name: BorrowContext.Self } } &&
+            returnType is not IrClassType { Plain: false } &&
+            !clauses.SelectMany(Passes.Check.Subexpressions).Any(e =>
+                e is IrVar { Name: Names.This or "$permission" } or IrInlinePulse or IrStmtExpr))
+            leading[0] = leading[0] with { Plain = true };
         lifted?.AddRange(lowerer.Expressions.Lifted);
         return new IrMethod(
             loc, Naming.Of(symbol), [.. leading, .. parameters], returnType,
@@ -235,6 +261,7 @@ public static partial class FrontendPass
             DefaultedTypeParameters = [.. typeParameters.Where(lowerer.Defaulted)],
             RlimitFactor = Declarations.Find(symbol, known.RlimitAttribute) is { ConstructorArguments: [{ Value: int factor }] } && factor > 0
                 ? factor : null,
+            InitialFuel = InitialFuel(symbol, known, loc, diagnostics),
         };
     }
 

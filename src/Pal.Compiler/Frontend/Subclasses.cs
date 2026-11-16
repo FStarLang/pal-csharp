@@ -31,6 +31,7 @@ internal static class Subclasses
             Declarations.Has(d, known.InvariantAttribute))
             return null;
         if (d.GetMembers().Any(m => m is IFieldSymbol { IsStatic: false, IsConst: false } ||
+                                    GhostStorage.Is(m, known) ||
                                     Declarations.Has(m, known.ModelAttribute) ||
                                     Declarations.Has(m, known.InvariantAttribute)))
             return null;
@@ -157,7 +158,17 @@ internal static class Subclasses
     public static bool Reaches(IMethodSymbol m, INamedTypeSymbol s, Compilation compilation)
     {
         var overridden = Overridden(s);
-        return Closure(m, compilation).Any(overridden.Contains);
+        var closure = Closure(m, compilation);
+        return closure.Any(overridden.Contains) || closure.Append(m).Any(method =>
+            method.DeclaringSyntaxReferences.Any(reference =>
+                compilation.Owns(reference.SyntaxTree) &&
+                reference.GetSyntax().DescendantNodes().OfType<ThisExpressionSyntax>().Any(th =>
+                {
+                    SyntaxNode at = th;
+                    while (at.Parent is ParenthesizedExpressionSyntax) at = at.Parent;
+                    return at.Parent is IsPatternExpressionSyntax ||
+                        at.Parent is BinaryExpressionSyntax b && b.IsKind(SyntaxKind.IsExpression);
+                })));
     }
 
     /// <summary>The name of the replica of <paramref name="m"/> verified at <paramref name="s"/>.</summary>
@@ -309,6 +320,11 @@ internal static class Subclasses
     /// <summary>Why a use of <c>this</c> lets an object of <paramref name="s"/> escape, or null.</summary>
     private static string? EscapesThis(ThisExpressionSyntax th, SemanticModel model, INamedTypeSymbol s, Compilation compilation)
     {
+        // `s` can be a discovery symbol from before specification shims were added.
+        // Conversion classification must compare symbols from the same compilation.
+        var currentSubclass = s.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } declaration
+            ? model.Compilation.GetSemanticModel(declaration.SyntaxTree).GetDeclaredSymbol(declaration) as INamedTypeSymbol ?? s
+            : s;
         SyntaxNode at = th;
         while (at.Parent is ParenthesizedExpressionSyntax) at = at.Parent;
         switch (at.Parent)
@@ -317,6 +333,17 @@ internal static class Subclasses
             case ElementAccessExpressionSyntax ea when ea.Expression == at: return null;
             case ConditionalAccessExpressionSyntax ca when ca.Expression == at: return null;
             case BinaryExpressionSyntax b when b.IsKind(SyntaxKind.EqualsExpression) || b.IsKind(SyntaxKind.NotEqualsExpression):
+                return null;
+            case BinaryExpressionSyntax b when b.IsKind(SyntaxKind.IsExpression):
+                return null;
+            case IsPatternExpressionSyntax { Pattern: TypePatternSyntax }:
+                return null;
+            case IsPatternExpressionSyntax { Pattern: DeclarationPatternSyntax pattern }
+                when model.GetTypeInfo(pattern.Type).Type is { } target &&
+                    (SymbolEqualityComparer.Default.Equals(target.OriginalDefinition, currentSubclass.OriginalDefinition) ||
+                     !model.Compilation.ClassifyCommonConversion(currentSubclass, target).IsImplicit):
+                // A binding at the exact subclass type is safe. An incompatible test
+                // never binds its local; importantly, a successful upcast is not allowed.
                 return null;
             case ArgumentSyntax { Parent: ArgumentListSyntax { Parent: var call } }:
                 if (call is InvocationExpressionSyntax refEq &&

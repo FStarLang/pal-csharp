@@ -1,0 +1,50 @@
+using System;
+using PalLang;
+
+[assembly: IncludePulseFile("GhostResultNegative.fst")]
+
+[Plain]
+public sealed class ProbeCell
+{
+    public bool flag;
+}
+
+public static class ProbeSpec
+{
+    [SpecOp("GhostResultNegative.sealed")]
+    public static SlProp Sealed(ProbeCell cell) => throw new InvalidOperationException();
+    [SpecOp("GhostResultNegative.raw")]
+    public static SlProp Raw(ProbeCell cell, bool flag) => throw new InvalidOperationException();
+}
+
+public static class ProbeProof
+{
+    [Lemma, Requires("ProbeSpec.Sealed(cell)")]
+    [Ensures("ProbeSpec.Raw(cell, Result)")]
+    [PulseBody("GhostResultNegative.unpack $(cell)")]
+    public static Ghost<bool> Unpack(ProbeCell cell) => throw new InvalidOperationException();
+
+    [Lemma, Ensures("Result == 0")]
+    public static int OrdinaryResult() => 0;
+}
+
+public static class ProbeClient
+{
+    [GhostArg("bool flag")]
+    public static bool NamedLeak()
+    {
+        Ghost<bool> value = Pal.Ghost<bool>("flag");
+        return value.Value;
+    }
+
+    [Requires("ProbeSpec.Sealed(cell)")]
+    [Ensures("ProbeSpec.Sealed(cell)")]
+    public static bool Leak(ProbeCell cell)
+    {
+        Ghost<bool> flag = ProbeProof.Unpack(cell);
+        return flag.Value;
+    }
+
+    [Requires("ProbeProof.Unpack(cell).Value")]
+    public static void PureContract(ProbeCell cell) { }
+}

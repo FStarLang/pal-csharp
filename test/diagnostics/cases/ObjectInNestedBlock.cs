@@ -34,11 +34,11 @@ public sealed class NestedCell
 }
 
 /// <summary>
-/// F19. The object is abandoned inside the <c>if</c>, so R4.14's discard lands where the
+/// F19. The object is abandoned inside a standalone lexical block, so R4.14's discard lands where the
 /// block closes — and a block in statement position has no postcondition of its own, so
 /// Pulse is still solving for one and cannot open the object's model existential.
-/// Refusing is the honest answer; the same allocation in a branch that <em>returns</em>
-/// is fine, because then the block's postcondition is the method's.
+/// The if-arm case is supported by annotated tail sinking and is verified in
+/// rebind_alias/ScopedInitialization.cs; an arbitrary lexical scope is not an if arm.
 /// </summary>
 public static class NestedUse
 {
@@ -46,7 +46,6 @@ public static class NestedUse
     public static int AbandonedInABlock(bool b)
     {
         int answer = 42;
-        if (b)
         {
             NestedCell c = new NestedCell();
             c.Get();

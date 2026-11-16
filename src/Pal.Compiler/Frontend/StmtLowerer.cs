@@ -26,12 +26,19 @@ public sealed class StmtLowerer(
         {
             ObjectFields = objectFields ?? [], Borrow = borrow, BorrowBody = borrow is not null,
         };
+    private readonly HashSet<InvocationExpressionSyntax> _ghostInitializers = [];
 
     /// <summary>
     /// R4.12c. A constructor initializer is an expression that is not inside any statement,
     /// so the one caller that needs it reaches the expression lowerer directly.
     /// </summary>
     public ExprLowerer Expressions => _code;
+
+    internal void SetGhostArguments(ImmutableDictionary<string, IrType> arguments)
+    {
+        _code.GhostArguments = arguments;
+        _spec.GhostArguments = arguments;
+    }
 
     /// <summary>R14.2a. The type parameters either lowerer took a <c>default</c> at.</summary>
     public bool Defaulted(string typeParameter) =>
@@ -53,7 +60,7 @@ public sealed class StmtLowerer(
             // R35.18. In a specialization, an `if` its constants decide is the branch taken.
             IfStatementSyntax i when Decided(i.Condition) is { } taken =>
                 taken ? Lower(i.Statement) : i.Else is null ? new IrBlock(loc, []) : Lower(i.Else.Statement),
-            IfStatementSyntax i when RegionPatternIf(i, loc) is { } bound => bound,
+            IfStatementSyntax i when PointerPatternIf(i, loc) is { } bound => bound,
             // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
             IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
                 new IrBlock(loc, [.. outs, new IrIf(loc, _code.Lower(i.Condition),
@@ -417,6 +424,15 @@ public sealed class StmtLowerer(
     /// </summary>
     private bool? Decided(ExpressionSyntax e)
     {
+        if ((e is IsPatternExpressionSyntax { Expression: ThisExpressionSyntax,
+                Pattern: TypePatternSyntax or DeclarationPatternSyntax } ||
+             e is BinaryExpressionSyntax { RawKind: (int)SyntaxKind.IsExpression, Left: ThisExpressionSyntax }) &&
+            _code.Lower(e) is IrLiteral { Value: bool receiverTest })
+        {
+            // Install a declaration pattern's proof alias as well as its code alias.
+            _spec.Lower(e);
+            return receiverTest;
+        }
         if (known.Specialization is not { } sp) return null;
         return e switch
         {
@@ -434,13 +450,14 @@ public sealed class StmtLowerer(
         };
     }
 
-    private IrStmt? RegionPatternIf(IfStatementSyntax i, IrLoc loc)
+    private IrStmt? PointerPatternIf(IfStatementSyntax i, IrLoc loc)
     {
         if (i.Condition is not IsPatternExpressionSyntax
             {
                 Pattern: DeclarationPatternSyntax { Designation: SingleVariableDesignationSyntax v } d,
             } isp ||
-            model.GetTypeInfo(isp.Expression).Type is not { } from || !known.IsRegionClass(from) ||
+            model.GetTypeInfo(isp.Expression).Type is not { } from ||
+            known.MapType(from) is not IrClassType { Plain: true } ||
             model.GetTypeInfo(d.Type).Type is not { } to ||
             !SymbolEqualityComparer.Default.Equals(from.WithNullableAnnotation(NullableAnnotation.NotAnnotated),
                                                    to.WithNullableAnnotation(NullableAnnotation.NotAnnotated)) ||
@@ -795,10 +812,25 @@ public sealed class StmtLowerer(
                     stored = new IrOptionOp(stored.Loc, OptionOpKind.Value, stored) { Type = type };
                 statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type, _code.ToDeclared(stored, type))
                 {
-                    Immutable = type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
+                    Immutable = (type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
                                     or IrUserSpecType or IrExnType &&
-                                NeverWritten(symbol, node.Parent ?? node),
+                                NeverWritten(symbol, node.Parent ?? node)) ||
+                                type is IrPrim { IsMachineInt: true } && ImmutableMachineLocal(symbol, node),
                 });
+                continue;
+            }
+            if (!known.IsGhost(symbol?.Type) && type is IrUserSpecType &&
+                GhostInitializer(node, v, symbol!, nameof(PalLang.Pal.UpdateGhost)) is { } initialize)
+            {
+                var initial = _spec.Lower(initialize.ArgumentList.Arguments[1].Expression);
+                if (ExprLowerer.HasEffect(initial))
+                    diagnostics.Unsupported(Locations.From(v), "An effectful ghost initializer");
+                statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type, initial)
+                {
+                    GhostOnly = true,
+                    Immutable = NeverWritten(symbol!, node.Parent ?? node, initialize.ArgumentList.Arguments[0]),
+                });
+                _ghostInitializers.Add(initialize);
                 continue;
             }
             // R24.12. A `Ghost<T>` local is a snapshot: a ghost name for a specification
@@ -806,29 +838,78 @@ public sealed class StmtLowerer(
             // statements can mention.
             if (known.IsGhost(symbol?.Type))
             {
-                if (v.Initializer is null || !NeverWritten(symbol!, node.Parent ?? node))
+                var capture = GhostInitializer(node, v, symbol!, nameof(PalLang.Pal.Capture));
+                if (v.Initializer is null ||
+                    !NeverWritten(symbol!, node.Parent ?? node, capture?.ArgumentList.Arguments[0]))
                 {
                     diagnostics.Unsupported(Locations.From(v),
                         "A `Ghost<T>` local without an initialiser, or one that is assigned",
                         "A ghost local names one specification value for its whole life.");
                     continue;
                 }
+                var initializer = ExprLowerer.Unparenthesized(
+                    capture?.ArgumentList.Arguments[1].Expression ?? v.Initializer.Value);
+                var namedGhost = initializer is InvocationExpressionSyntax retrievalCall &&
+                    model.GetSymbolInfo(retrievalCall).Symbol is IMethodSymbol retrieval &&
+                    known.IsPalIntrinsic(retrieval) && retrieval.Name == nameof(PalLang.Pal.Ghost);
+                var ghostValue = initializer is InvocationExpressionSyntax invocation &&
+                    model.GetSymbolInfo(invocation).Symbol is IMethodSymbol lemma &&
+                    Declarations.KindOf(lemma, known) == CalleeKind.Lemma
+                    ? LowerLemmaCall(invocation, lemma, Locations.From(v))
+                    : namedGhost || capture is not null
+                    ? _spec.Lower(initializer)
+                    : _code.Lower(initializer);
+                if (capture is not null && ExprLowerer.HasEffect(ghostValue))
+                {
+                    diagnostics.Unsupported(Locations.From(v), "An effectful ghost capture",
+                        "Capture a pure specification value or a checked ghost lemma result.");
+                    continue;
+                }
                 statements.Add(new IrGhostStmt(Locations.From(v), GhostKind.Let,
-                    _code.Lower(v.Initializer.Value), v.Identifier.ValueText) { Type = type });
+                    ghostValue, v.Identifier.ValueText) { Type = type, ErasedSource = namedGhost });
+                if (capture is not null) _ghostInitializers.Add(capture);
                 continue;
             }
             statements.Add(new IrLocalDecl(Locations.From(v), v.Identifier.ValueText, type,
                 v.Initializer is null ? null : _code.ToDeclared(_code.Lower(v.Initializer.Value), type))
             {
                 Immutable = v.Initializer is not null && symbol is not null &&
-                            type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
+                            ((type is IrPrim { Kind: PrimKind.Bool or PrimKind.String } or IrOptionType
                                 or IrUserSpecType or IrExnType &&
-                            NeverWritten(symbol, node.Parent ?? node),
+                            NeverWritten(symbol, node.Parent ?? node)) ||
+                            type is IrPrim { IsMachineInt: true } && ImmutableMachineLocal(symbol, node)),
             });
         }
 
         // `T a, b;` declares both names in the enclosing block: the enclosing block splices them.
         return statements.Count == 1 ? statements[0] : new IrBlock(loc, statements.ToImmutable()) { Splice = true };
+    }
+
+    private InvocationExpressionSyntax? GhostInitializer(LocalDeclarationStatementSyntax declaration,
+        VariableDeclaratorSyntax variable, ILocalSymbol local, string intrinsic)
+    {
+        if (declaration.Declaration.Variables.Count != 1 ||
+            variable.Initializer?.Value.IsKind(SyntaxKind.DefaultLiteralExpression) != true)
+            return null;
+        var siblings = declaration.Parent switch
+        {
+            BlockSyntax block => block.Statements,
+            SwitchSectionSyntax section => section.Statements,
+            _ => default,
+        };
+        var next = siblings.IndexOf(declaration) + 1;
+        if (next <= 0 || next >= siblings.Count ||
+            siblings[next] is not ExpressionStatementSyntax
+                { Expression: InvocationExpressionSyntax call } ||
+            model.GetSymbolInfo(call).Symbol is not IMethodSymbol method ||
+            !known.IsPalIntrinsic(method) || method.Name != intrinsic ||
+            call.ArgumentList.Arguments is not [var target, var value] ||
+            !target.RefKindKeyword.IsKind(SyntaxKind.RefKeyword) ||
+            !SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(target.Expression).Symbol, local) ||
+            value.Expression.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>().Any(id =>
+                SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local)))
+            return null;
+        return call;
     }
 
     /// <summary>
@@ -1509,10 +1590,26 @@ public sealed class StmtLowerer(
             _ => null,
         } is IdentifierNameSyntax id && SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, local));
 
-    private bool NeverWritten(ILocalSymbol local, SyntaxNode scope)
+    private bool ImmutableMachineLocal(ILocalSymbol local, SyntaxNode declaration)
+    {
+        // Scan the whole enclosing function, not just this switch section/block:
+        // captured and nested writes still refer to the same Roslyn local symbol.
+        var scope = declaration.AncestorsAndSelf().FirstOrDefault(n =>
+            n is BaseMethodDeclarationSyntax or AccessorDeclarationSyntax or LocalFunctionStatementSyntax)
+            ?? declaration.Parent ?? declaration;
+        // Opaque inline proof text may depend on the backing-storage representation.
+        if (scope.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(call =>
+            model.GetSymbolInfo(call).Symbol is IMethodSymbol method && known.IsPalIntrinsic(method) &&
+            method.Name is nameof(PalLang.Pal.GhostStmt) or nameof(PalLang.Pal.InlinePulse)))
+            return false;
+        return NeverWritten(local, scope);
+    }
+
+    private bool NeverWritten(ILocalSymbol local, SyntaxNode scope, SyntaxNode? initialization = null)
     {
         foreach (var n in scope.DescendantNodes())
         {
+            if (n == initialization) continue;
             var target = n switch
             {
                 AssignmentExpressionSyntax a => a.Left,
@@ -1521,9 +1618,13 @@ public sealed class StmtLowerer(
                 PostfixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.PostIncrementExpression) ||
                                                     u.IsKind(SyntaxKind.PostDecrementExpression) => u.Operand,
                 ArgumentSyntax { RefKindKeyword.RawKind: not (int)SyntaxKind.None } arg => arg.Expression,
+                ArgumentSyntax arg when model.GetOperation(arg) is
+                    Microsoft.CodeAnalysis.Operations.IArgumentOperation { Parameter.RefKind: not RefKind.None }
+                    => arg.Expression,
                 ArgumentSyntax arg when Declarations.WrittenParameterOf(arg, model, known) is not null
                     => arg.Expression,
                 RefExpressionSyntax r => r.Expression,
+                PrefixUnaryExpressionSyntax u when u.IsKind(SyntaxKind.AddressOfExpression) => u.Operand,
                 _ => null,
             };
             // R33.26. A write through a reference (`book._entries[i]`, `ref book._entries[i]`)
@@ -1957,6 +2058,27 @@ public sealed class StmtLowerer(
         {
             switch (method.Name)
             {
+                case nameof(PalLang.Pal.UpdateGhost):
+                    if (_ghostInitializers.Contains(node)) return new IrBlock(loc, []);
+                    if (args is [var field, var value] &&
+                        field.RefKindKeyword.IsKind(SyntaxKind.RefKeyword) &&
+                        field.Expression is IdentifierNameSyntax or
+                            MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax or ThisExpressionSyntax } &&
+                        (model.GetSymbolInfo(field.Expression).Symbol is IFieldSymbol { IsStatic: false } or ILocalSymbol ||
+                         GhostStorage.Is(model.GetSymbolInfo(field.Expression).Symbol, known)) &&
+                        _spec.Lower(field.Expression) is { Type: IrUserSpecType } target &&
+                        target is IrField or IrVar &&
+                        _spec.Lower(value.Expression) is { } replacement && !ExprLowerer.HasEffect(replacement))
+                        return new IrAssign(loc, target, replacement) { GhostOnly = true };
+                    diagnostics.Unsupported(loc, "A ghost update of anything other than an erased specification field or local",
+                        "Use a direct reference and a pure specification value; F* checks that its type is erased.");
+                    return new IrBlock(loc, []);
+                case nameof(PalLang.Pal.Capture):
+                    if (!_ghostInitializers.Contains(node))
+                        diagnostics.Unsupported(loc, "A ghost capture outside its initialization",
+                            "Pal.Capture must immediately follow a single default-initialized Ghost<T> local, " +
+                            "without self-reference or any other writes to that local.");
+                    return new IrBlock(loc, []);
                 case nameof(PalLang.Pal.Assert):
                     return new IrGhostStmt(loc, GhostKind.Assert, _spec.Lower(args[0].Expression), null);
                 case nameof(PalLang.Pal.Assume):
@@ -2086,12 +2208,7 @@ public sealed class StmtLowerer(
         var kind = Declarations.KindOf(_code.ThisInterfaceImpl(node, method) ?? method, known);
         if (kind == CalleeKind.Lemma)
         {
-            var call = new IrCall(loc, Naming.Of(method), [.. args.Select(a => _spec.Lower(a.Expression))])
-            {
-                Kind = CalleeKind.Lemma,
-                ParamTypes = Declarations.ParamTypes(method, known, receiver: false),
-                TypeArguments = known.TypeArguments(method),
-            };
+            var call = LowerLemmaCall(node, method, loc);
             return new IrGhostStmt(loc, GhostKind.LemmaCall, call, null);
         }
 
@@ -2106,6 +2223,17 @@ public sealed class StmtLowerer(
         diagnostics.Unsupported(loc, $"A call to `{method.Name}`");
         return new IrBlock(loc, []);
     }
+
+    private IrCall LowerLemmaCall(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc) =>
+        new(loc, Naming.Of(method),
+            [.. node.ArgumentList.Arguments.Select((a, i) =>
+                _spec.LowerGhostArgument(a.Expression, method.Parameters[i]))])
+        {
+            Kind = CalleeKind.Lemma,
+            ResultType = known.MapReturnType(method.ReturnType),
+            ParamTypes = Declarations.ParamTypes(method, known, receiver: false),
+            TypeArguments = known.TypeArguments(method),
+        };
 
     /// <summary>
     /// R34.6. <c>using (IEnumerator&lt;T&gt; en = e.GetEnumerator())</c>, or the declaration

@@ -1,0 +1,131 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+public sealed partial class RbTree<T>
+{
+    internal void Validate(SortedSet<T> expected)
+    {
+        var seen = new HashSet<Node>();
+        var items = new List<T>();
+        int Walk(Node? node)
+        {
+            if (node == null)
+                return 0;
+            if (!seen.Add(node))
+                throw new Exception("Cycle or shared node");
+            int leftHeight = Walk(node.Left);
+            items.Add(node.Item);
+            int rightHeight = Walk(node.Right);
+            if (leftHeight != rightHeight)
+                throw new Exception("Unequal black heights");
+            if (node.Color == NodeColor.Red &&
+                (node.Left?.Color == NodeColor.Red || node.Right?.Color == NodeColor.Red))
+                throw new Exception("Red parent and child");
+            return leftHeight + (node.Color == NodeColor.Black ? 1 : 0);
+        }
+        Walk(root);
+        if (root?.Color == NodeColor.Red)
+            throw new Exception("Red root");
+        if (Count != expected.Count || count != items.Count || !items.SequenceEqual(expected))
+            throw new Exception("Contents/count differ from SortedSet");
+        for (int i = 1; i < items.Count; ++i)
+            if (comparer.Compare(items[i - 1], items[i]) >= 0)
+                throw new Exception("Tree is not strictly ordered");
+    }
+}
+
+internal static class Program
+{
+    private static int operations;
+
+    private static IEnumerable<int[]> Permutations(int[] values, int start = 0)
+    {
+        if (start == values.Length)
+        {
+            yield return (int[])values.Clone();
+            yield break;
+        }
+        for (int i = start; i < values.Length; ++i)
+        {
+            (values[start], values[i]) = (values[i], values[start]);
+            foreach (var result in Permutations(values, start + 1))
+                yield return result;
+            (values[start], values[i]) = (values[i], values[start]);
+        }
+    }
+
+    private static void Check(RbTree<int> tree, SortedSet<int> expected)
+    {
+        ++operations;
+        tree.Validate(expected);
+        foreach (int key in new[] { int.MinValue, -1, 0, 1, 2, 3, 4, 5, 6, 31, int.MaxValue })
+            if (tree.Contains(key) != expected.Contains(key))
+                throw new Exception($"Contains differs at {key}");
+    }
+
+    private static void Add(RbTree<int> tree, SortedSet<int> expected, int key)
+    {
+        if (tree.Add(key) != expected.Add(key))
+            throw new Exception($"Add differs at {key}");
+        Check(tree, expected);
+    }
+
+    private static void Remove(RbTree<int> tree, SortedSet<int> expected, int key)
+    {
+        if (tree.Remove(key) != expected.Remove(key))
+            throw new Exception($"Remove differs at {key}");
+        Check(tree, expected);
+    }
+
+    private static void Main()
+    {
+        if (!Clients.RoundTrip(42) || !Clients.ClearAndReuse(42, -42))
+            throw new Exception("Verified clients disagree at runtime");
+        var permutations = Permutations(new[] { 0, 1, 2, 3, 4 }).ToArray();
+        foreach (int[] insertion in permutations)
+            foreach (int[] deletion in permutations)
+            {
+                var tree = new RbTree<int>();
+                var expected = new SortedSet<int>();
+                Remove(tree, expected, 0);
+                foreach (int key in insertion)
+                    Add(tree, expected, key);
+                foreach (int key in insertion)
+                    Add(tree, expected, key);
+                Remove(tree, expected, 10);
+                foreach (int key in deletion)
+                    Remove(tree, expected, key);
+                Remove(tree, expected, 0);
+                Add(tree, expected, int.MinValue);
+                Add(tree, expected, int.MaxValue);
+            }
+
+        foreach (IComparer<int>? comparer in new IComparer<int>?[]
+        {
+            null,
+            Comparer<int>.Create((x, y) => y.CompareTo(x)),
+            Comparer<int>.Create((x, y) => (x / 10).CompareTo(y / 10))
+        })
+        {
+            var tree = new RbTree<int>(comparer);
+            var expected = new SortedSet<int>(comparer);
+            var random = new Random(1729);
+            for (int i = 0; i < 10000; ++i)
+            {
+                int key = random.Next(-128, 128);
+                if (i % 997 == 0)
+                {
+                    tree.Clear();
+                    expected.Clear();
+                    Check(tree, expected);
+                }
+                else if (random.Next(2) == 0)
+                    Add(tree, expected, key);
+                else
+                    Remove(tree, expected, key);
+            }
+        }
+        Console.WriteLine($"regionops: {operations} mutations agree with SortedSet; structure checked after each");
+    }
+}

@@ -116,13 +116,21 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                default;
+            Pal.Capture(ref labels, SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot)));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
             if (keyValuePair.Value == null)
             {
-                return node.Item.Value == null;
+                bool result = node.Item.Value == null;
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
             }
             else
             {
-                return EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value);
+                bool result = EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value);
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
             }
         }
 
@@ -137,11 +145,17 @@ namespace System.Collections.Generic
                 return false;
             }
 
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                default;
+            Pal.Capture(ref labels, SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot)));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
             if (EqualityComparer<TValue>.Default.Equals(node.Item.Value, keyValuePair.Value))
             {
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
                 _set.Remove(keyValuePair);
                 return true;
             }
+            SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
             return false;
         }
 
@@ -171,7 +185,13 @@ namespace System.Collections.Generic
                     throw new KeyNotFoundException(SR.Format(SR.Arg_KeyNotFoundWithKey, key.ToString()));
                 }
 
-                return node.Item.Value;
+                Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                    default;
+                Pal.Capture(ref labels, SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot)));
+                SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
+                TValue result = node.Item.Value;
+                SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
+                return result;
             }
             [Requires("!Pal.IsNull(key)")]
             [Requires("@this.SpecPairs.Length < int.MaxValue")]
@@ -188,7 +208,16 @@ namespace System.Collections.Generic
                 }
                 else
                 {
+                    Ghost<SortedSetItemTicket<KeyValuePair<TKey, TValue>>> edit =
+                        default;
+                    Pal.Capture(ref edit, SortedSetItemProof.Open(node));
                     node.Item = new KeyValuePair<TKey, TValue>(node.Item.Key, value);
+                    Ghost<SortedSetItemResult<KeyValuePair<TKey, TValue>>> replacement =
+                        default;
+                    Pal.Capture(ref replacement, SortedSetItemProof.Finish(node, edit,
+                            new KeyValuePair<TKey, TValue>(
+                                SortedSetOwnership.Item(SortedSetItem.Node(edit.Value)).Key, value)));
+                    SortedSet<KeyValuePair<TKey, TValue>>.CommitItemState(_set);
                     _set.UpdateVersion();
                 }
             }
@@ -293,7 +322,7 @@ namespace System.Collections.Generic
             {
                 _set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
                 {
-                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => Pal.IsNull(value) && SpecValueSearch.Searched(tr, value, found));
+                    Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => Pal.IsNull(value) && SpecValueSearch.Searched(tr, value!, found));
                     if (node.Item.Value == null)
                     {
                         found = true;
@@ -360,7 +389,12 @@ namespace System.Collections.Generic
                 value = default;
                 return false;
             }
+            Ghost<SortedSetLabels<KeyValuePair<TKey, TValue>>> labels =
+                default;
+            Pal.Capture(ref labels, SortedSetOwnership.SnapshotLabels(SortedSetOwnership.Snapshot(_set.SpecSnapshot)));
+            SortedSetOwnershipProof.ReadSetAt(labels, node, Pal.Permission());
             value = node.Item.Value;
+            SortedSetOwnershipProof.CloseSetPoint(labels, node, Pal.Permission());
             return true;
         }
 
@@ -717,9 +751,12 @@ namespace System.Collections.Generic
                     throw new ArgumentException(SR.Arg_ArrayPlusOffTooSmall);
                 }
 
-                Ghost<SpecInt> i0 = (SpecInt)index;
-                Ghost<SpecInt> n0 = (SpecInt)_dictionary.SpecPairs.Length;
-                Ghost<Seq<TKey>> a0 = Pal.Contents(array);
+                Ghost<SpecInt> i0 = default;
+                Pal.Capture(ref i0, (SpecInt)index);
+                Ghost<SpecInt> n0 = default;
+                Pal.Capture(ref n0, (SpecInt)_dictionary.SpecPairs.Length);
+                Ghost<Seq<TKey>> a0 = default;
+                Pal.Capture(ref a0, Pal.Contents(array));
                 _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
                 {
                     Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => i0.Value + n0.Value <= a0.Value.Length && a0.Value.Length <= int.MaxValue && SpecKeyMap.CopiedKeys(tr, a0.Value, Pal.Contents(array), i0.Value, index), n0.Value);
@@ -918,9 +955,12 @@ namespace System.Collections.Generic
                     throw new ArgumentException(SR.Arg_ArrayPlusOffTooSmall);
                 }
 
-                Ghost<SpecInt> i0 = (SpecInt)index;
-                Ghost<SpecInt> n0 = (SpecInt)_dictionary.SpecPairs.Length;
-                Ghost<Seq<TValue>> a0 = Pal.Contents(array);
+                Ghost<SpecInt> i0 = default;
+                Pal.Capture(ref i0, (SpecInt)index);
+                Ghost<SpecInt> n0 = default;
+                Pal.Capture(ref n0, (SpecInt)_dictionary.SpecPairs.Length);
+                Ghost<Seq<TValue>> a0 = default;
+                Pal.Capture(ref a0, Pal.Contents(array));
                 _dictionary._set.InOrderTreeWalk(delegate (TreeSet<KeyValuePair<TKey, TValue>>.Node node)
                 {
                     Pal.Protocol<(KeyValuePair<TKey, TValue>, bool), bool>(tr => i0.Value + n0.Value <= a0.Value.Length && a0.Value.Length <= int.MaxValue && SpecKeyMap.CopiedValues(tr, a0.Value, Pal.Contents(array), i0.Value, index), n0.Value);

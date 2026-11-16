@@ -12,6 +12,11 @@ work="obj/cs"
 # A program written before nullable reference types (production code verified in place,
 # doc/translation.md §20) sets PAL_CS_NULLABLE=disable; the tests keep the default.
 nullable="${PAL_CS_NULLABLE:-enable}"
+# Explicit, project-local wiring for copied runtime sources. Defaults keep the
+# ordinary acceptance projects strict and unchanged.
+nowarn="${PAL_CS_NOWARN:-}"
+unsafe="${PAL_CS_UNSAFE:-false}"
+excluded="${PAL_CS_EXCLUDE:-}"
 
 mkdir -p "$work"
 cat > "$work/$name.csproj" <<EOF
@@ -22,9 +27,11 @@ cat > "$work/$name.csproj" <<EOF
     <ImplicitUsings>enable</ImplicitUsings>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$nowarn</NoWarn>
+    <AllowUnsafeBlocks>$unsafe</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-$(for f in "$@"; do case $f in /*) p=$f ;; *) p="$(pwd)/$f" ;; esac; printf '    <Compile Include="%s" />\n' "$p"; done)
+$(for f in "$@"; do case $f in /*) p=$f ;; *) p="$(pwd)/$f" ;; esac; case " $excluded " in *" $p "*) continue ;; esac; printf '    <Compile Include="%s" />\n' "$p"; done)
     <ProjectReference Include="$root/src/Pal.Annotations/Pal.Annotations.csproj" />
   </ItemGroup>
 </Project>

@@ -13,6 +13,7 @@ namespace System
 
     internal static class SR
     {
+        internal static string Arg_HTCapacityOverflow => nameof(Arg_HTCapacityOverflow);
         internal static string Arg_ArrayPlusOffTooSmall => nameof(Arg_ArrayPlusOffTooSmall);
         internal static string Arg_KeyNotFoundWithKey => nameof(Arg_KeyNotFoundWithKey);
         internal static string Arg_NonZeroLowerBound => nameof(Arg_NonZeroLowerBound);
@@ -22,9 +23,12 @@ namespace System
         internal static string ArgumentOutOfRange_IndexMustBeLessOrEqual => nameof(ArgumentOutOfRange_IndexMustBeLessOrEqual);
         internal static string ArgumentOutOfRange_SmallCapacity => nameof(ArgumentOutOfRange_SmallCapacity);
         internal static string Argument_AddingDuplicate => nameof(Argument_AddingDuplicate);
+        internal static string Argument_AddingDuplicateWithKey => nameof(Argument_AddingDuplicateWithKey);
         internal static string Argument_InvalidOffLen => nameof(Argument_InvalidOffLen);
         internal static string Argument_IncompatibleArrayType => nameof(Argument_IncompatibleArrayType);
         internal static string InvalidOperation_EnumFailedVersion => nameof(InvalidOperation_EnumFailedVersion);
+        internal static string InvalidOperation_EnumEnded => nameof(InvalidOperation_EnumEnded);
+        internal static string InvalidOperation_EnumNotStarted => nameof(InvalidOperation_EnumNotStarted);
         internal static string InvalidOperation_EnumOpCantHappen => nameof(InvalidOperation_EnumOpCantHappen);
         internal static string InvalidOperation_EmptyStack => nameof(InvalidOperation_EmptyStack);
         internal static string InvalidOperation_EmptyQueue => nameof(InvalidOperation_EmptyQueue);

@@ -1,0 +1,42 @@
+using System;
+using PalLang;
+
+public static class ImmutableAlias
+{
+    [Ensures("Result == Pal.Old(value) && value == Pal.Old(value)")]
+    public static int Peek(in int value) => value;
+
+    [Ensures("Result == 7")]
+    public static int ImplicitIn()
+    {
+        int local = 7;
+        return Peek(local);
+    }
+
+    [Ensures("Result == 8")]
+    public static int ThroughAlias()
+    {
+        int local = 7;
+        ref int alias = ref local;
+        alias++;
+        return local;
+    }
+
+    [Ensures("Result == 8")]
+    public static int Captured()
+    {
+        int local = 7;
+        Action update = () => local = 8;
+        update();
+        return local;
+    }
+
+    [Ensures("Result == 8")]
+    public static unsafe int Address()
+    {
+        int local = 7;
+        int* address = &local;
+        *address = 8;
+        return local;
+    }
+}
