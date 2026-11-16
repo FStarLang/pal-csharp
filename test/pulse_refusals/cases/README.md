@@ -52,6 +52,7 @@ a third of it.
 | `InvariantNotEstablished` | The invariant holds on entry. |
 | `InvariantNotPreserved` | The body restores the invariant. |
 | `InvariantTooWeak` | Invariant and negated guard together give the postcondition. |
+| `LoopContentsChanged` | Type-derived array-length preservation does not preserve overwritten elements. |
 | `MeasureNotDecreasing` | The `[Decreases]` measure falls on every iteration. |
 
 ## Ownership and permissions

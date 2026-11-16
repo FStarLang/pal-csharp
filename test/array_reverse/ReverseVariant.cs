@@ -20,7 +20,6 @@ public static class ArraysVariant
         for (int i = 0; i < n - 1 - i; i++)
         {
             Pal.Invariant(n == Pal.Contents(a).Length);
-            Pal.Invariant(Pal.Contents(a).Length == Pal.Old(Pal.Contents(a)).Length);
             Pal.Invariant(0 <= i && 2 * i <= Pal.Contents(a).Length);
             Pal.Invariant(Pal.Forall((int k) => Pal.Implies(
                 (0 <= k && k < i) || (Pal.Contents(a).Length - 1 - i < k && k < Pal.Contents(a).Length),
