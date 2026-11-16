@@ -44,13 +44,6 @@ namespace System
 
 namespace System.Collections.Generic
 {
-    // Stand-ins for System.Collections internals that verified code does not reach.
-    internal static class EnumerableHelpers
-    {
-        internal static IEnumerator<T> GetEmptyEnumerator<T>() => ((IEnumerable<T>)Array.Empty<T>()).GetEnumerator();
-        internal static T[] ToArray<T>(IEnumerable<T> source, out int length) { var a = new List<T>(source).ToArray(); length = a.Length; return a; }
-    }
-
     internal sealed class IDictionaryDebugView<TKey, TValue>(IDictionary<TKey, TValue> dictionary)
     {
         public IDictionary<TKey, TValue> Dictionary => dictionary;

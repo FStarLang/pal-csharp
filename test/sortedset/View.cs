@@ -190,8 +190,29 @@ public class Pile<T>
         [Ensures("Result == @this.SpecViewCount + extra && @this.SpecCoherent")]
         internal int Current(int extra = 0)
         {
-            VersionCheck();
+            Sync(true);
             return count + extra;
+        }
+
+        // R35.18. Translated once per constant its callers pass, with the test of `full`
+        // decided: `Sync__full_true` and `Sync__full_false`.
+        [Requires("@this.SpecCoherent")]
+        [Ensures("@this.SpecCoherent && @this.SpecLo == Pal.Old(@this.SpecLo) && @this._hi == Pal.Old(@this._hi)")]
+        [Ensures("Pal.Implies(full, @this._countVersion == @this._underlying.SpecVersion)")]
+        private void Sync([Specialize] bool full)
+        {
+            if (full)
+            {
+                VersionCheck();
+            }
+        }
+
+        [Requires("@this.SpecCoherent")]
+        [Ensures("Result == @this._hi && @this.SpecCoherent")]
+        internal int Low()
+        {
+            Sync(false);
+            return _hi;
         }
 
         internal override void Push()

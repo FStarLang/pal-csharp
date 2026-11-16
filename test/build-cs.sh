@@ -24,7 +24,7 @@ cat > "$work/$name.csproj" <<EOF
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-$(for f in "$@"; do printf '    <Compile Include="%s/%s" />\n' "$(pwd)" "$f"; done)
+$(for f in "$@"; do case $f in /*) p=$f ;; *) p="$(pwd)/$f" ;; esac; printf '    <Compile Include="%s" />\n' "$p"; done)
     <ProjectReference Include="$root/src/Pal.Annotations/Pal.Annotations.csproj" />
   </ItemGroup>
 </Project>

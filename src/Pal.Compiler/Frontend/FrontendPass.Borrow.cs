@@ -35,7 +35,9 @@ public static partial class FrontendPass
         // R32.12. A wrapping struct's member is one of the object its core borrows.
         var (corePath, core) = Borrowing.Innermost(self, known);
         var owner = Borrowing.OwnerField(core, known)!;
-        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor)
+        // R35.3. Unless the core owns no objects and is created by a method of the owner's class.
+        if (!corePath.IsEmpty && symbol.MethodKind == MethodKind.Constructor &&
+            !(Borrowing.CreatableWrapping(self, known) && Borrowing.OwnerParameter(symbol, owner, known.Compilation) is not null))
         {
             diagnostics.Error("PALCS0801", loc,
                 $"The constructor of the wrapping struct `{self.Name}`. A wrapping struct's members are " +
@@ -84,6 +86,10 @@ public static partial class FrontendPass
             };
             if (target is null || model.GetSymbolInfo(target).Symbol is not IFieldSymbol { IsStatic: false } wf ||
                 borrow.IsState(wf)) continue;
+            // A field of a struct the member holds in a local (`result.Count = …`) is
+            // the local's, not the borrowed object's.
+            if (wf.ContainingType.IsValueType && target is MemberAccessExpressionSyntax { Expression: var recv } &&
+                model.GetSymbolInfo(recv).Symbol is ILocalSymbol) continue;
             diagnostics.Error("PALCS0734", Locations.From(target),
                 $"`{target}` is written in a member of `{self.Name}`, which borrows `{owner.Name}`. A " +
                 "borrowing struct reads the object it borrows and never writes it (doc/translation.md R28.7).");
@@ -110,7 +116,7 @@ public static partial class FrontendPass
                new IrParam(loc, BorrowContext.Self, selfType, writes ? ParamMode.Ref : ParamMode.Value),
                .. owned.Select(o => new IrParam(loc, Borrowing.OwnedName(o.Field), o.Type, ParamMode.Value))];
 
-        var returnType = isCtor ? selfType : known.MapType(ExactReturn(symbol, known) ?? symbol.ReturnType);
+        var returnType = isCtor ? selfType : known.MapReturnType(ExactReturn(symbol, known) ?? symbol.ReturnType);
         if (returnType is null)
         {
             diagnostics.Unsupported(loc, $"The return type `{symbol.ReturnType}`");
@@ -172,11 +178,14 @@ public static partial class FrontendPass
 
         var lowerer = new StmtLowerer(model, known, diagnostics, ImmutableHashSet<string>.Empty, borrow);
         // R32.11. A lambda a borrowing member passes to a `[Callback]` is lifted as any other's.
-        lowerer.Expressions.LiftPrefix = view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol);
+        lowerer.Expressions.LiftPrefix = known.Specialization?.Name ??
+            (view is not null && known.Replica is { } rq ? rq.Name : Naming.Of(symbol));
         lowerer.Expressions.LiftTypeParameters =
             [.. WellKnown.AllTypeParameters(self).Select(t => t.Name), .. symbol.TypeParameters.Select(t => t.Name)];
         IrStmt? body;
         ImmutableArray<IrExpr> bodyRequires = [], bodyEnsures = [];
+        // R20.2. An `[Admit]`ted member's body is not translated here either.
+        var admitted = !isCtor && Declarations.Has(symbol, known.AdmitAttribute);
         if (isCtor)
         {
             if (candidate.Syntax is ConstructorDeclarationSyntax { Initializer: { } init } chained &&
@@ -195,13 +204,15 @@ public static partial class FrontendPass
         }
         else
         {
-            body = LowerBody(candidate.Syntax, lowerer);
-            var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: true);
+            body = admitted ? null : LowerBody(candidate.Syntax, lowerer);
+            var (br, be, trimmed) = ExtractBodyContracts(candidate.Syntax, model, known, lowerer, lowerRest: !admitted);
             bodyRequires = br;
             bodyEnsures = be;
             body = trimmed ?? body;
+            if (body is not null && lowerer.Expressions.HoistedCells.Count > 0)
+                body = new IrBlock(body.Loc, [.. lowerer.Expressions.HoistedCells.Values.OrderBy(d => d.Name, StringComparer.Ordinal), body]);
             if (body is not null && candidate.Syntax.DescendantNodes().Any(n =>
-                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or ForEachStatementSyntax))
+                    n is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or CommonForEachStatementSyntax))
                 body = new IrBlock(body.Loc, [.. BorrowFacts.Snapshots(borrow, known, loc), body]);
         }
 
@@ -215,6 +226,7 @@ public static partial class FrontendPass
             specs.Decreases, body)
         {
             Preserves = specs.Preserves,
+            Admit = admitted,
             UnconditionalEnsures = ensures.Count,
             Throws = specs.Throws,
             DeclaringClass = ((INamedTypeSymbol)owner.Type).Name,

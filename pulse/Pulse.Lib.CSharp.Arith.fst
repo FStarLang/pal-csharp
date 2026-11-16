@@ -115,6 +115,7 @@ let rec log2_nat_lt (n: nat) (k: pos)
   : Lemma (requires n < pow2 k) (ensures log2_nat n < k) (decreases k)
   = if n < 2 then () else (FStar.Math.Lemmas.pow2_double_mult (k - 1); log2_nat_lt (n / 2) (k - 1))
 
-let log2_u32 (x: FStar.UInt32.t) : r: FStar.Int32.t { 0 <= FStar.Int32.v r /\ FStar.Int32.v r <= 31 } =
+let log2_u32 (x: FStar.UInt32.t)
+  : r: FStar.Int32.t { FStar.Int32.v r == log2_nat (FStar.UInt32.v x) /\ 0 <= FStar.Int32.v r /\ FStar.Int32.v r <= 31 } =
   log2_nat_lt (FStar.UInt32.v x) 32;
   FStar.Int32.int_to_t (log2_nat (FStar.UInt32.v x))

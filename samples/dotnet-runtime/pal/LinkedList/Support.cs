@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-
 namespace System
 {
     // Stands in for System.Collections' generated resource class. Messages are not
@@ -24,14 +22,5 @@ namespace System
         internal static string LinkedListEmpty => nameof(LinkedListEmpty);
         internal static string LinkedListNodeIsAttached => nameof(LinkedListNodeIsAttached);
         internal static string Serialization_MissingValues => nameof(Serialization_MissingValues);
-    }
-}
-
-namespace System.Collections.Generic
-{
-    // Stand-ins for System.Collections internals that verified code does not reach.
-    internal static class EnumerableHelpers
-    {
-        internal static IEnumerator<T> GetEmptyEnumerator<T>() => ((IEnumerable<T>)Array.Empty<T>()).GetEnumerator();
     }
 }

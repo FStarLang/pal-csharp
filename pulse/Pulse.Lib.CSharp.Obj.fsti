@@ -21,3 +21,8 @@ unfold let enumerator_of (a: Type0) : Type0 = obj
 /// enumerators (`SZGenericArrayEnumerator<T>.Empty`, `EnumerableHelpers.GetEmptyEnumerator<T>()`)
 /// are bound to. Which object it is, is left uninterpreted.
 val empty_enumerator (a: Type0) : obj
+
+/// A nullable value that is not null boxes as the value itself: `(object)x!` and
+/// `(object)x` are the same object (and `Nullable<T>` boxes as its `T`) (R30.28).
+val box_some (#a: Type0) (x: a)
+  : Lemma (box (Some x) == box x) [SMTPat (box (Some x))]

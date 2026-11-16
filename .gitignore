@@ -1,5 +1,5 @@
 # F* toolchain (installed by `make tools`)
-tools/fstar/
+/tools/fstar
 tools/fstar-src/
 
 # Translator output and F* caches

@@ -96,8 +96,8 @@ public static class Borrowing
         if (!IsFillOf(a, f, model, known)) return false;
         foreach (var r in f.ContainingType.OriginalDefinition.DeclaringSyntaxReferences)
         {
-            if (!model.Compilation.ContainsSyntaxTree(r.SyntaxTree)) return false;
-            var m = model.Compilation.GetSemanticModel(r.SyntaxTree);
+            if (!model.Compilation.Owns(r.SyntaxTree)) return false;
+            var m = model.Compilation.Model(r.SyntaxTree);
             foreach (var node in r.GetSyntax().DescendantNodes())
             {
                 var written = node switch
@@ -181,6 +181,14 @@ public static class Borrowing
     public static bool IsWrapping(ITypeSymbol? type, WellKnown known) => InnerField(type, known) is not null;
 
     /// <summary>
+    /// R35.3. A wrapping struct that may be created: it wraps its core directly, and the core
+    /// owns no objects, so the core a method of the owner's class returns is all it holds.
+    /// </summary>
+    public static bool CreatableWrapping(ITypeSymbol? type, WellKnown known) =>
+        type is not null && IsWrapping(type, known) && Innermost(type, known) is { Path.Length: 1, Core: var core } &&
+        OwnedFields(core, known).IsEmpty;
+
+    /// <summary>
     /// R32.12. The wrapped fields from a wrapping struct down to the borrowing struct at its
     /// core, and that struct: each field is of the struct the next is a field of.
     /// </summary>
@@ -237,8 +245,8 @@ public static class Borrowing
                 model.GetSymbolInfo(call).Symbol is IMethodSymbol { IsStatic: false } callee &&
                 SymbolEqualityComparer.Default.Equals(callee.ContainingType.OriginalDefinition, self.OriginalDefinition) &&
                 callee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } decl &&
-                model.Compilation.ContainsSyntaxTree(decl.SyntaxTree) &&
-                WritesState(decl, model.Compilation.GetSemanticModel(decl.SyntaxTree), self, seen))
+                model.Compilation.Owns(decl.SyntaxTree) &&
+                WritesState(decl, model.Compilation.Model(decl.SyntaxTree), self, seen))
                 return true;
             // R32.12. A call of a writer member of the struct a wrapping struct wraps writes it.
             if (node is InvocationExpressionSyntax
@@ -253,14 +261,16 @@ public static class Borrowing
                 model.GetSymbolInfo(inner).Symbol is IMethodSymbol { IsStatic: false } innerCallee &&
                 SymbolEqualityComparer.Default.Equals(innerCallee.ContainingType.OriginalDefinition, wt.OriginalDefinition) &&
                 innerCallee.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax() is { } innerDecl &&
-                model.Compilation.ContainsSyntaxTree(innerDecl.SyntaxTree) &&
-                WritesState(innerDecl, model.Compilation.GetSemanticModel(innerDecl.SyntaxTree), wt, seen))
+                model.Compilation.Owns(innerDecl.SyntaxTree) &&
+                WritesState(innerDecl, model.Compilation.Model(innerDecl.SyntaxTree), wt, seen))
                 return true;
             var target = node switch
             {
                 AssignmentExpressionSyntax a => a.Left,
                 PrefixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
                 PostfixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                // R35.4. A field passed by reference may be written.
+                ArgumentSyntax { RefKindKeyword.RawKind: (int)SyntaxKind.RefKeyword or (int)SyntaxKind.OutKeyword } ra => ra.Expression,
                 _ => null,
             };
             if (target is null) continue;
@@ -300,8 +310,8 @@ public static class Borrowing
             if (callee is null) return;
             var target = viaBase ? callee : Subclasses.OverrideOf(view, callee) ?? callee;
             foreach (var r in target.DeclaringSyntaxReferences)
-                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree))
-                    ViewWrites(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, written, seen);
+                if (model.Compilation.Owns(r.SyntaxTree))
+                    ViewWrites(r.GetSyntax(), model.Compilation.Model(r.SyntaxTree), view, known, written, seen);
         }
         foreach (var node in body.DescendantNodes())
         {
@@ -369,8 +379,8 @@ public static class Borrowing
             var target = receiver is BaseExpressionSyntax ? callee
                 : Subclasses.OverrideOf(view, callee) ?? callee;
             foreach (var r in target.DeclaringSyntaxReferences)
-                if (model.Compilation.ContainsSyntaxTree(r.SyntaxTree) &&
-                    WritesOwner(r.GetSyntax(), model.Compilation.GetSemanticModel(r.SyntaxTree), view, known, seen))
+                if (model.Compilation.Owns(r.SyntaxTree) &&
+                    WritesOwner(r.GetSyntax(), model.Compilation.Model(r.SyntaxTree), view, known, seen))
                     return true;
         }
         return false;
@@ -403,7 +413,7 @@ public static class Borrowing
             if (compilation is null || !init.ThisOrBaseKeyword.IsKind(SyntaxKind.ThisKeyword) ||
                 decl.Body is { Statements.Count: > 0 } || decl.ExpressionBody is not null)
                 return null;
-            var m = compilation.GetSemanticModel(decl.SyntaxTree);
+            var m = compilation.Model(decl.SyntaxTree);
             if (m.GetSymbolInfo(init).Symbol is not IMethodSymbol target ||
                 OwnerParameter(target, owner, compilation) is not { } tp)
                 return null;
@@ -429,6 +439,41 @@ public static class Borrowing
             };
             if (name != owner.Name) continue;
             return ctor.Parameters.FirstOrDefault(p => p.Name == right.Identifier.ValueText);
+        }
+        return compilation is null ? null : WrappingOwnerParameter(ctor, decl, owner, compilation);
+    }
+
+    /// <summary>
+    /// R35.3. The parameter a wrapping struct's constructor takes the object its core borrows
+    /// in: the receiver of the call that creates the wrapped struct
+    /// (<c>_enumerator = dictionary.GetEnumerator()</c>), a method of the owner's class.
+    /// </summary>
+    private static IParameterSymbol? WrappingOwnerParameter(
+        IMethodSymbol ctor, ConstructorDeclarationSyntax decl, IFieldSymbol owner, Compilation compilation)
+    {
+        if (ctor.ContainingType is not { TypeKind: TypeKind.Struct } self || decl.Initializer is not null) return null;
+        var model = compilation.Model(decl.SyntaxTree);
+        IEnumerable<ExpressionSyntax> exprs = decl.Body?.Statements.OfType<ExpressionStatementSyntax>()
+            .Select(s => s.Expression) ?? [];
+        if (decl.ExpressionBody is { } eb) exprs = [eb.Expression];
+        foreach (var e in exprs)
+        {
+            if (e is not AssignmentExpressionSyntax { Left: var left, Right: var right } ||
+                model.GetSymbolInfo(left).Symbol is not IFieldSymbol
+                {
+                    IsStatic: false, Type: INamedTypeSymbol { TypeKind: TypeKind.Struct },
+                } wf ||
+                wf.ContainingType.OriginalDefinition.ToDisplayString() != self.OriginalDefinition.ToDisplayString())
+                continue;
+            ExpressionSyntax? source = right switch
+            {
+                InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax recv } } => recv,
+                _ => null,
+            };
+            if (source is IdentifierNameSyntax id && model.GetSymbolInfo(id).Symbol is IParameterSymbol p &&
+                p.ContainingSymbol is IMethodSymbol { MethodKind: MethodKind.Constructor } &&
+                p.Type.OriginalDefinition.ToDisplayString() == owner.Type.OriginalDefinition.ToDisplayString())
+                return ctor.Parameters.FirstOrDefault(cp => cp.Name == p.Name);
         }
         return null;
     }

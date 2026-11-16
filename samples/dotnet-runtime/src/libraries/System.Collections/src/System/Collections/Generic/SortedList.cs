@@ -180,6 +180,10 @@ namespace System.Collections.Generic
         // the IComparable interface, which in that case must be implemented
         // by the keys of all entries added to the sorted list.
         //
+        [Throws(typeof(ArgumentOutOfRangeException), "capacity < 0")]
+        [Ensures("@this.SpecCount == 0")]
+        [Ensures("@this.SpecCapacity == capacity")]
+        [Ensures("@this.SpecComparer == (comparer ?? Comparer<TKey>.Default)")]
         public SortedList(int capacity, IComparer<TKey>? comparer)
             : this(comparer)
         {
@@ -192,6 +196,11 @@ namespace System.Collections.Generic
         // keys of all entries in the given dictionary as well as keys
         // subsequently added to the sorted list.
         //
+        [Throws(typeof(ArgumentException), "!SpecKeyMap.DistinctKeys(Comparer<TKey>.Default, Pal.Contents(dictionary))")]
+        [Ensures("@this.SpecComparer == Comparer<TKey>.Default")]
+        [Ensures("@this.SpecCount == Pal.Contents(dictionary).Length")]
+        [Ensures("@this.SpecCapacity == Pal.Contents(dictionary).Length")]
+        [Ensures("Pal.Permutation(Pal.Contents(dictionary), SpecKeyMap.Zip(@this.SpecKeys, @this.SpecValues))")]
         public SortedList(IDictionary<TKey, TValue> dictionary)
             : this(dictionary, null)
         {
@@ -205,6 +214,11 @@ namespace System.Collections.Generic
         // by the keys of all entries in the given dictionary as well as keys
         // subsequently added to the sorted list.
         //
+        [Throws(typeof(ArgumentException), "!SpecKeyMap.DistinctKeys(comparer ?? Comparer<TKey>.Default, Pal.Contents(dictionary))")]
+        [Ensures("@this.SpecComparer == (comparer ?? Comparer<TKey>.Default)")]
+        [Ensures("@this.SpecCount == Pal.Contents(dictionary).Length")]
+        [Ensures("@this.SpecCapacity == Pal.Contents(dictionary).Length")]
+        [Ensures("Pal.Permutation(Pal.Contents(dictionary), SpecKeyMap.Zip(@this.SpecKeys, @this.SpecValues))")]
         public SortedList(IDictionary<TKey, TValue> dictionary, IComparer<TKey>? comparer)
             : this(dictionary?.Count ?? throw new ArgumentNullException(nameof(dictionary)), comparer)
         {
@@ -215,22 +229,52 @@ namespace System.Collections.Generic
                 dictionary.Keys.CopyTo(keys, 0);
                 dictionary.Values.CopyTo(values, 0);
                 Debug.Assert(count == this.keys.Length);
+                CopiedPairs(Pal.Contents(dictionary), Pal.Contents(keys), Pal.Contents(values));
                 if (count > 1)
                 {
                     comparer = Comparer; // obtain default if this is null.
                     Array.Sort<TKey, TValue>(keys, values, comparer);
                     for (int i = 1; i < keys.Length; ++i)
                     {
+                        Pal.Invariant(1 <= i && i <= keys.Length);
+                        Pal.Invariant(Pal.StrictlySorted(comparer, Pal.Slice(Pal.Contents(keys), 0, i)));
                         if (comparer.Compare(keys[i - 1], keys[i]) == 0)
                         {
+                            DuplicateFound(Pal.Contents(dictionary), Pal.Contents(keys), Pal.Contents(values), comparer, i);
                             throw new ArgumentException(SR.Format(SR.Argument_AddingDuplicate, keys[i]));
                         }
+                        StrictStep(comparer, Pal.Contents(keys), i);
                     }
                 }
+            }
+            else
+            {
+                CopiedPairs(Pal.Contents(dictionary), Pal.Contents(keys), Pal.Contents(values));
             }
 
             _size = count;
         }
+
+        [Lemma]
+        [Requires("ks.Length == vs.Length && Pal.Permutation(s, SpecKeyMap.Zip(ks, vs)) && 0 < i && i < ks.Length && Pal.Compare(c, ks[i - 1], ks[i]) == 0")]
+        [Ensures("!SpecKeyMap.DistinctKeys(c, s)")]
+        [PulseBody("Pulse.Lib.CSharp.SortPairs.dup_found $(s) $(ks) $(vs) $(c) $(i)")]
+        [Conditional("PAL")]
+        private static void DuplicateFound(Seq<KeyValuePair<TKey, TValue>> s, Seq<TKey> ks, Seq<TValue> vs, IComparer<TKey> c, SpecInt i) { }
+
+        [Lemma]
+        [Requires("Pal.Sorted(c, s) && 0 < i && i < s.Length && Pal.StrictlySorted(c, Pal.Slice(s, 0, i)) && Pal.Compare(c, s[i - 1], s[i]) != 0")]
+        [Ensures("Pal.StrictlySorted(c, Pal.Slice(s, 0, i + 1))")]
+        [PulseBody("Pulse.Lib.CSharp.SortPairs.strict_step $(c) $(s) $(i)")]
+        [Conditional("PAL")]
+        private static void StrictStep(IComparer<TKey> c, Seq<TKey> s, SpecInt i) { }
+
+        [Lemma]
+        [Requires("ks.Length == s.Length && vs.Length == s.Length && (s.Length == 0 || ks == SpecKeyMap.Keys(s) && vs == SpecKeyMap.Values(s))")]
+        [Ensures("Pal.Permutation(s, SpecKeyMap.Zip(ks, vs))")]
+        [PulseBody("Pulse.Lib.CSharp.SortPairs.copied_pairs $(s) $(ks) $(vs)")]
+        [Conditional("PAL")]
+        private static void CopiedPairs(Seq<KeyValuePair<TKey, TValue>> s, Seq<TKey> ks, Seq<TValue> vs) { }
 
         // Adds an entry with the given key and value to this sorted list. An
         // ArgumentException is thrown if the key is already present in the sorted list.
@@ -891,6 +935,10 @@ namespace System.Collections.Generic
         //
         // SortedList.Clear();
         // SortedList.TrimExcess();
+        [Ensures("@this.SpecKeys == Pal.Old(@this.SpecKeys)")]
+        [Ensures("@this.SpecValues == Pal.Old(@this.SpecValues)")]
+        [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
+        [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity) || @this.SpecCapacity == @this.SpecCount")]
         public void TrimExcess()
         {
             int threshold = (int)(keys.Length * 0.9);

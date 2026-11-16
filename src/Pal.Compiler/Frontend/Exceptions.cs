@@ -20,7 +20,7 @@ public static partial class FrontendPass
         var symbols = new List<INamedTypeSymbol>();
         foreach (var tree in compilation.SyntaxTrees)
         {
-            var model = compilation.GetSemanticModel(tree);
+            var model = compilation.Model(tree);
             foreach (var decl in tree.GetRoot().DescendantNodes().OfType<ClassDeclarationSyntax>())
                 if (model.GetDeclaredSymbol(decl) is INamedTypeSymbol s && known.IsExceptionClass(s))
                     symbols.Add(s);
@@ -156,7 +156,7 @@ public static partial class FrontendPass
         if (ctor.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
             is not ConstructorDeclarationSyntax syntax)
             return null;
-        var model = compilation.GetSemanticModel(syntax.SyntaxTree);
+        var model = compilation.Model(syntax.SyntaxTree);
         var parameters = LowerParameters(ctor, model, known, diagnostics);
         var lowerer = new ExprLowerer(model, known, diagnostics, specPosition: false);
         var paramNames = new HashSet<string>(ctor.Parameters.Select(p => p.Name));

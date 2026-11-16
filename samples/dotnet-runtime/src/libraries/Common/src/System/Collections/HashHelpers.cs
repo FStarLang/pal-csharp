@@ -3,6 +3,7 @@
 
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using PalLang;
 
 namespace System.Collections
 {
@@ -147,7 +148,23 @@ namespace System.Collections
             }
         }
 
+        /// <summary>A size <see cref="GetPrime"/> hands out: at least 3 and prime (Pulse.Lib.CSharp.HashSize).</summary>
+        [Spec]
+        [PulseBody("Pulse.Lib.CSharp.HashSize.prime_size $(n)")]
+        internal static bool PrimeSize(SpecInt n) => throw new InvalidOperationException();
+
+        /// <summary><c>MaxPrimeArrayLength</c> is a table size (what the erased <c>Debug.Assert</c> in <c>ExpandPrime</c> checks).</summary>
+        [Lemma]
+        [Ensures("PrimeSize(0x7FFFFFC3)")]
+        [PulseBody("Pulse.Lib.CSharp.HashSize.max_prime_is_prime ()")]
+        [Conditional("PAL")]
+        private static void MaxPrimeIsPrime() { }
+
         // Returns the size of the hashtable to grow to.
+        [Wrapping]
+        [Requires("0 <= oldSize && oldSize < 0x7FFFFFC3")]
+        [Ensures("oldSize < Result && Result <= 0x7FFFFFC3")]
+        [Ensures("PrimeSize(Result)")]
         public static int ExpandPrime(int oldSize)
         {
             int newSize = 2 * oldSize;
@@ -157,6 +174,7 @@ namespace System.Collections
             if ((uint)newSize > MaxPrimeArrayLength && MaxPrimeArrayLength > oldSize)
             {
                 Debug.Assert(MaxPrimeArrayLength == GetPrime(MaxPrimeArrayLength), "Invalid MaxPrimeArrayLength");
+                MaxPrimeIsPrime();
                 return MaxPrimeArrayLength;
             }
 

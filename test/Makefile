@@ -35,9 +35,14 @@ configs:
 	@bash fst-configs.sh
 	@bash cs-projects.sh
 
+# A test after the units it references (doc/translation.md §36), so that a unit two tests
+# reference is built once; each then only checks that its references are up to date.
+REFS_OF = $(notdir $(shell sed -n 's/^REFERENCES *:\?= *//p' $(1)/Makefile 2>/dev/null))
+$(foreach t,$(TESTS),$(eval $(t): $(call REFS_OF,$(t))))
+
 .PHONY: $(TESTS)
 $(TESTS):
-	@$(MAKE) -C $@
+	@$(MAKE) -C $@ REFERENCES_BUILT=1
 
 runtime_comparison: shape_hierarchy
 

@@ -42,12 +42,15 @@ namespace System.Collections.Generic
         {
         }
 
+        [Requires("Pal.Contents(collection).Length < int.MaxValue")]
+        [Ensures("@this.SpecCount == Pal.Contents(collection).Length && @this.SpecItems == Pal.Contents(collection)")]
         public LinkedList(IEnumerable<T> collection)
         {
             ArgumentNullException.ThrowIfNull(collection);
 
             foreach (T item in collection)
             {
+                Pal.Invariant(this.SpecCount == Pal.Index(item) && this.SpecItems == Pal.Slice(Pal.Contents(collection), 0, Pal.Index(item)));
                 AddLast(item);
             }
         }

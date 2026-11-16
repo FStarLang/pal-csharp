@@ -12,3 +12,17 @@ using PalLang;
 [assembly: SpecBinding("M:System.Object.GetHashCode", "Pulse.Lib.CSharp.Equality.object_get_hash_code")]
 [assembly: SpecBinding("T:System.Type", "Pulse.Lib.CSharp.Equality.type_handle")]
 [assembly: SpecBinding("P:System.Type.IsValueType", "Pulse.Lib.CSharp.Equality.is_value_type")]
+
+// R30.6. The string comparer CoreLib picks for a string-keyed set or dictionary
+// (Pulse.Lib.CSharp.StringComparers): a test for it, and its randomized counterpart, which
+// has the same equality.
+[assembly: SpecBinding("T:System.Collections.Generic.NonRandomizedStringEqualityComparer", "Pulse.Lib.CSharp.Equality.handle")]
+[assembly: SpecBinding("is:T:System.Collections.Generic.NonRandomizedStringEqualityComparer", "Pulse.Lib.CSharp.StringComparers.is_non_randomized")]
+[assembly: SpecBinding("M:System.Collections.Generic.NonRandomizedStringEqualityComparer.GetRandomizedEqualityComparer", "Pulse.Lib.CSharp.StringComparers.randomized")]
+// R30.18. `NonRandomizedStringEqualityComparer.GetStringComparer(comparer)`: the
+// non-randomized comparer with `comparer`'s equality, or null.
+[assembly: SpecBinding("M:System.Collections.Generic.NonRandomizedStringEqualityComparer.GetStringComparer(System.Object)", "Pulse.Lib.CSharp.StringComparerOf.string_comparer")]
+// R30.34. `IInternalStringEqualityComparer.GetUnderlyingEqualityComparer(comparer)`: the
+// public comparer a string-keyed collection's `Comparer` returns, with `comparer`'s equality.
+[assembly: SpecBinding("T:System.Collections.Generic.IInternalStringEqualityComparer", "Pulse.Lib.CSharp.Equality.handle")]
+[assembly: SpecBinding("M:System.Collections.Generic.IInternalStringEqualityComparer.GetUnderlyingEqualityComparer(System.Collections.Generic.IEqualityComparer{System.String})", "Pulse.Lib.CSharp.StringUnderlying.underlying")]

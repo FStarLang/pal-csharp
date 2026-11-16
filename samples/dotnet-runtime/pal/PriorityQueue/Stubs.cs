@@ -5,6 +5,7 @@
 // `typeof(TPriority).IsValueType` (InitializeComparer) and the equality comparers (FindIndex) are bound in ../HashCommon/Bindings.cs.
 
 [assembly: PalLang.IncludePulseFile("PriorityQueueRemove.fst")]
+[assembly: PalLang.IncludePulseFile("PriorityQueueHeapify.fst")]
 
 namespace System
 {
@@ -26,12 +27,6 @@ namespace System
 
 namespace System.Collections.Generic
 {
-    // Stand-ins for System.Collections internals that verified code does not reach.
-    internal static class EnumerableHelpers
-    {
-        internal static T[] ToArray<T>(IEnumerable<T> source, out int length) => throw new NotSupportedException();
-        internal static IEnumerator<T> GetEmptyEnumerator<T>() => throw new NotSupportedException();
-    }
 
     internal sealed class PriorityQueueDebugView<TElement, TPriority>(PriorityQueue<TElement, TPriority> queue)
     {

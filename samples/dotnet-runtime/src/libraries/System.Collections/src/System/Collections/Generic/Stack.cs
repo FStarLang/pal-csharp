@@ -94,6 +94,7 @@ namespace System.Collections.Generic
 
         // Fills a Stack with the contents of a particular collection.  The items are
         // pushed onto the stack in the same order they are read by the enumerator.
+        [Ensures("@this.Items == Pal.Contents(collection)")]
         public Stack(IEnumerable<T> collection)
         {
             ArgumentNullException.ThrowIfNull(collection);
@@ -232,6 +233,8 @@ namespace System.Collections.Generic
 
         IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<T>)this).GetEnumerator();
 
+        [Ensures("@this.Items == Pal.Old(@this.Items)")]
+        [Ensures("@this.SpecCapacity == Pal.Old(@this.SpecCapacity) || @this.SpecCapacity == @this.SpecCount")]
         public void TrimExcess()
         {
             int threshold = (int)(_array.Length * 0.9);

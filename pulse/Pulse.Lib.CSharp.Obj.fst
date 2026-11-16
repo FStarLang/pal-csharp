@@ -5,3 +5,5 @@ let obj = unit
 let box #a x = ()
 
 let empty_enumerator a = ()
+
+let box_some #a x = ()

@@ -31,6 +31,15 @@ public static class SpecKeyMap
     [SpecOp("Pulse.Lib.CSharp.KeyMap.values")]
     public static Seq<TValue> Values<TKey, TValue>(Seq<KeyValuePair<TKey, TValue>> pairs) => throw Ghost();
 
+    /// <summary>R34.22. The pairs of <paramref name="keys"/> and <paramref name="values"/>, position by position.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SortPairs.zip")]
+    public static Seq<KeyValuePair<TKey, TValue>> Zip<TKey, TValue>(Seq<TKey> keys, Seq<TValue> values) => throw Ghost();
+
+    /// <summary>R34.22. No two keys of <paramref name="pairs"/> are equivalent under <paramref name="keyComparer"/>.</summary>
+    [SpecOp("Pulse.Lib.CSharp.SortPairs.distinct_keys")]
+    public static bool DistinctKeys<TKey, TValue>(IComparer<TKey> keyComparer, Seq<KeyValuePair<TKey, TValue>> pairs) =>
+        throw Ghost();
+
     /// <summary>
     /// R32.11. The protocol of a walk's callback copying the key of each pair it is called
     /// on into an array from <paramref name="i0"/>, starting from contents

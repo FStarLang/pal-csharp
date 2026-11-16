@@ -3,7 +3,8 @@
 # §31 lists what is verified and what is not.
 GENERIC  := ../../src/libraries/System.Collections/src/System/Collections/Generic
 CORELIB  := ../../src/libraries/System.Private.CoreLib/src/System/Collections/Generic
-SOURCES  := $(GENERIC)/LinkedList.cs $(wildcard ../common/*.cs) $(wildcard *.cs)
+SOURCES  := $(GENERIC)/LinkedList.cs ../common/GlobalUsings.cs ../common/Scope.cs $(wildcard *.cs)
+REFERENCES := ../common
 
 PAL_CS_FLAGS := --preview --unsafe
 

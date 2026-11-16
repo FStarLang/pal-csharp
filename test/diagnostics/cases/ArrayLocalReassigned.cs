@@ -1,12 +1,12 @@
-// EXPECT: PALCS0623
+// EXPECT: PALCS0863
 using PalLang;
 
 public static class ArrayLocalReassigned
 {
-    public static int Bad()
+    public static int Bad(int[] a)
     {
         int[] b = new int[2];
-        b = new int[3];
+        b = a;
         return b.Length;
     }
 }

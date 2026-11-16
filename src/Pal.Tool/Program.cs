@@ -15,7 +15,7 @@ namespace Pal.Tool;
 /// <c>palcs</c> — translate annotated C# to Pulse.
 ///
 /// <para>
-/// Usage: <c>palcs [-o OUT] [--print-ir] [--time-passes] [-q] &lt;files…&gt;</c>
+/// Usage: <c>palcs [-o OUT] [--reference DIR]… [--print-ir] [--time-passes] [-q] &lt;files…&gt;</c>
 /// </para>
 /// <para>
 /// <c>palcs report -o OUT</c> is the other direction: F*'s JSON messages on stdin, said
@@ -36,6 +36,7 @@ public static class Program
         var nullable = true;
         var preview = false;
         var allowUnsafe = false;
+        var references = new List<string>();
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -60,6 +61,9 @@ public static class Program
                 // `AllowUnsafeBlocks`; a file from it compiles only as it is built.
                 case "--preview": preview = true; break;
                 case "--unsafe": allowUnsafe = true; break;
+                // R36.1. A unit translated before, whose declarations this one uses and
+                // whose modules it does not emit again.
+                case "--reference" when i + 1 < args.Length: references.Add(args[++i]); break;
                 case "-h" or "--help": Usage(); return 0;
                 default:
                     if (args[i].StartsWith('-')) { Console.Error.WriteLine($"palcs: unknown option `{args[i]}`"); return 2; }
@@ -75,7 +79,17 @@ public static class Program
         var diagnostics = new DiagnosticBag();
         var watch = Stopwatch.StartNew();
 
-        var compilation = Loader.Create(sources, nullable: nullable, preview: preview, allowUnsafe: allowUnsafe);
+        var assembly = UnitManifest.AssemblyFor(output);
+        var units = UnitGraph.Load(references, out var unitError);
+        if (unitError is not null) { Console.Error.WriteLine($"palcs: --reference: {unitError}"); return 2; }
+        var referenceErrors = units.Compile(assembly);
+        if (referenceErrors.Count > 0)
+        {
+            foreach (var d in referenceErrors) Console.Error.WriteLine(d.ToString());
+            return 1;
+        }
+
+        var compilation = Loader.Create(sources, assembly, nullable, preview, allowUnsafe, units.Compilations);
         var csharpErrors = compilation.GetDiagnostics()
             .Where(d => d.Severity == DiagnosticSeverity.Error)
             .ToList();
@@ -88,18 +102,28 @@ public static class Program
         }
         Stage("load", watch, timePasses);
 
-        var program = FrontendPass.Run(compilation, diagnostics);
+        if (units.Lower(out var referenceDiagnostics) is { } failedUnit)
+        {
+            Console.Error.Write(referenceDiagnostics.Render());
+            Console.Error.WriteLine($"palcs: --reference: `{failedUnit}` does not translate cleanly, so it cannot be referenced");
+            return 1;
+        }
+        var context = units.Context;
+        if (!units.Units.IsEmpty) Stage("references", watch, timePasses);
+
+        var program = FrontendPass.Run(compilation, diagnostics, context);
         Stage("frontend", watch, timePasses);
 
         program = Normalize.Run(program, diagnostics);
         Stage("normalize", watch, timePasses);
 
-        program = Check.Run(program, diagnostics);
+        program = Check.Run(program, diagnostics, context);
         Stage("check", watch, timePasses);
 
         if (printIr) Console.WriteLine(Printer.Print(program));
 
-        var modules = new PulseEmitter(diagnostics).Emit(program);
+        var modules = new PulseEmitter(diagnostics).Emit(program, context);
+        units.CheckCollisions(modules, diagnostics);
         Stage("emit", watch, timePasses);
 
         Directory.CreateDirectory(output);
@@ -138,6 +162,16 @@ public static class Program
         WriteIfChanged(Path.Combine(output, "diagnostics.json"), diagnostics.ToJson());
         WriteIfChanged(Path.Combine(output, "source_range_info.json"), Provenance(modules));
         WriteIfChanged(Path.Combine(output, "line_map.json"), LineMap(modules));
+        WriteIfChanged(Path.Combine(output, UnitManifest.FileName), new UnitManifest
+        {
+            Assembly = assembly,
+            Nullable = nullable,
+            Preview = preview,
+            Unsafe = allowUnsafe,
+            Sources = [.. sources.Select(UnitManifest.Source)],
+            References = [.. units.Direct],
+            Modules = [.. modules.Select(m => m.Name).Distinct().Order(StringComparer.Ordinal)],
+        }.ToJson());
 
         if (diagnostics.Items.Length > 0) Console.Error.Write(diagnostics.Render());
         if (!quiet)
@@ -271,6 +305,9 @@ public static class Program
               --nullable M   compile with nullable reference types `enable`d (default) or `disable`d
               --preview      compile with `LangVersion=preview`, as dotnet/runtime does
               --unsafe       allow `unsafe` blocks in members that are not translated
+              --reference D  use the unit translated into D (repeatable): its declarations
+                             are visible, internals included, and its modules are not
+                             emitted again (doc/translation.md §36)
           -h, --help         show this message
         """);
 }

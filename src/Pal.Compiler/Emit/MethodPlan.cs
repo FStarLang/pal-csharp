@@ -267,6 +267,9 @@ public sealed class MethodPlan
                     }
 
                     pre.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    // R30.25. `array != null` asks about the parameter's reference (R24.7).
+                    pre.Bind(SpecEmitter.ArrayRefKey(p.Name), new Term(name, TermKind.Other, p.Type));
+                    post.Bind(SpecEmitter.ArrayRefKey(p.Name), new Term(name, TermKind.Other, p.Type));
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name)
                     {
                         Fraction = p.Fraction,
@@ -310,6 +313,31 @@ public sealed class MethodPlan
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Span, name)
                     {
                         Fraction = p.Fraction,
+                    };
+                    break;
+                }
+
+                // R34.1. An enumerable argument is lent read-only, at a permission the caller
+                // chooses, and the items it yields are the ghost binder a specification sees.
+                // `ICollection<T>` says, in the precondition, that the object is a collection.
+                case IrEnumerableType enumerable:
+                {
+                    var preValue = "pre_" + p.Name;
+                    var perm = "p_" + p.Name;
+                    binders.Add($"({name}: Pulse.Lib.CSharp.Enumerable.enumerable {Types.Atom(enumerable.Element)})");
+                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(enumerable.Element)}))");
+                    ghostBinders.Add($"(#{perm}: perm)");
+                    preResources.Add($"Pulse.Lib.CSharp.Enumerable.pts_to {name} #{perm} {preValue}");
+                    postResources.Add($"Pulse.Lib.CSharp.Enumerable.pts_to {name} #{perm} {preValue}");
+                    if (enumerable.Collection)
+                        preResources.Add($"pure (Pulse.Lib.CSharp.Enumerable.is_collection {name})");
+                    var items = new Term($"(reveal {preValue})", TermKind.Seq, p.Type);
+                    pre.Bind(p.Name, items);
+                    post.Bind(p.Name, items);
+                    slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Enumerable, name)
+                    {
+                        Fraction = perm,
+                        Items = $"(reveal {preValue})",
                     };
                     break;
                 }
@@ -836,6 +864,8 @@ public sealed class MethodPlan
         // R17.1. A span, like an array, *is* its contents wherever a specification
         // names it; only the resource holding those contents differs.
         IrSpanType => TermKind.Seq,
+        // R34.1. And so, to a specification, is an enumerable: the items it yields.
+        IrEnumerableType => TermKind.Seq,
         _ => TermKind.Other,
     };
 

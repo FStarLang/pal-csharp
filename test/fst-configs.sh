@@ -114,6 +114,10 @@ for dir in "$ROOT"/test/*/ "$ROOT"/examples/*/; do
     fi
 
     if grep -q 'verify\.mk' "$dir/Makefile" 2>/dev/null; then
+        # The units it references come first, as in verify.mk (doc/translation.md §36).
+        for r in $(sed -n 's/^REFERENCES *:\?= *//p' "$dir/Makefile"); do
+            includes+=("$r/_cache" "$r/out")
+        done
         includes+=(out)
     fi
 
