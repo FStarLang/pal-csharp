@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] - Verified Pet Store</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    <header>
+        <nav>
+            <a class="brand" asp-page="/Index">🐾 Verified Pet Store</a>
+            <a asp-page="/Index">Shop</a>
+            <a asp-page="/Cart">Cart</a>
+            <a asp-page="/Orders">My orders</a>
+            <a asp-page="/Staff">Staff</a>
+        </nav>
+    </header>
+    <main>
+        @if (TempData["Message"] is string msg)
+        {
+            <p class="flash @(TempData["Kind"] ?? "info")">@msg</p>
+        }
+        @RenderBody()
+    </main>
+    <footer>
+        Every change to the store goes through operations verified with pal-csharp against
+        a model of the database under concurrent access. Customer #@Customer.Id(Context).
+    </footer>
+</body>
+</html>

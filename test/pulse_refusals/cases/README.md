@@ -39,6 +39,7 @@ each one is a false theorem that `palcs` once proved.
 | `StepCountedTwice` † | An l-value with a side effect is evaluated once, not twice. |
 | `BranchMissesPostcondition` | The postcondition holds on *every* path, not on one. |
 | `MissingLemma` | A recursive specification is not unfolded at a symbolic index; the step has to be supplied, and this is what happens when it is not. |
+| `ImplementsOverclaims` | An `[Implements]` binder's contract is proved of the model it names; one that claims more is refused. |
 | `LemmaNotProved` | A `[Lemma]` is proved, not declared. The most load-bearing case here: were lemma bodies admitted rather than checked, nothing else in this directory would mean anything. |
 
 ## Loop obligations

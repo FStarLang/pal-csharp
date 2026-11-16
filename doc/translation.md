@@ -5334,6 +5334,13 @@ owns memory, and taking the window takes that ownership. Five C# forms, three li
 | `a.AsSpan(i)`, `a.AsSpan(i, n)` | `Span.of_array_range a i n` | `Span.is_range_of a w p i j v` |
 | `s.Slice(i)`, `s.Slice(i, n)`, `s[i..j]` | `Span.sub s i n` | `Span.is_sub_of s w p i j v` |
 
+The method forms name the framework's array overloads of `System.MemoryExtensions.AsSpan`
+and integer overloads of `System.Span<T>.Slice` or `System.ReadOnlySpan<T>.Slice`, checked
+by resolved symbol (including an extension method's unreduced declaration). A user or
+referenced library's method with the same name and signature is not thereby a borrow and
+is refused under R17.7. Arguments must be in parameter order; reordered named arguments
+are refused rather than given different bounds.
+
 The one-argument forms synthesise the missing length as `source.Length - start`, so
 `s.Slice(i)` and `s.Slice(i, s.Length - i)` translate to the same term — two spellings of
 one operation, which is what §0's structure-preservation rule requires of them.
@@ -5795,7 +5802,8 @@ itself, so a harness Makefile `export`s them.
 ### R20.2 `[Admit]` bodies are not lowered
 
 The body of an `[Admit]` method is never read: its contract is assumed (PALCS0900), so
-nothing in the body (a localised-message lookup, say) needs to be translatable.
+nothing in the body (a localised-message lookup, say) needs to be translatable. The
+same holds for an `[Implements]` method (R20.14), whose contract is proved instead.
 
 ### R20.3 Library value types
 
@@ -5944,6 +5952,25 @@ value, so R20.8's "no mutation through an alias" becomes "no mutation except thr
 parameters R20.13 finds". `Pal.Same(a, b)` states equality where `==` is not decidable
 (a model holding a function).
 
+### R20.14 `[Implements("…")]`: a binder tied to a verified model
+
+A code method whose C# body talks to a system the proof cannot see (a SQL statement, a
+remote service) may carry `[Implements("t")]`, where `t` is a Pulse term, with `$(p)`
+naming a parameter (R4.9). The method is translated as an ordinary code method whose body
+is `t` rather than its C# body: its `[Requires]`/`[Ensures]` and resource contract are the
+signature, and F\* proves that `t` meets them. Typically `t` is a call to a function of a
+model written and verified in Pulse (`[assembly: IncludePulse…]`), so the binder's
+contract is *checked* against the model where `[Admit]` would assume it. The ghost
+arguments of the model function are inferred.
+
+What remains trusted is that the C# body behaves as `t` does (R20.8); PALCS0904 reports
+it at every such method. The C# body is not lowered (R20.2), so it may use anything.
+`[Implements]` together with `[Admit]`, `[PulseBody]`, `[Spec]` or `[Lemma]` is refused
+(PALCS0503). `test/implements_binder` is the positive case and
+`test/pulse_refusals/cases/ImplementsOverclaims` the refusal of a binder that claims more
+than its model provides; `demo/petstore` ties each of its SQL binders to a concurrent
+model of the database this way.
+
 ### R20.8 What a proof of production code trusts
 
 * the decimal model: `decimal` is an `eqtype` injected into `real` by `D.v`, and the C#
@@ -5971,6 +5998,7 @@ parameters R20.13 finds". `Pal.Same(a, b)` states equality where `==` is not dec
   total);
 * the BCL exceptions of R21.7 are distinguished by type only: their messages are not
   modelled;
+* the C# body of every `[Implements]` method (R20.14) behaves as the Pulse term it names;
 * every `[Admit]`ed contract, and whatever stand-ins the harness supplies for types
   outside the file.
 
@@ -6660,7 +6688,8 @@ well-formedness, membership, the chain-search invariant) is named from C#.
 
 Only a `[Spec]` or `[Lemma]` method's body is skipped this way; a code method with
 `[PulseBody]` is still lowered, so a code method with two bodies is still refused
-(PALCS0503).
+(PALCS0503). A code method whose body is meant to be replaced by Pulse says so with
+`[Implements]` (R20.14).
 
 Such a function is not an observation (R9.21). A class module opens the spec-function
 modules named by its invariants, model, refinements and observations, and so does every

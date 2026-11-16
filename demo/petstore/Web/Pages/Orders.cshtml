@@ -1,0 +1,16 @@
+@page
+@model OrdersModel
+@{ ViewData["Title"] = "Orders"; }
+<h1>Your orders</h1>
+@if (Model.Orders.Count == 0) { <p>No orders yet.</p> }
+@foreach (var o in Model.Orders)
+{
+    <div class="card" style="margin-bottom:1rem">
+        <h3>Order #@o.Id</h3>
+        <p class="muted">Placed @o.PlacedAt</p>
+        <ul>
+            @foreach (var l in o.Lines) { <li>@l.Qty × @l.Name @@ @Money.Format(l.PriceCents)</li> }
+        </ul>
+        <p class="price">Total @Money.Format(o.TotalCents)</p>
+    </div>
+}

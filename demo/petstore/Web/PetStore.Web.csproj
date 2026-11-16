@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!-- The verified core, compiled as ordinary C#: the same files palcs translates and
+       F* checks (see ../Verified/Makefile). -->
+  <ItemGroup>
+    <Compile Include="../Verified/Db.cs" Link="Verified/Db.cs" />
+    <Compile Include="../Verified/Ops.cs" Link="Verified/Ops.cs" />
+    <Compile Include="../Verified/StoreBackend.cs" Link="Verified/StoreBackend.cs" />
+    <ProjectReference Include="../../../src/Pal.Annotations/Pal.Annotations.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Data/Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
