@@ -1621,6 +1621,13 @@ than existentially quantifying it. Whether a local is assigned is a syntactic pr
 the body — it does not depend on what the loop is for — so this is a rule, not an
 inference.
 
+For an **array or span held read-only** (R4.9, R17.2), its contents are held fixed
+too, even when the body, guard or step passes it to a call. The conservative call
+assignment analysis does not override the slot's read-only permission. This includes
+`[Frac]` array and span parameters and `ReadOnlySpan<T>` parameters. Fully owned
+arrays and writable spans remain conservative: calling only fractional helpers does
+not itself infer that their contents are unchanged.
+
 Without it, nothing connects the local's value before and after the loop. The
 insertion-sort probe found this the hard way: the outer loop's step `i = i + 1` could not
 be shown to decrease the measure, because the *inner* loop had existentially rebound `i`

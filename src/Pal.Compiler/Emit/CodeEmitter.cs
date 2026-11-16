@@ -3412,6 +3412,11 @@ public sealed class CodeEmitter(
             .Where(s => !_objects.Any(o => o.Name == s.Name))
             .ToImmutableArray();
         var unassigned = w.Unassigned.ToImmutableHashSet();
+        // R4.9/R17.2. Calls cannot change a read-only array or span's contents,
+        // even when Normalize conservatively marks the argument assigned.
+        foreach (var slot in live)
+            if (slot is { Kind: SlotKind.Array or SlotKind.Span, Fraction: not null })
+                unassigned = unassigned.Add(slot.Name);
         // R26.10. A local holding an array -- `var nodes = _nodes;` -- is a cell holding a
         // reference. Writing an element changes the array, which is owned elsewhere, and
         // not the cell, so the reference stays known to be the one the loop started with.

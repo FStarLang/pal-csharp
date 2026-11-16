@@ -61,7 +61,14 @@ a third of it.
 | `AliasedArrays` | Two array parameters are separate; a caller cannot pass one twice. |
 | `AliasedObjects` | The same, for objects. |
 | `FracMutates` | A write needs full ownership, which `[Frac]` does not grant. |
+| `FracArrayLoopMutates` | A loop holding an array at a fraction cannot call a helper requiring full ownership. |
+| `OwnedArrayLoopNotFramed` | A fully owned array still needs an explicit contents frame across a loop that calls helpers. |
 | `BorrowNotReturned` | A span's borrow is given back before the parent is spoken about again. |
+
+`OwnedArrayLoopNotFramed` checks the boundary of read-only loop framing: a
+fractional helper preserves its argument, but that alone does not make the
+caller's fully owned array a read-only slot. Adding the explicit contents-equality
+invariant would make this case verify.
 
 ## Objects and inheritance
 
