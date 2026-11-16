@@ -68,8 +68,9 @@ public sealed class CodeEmitter(
             return true;
         return Check.Statements(stmt).SelectMany(Check.Expressions).SelectMany(Check.Subexpressions)
             .OfType<IrCall>()
-            .Any(c => c.HasReceiver && c.Args is [IrVar { Name: Names.This }, ..] &&
-                      readOnlyMethods?.Contains(c.Callee) != true);
+            .Any(c => (c.Kind is CalleeKind.Method or CalleeKind.Callback) &&
+                       c.HasReceiver && c.Args is [IrVar { Name: Names.This }, ..] &&
+                       readOnlyMethods?.Contains(c.Callee) != true);
     }
 
     /// <summary>
@@ -1882,7 +1883,7 @@ public sealed class CodeEmitter(
 
             foreach (var node in Check.Expressions(stmt).SelectMany(Check.Subexpressions))
             {
-                if (node is not IrCall call) continue;
+                if (node is not IrCall { Kind: CalleeKind.Method or CalleeKind.Callback } call) continue;
                 // R27.23. An `[Open]` callee is handed the receiver's record and may write it.
                 // R33.16. And the arrays it owns.
                 if (call.HasReceiver && openMethods?.Contains(call.Callee) == true &&
@@ -6830,9 +6831,8 @@ public sealed class CodeEmitter(
     private bool Pristine => RegionOwner && (_pristineLoops.Count == 0 || _pristineLoops.Peek()) && !_receiverDirty;
 
     /// <summary>
-    /// R27.50. Pristine receivers are tracked for region owners only, whose writes
-    /// `DirtiesReceiver` sees (fields and regions); an array field's contents are written
-    /// through aliases it does not follow.
+    /// R27.50. The entry-model closing protocol applies to region owners only.
+    /// Array owners carry separate contents resources and use their own closing protocol.
     /// </summary>
     private bool RegionOwner =>
         _method?.DeclaringClass is { } dc && classes is not null && classes.TryGetValue(dc, out var owner) &&

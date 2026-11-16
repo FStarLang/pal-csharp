@@ -72,10 +72,23 @@ with tempfile.TemporaryDirectory(prefix="pal-unsupported-current-model-") as tem
     assert not any("__abs_model_current" in entry["construct"] for entry in unsupported_origins)
 
 array_source = (here / "UnsupportedCurrentModel.cs.in").read_text()
+array_source = array_source.replace("private int[] items;", "private int[] items; private int marker;").replace(
+    "items = new int[1];", "items = new int[1]; marker = 0;"
+)
 loop_start = array_source.index("        int i = 0;")
 array_source = array_source[:loop_start] + "{body}\n    }\n}\n"
+array_source += """
+public static class ArrayObservers
+{
+    [Spec] public static int Read(int n) => n;
+    [Lemma, Ensures("n == n"), System.Diagnostics.Conditional("PAL")]
+    public static void Remember(int n) { }
+}
+"""
 for name, body, accepted in (
     ("pristine", "Pal.Assert(this.Length == 1); items[0] = 42;", True),
+    ("pure-observers", "ArrayObservers.Remember(marker); Pal.Assert(ArrayObservers.Read(marker) == marker); "
+     "Pal.Assert(this.Length == 1); items[0] = 42;", True),
     ("mutated", "items[0] = 42; Pal.Assert(this.Length == 1);", False),
     ("alias", "var alias = items; alias[0] = 42; Pal.Assert(this.Length == 1);", False),
 ):
@@ -96,7 +109,8 @@ for name, body, accepted in (
             "--include", str(root / "pulse/_cache"), "--cache_checked_modules",
             "--cache_dir", temporary, "--already_cached", "*",
         ]
-        for module in ("Class_UnsupportedCurrentModel", "Func_UnsupportedCurrentModel_Mutate"):
+        for module in ("Class_UnsupportedCurrentModel", "Let_ArrayObservers_Read",
+                       "Let_ArrayObservers_Remember", "Func_UnsupportedCurrentModel_Mutate"):
             checked = subprocess.run(
                 command + [str(directory / (module + ".fst"))], text=True, capture_output=True,
             )
