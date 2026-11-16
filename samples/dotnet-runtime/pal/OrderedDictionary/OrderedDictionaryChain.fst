@@ -943,6 +943,21 @@ let push_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv))
    same_but bs bs' b /\ I32.v (Seq.index bs' b) == i + 1) /\
   es' == Seq.upd es i (Seq.index es' i)
 
+let push_writes_entry (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv))
+                      (y: entry tk tv) (i: int)
+  : Lemma
+      (requires 0 <= i /\ i < Seq.length es /\ Seq.length es == Seq.length bs /\
+                Seq.length bs <= 2147483647 /\ Seq.length bs' == Seq.length bs /\
+                y.E.fld_HashCode == (Seq.index es i).E.fld_HashCode /\
+                y.E.fld_Key == (Seq.index es i).E.fld_Key /\
+                y.E.fld_Value == (Seq.index es i).E.fld_Value /\
+                I32.v y.E.fld_Next == I32.v (Seq.index bs (bk y (Seq.length bs))) - 1 /\
+                I32.v (Seq.index bs' (bk y (Seq.length bs))) == i + 1 /\
+                (forall (b: int). 0 <= b /\ b < Seq.length bs /\ b <> bk y (Seq.length bs) ==>
+                   Seq.index bs' b == Seq.index bs b))
+      (ensures push_writes bs bs' es (Seq.upd es i y) i)
+  = ()
+
 /// One more step of `Resize`'s loop.
 let push_step (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (ob: seq I32.t) (old: seq (entry tk tv))
               (i n: int) (c: option (Eq.comparer tk))
