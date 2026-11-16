@@ -1621,6 +1621,13 @@ than existentially quantifying it. Whether a local is assigned is a syntactic pr
 the body — it does not depend on what the loop is for — so this is a rule, not an
 inference.
 
+Passing a primitive scalar by value is a read, not an assignment: a callee cannot
+change the caller's scalar variable. Such arguments, including read-only callback
+captures, keep their values just like other unassigned locals. Passing a variable by
+`ref` or `out`, or capturing it for writing, still counts as a possible assignment.
+Calls inside the guard and the `for` step follow the same rule as calls in the body.
+This does not frame the mutable contents of arrays or other owned resources.
+
 Without it, nothing connects the local's value before and after the loop. The
 insertion-sort probe found this the hard way: the outer loop's step `i = i + 1` could not
 be shown to decrease the measure, because the *inner* loop had existentially rebound `i`
