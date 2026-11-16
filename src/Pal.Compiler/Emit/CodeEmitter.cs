@@ -3483,16 +3483,24 @@ public sealed class CodeEmitter(
         var repFixed = new List<(string Name, string Resource)>();
         // R5.8e. Mutable contents do not change an immutable array reference's length.
         var arrays = live.Where(s => s.Kind == SlotKind.Array && !unassigned.Contains(s.Name)).ToImmutableArray();
-        static IEnumerable<string> ArraysHanded(IEnumerable<IrExpr> expressions) =>
+        static IEnumerable<IrExpr> ArraysHanded(IEnumerable<IrExpr> expressions) =>
             expressions.SelectMany(Check.Subexpressions).OfType<IrCall>()
                 .SelectMany(c => c.Args.Concat(c.Args.SelectMany(Check.Subexpressions)
                     .OfType<IrLambdaRef>().SelectMany(l => l.Captures)))
-                .Where(a => a.Type is IrArrayType)
-                .SelectMany(Check.Subexpressions).OfType<IrVar>().Select(v => v.Name);
-        var handed = ArraysHanded(Check.Statements(w.Body).Concat(w.Step.SelectMany(Check.Statements))
-            .SelectMany(Check.Expressions).Append(w.Cond)).ToImmutableHashSet();
-        var guardHanded = ArraysHanded([w.Cond]).ToImmutableHashSet();
-        var calledArrays = arrays.Where(s => handed.Contains(s.Name)).ToImmutableArray();
+                .Where(a => a.Type is IrArrayType);
+        ImmutableArray<Slot> ArraysCalled(IEnumerable<IrExpr> expressions)
+        {
+            var handed = ArraysHanded(expressions).ToImmutableArray();
+            // A non-owning reference may alias any array the invariant owns.
+            if (handed.Any(a => a is not IrVar v ||
+                                !_slots.TryGetValue(v.Name, out var slot) || slot.Kind != SlotKind.Array))
+                return arrays;
+            var names = handed.OfType<IrVar>().Select(v => v.Name).ToImmutableHashSet();
+            return arrays.Where(s => names.Contains(s.Name)).ToImmutableArray();
+        }
+        var calledArrays = ArraysCalled(Check.Statements(w.Body).Concat(w.Step.SelectMany(Check.Statements))
+            .SelectMany(Check.Expressions).Append(w.Cond));
+        var guardArrays = ArraysCalled([w.Cond]);
         void Lengths()
         {
             foreach (var slot in calledArrays)
@@ -3611,7 +3619,7 @@ public sealed class CodeEmitter(
         var guard = Capture(() =>
         {
             var term = Expr(w.Cond);
-            foreach (var slot in arrays.Where(s => guardHanded.Contains(s.Name)))
+            foreach (var slot in guardArrays)
                 Line($"A.pts_to_len {slot.Binder} {slot.PermArg};");
             return term;
         });

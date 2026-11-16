@@ -104,6 +104,54 @@ public static class Arrays
         }
     }
 
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallInAssignment(int[] a)
+    {
+        bool flag = false;
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2);
+            if ((flag = TouchCondition(a))) { }
+        }
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallInAssignedGuard(int[] a)
+    {
+        bool flag = false;
+        while (a.Length > 0 && (flag = TouchCondition(a)))
+        {
+            Pal.Decreases(0);
+        }
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallThroughAlias(int[] a)
+    {
+        int[] alias = a;
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2);
+            a[0] = 1;
+            Touch(alias);
+        }
+    }
+
+    [Requires("a.Length > 0")]
+    [Ensures("Contents(a).Length == Old(Contents(a)).Length")]
+    public static void CallThroughAliasInGuard(int[] a)
+    {
+        int[] alias = a;
+        while (TouchCondition(alias))
+        {
+            Pal.Decreases(0);
+            a[0] = 1;
+        }
+    }
+
     [Requires("n >= 0")]
     [Ensures("Result == n")]
     public static int AllocateAndFill(int n)

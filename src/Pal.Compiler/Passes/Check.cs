@@ -560,7 +560,7 @@ public static class Check
             IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
-            IrStmtExpr se => [se.Value],
+            IrStmtExpr se => [.. se.Prelude.SelectMany(Statements).SelectMany(Expressions), se.Value],
             IrRaise ra => [ra.Exception],
             IrOld o => [o.Operand],
             IrLive l => [l.Operand],

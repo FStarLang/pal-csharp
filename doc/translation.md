@@ -1643,7 +1643,10 @@ passed to helpers; it does not assert that their contents are unchanged.
 
 The emitter invokes the general-purpose ghost lemma `A.pts_to_len a #p` before
 the loop and, for arrays passed as array arguments (including callback captures) to calls
-in its guard, body or step, at each normal iteration exit. It connects both the entry and current
+in its guard, body or step, at each normal iteration exit. Calls inside expression
+preludes, such as an assignment in a condition, count too. If an array argument is not
+an owning array slot, it may alias any loop-carried array, so the emitter conservatively
+bridges all loop-carried arrays with mutable contents. It connects both the entry and current
 contents to the same immutable `A.length a`, proving the equality even after a helper
 returns arbitrary contents with no explicit length postcondition. Each tail branch
 establishes this fact before meeting the invariant; escape paths that re-enter the loop's
