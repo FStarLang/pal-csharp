@@ -6,6 +6,9 @@ namespace Pal.Compiler.Emit;
 
 internal static class GhostStorageEmitter
 {
+    public static string CheckName(string owner, IrFieldDecl field) =>
+        $"ghost_storage_{owner}_{field.Name}";
+
     public static void Checks(StringBuilder sb, IrClass c)
         => Checks(sb, c.Name, c.Fields, c.TypeParameters);
 
@@ -17,7 +20,7 @@ internal static class GhostStorageEmitter
             // Check a function's DOMAIN, not a value: F* must not insert `hide`
             // and thereby accept an informative type. This is checked even if
             // no constructor or update of the field is ever translated.
-            sb.AppendLine($"let ghost_storage_{name}_{field.Name}{new TypeBinders(typeParameters).Implicit} () : Lemma True =");
+            sb.AppendLine($"let {CheckName(name, field)}{new TypeBinders(typeParameters).Implicit} () : Lemma True =");
             sb.AppendLine($"  Pulse.Lib.CSharp.Ownership.require_erased (id #{Types.Atom(field.Type)})");
             sb.AppendLine();
         }

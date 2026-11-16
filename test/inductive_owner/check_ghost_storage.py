@@ -1,4 +1,5 @@
 """Ghost storage is a logical field, not a CLR getter or a fresh permission."""
+import json
 import subprocess
 import sys
 import tempfile
@@ -7,6 +8,13 @@ from pathlib import Path
 here = Path(__file__).resolve().parent
 root = here.parent.parent
 tool = sys.argv[1]
+origins = {
+    entry["construct"]: entry["source"]
+    for entry in json.loads((here / "out/source_range_info.json").read_text())
+}
+for name in ("GhostStorageOwner_state", "GhostStoragePlain_State", "RawOwner_state"):
+    assert "ghost_storage_" + name in origins, name
+assert origins["ghost_storage_GhostStorageOwner_state"] != origins["class_GhostStorageOwner__inv"]
 
 
 def translate(source, directory):

@@ -446,6 +446,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.StructRaw(st.Name), decl.Loc),
                     new Provenance(Names.StructPred(st.Name), decl.Loc),
                     new Provenance(Names.StructType(st.Name), decl.Loc),
+                    .. st.Fields.Where(f => f.IsGhost).Select(f =>
+                        new Provenance(GhostStorageEmitter.CheckName(st.Name, f), f.Loc)),
                 ],
                 // §3.4 emits five constructs plus one per [Spec] member for a single C#
                 // class declaration, so each is recorded against the span it came from
@@ -508,6 +510,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     new Provenance(Names.ClassModelPred(cl.Name), decl.Loc),
                     new Provenance(Names.ClassModel(cl.Name), decl.Loc),
                     new Provenance(Names.ClassInv(cl.Name), decl.Loc),
+                    .. cl.Fields.Where(f => f.IsGhost).Select(f =>
+                        new Provenance(GhostStorageEmitter.CheckName(cl.Name, f), f.Loc)),
                     // R3.10d's three lemmas. Their span is the class declaration: they
                     // exist because the class does, and there is nothing else in the C#
                     // for them to point at.
