@@ -78,12 +78,8 @@ namespace System.Collections.Generic
         private IComparer<T> comparer = default!;
         private int count;
         [Wrapping] private int version;
-#if PAL
-        private SortedSetOwnershipState<T> ownershipState = SortedSetOwnership.Empty<T>();
-#else
-        [Spec]
+        [GhostField("SortedSetOwnership.Empty<T>()")]
         private ref SortedSetOwnershipState<T> ownershipState => throw new InvalidOperationException("Specification only");
-#endif
 
         [Refine("Pal.StrictlySorted(Result.Comparer, SpecSearchTree.Keys(Result.Tree))")]
         [Refine("SpecSearchTree.IsRedBlack(Result.Tree)")]
