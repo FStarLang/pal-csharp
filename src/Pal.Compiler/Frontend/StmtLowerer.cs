@@ -1151,6 +1151,8 @@ public sealed class StmtLowerer(
 
             case InvocationExpressionSyntax call:
                 return RefFieldCopy(call, loc) ?? RefElementCopy(call, loc) ?? LowerCallStatement(call, loc);
+            case AwaitExpressionSyntax awaited:
+                return new IrExprStmt(loc, Expressions.Lower(awaited));
 
             case ConditionalAccessExpressionSyntax access
                 when known.IsRegionClass(model.GetTypeInfo(access.Expression).Type):
@@ -1415,6 +1417,11 @@ public sealed class StmtLowerer(
         if (!_code.ArgumentsInOrder(node.ArgumentList)) return new IrBlock(loc, []);
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method)
             return UnsupportedStatement(node, loc);
+        if (Async.IsTask(method.ReturnType))
+        {
+            diagnostics.Unsupported(loc, "Discarding a task", "Await it or forward its completion permission.");
+            return new IrBlock(loc, []);
+        }
 
         var args = node.ArgumentList.Arguments;
 
@@ -1589,6 +1596,7 @@ public sealed class StmtLowerer(
             IrVar v => !written.Contains(v.Name),
             IrLength l => Untouched(l.Array, written),
             IrConvert c => Untouched(c.Operand, written),
+            IrAsync => false,
             IrUnary u => Untouched(u.Operand, written),
             IrBinary b => Untouched(b.Left, written) && Untouched(b.Right, written),
             _ => false,

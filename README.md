@@ -94,6 +94,12 @@ Pulse out — and the whole M1 acceptance suite passes.
       [`test/pulse_facts/SliceFacts.fst`](test/pulse_facts/SliceFacts.fst))
 - [ ] Interfaces, constrained generics, `IEnumerable<T>` iterators — see
       [`doc/translation.md`](doc/translation.md) §15.5 and §16.5
+- [x] **Async task ownership** — `Task`/`Task<T>` defer their resource
+      postconditions until a one-shot `await`, including across loops and task aliases.
+      [Small examples](test/task_ownership) precede a
+      [real HTTP download demonstrator](demo/downloads), with gated concurrency tests.
+      This first fragment proves normal-completion partial correctness; exception
+      recovery and cancellation protocols remain outside the verified subset.
 
 ## Quick start
 

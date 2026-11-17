@@ -25,6 +25,10 @@ let pts_to (#t: Type0) ([@@@mkey] a: array t)
   (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop =
   Raw.pts_to (storage a) #p s
 
+instance is_send_pts_to #t (a:array t) #p s :
+  Pulse.Lib.Send.is_send (pts_to a #p s) =
+  Raw.is_send_pts_to (storage a) #p s
+
 ghost
 fn to_raw (#t: Type0) (a: array t) (#p: perm) (#s: Ghost.erased (Seq.seq t))
   requires pts_to a #p s

@@ -336,6 +336,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
     {
         var loc = Locations.From(node);
         var info = model.GetTypeInfo(node);
+        if (node is BinaryExpressionSyntax binary &&
+            (Async.IsTask(model.GetTypeInfo(binary.Left).Type) || Async.IsTask(model.GetTypeInfo(binary.Right).Type)))
+            return Refused("PALCS0001", loc, "Task identity and task-state observations are not modelled; only forwarding and await are supported.");
         var atExact = ExactArgument(node, info, loc);
         // R10.2. `null` has no type of its own; what it denotes is fixed by the context,
         // and that is the only thing that says *which* class's `None` this is.
@@ -503,6 +506,8 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             CastExpressionSyntax c when known.MapType(model.GetTypeInfo(c.Type).Type) is { } t =>
                 new IrConvert(loc, t, Lower(c.Expression)),
             InvocationExpressionSyntax i => LowerInvocation(i, loc),
+            AwaitExpressionSyntax a when Async.IsTask(model.GetTypeInfo(a.Expression).Type) =>
+                new IrAsync(loc, AsyncOp.Await, Lower(a.Expression)),
             // R22.27. `checked(e)` throws on overflow where `e` would wrap. Without
             // `[Wrapping]` no arithmetic wraps: each operation must be shown not to
             // overflow, which shows the `OverflowException` is never thrown.
@@ -1522,6 +1527,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     private IrExpr LowerMemberAccess(MemberAccessExpressionSyntax node, IrLoc loc)
     {
+        if (model.GetSymbolInfo(node).Symbol is IPropertySymbol
+            { Name: "CompletedTask", ContainingType: var taskOwner } && Async.IsTask(taskOwner))
+            return new IrAsync(loc, AsyncOp.Completed, new IrLiteral(loc, null) { Type = IrPrim.Void });
         var symbol = model.GetSymbolInfo(node).Symbol;
         var receiverType = model.GetTypeInfo(node.Expression).Type;
         // R27.51. An interface's property read off an object of a class translated at its
@@ -2361,6 +2369,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
+            IrAsync a => [a.Operand],
             IrStmtExpr se => [se.Value],
             IrRaise ra => [ra.Exception],
             IrOptionOp oo => [oo.Operand],
@@ -2559,6 +2568,16 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (model.GetSymbolInfo(node).Symbol is not IMethodSymbol method) return Unsupported(node, loc);
 
         var args = node.ArgumentList.Arguments;
+        if (method.Name is "ReferenceEquals" or "Same" &&
+            args.Any(a => Async.IsTask(model.GetTypeInfo(a.Expression).Type)))
+            return Refused("PALCS0001", loc, "Task identity is not modelled.");
+        if (!SpecPosition && Async.IsTask(method.ContainingType) && method.IsStatic)
+        {
+            if (method.Name == "FromResult" && args.Count == 1)
+                return new IrAsync(loc, AsyncOp.Completed, Lower(args[0].Expression));
+            if (method.Name == "Delay" && method.Parameters is [{ Type.SpecialType: SpecialType.System_Int32 }] && args.Count == 1)
+                return new IrAsync(loc, AsyncOp.Delay, Lower(args[0].Expression));
+        }
 
         // R29.1. `KeyValuePair.Create(k, v)`.
         if (method is { IsStatic: true, Name: "Create", Parameters.Length: 2 } &&

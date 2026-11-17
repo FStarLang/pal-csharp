@@ -355,7 +355,7 @@ public static class Check
                         "`try` (doc/translation.md R19.4).");
                     break;
 
-                case IrWhile { Decreases: null, Counted: null } w:
+                case IrWhile { Decreases: null, Counted: null, IsDivergent: false } w:
                     // Belt and braces: Normalize reports this too (PALCS0200), but a
                     // loop reaching Emit without a measure produces a `while` that
                     // cannot compose with its continuation (F2), which is far harder to
@@ -560,6 +560,7 @@ public static class Check
             IrLambdaRef l => l.Captures,
             IrCall c => c.Args,
             IrConvert c => [c.Operand],
+            IrAsync a => [a.Operand],
             IrStmtExpr se => [se.Value],
             IrRaise ra => [ra.Exception],
             IrOld o => [o.Operand],

@@ -243,7 +243,9 @@ public sealed class MethodPlan
                     var preValue = "pre_" + p.Name;
                     var postValue = "post_" + p.Name;
                     binders.Add($"({name}: array {Types.Atom(array.Element)})");
-                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(array.Element)}))");
+                    ghostBinders.Add(method.ReturnsTask
+                        ? $"(#{preValue}: erased (s:Seq.seq {Types.Atom(array.Element)}{{Seq.length s == A.length {name}}}))"
+                        : $"(#{preValue}: erased (Seq.seq {Types.Atom(array.Element)}))");
 
                     // R4.9. `[Frac("p")]` introduces a permission variable and makes the
                     // parameter read-only: the contents cannot change, so the same binder
@@ -257,7 +259,9 @@ public sealed class MethodPlan
                     if (p.Fraction is null)
                     {
                         postResources.Add($"A.pts_to {name} {postValue}");
-                        postExistentials.Add(postValue);
+                        postExistentials.Add(method.ReturnsTask
+                            ? $"({postValue}: Seq.seq {Types.Atom(array.Element)}{{Seq.length {postValue} == Seq.length (reveal {preValue})}})"
+                            : postValue);
                         post.Bind(p.Name, new Term(postValue, TermKind.Seq, p.Type));
                     }
                     else

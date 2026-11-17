@@ -62,6 +62,10 @@ a third of it.
 | `AliasedObjects` | The same, for objects. |
 | `FracMutates` | A write needs full ownership, which `[Frac]` does not grant. |
 | `BorrowNotReturned` | A span's borrow is given back before the parent is spoken about again. |
+| `TaskEarlyAccess` | A pending task owns its buffer until await. |
+| `TaskOverlap` | Two outstanding tasks cannot own the same writable buffer. |
+| `TaskDoubleAwait` | Aliasing a task does not duplicate its completion permission. |
+| `TaskFalsePromise` | The async body must establish its promised result. |
 
 ## Objects and inheritance
 

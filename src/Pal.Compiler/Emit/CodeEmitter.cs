@@ -4898,6 +4898,12 @@ public sealed class CodeEmitter(
                 return Branch(cond, whenTrue, whenFalse);
             }
 
+            case IrAsync a:
+                var asyncOperand = a.Operand.Type == IrPrim.Void ? "()" : Expr(a.Operand);
+                var asyncResult = Fresh();
+                var operation = a.Op switch { AsyncOp.Await => "await", AsyncOp.Completed => "completed", _ => "delay" };
+                Line($"let {asyncResult} = Pulse.Lib.CSharp.Async.{operation} {asyncOperand};");
+                return asyncResult;
             case IrCall { Kind: CalleeKind.Method } call:
                 return Call(call, Fresh());
 
@@ -4998,6 +5004,10 @@ public sealed class CodeEmitter(
             .Select((text, i) => Inject(
                 i < call.ParamTypes.Length ? call.ParamTypes[i] : null, call.Args[i], text))
             .ToImmutableArray();
+        if (methods is not null && methods.TryGetValue(call.Callee, out var asyncCallee) && asyncCallee.ReturnsTask)
+            for (var i = 0; i < call.Args.Length; i++)
+                if (call.Args[i].Type is IrArrayType)
+                    Line($"A.pts_to_len {args[i]};");
 
         // R31.11. A ring node's member that reads its owner is called from a method of the
         // owner's class, on a node of the receiver's region: the receiver's box is passed as
