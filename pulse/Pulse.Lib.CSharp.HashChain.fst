@@ -21,6 +21,7 @@ noeq type ops (e: Type0) (k: Type0) = {
   hc  : e -> int;
   nx  : e -> int;
   key : e -> k;
+  equality : Eq.has_equality k;
 }
 
 /// The bucket of a hash code: `(uint)hashCode % (uint)buckets.Length`.
@@ -162,7 +163,7 @@ let wf (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e) (n
   = wfh o c bs es n (-1) fl fc
 
 /// `∃ p. c.Equals(xs[p], x)`: what `Contains(x)` answers.
-let mem (#k: Type0) (c: Eq.handle) (xs: seq k) (x: k) : prop =
+let mem (#k: Type0) {| Eq.has_equality k |} (c: Eq.handle) (xs: seq k) (x: k) : prop =
   exists (p: nat). p < Seq.length xs /\ Eq.equals c (Seq.index xs p) x
 
 (* ---------------------------------------------------------------------------------- *)
@@ -194,7 +195,7 @@ let chain_len_unique (#e #k: Type0) (o: ops e k) (es: seq e) (m hole b h: int) (
 
 /// `c.Equals(e.Key, x)` and the stored hash code is `h`: what a search stops at.
 let hit (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (h: int) (x: k) (j: int) : bool =
-  inr es j && o.hc (Seq.index es j) = h && Eq.equals c (o.key (Seq.index es j)) x
+  inr es j && o.hc (Seq.index es j) = h && Eq.equals #k #o.equality c (o.key (Seq.index es j)) x
 
 /// The search for `x`, whose hash is `h`, has followed `q` links of its bucket's chain to
 /// `i`, and none of the entries passed is a hit.
@@ -256,12 +257,12 @@ let search_found (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es:
 let search_none (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                 (n fl fc: int) (x: k) (i: int) (q: nat) (j: int)
   : Lemma (requires search o c bs es n fl fc x i q /\ not (inr es i) /\ lvx o es n (-1) j)
-          (ensures not (Eq.equals c (o.key (Seq.index es j)) x))
+          (ensures not (Eq.equals #k #o.equality c (o.key (Seq.index es j)) x))
   = let b = bkt (hv c x) (Seq.length es) in
     let h = I32.v (Seq.index bs b) - 1 in
     let l = chain_of o c bs es n fl fc b in
-    if Eq.equals c (o.key (Seq.index es j)) x then begin
-      Eq.equals_hash c (o.key (Seq.index es j)) x;
+    if Eq.equals #k #o.equality c (o.key (Seq.index es j)) x then begin
+      Eq.equals_hash #k #o.equality c (o.key (Seq.index es j)) x;
       assert (in_bucket o es b j);
       let aux (q': nat) : Lemma (requires q' < l /\ walk o es h q' == j) (ensures False) =
         if q' < q then () else (assert (lvx o es n (-1) (walk o es h q)))
@@ -622,16 +623,16 @@ let wf_count (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq
 
 /// The items are the keys of the chain nodes.
 let mem_live (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n: nat{n <= Seq.length es}) (x: k)
-  : Lemma (requires mem c (items o es n (-1)) x)
-          (ensures exists (j: int). lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x)
+  : Lemma (requires mem #k #o.equality c (items o es n (-1)) x)
+          (ensures exists (j: int). lvx o es n (-1) j /\ Eq.equals #k #o.equality c (o.key (Seq.index es j)) x)
   = let p = FStar.IndefiniteDescription.indefinite_description_ghost nat
-              (fun p -> p < Seq.length (items o es n (-1)) /\ Eq.equals c (Seq.index (items o es n (-1)) p) x) in
+              (fun p -> p < Seq.length (items o es n (-1)) /\ Eq.equals #k #o.equality c (Seq.index (items o es n (-1)) p) x) in
     let j = items_live o es n p in
     assert (lvx o es n (-1) j)
 
 let live_mem (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n: nat{n <= Seq.length es}) (x: k) (j: int)
-  : Lemma (requires lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x)
-          (ensures mem c (items o es n (-1)) x /\ pos o es j < Seq.length (items o es n (-1)) /\
+  : Lemma (requires lvx o es n (-1) j /\ Eq.equals #k #o.equality c (o.key (Seq.index es j)) x)
+          (ensures mem #k #o.equality c (items o es n (-1)) x /\ pos o es j < Seq.length (items o es n (-1)) /\
                    Seq.index (items o es n (-1)) (pos o es j) == o.key (Seq.index es j))
   = items_index o es n j
 
@@ -639,11 +640,11 @@ let live_mem (#e #k: Type0) (o: ops e k) (c: Eq.handle) (es: seq e) (n: nat{n <=
 let search_absent (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                   (n fl fc: int) (x: k) (i: int) (q: nat)
   : Lemma (requires search o c bs es n fl fc x i q /\ not (inr es i))
-          (ensures ~ (mem c (items o es n (-1)) x))
-  = let aux () : Lemma (requires mem c (items o es n (-1)) x) (ensures False) =
+          (ensures ~ (mem #k #o.equality c (items o es n (-1)) x))
+  = let aux () : Lemma (requires mem #k #o.equality c (items o es n (-1)) x) (ensures False) =
       mem_live o c es n x;
       let j = FStar.IndefiniteDescription.indefinite_description_ghost int
-                (fun j -> lvx o es n (-1) j /\ Eq.equals c (o.key (Seq.index es j)) x) in
+                (fun j -> lvx o es n (-1) j /\ Eq.equals #k #o.equality c (o.key (Seq.index es j)) x) in
       search_none o c bs es n fl fc x i q j
     in
     FStar.Classical.move_requires aux ()
@@ -652,7 +653,7 @@ let search_absent (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es
 let search_hit (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs: seq I32.t) (es: seq e)
                (n fl fc: int) (x: k) (i: int) (q: nat)
   : Lemma (requires search o c bs es n fl fc x i q /\ hit o c es (hv c x) x i)
-          (ensures lvx o es n (-1) i /\ mem c (items o es n (-1)) x)
+          (ensures lvx o es n (-1) i /\ mem #k #o.equality c (items o es n (-1)) x)
   = search_found o c bs es n fl fc x i q;
     live_mem o c es n x i
 
@@ -805,7 +806,7 @@ let remove_ok (#e #k: Type0) (o: ops e k) (c: Eq.handle) (bs bs': seq I32.t) (es
                    pos o es i < Seq.length (items o es n (-1)) /\
                    wf o c bs' es' n i (fc + 1) /\
                    items o es' n (-1) == remove_at (items o es n (-1)) (pos o es i) /\
-                   Eq.equals c (Seq.index (items o es n (-1)) (pos o es i)) x)
+                   Eq.equals #k #o.equality c (Seq.index (items o es n (-1)) (pos o es i)) x)
   = let len = Seq.length es in
     let b = bkt (hv c x) len in
     let h = I32.v (Seq.index bs b) - 1 in

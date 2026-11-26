@@ -1,4 +1,4 @@
-module Pulse.Lib.CSharp.StringComparerOf
+module Pulse.Lib.CSharp.StringComparerOfOpaque
 
 /// `NonRandomizedStringEqualityComparer.GetStringComparer(comparer)` (doc/translation.md
 /// R30.18): the constructors of a string-keyed `HashSet<T>` or `Dictionary<TKey, TValue>`
@@ -8,9 +8,9 @@ module Pulse.Lib.CSharp.StringComparerOf
 /// TRUSTED: both `val`s below are assumptions about CoreLib's
 /// `NonRandomizedStringEqualityComparer`, which the program does not verify.
 
-module Eq = Pulse.Lib.CSharp.Equality
+module Eq = Pulse.Lib.CSharp.EqualityOpaque
 module Obj = Pulse.Lib.CSharp.Obj
-module SC = Pulse.Lib.CSharp.StringComparers
+module SC = Pulse.Lib.CSharp.StringComparersOpaque
 
 /// `GetStringComparer(comparer)`, of the comparer as an `object`.
 val string_comparer (o: Obj.obj) : option Eq.handle

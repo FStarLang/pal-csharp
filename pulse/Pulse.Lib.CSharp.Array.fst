@@ -240,7 +240,7 @@ fn reverse (#t: Type0) (a: array t) (i: I32.t) (n: I32.t)
   ()
 }
 
-fn index_of (#t: Type0) (a: array t) (x: t) (i: I32.t) (n: I32.t)
+fn index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (a: array t) (x: t) (i: I32.t) (n: I32.t)
   (#p: perm)
   (#s: Ghost.erased (Seq.seq t) { I32.v i >= 0 /\ I32.v n >= 0 /\ I32.v i + I32.v n <= Seq.length s })
   preserves A.pts_to a #p s
@@ -267,7 +267,7 @@ fn index_of (#t: Type0) (a: array t) (x: t) (i: I32.t) (n: I32.t)
   !r
 }
 
-fn last_index_of_lo (#t: Type0) (a: array t) (x: t) (lo: I32.t) (n: I32.t)
+fn last_index_of_lo (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (a: array t) (x: t) (lo: I32.t) (n: I32.t)
   (#p: perm)
   (#s: Ghost.erased (Seq.seq t) { I32.v lo >= 0 /\ I32.v n >= 0 /\ I32.v lo + I32.v n <= Seq.length s })
   preserves A.pts_to a #p s
@@ -303,7 +303,7 @@ fn clear (#t: Type0) {| d: has_default t |} (a: array t) (i: I32.t) (n: I32.t)
 }
 
 /// `Array.LastIndexOf(a, x, index, count)`: the last match in `[index-count+1, index]`.
-fn last_index_of (#t: Type0) (a: array t) (x: t) (index: I32.t) (count: I32.t)
+fn last_index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (a: array t) (x: t) (index: I32.t) (count: I32.t)
   (#p: perm)
   (#s: Ghost.erased (Seq.seq t) {
      I32.v count >= 0 /\ I32.v index - I32.v count + 1 >= 0 /\ I32.v index < Seq.length s })

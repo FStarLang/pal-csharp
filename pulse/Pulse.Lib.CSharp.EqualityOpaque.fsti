@@ -1,4 +1,4 @@
-module Pulse.Lib.CSharp.Equality
+module Pulse.Lib.CSharp.EqualityOpaque
 
 /// Equality comparers, as the hashing collections use them (doc/translation.md §24).
 /// Every `val` here is a MODELING AXIOM (doc/translation.md R24.13, What is trusted).
@@ -34,8 +34,12 @@ val equals_hash (#t: Type0) (c: handle) (x y: t)
 /// `EqualityComparer<T>.Default`, whose `Equals` is R22.25's `default_equals`.
 val default_comparer (t: Type0) : handle
 
+/// The pre-existing opaque default-equality interpretation, now internal to the
+/// opaque model so the public Bcl operation can take explicit semantic evidence.
+val default_equals (#t: Type0) (x y: t) : bool
+
 val default_equals_def (#t: Type0) (x y: t)
-  : Lemma (equals (default_comparer t) x y == Pulse.Lib.CSharp.Bcl.default_equals x y)
+  : Lemma (equals (default_comparer t) x y == default_equals x y)
           [SMTPat (equals (default_comparer t) x y)]
 
 /// `x.GetHashCode()` on a value of a type parameter, which the collections call only at a

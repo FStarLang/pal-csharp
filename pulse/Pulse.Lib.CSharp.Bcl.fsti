@@ -33,11 +33,12 @@ let hash_set_add (#a: eqtype) (x: a) (s: hash_set a) : hash_set a = x :: s
 let hash_set_contains (#a: eqtype) (s: hash_set a) (x: a) : bool = FStar.List.Tot.mem x s
 
 /// `EqualityComparer<T>.Default.Equals(x, y)`, which `Array.IndexOf` and every
-/// collection without a comparer of its own uses (doc/translation.md R22.25). Left
-/// uninterpreted: a user type's `Equals` is whatever it is, and nothing is assumed
-/// of it -- not even reflexivity, which `double.NaN` breaks for `==`. What is
-/// assumed is that it is a function: deterministic, terminating, without effects.
-val default_equals (#t: Type) (x y: t) : bool
+/// collection without a comparer of its own uses (doc/translation.md R22.25).
+/// Semantic evidence selects reference identity for certified plain reference
+/// classes; other types retain opaque, deterministic, terminating, pure equality.
+let default_equals (#t: Type0)
+  {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (x y: t) : bool =
+  Pulse.Lib.CSharp.EqualityModel.default_equals x y
 
 /// `RuntimeHelpers.IsReferenceOrContainsReferences<T>()`: a constant per type,
 /// fixed when the JIT compiles the caller, and otherwise unknown (R22.26).

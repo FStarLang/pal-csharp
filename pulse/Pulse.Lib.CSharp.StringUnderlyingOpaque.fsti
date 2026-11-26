@@ -1,4 +1,4 @@
-module Pulse.Lib.CSharp.StringUnderlying
+module Pulse.Lib.CSharp.StringUnderlyingOpaque
 
 /// `IInternalStringEqualityComparer.GetUnderlyingEqualityComparer(c)` (doc/translation.md
 /// R30.34): the public comparer a string-keyed `HashSet<T>` or `Dictionary<TKey, TValue>`
@@ -8,7 +8,7 @@ module Pulse.Lib.CSharp.StringUnderlying
 /// TRUSTED: both `val`s below are assumptions about CoreLib, which the program does not
 /// verify.
 
-module Eq = Pulse.Lib.CSharp.Equality
+module Eq = Pulse.Lib.CSharp.EqualityOpaque
 
 val underlying (c: Eq.handle) : Eq.handle
 

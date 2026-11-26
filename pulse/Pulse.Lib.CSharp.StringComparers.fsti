@@ -1,29 +1,35 @@
 module Pulse.Lib.CSharp.StringComparers
 
-/// CoreLib's non-randomized string comparers (doc/translation.md R30.6). A string-keyed
-/// `HashSet<T>` or `Dictionary<TKey, TValue>` built with the default, ordinal or
-/// ordinal-ignore-case comparer hashes with a cheaper, non-randomized function, and switches
-/// to the randomized comparer with the same equality when a chain grows too long.
-///
-/// TRUSTED: every `val` below is an assumption about CoreLib's
-/// `NonRandomizedStringEqualityComparer`, which the program does not verify.
+module E = Pulse.Lib.CSharp.EqualityModel
+module Raw = Pulse.Lib.CSharp.EqualityOpaque
 
-module Eq = Pulse.Lib.CSharp.Equality
+let is_non_randomized = E.is_non_randomized
+let non_randomized_refl (#t: Type0) {| E.has_equality t |} (c: E.handle) (x: t)
+  : Lemma (requires is_non_randomized c) (ensures E.equals c x x)
+  = E.non_randomized_refl c x
 
-/// `c is NonRandomizedStringEqualityComparer`.
-val is_non_randomized (c: Eq.handle) : bool
+/// A deterministic mathematical exemplar, not the runtime factory.
+let randomized_model = E.randomized
+let randomized_model_equals (#t: Type0) {| E.has_equality t |}
+                            (c: E.handle{is_non_randomized c}) (x y: t)
+  : Lemma (E.equals (randomized_model c) x y == E.equals c x y)
+          [SMTPat (E.equals (randomized_model c) x y)]
+  = E.randomized_equals c x y
 
-/// `c.GetRandomizedEqualityComparer()`.
-val randomized (c: Eq.handle) : Eq.handle
+/// The runtime factory preserves equality but does not fix a per-input result
+/// identity. This relational interface hides the deterministic implementation
+/// witness; two calls are not equated, nor are their hash functions.
+let randomized_from (c r: E.handle) : prop =
+  E.OpaqueHandle? c /\ E.OpaqueHandle? r /\
+  (forall (t: Type0) (x y: t).
+    Raw.equals (E.token r) x y == Raw.equals (E.token c) x y)
 
-/// The randomized comparer deems equal what the non-randomized one does.
-val randomized_equals (#t: Type0) (c: Eq.handle) (x y: t)
-  : Lemma (requires is_non_randomized c)
-          (ensures Eq.equals (randomized c) x y == Eq.equals c x y)
-          [SMTPat (Eq.equals #t (randomized c) x y)]
+val randomized (c: E.handle)
+  : Pulse.Lib.Core.stt E.handle
+      (Pulse.Lib.Core.pure (is_non_randomized c))
+      (fun r -> Pulse.Lib.Core.pure (randomized_from c r))
 
-/// A non-randomized comparer's equality (ordinal, or ordinal ignoring case) is reflexive.
-val non_randomized_refl (#t: Type0) (c: Eq.handle) (x: t)
-  : Lemma (requires is_non_randomized c)
-          (ensures Eq.equals c x x)
-          [SMTPat (is_non_randomized c); SMTPat (Eq.equals #t c x x)]
+val randomized_equals (#t: Type0) {| E.has_equality t |}
+                      (c r: E.handle) (x y: t)
+  : Lemma (requires randomized_from c r)
+          (ensures E.equals r x y == E.equals c x y)
