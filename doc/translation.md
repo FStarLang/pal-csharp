@@ -2805,6 +2805,93 @@ list); an `abstract` class with fields, and hence a constructor chain; a class h
 `Shape` *field* (boxable per F29, but nested-invariant composition à la R3.10b is
 untested); and a cast that may fail.
 
+#### Ownership-preserving interface casts: `test/pulse_facts/InterfaceCastFacts.fst`
+
+This design study addresses the missing connection between a borrowed interface
+argument and the concrete object a successful runtime cast reveals. It is a
+verified prototype, **not a statement that the compiler already implements these
+casts**.
+
+The first encoding partitions implementations relative to one cast target:
+`Matches x` or `Misses y`. Opening a successful cast consumes the interface
+invariant and exposes the original concrete ownership at the same permission;
+closing consumes that ownership and restores the interface invariant. A failed
+cast preserves the other implementation's resources. This establishes the
+resource protocol, but a separate, checked adapter must establish which side of
+the partition the actual C# object occupies.
+
+The second encoding retains a single descriptor for all exact-type queries:
+
+```fstar
+noeq type tagged (code: eqtype) (rep: code -> Type0) = {
+  tag: code;
+  value: rep tag;
+}
+```
+
+The code universe and representation family are parameters, not an enumeration
+of known subclasses. The indexed invariant retains this same descriptor for the
+reference's lifetime. `checked_cast` recovers it with R9.13's existing `recover`
+primitive, compares its code to the requested code, and returns the original
+typed representation or `None`. The study adds no new runtime assumption.
+
+The positive clients verify repeated casts, failed casts, reads through the
+successful result, and restoration of the original ownership. One uses distinct
+runtime codes with the **same** F* representation, showing why a representation
+type alone is not a C# type test. An allocating client exercises both concrete
+implementations and frees every allocation. Two `expect_failure` tests reject
+duplicating full ownership and changing an existing reference's runtime tag.
+
+There are two essential integration obligations still beyond this study:
+
+* R34.26 currently discards concrete identity when it converts a collection to a
+  snapshot. That conversion must retain the descriptor and connect enumerable
+  contents to the same concrete ownership. Contents alone cannot determine the
+  object's runtime type, even when the contents are completely known.
+* Exact code equality is not C# assignability. Base-class casts must include
+  derived instances and supply checked base-view/dispatch adapters. In particular,
+  a borrowed view cannot simply acquire the base's concrete representation
+  invariant, which may describe a different logical collection.
+
+Neither obligation can be discharged by declaring every unknown cast to fail.
+The study therefore does not by itself justify removing `[Exactly]` from a
+public collection API or claiming an end-to-end proof of a client of that API.
+
+#### Base views and enumeration: `test/pulse_facts/InterfaceViewFacts.fst`
+
+The companion study supplies the **abstract base capability** needed when a
+successful cast names a derived object. Its source descriptor owns the actual
+implementation and optionally carries a base-class virtual slot, specified over
+the base view's logical model. `as_base` returns the same reference, not a
+replacement object satisfying the ordinary base implementation's invariant.
+Opening the base view retains the source descriptor; dispatch uses that
+descriptor's actual virtual implementation.
+
+The distinction is exercised rather than assumed away. The ordinary
+implementation stores its logical Boolean directly; the derived implementation
+stores its negation and overrides the read accordingly. Casting the derived
+object and reading through the base capability verifies. Substituting ordinary
+base storage ownership or calling the ordinary base implementation is rejected
+by separate `expect_failure` tests. An unrelated implementation supplies no
+base capability and its cast returns `None`.
+
+The study also composes this dispatch with
+`Pulse.Lib.CSharp.Enumerable.Source`. That module retains a source value and a
+snapshot under a loan owning both, with a checked model-to-contents
+correspondence. `cast_or_enumerate` fills the snapshot through the source's
+enumeration slot, then either invokes the successful base cast's virtual slot
+or enumerates the snapshot. Both branches return the same logical value and
+restore the same source and snapshot resources. An allocating client verifies
+both runtime choices and frees the source allocation.
+
+This composition uses full source/snapshot ownership; the cast and base-view
+primitives themselves work at arbitrary permissions. It adds no runtime
+assumption beyond R9.13's `recover`. The descriptor factories must still be
+generated from **nominal CLR assignability**, not from the presence of methods
+with matching signatures. Compiler-generated adapters for actual C# classes,
+including borrowing views, are an integration obligation: this handwritten
+study alone is not a verification of `SortedSet.SetEquals`.
+
 ### 8.5 Not yet done
 
 **Language constructs outside the subset.** `string` and `float`/`double`; `interface`
@@ -6616,6 +6703,22 @@ for `c.Compare(x, y)`, up to sign. A comparer is assumed to be a deterministic t
 preorder: `compare_refl`, `compare_antisym` and `compare_trans`. How a collection's
 contract names its comparer, and how a call to `Compare` lowers, is given with the
 collection families that use it.
+
+The additional **modeling axiom** `Order.default_int32_order` ties the sign of
+`Comparer<int>.Default.Compare(x, y)` to numeric order on the full signed
+32-bit range. It specifies negative and zero comparisons, not their magnitude,
+and does not constrain custom comparers or other element types. This is a
+trusted BCL correspondence, not a proved implementation or a fact about one
+regression's constants. At the reviewed runtime revision
+`254919ae80190e850cbac0275b499915e018e681`, the default factory selects
+[`GenericComparer<int>` for `IComparable<int>`](https://github.com/dotnet/runtime/blob/254919ae80190e850cbac0275b499915e018e681/src/coreclr/System.Private.CoreLib/src/System/Collections/Generic/ComparerHelpers.cs#L28-L39);
+[`GenericComparer.Compare`](https://github.com/dotnet/runtime/blob/254919ae80190e850cbac0275b499915e018e681/src/libraries/System.Private.CoreLib/src/System/Collections/Generic/Comparer.cs#L55-L66)
+delegates to
+[`Int32.CompareTo`](https://github.com/dotnet/runtime/blob/254919ae80190e850cbac0275b499915e018e681/src/libraries/System.Private.CoreLib/src/System/Int32.cs#L84-L91),
+which compares with `<` and `>` rather than subtracting and risking overflow.
+`test/collections_sorted` checks the translated default-comparer call for
+arbitrary integers; `test/pulse_facts/ComparerFacts.fst` rejects strengthening
+this to custom comparers, other default types, or an exact model magnitude.
 
 
 ### R22.31 `[Rlimit(n)]`
@@ -11764,6 +11867,106 @@ which of the equivalent items is kept is unspecified; the result is specified by
 `dedupe_done`); `DedupeInv`'s and `SetOf`'s quantified parts are opaque to SMT outside those
 lemmas. `SpecSortDedupe.ComparerEquals(c, d)` is `c.Equals(d)`, uninterpreted (R27.47).
 
+**R34.28. A source-retaining enumerable cast (sealed-class bridge).**
+`if (e is C c)` on an enumerable parameter can recover concrete ownership when
+`C` is a top-level, directly object-derived sealed model class. Generic classes
+and structured/refined models are supported. A `[Spec, EnumerationModel]`
+property declares the pure sequence projection when the model is not itself
+an unrefined sequence of the enumerable's element type. The original
+`var c = e as C<T>; if (c != null)` form, reversed null-test operands, and nested
+early returns are also supported, with loan restoration on return and
+fallthrough. Only one target per parameter is supported. This is not a rule
+classifying arbitrary enumerables as non-`C`.
+
+The parameter carries a target-relative `Enumerable.Cast` descriptor and
+`Enumerable.Source` loan. A concrete caller establishes nominal equality or
+disjointness using the actual CLR class declarations. Generic callers and
+provably distinct generic instantiations are supported; unknown instantiations
+are rejected rather than assumed unequal. A matching descriptor retains the
+original concrete reference, invariant, and complete model, including state
+omitted by the enumeration projection. A nonmatching descriptor
+retains the actual source under a caller-supplied ownership predicate, without
+exposing its representation to the callee.
+
+Before lending, the generated adapter calls verified nonmutating `Count`,
+`CopyTo`, and the iterator implementing the actual `IEnumerable<T>` member.
+Both the snapshot and yielded sequence must equal the declared projection
+(or the sequence model itself). The projection annotation does not assume
+this correspondence. Thus a
+method merely named `GetEnumerator`, or a `CopyTo` with an insufficient contract,
+does not supply the correspondence by fiat. Opening a match transfers its
+concrete ownership out of the combined loan; closing restores the same source
+and snapshot. Source identity is not inferred from the snapshot.
+
+This rule requires named, nonnullable, concrete sources with full
+ownership. Interface-loan forwarding, named arguments, multiple targets,
+source reuse while its concrete loan is open, and mixed
+collection-capability casts are rejected. Unsupported enumerable/class tests
+are PALCS0865; unsupported adapter shapes are PALCS0866. These restrictions
+are proof-coverage limits, not new restrictions on the CLR's API.
+
+`test/enumerable_cast` verifies actual C# successful and failed clients and their
+restored source contents. Fresh negative chains use incorrect copy or iterator
+implementations with honest weaker contracts: those implementations verify,
+but their adapter clients fail the correspondence proof. The CLR harness checks
+the same successful/failed outcomes. `test/enumerable_projected` additionally
+checks generic structured/refined models, early returns, and preservation of
+unprojected state. Wrong copy, iterator, and projection implementations fail
+their adapter correspondence obligations; mutating observations are rejected,
+and changing unprojected source state fails loan restoration.
+
+Ordinary borrowing-struct factories can supply the checked protocol in R34.29.
+This sealed-class rule does **not** yet justify removing the public SortedSet
+comparisons' `[Exactly]` restriction: nonsealed dispatch, assignable borrowing
+views, and view-aware iterator ownership still need further adapters. Forwarding
+an existing interface loan now retains its descriptor and snapshot, rather than
+copying ownership or taking another snapshot.
+
+**R34.29. Checked ordinary enumerator protocols.**
+`[EnumerationState(ready, remaining, value, valid)]` names four `[Spec]`
+properties of a borrowing struct implementing `IEnumerator<T>`. The actual
+nominal `MoveNext`, `Current`, and `Dispose` bodies must establish the protocol,
+not just advertise authored contracts. `MoveNext` succeeds exactly when the
+old remaining sequence is nonempty, consumes its head on success, and establishes
+a valid current value equal to that head. Exhausted remaining state stays empty.
+`Current` returns the projected current value in a ready, valid state.
+`Dispose` preserves the logical state at every ready position, including
+partial enumeration; an authored end-only precondition cannot hide other
+positions from this obligation.
+
+The protocol extends, rather than replaces, each method's authored domain.
+Checking includes both the original precondition and the protocol precondition,
+with the corresponding guarantees required in each domain. In particular,
+List's stale-version exception path remains covered even though protocol
+readiness requires matching versions. Removing its version check is rejected
+by the actual implementation proof.
+
+`[EnumerationProtocol]` marks a checked complete traversal through the nominal
+factory and these slots: create the iterator, loop on its `MoveNext`, yield its
+`Current`, and dispose it. Invariants and a decreasing measure establish
+termination and correspondence with `[EnumerationModel]`. Count/CopyTo must
+independently produce the same projected sequence. Neither annotation is a
+trusted implementation or a replacement enumeration algorithm.
+
+A fresh, nonescaping boxed local obtained through the actual
+`IEnumerable<T>.GetEnumerator` factory retains one mutable iterator state and
+the original source ownership. Aliasing or escaping this box is unsupported.
+Ordinary borrowing structs can also borrow named owned collection locals in
+static clients. A static client can also create and use a borrowed-class view of
+an owned local, and an iterator can retain that view's state-cell reference as
+its borrowed owner. This representation support does not establish the
+implementation-specific iterator proof.
+Conditional factory forwarding is checked by proving its branch guard; this
+does not assume that an unhandled alternative is an empty iterator.
+
+`test/enumerable_protocol` checks complete direct and conditional-factory
+chains, partial disposal, stable exhaustion, static clients, and dishonest
+protocol variants. The actual List enumerator now has a state projection and
+an `EnumerationProof` traversal whose postcondition specifies the complete
+yielded sequence by length and every element. Its empty singleton factory
+branch and nonsealed dynamic dispatch are not established merely by that
+traversal proof.
+
 ### Verified (§34)
 
 * `EnumerableHelpers.ToArray(IEnumerable<T>, out int)`: the result's first `length` items are
@@ -12545,6 +12748,126 @@ contract into these results:
 `AllIn`/`SameKeys` as `all_hit` when both sets share the comparer. The method's contract
 now also states `UnfoundCount >= 0`, which the case analysis needs. `R34.26`'s snapshot of
 `other` is `other.SpecItems`.
+
+**R37.11. An out-of-range witness for a public equality client.**
+`SortedSetCount.range_misses`, exposed as `SortedSetCount.RangeMisses`, proves
+`!AllHit(c, Filter(c, lo, hi, la, ua, keys), other)` from one indexed occurrence
+of `other` outside the active bounds. It requires neither a particular backing
+tree nor sorted input: every filtered element is in range, and comparer-equivalent
+elements have identical range membership. This supplies the final mathematical
+inference for a false `SetEquals` result once the public call is verified for a
+general enumerable; it is not itself that public-call proof.
+
+The concrete client's range comparisons additionally rely on R22.30's explicit
+trusted numeric-default-comparer correspondence. An abstract total preorder
+alone cannot establish them from the literal values `2`, `5`, and `9`.
+`range_misses` itself is proved for arbitrary comparers without that additional
+correspondence.
+
+`pal/SortedSet/PublicRegression.cs` separately verifies construction of the
+set by adding `0` through `9`, with its size bound and version, and of the exact
+list `[2, 3, 4, 9]`. The empty constructors expose their initial version `0`,
+needed to establish the fresh-view count condition. `ViewExcludesNine` now
+constructs both collections and the bounded view in a static client, applies
+`RangeMisses` to the concrete List witness, and proves the public
+`view.Contains(9)` result is false. Its constructor, insertion, view, and lookup
+dependency closure is checked; it is not a public `SetEquals` regression proof.
+The logical `SpecItems` and `SpecComparer` projections now have view overrides.
+The same concrete client proves `!AllHit(view.SpecComparer, view.SpecItems,
+other.Items)` without opening an ordinary model for the view.
+
+The remaining public-comparison work includes nonsealed nominal dispatch and
+inherited public-method iterator calls. A newly constructed view can
+enumerate `[2, 3, 4, 5]` while its cached count remains zero, so its iterator
+proof must distinguish logical contents and underlying-tree capacity from that
+cache. Reading Count first would alter the regression's execution and is not a
+substitute for this proof. The final guarded/unguarded public-method dependency
+experiment remains pending.
+
+`SortedSetInductive.IteratorSpec` now proves filtered stack push/pop and subtree
+pruning for both traversal directions. Its range-enabled stack predicate records
+in-range roots and sorted subtrees; its unbounded case retains the ordinary
+walkability predicate. The pop identifies the next logical key and decreases
+the raw pending length, without identifying either length with the view's cache.
+Directional-bound lemmas justify which excluded subtree can be skipped:
+initialization and post-pop traversal approach opposite bounds. Initialization
+admits an in-range root even if its subtree crosses the bounds; post-pop
+traversal preserves a directional bound on the entire successor subtree.
+Empty-pending and filter/reversal lemmas connect the initial traversal to the
+logical sequence in either direction. The active shared proof now checks
+ordinary and view Initialize, MoveNext, Current, Dispose, and both constructors.
+The inherited view factory also checks, preserving untouched inherited ghost
+state and exposing the raw-pending capacity bound. The complete view iterator
+client now checks through the conditional Current read and Dispose:
+ownership-bearing branch joins retain its source link. The legacy bounded walk
+and actual view Count also check after erased proof calls explicitly switch
+between full-source and cursor read windows around the comparer call.
+Eligible readonly ordinary owners stay closed between checked unfold/read/fold
+brackets, so source-based ghost calls no longer conflict with subsequent
+raw-record captures. Mutation and explicitly raw proof protocols are unchanged.
+The isolated iterator-annotation rewriting function has been removed.
+No executable iterator branch was changed to obtain these results.
+
+The exact-input view SetEquals probe now translates and demands a false result.
+HasEqualComparer and SetEquals have explicit view contracts, rather than
+silently relying on ordinary-owner contracts at a borrowed receiver.
+These expose comparator correspondence, logical equality, and preservation of
+both sequences. Cache coherence is conditional on the cached version; no
+client-side Count warmup is required. The short-circuit getter join and Current's
+untouched-owner framing are repaired. The iterator preserves walking readiness
+and conditional count-cache validity; opaque suffix/equality-progress predicates
+avoid recursive slice rewriting in SetEquals's loop. The inherited helper call
+now lends and restores a checked enumerable snapshot. Both ordinary and
+inherited-view SetEquals implementations verify, and a fresh exact-view client
+closure proves false with a singleton SortedSet containing 9. This focused
+dispatch check is not the required List `[2,3,4,9]` regression.
+HasEqualComparer's logical sequence frames replace redundant structural frames;
+its exact spatial contracts still retain identical full models. Both ordinary
+and view helper implementations also check against abstract nominal arguments.
+SetEquals's loop now observes the optional current element as an empty/singleton
+`SpecCurrentItems` sequence, not a tree. Actual ordinary/view MoveNext and Current
+prove its correspondence to the pending head; legacy tree contracts are retained.
+The enumerator now has `EnumerationState` metadata with checked additional laws
+for both ordinary and view methods. Initialize, constructors, and factories
+expose the initial null-current state. The ordinary `EnumerationProof` verifies
+an actual complete traversal against `SpecItems`, using a checked prefix-step
+lemma and explicit branch join. The inherited view protocol specialization is
+now emitted and its traversal proof checks. Both protocols additionally establish
+strict sortedness using the checked range-filter lemma. These checked facts are
+exported through the generic nominal interface. Inherited two- and three-argument
+CopyTo implementations also have checked view contracts with their original
+exception guards. The view traversal now preserves conditional count-cache
+validity through all three loops.
+`SortedSetInductive.RangeCounts` proves equality of range-restricted counts and
+ordinary counts over the filtered sequence, without new assumptions. This bridges
+the helper's actual counting contract to public logical equality.
+The new view SetEquals contract requires at most 126 underlying items, ensuring
+the height bound is at most 12 and the checked bitmap path is used. The constructed
+regression satisfies this bound. The admitted large-tree fallback's contract has
+not been strengthened to promise cache coherence; the helper's added
+cache-preservation guarantee is conditional on the small-tree bound.
+Active SetEquals now accepts a general enumerable with checked source evidence;
+the other three comparisons retain Exactly. The persistent
+`PublicRegression.ViewSetEqualsListFalse` client constructs the ten-item set,
+bounded view, and List `[2,3,4,9]`, calls public SetEquals, and proves its Boolean
+result false. No pre-reading of the view's Count is needed.
+`public_range_negative.py` demands a fresh successful public
+List-client closure before attempting the isolated range-guard mutation, so it
+does not mistake a failed positive gate for the required negative experiment.
+Resource-producing nominal iterator slots and source enumeration evidence are
+implemented, including explicit reclamation without synthesized Dispose calls.
+Disjoint List
+installation now verifies actual `[2,3,4,9]` construction, failed casting, and
+ownership/content restoration independently of public SetEquals. The client
+allocates its List directly, avoiding a separate factory-return exactness feature.
+The concrete-call typing failure has a class-free reproducer: the pinned F*
+core checker's local binder allocator collides with ordinary global freshening,
+so lookup can mistake an implementation-type variable for a permission or model
+variable. See `test/nominal_observations/CALL_DIAGNOSTIC.md`. A proper freshness
+repair now passes the class-free controls and unchanged generated call. It is
+installed locally and reproducibly pinned by the SHA256 of
+`tools/fstar-core-freshness.patch`; the original compiler remains available for
+the before/after experiment. This is not a contract or allocation workaround.
 
 **R20.2 and R28.7, extended.**
 * An `[Admit]`ted member's body is not lowered on the borrowing path either (R20.2).

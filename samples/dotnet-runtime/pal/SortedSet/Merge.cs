@@ -35,5 +35,24 @@ namespace System.Collections.Generic
         [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetMerge.pending_next")]
         internal static void PendingNext<T>(Seq<T> s, Seq<T> p0) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetMerge.prefix_step")]
+        internal static void PrefixStep<T>(Seq<T> items, Seq<T> prefix, T item) => throw Ghost();
+
+        [SpecOp("SortedSetMerge.equal_remaining")]
+        internal static bool EqualRemaining<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetMerge.equal_start")]
+        internal static void EqualStart<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetMerge.equal_step")]
+        internal static void EqualStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetMerge.equal_finish")]
+        internal static void EqualFinish<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
     }
 }

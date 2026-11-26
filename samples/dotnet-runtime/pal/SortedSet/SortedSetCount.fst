@@ -349,6 +349,12 @@ let pos_bound (#a #b: Type0) (c: O.comparer a) (ok: a -> bool) (tr: T.tree (a & 
   : Lemma (index_of c ok tr x < pow2 (T.height tr) - 1)
   = ST.heap_index_bound c tr x
 
+let small_height_bound (n: nat)
+  : Lemma (n <= 126 ==> 2 * A.log2_nat (n + 1) <= 12) =
+  if n <= 126 then (
+    assert_norm (pow2 7 == 128);
+    A.log2_nat_lt (n + 1) 7)
+
 let rec rb_height (#a: Type0) (t: T.tree (a & bool))
   : Lemma (requires ST.rb t)
           (ensures T.height t <= 2 * ST.black_height t + (if ST.is_red t then 1 else 0) /\
@@ -793,6 +799,31 @@ let rec all_hit_at (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
       all_hit_at c s (init t);
       assert (forall (j: nat). j < Seq.length t - 1 ==> Seq.index (init t) j == Seq.index t j)
     end
+
+let rec filter_in_range (#a: Type0) (c: O.comparer a) (lo hi: a) (la ua: bool) (s: Seq.seq a) (i: nat)
+  : Lemma (requires i < Seq.length (RW.filter c lo hi la ua s))
+          (ensures ST.in_range c lo hi la ua (Seq.index (RW.filter c lo hi la ua s) i))
+          (decreases Seq.length s)
+  = if Seq.length s = 0 then ()
+    else if ST.in_range c lo hi la ua (Seq.head s) then
+      (if i > 0 then filter_in_range c lo hi la ua (Seq.tail s) (i - 1))
+    else filter_in_range c lo hi la ua (Seq.tail s) i
+
+/// One out-of-range input occurrence refutes equality with the logical view,
+/// independently of the backing tree's shape or the input's ordering.
+let range_misses (#a: Type0) (c: O.comparer a) (lo hi: a) (la ua: bool) (ks s: Seq.seq a) (j: int)
+  : Lemma (requires 0 <= j /\ j < Seq.length s /\ not (ST.in_range c lo hi la ua (Seq.index s j)))
+          (ensures not (all_hit c (RW.filter c lo hi la ua ks) s))
+  = let view = RW.filter c lo hi la ua ks in
+    let x = Seq.index s j in
+    let reject (i: nat{i < Seq.length view})
+      : Lemma (O.compare c (Seq.index view i) x <> 0)
+      = filter_in_range c lo hi la ua ks i;
+        if O.compare c (Seq.index view i) x = 0 then
+          in_range_equiv c lo hi la ua (Seq.index view i) x in
+    FStar.Classical.forall_intro reject;
+    hit_at c view x;
+    all_hit_at c view s
 
 let all_hit_empty (#a: Type0) (c: O.comparer a) (s t: Seq.seq a)
   : Lemma (ensures (Seq.length t == 0 ==> all_hit c s t) /\

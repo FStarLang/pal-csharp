@@ -17,6 +17,37 @@ static void Same(ActualSet actual, SortedSet<int> expected)
     Check(copy.Skip(1).Take(actual.Count).SequenceEqual(expected));
 }
 
+// Do not touch Count before enumerating: a view's cached count is not the
+// logical length its iterator must describe. This is a concrete witness for
+// why the ordinary iterator's count-based specification cannot simply be
+// installed as the view's base capability.
+var cacheSource = new ActualSet();
+for (int key = 0; key < 10; key++) cacheSource.Add(key);
+var cacheView = cacheSource.GetViewBetween(2, 5);
+var countField = typeof(ActualSet).GetField("count",
+    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+int countBefore = (int)countField.GetValue(cacheView)!;
+var enumerated = new List<int>();
+using (var iterator = cacheView.GetEnumerator())
+    while (iterator.MoveNext()) enumerated.Add(iterator.Current);
+int countAfter = (int)countField.GetValue(cacheView)!;
+Check(countBefore == 0 && countAfter == 0);
+Check(enumerated.SequenceEqual(new[] { 2, 3, 4, 5 }));
+var enumerationProof = typeof(ActualSet).GetMethod("EnumerationProof",
+    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+Check(((IEnumerable<int>)enumerationProof.Invoke(cacheSource, null)!).SequenceEqual(Enumerable.Range(0, 10)));
+Check(((IEnumerable<int>)enumerationProof.Invoke(cacheView, null)!).SequenceEqual(new[] { 2, 3, 4, 5 }));
+Check(!((IEnumerable<int>)enumerationProof.Invoke(new ActualSet(), null)!).Any());
+Check((int)countField.GetValue(cacheView)! == 0);
+Console.WriteLine($"View iterator: cached count {countBefore}->{countAfter}, yielded {string.Join(",", enumerated)}");
+Check(!cacheView.SetEquals(new List<int> { 2, 3, 4, 9 }));
+Check(!cacheView.SetEquals(new ActualSet(new[] { 2, 3, 4, 9 })));
+var publicRegression = typeof(ActualSet).Assembly
+    .GetType("System.Collections.Generic.SortedSetPublicRegression")!
+    .GetMethod("ViewSetEqualsListFalse",
+        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+Check(!(bool)publicRegression.Invoke(null, null)!);
+
 foreach (var comparer in new[]
 {
     Comparer<int>.Default,

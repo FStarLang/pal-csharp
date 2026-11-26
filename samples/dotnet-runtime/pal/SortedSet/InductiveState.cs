@@ -9,6 +9,26 @@ namespace System.Collections.Generic
 
     internal static class SortedSetState
     {
+        [SpecOp("SortedSetInductive.IteratorSpec.current_items")]
+        internal static Seq<T> CurrentItems<T>(SpecTree<(T, bool)> tree) => throw new InvalidOperationException();
+
+        [SpecOp("SortedSetInductive.IteratorSpec.filter")]
+        internal static Seq<T> Filter<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, Seq<T> items) => throw new InvalidOperationException();
+
+        [SpecOp("SortedSetInductive.IteratorSpec.walkable")]
+        internal static bool RangeWalkable<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, SortedSetObservation<T> state,
+            Seq<SortedSet<T>.Node?> stack) => throw new InvalidOperationException();
+
+        [SpecOp("SortedSetInductive.IteratorSpec.frontier")]
+        internal static bool RangeFrontier<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool upperSide, SpecTree<(T, bool)> tree) => throw new InvalidOperationException();
+
+        [SpecOp("SortedSetInductive.IteratorSpec.successor")]
+        internal static bool RangeSuccessor<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool upperSide, SpecTree<(T, bool)> tree) => throw new InvalidOperationException();
+
         [SpecOp("SortedSetInductive.State.observe")]
         internal static SortedSetObservation<T> Observe<T>(SortedSetOwnershipState<T> state) => throw new InvalidOperationException();
 
@@ -51,6 +71,69 @@ namespace System.Collections.Generic
 
     internal static class SortedSetStateProof
     {
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.filter_sorted")]
+        internal static void RangeSorted<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, Ghost<Seq<T>> items) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.RangeCounts.counts")]
+        internal static void RangeCounts<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, Ghost<Seq<T>> items, Seq<T> other) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.initial")]
+        internal static void RangeInitial<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool reverse, Ghost<SpecTree<(T, bool)>> tree) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.walkable_push")]
+        internal static void RangePush<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, Ghost<SortedSetObservation<T>> state,
+            Ghost<Seq<SortedSet<T>.Node?>> stack, SortedSet<T>.Node node) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.pop_at")]
+        internal static void RangePopAt<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool reverse, Ghost<SortedSetObservation<T>> state,
+            Ghost<Seq<SortedSet<T>.Node?>> stack, Ghost<Seq<T>> keys, SpecInt offset) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.skip")]
+        internal static void RangeSkip<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool reverse, Ghost<SortedSetObservation<T>> state,
+            SortedSet<T>.Node node, SortedSet<T>.Node? child, Ghost<Seq<T>> rest) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.frontier_step")]
+        internal static void RangeFrontierStep<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool upperSide, Ghost<SortedSetObservation<T>> state,
+            SortedSet<T>.Node node) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.successor_step")]
+        internal static void RangeSuccessorStep<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool upperSide, Ghost<SortedSetObservation<T>> state,
+            SortedSet<T>.Node node) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.excluded_children")]
+        internal static void RangeExcludedChildren<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, Ghost<SortedSetObservation<T>> state,
+            SortedSet<T>.Node node) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.pop_frontier")]
+        internal static void RangePopFrontier<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool reverse, Ghost<SortedSetObservation<T>> state,
+            Ghost<Seq<SortedSet<T>.Node?>> stack) { }
+
+        [Conditional("PAL")]
+        [SpecOp("SortedSetInductive.IteratorSpec.start")]
+        internal static void RangeRoot<T>(IComparer<T> comparer, Seq<T> lower, Seq<T> upper,
+            bool lowerActive, bool upperActive, bool reverse, bool upperSide,
+            Ghost<SpecTree<(T, bool)>> tree, Ghost<Seq<T>> pending) { }
+
         [Lemma, Conditional("PAL")]
         [PulseBody("SortedSetInductive.StateActive.active $(ownership)")]
         [Requires("SortedSetOwnership.Good(SortedSetOwnership.Active(ownership))")]
@@ -81,6 +164,17 @@ namespace System.Collections.Generic
         [Ensures("SortedSetOwnership.SetInv(owner, snapshot, permission)")]
         [Ensures("SortedSetState.WellFormed(state, SortedSetOwnership.Top(tree)) && SortedSetState.Tree(state, SortedSetOwnership.Top(tree)) == SortedSetOwnership.Values(tree)")]
         internal static void RootFacts<T>(Ghost<SortedSetObservation<T>> state, Ghost<SortedSetLabels<T>> tree, Ghost<Perm> permission) { }
+
+        [Lemma, Conditional("PAL")]
+        [GhostArg("SortedSet<T> owner"), GhostArg("SortedSetSnapshot<T> snapshot")]
+        [PulseBody("SortedSetInductive.StateOwnerRead.node_facts $(owner) $(snapshot) $(state) $(tree) $(node) $(permission)")]
+        [Requires("SortedSetOwnership.SetInv(owner, snapshot, permission)")]
+        [Requires("Pal.Same(state, SortedSetState.SnapshotObservation(snapshot)) && Pal.Same(tree, SortedSetOwnership.SnapshotLabels(snapshot))")]
+        [Requires("node == null || SortedSetOwnership.Member(tree, node)")]
+        [Ensures("SortedSetOwnership.SetInv(owner, snapshot, permission)")]
+        [Ensures("SortedSetState.WellFormed(state, node) && SortedSetState.Tree(state, node) == SortedSetOwnership.Lookup(tree, node)")]
+        internal static void NodeFacts<T>(Ghost<SortedSetObservation<T>> state, Ghost<SortedSetLabels<T>> tree,
+            SortedSet<T>.Node? node, Ghost<Perm> permission) { }
 
         [Lemma, Conditional("PAL")]
         [PulseBody("SortedSetInductive.StateFacts.null $(state) $(node)")]

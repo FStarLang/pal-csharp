@@ -67,3 +67,28 @@ let active (#a: Type0) (s: O.state a)
   subtree (Q.fuel (Q.observe s)) (Q.observe s) t (O.top t);
   reveal_opaque (`%Q.tree_at) (Q.tree_at #a);
   reveal_opaque (`%Q.wf) (Q.wf #a)
+
+let rec focus_size (#a: Type0) (t: O.tree a) (x: N.class_Node__opt a)
+    (acc: list (D.fr (N.class_Node__raw a) a))
+  : Lemma (ensures T.size (snd (P.focus_acc t x acc)) <= T.size t) (decreases t) =
+  match t with
+  | T.Leaf -> ()
+  | T.Branch l (b, v) r ->
+    if E.ref_eq b x then ()
+    else if P.mem_box x l then
+      focus_size l x ({ P.went_right=false; P.fbox=b; P.fval=v; P.fsib=r } :: acc)
+    else
+      focus_size r x ({ P.went_right=true; P.fbox=b; P.fval=v; P.fsib=l } :: acc)
+
+let active_node (#a: Type0) (s: O.state a) (x: N.class_Node__opt a)
+  : Lemma (requires O.good (O.active s) /\ (B.is_null x \/ O.member (O.active s) x))
+      (ensures Q.wf (Q.observe s) x /\ Q.tree_at (Q.observe s) x == O.lookup (O.active s) x) =
+  let t = O.active s in
+  let at (y: N.class_Node__opt a) : Lemma
+      (O.member t y ==> Q.find (Q.observe s) y == Q.find_tree t y) =
+    present t y in
+  FStar.Classical.forall_intro at;
+  focus_size t x [];
+  subtree (Q.fuel (Q.observe s)) (Q.observe s) t x;
+  reveal_opaque (`%Q.tree_at) (Q.tree_at #a);
+  reveal_opaque (`%Q.wf) (Q.wf #a)

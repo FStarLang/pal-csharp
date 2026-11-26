@@ -63,6 +63,10 @@ namespace System.Collections.Generic
         internal static void RedBlackHeight<T>(SpecTree<(T, bool)> t) => throw Ghost();
 
         [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetCount.small_height_bound")]
+        internal static void SmallHeightBound(SpecInt count) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("SortedSetCount.range_root_height")]
         internal static void RangeRootHeight<T, TTag>(IComparer<T> c, SpecTree<(T, TTag)> t, T lo, T hi, bool la, bool ua) => throw Ghost();
 
@@ -124,6 +128,11 @@ namespace System.Collections.Generic
         // under `c` to an item of `s`; neither need be sorted under `c`.
         [SpecOp("SortedSetCount.all_hit")]
         internal static bool AllHit<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetCount.range_misses")]
+        internal static void RangeMisses<T>(IComparer<T> c, T lo, T hi, bool la, bool ua,
+                                            Seq<T> ks, Seq<T> s, SpecInt index) => throw Ghost();
 
         // On a strictly sorted `ks`: `FoundAll == |ks|` iff `s` holds every key, and
         // `UnfoundAll == 0` iff the keys hold every item of `s`.
