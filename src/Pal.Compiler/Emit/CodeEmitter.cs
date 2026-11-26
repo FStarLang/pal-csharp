@@ -198,6 +198,11 @@ public sealed class CodeEmitter(
         // a plain Dictionary, so every later walk of it inherits the order set here.
         foreach (var name in plan.SlotOrder) _slots[name] = plan.Slots[name];
 
+        // Keep the CLR length fact available when the array's ownership is folded away.
+        foreach (var name in plan.SlotOrder)
+            if (plan.Slots[name] is { Kind: SlotKind.Array, Consumed: true } array)
+                Line($"A.pts_to_len {array.Binder};");
+
         if (method is { IsConstructor: true, ReturnType: IrClassType built })
         {
             // R4.2 applies here too, and the prologue has to precede the initialisers: a
@@ -4529,13 +4534,13 @@ public sealed class CodeEmitter(
         : _objectLocals.FirstOrDefault(l => l.Name == name);
 
     /// <summary>
-    /// The object a Pulse binder stands for, if any. A conversion (R9.15) produces a
-    /// reference with no C# name at all, so the binder — not the source name — is what
-    /// identifies it once it has been emitted.
+    /// The owned object or array a Pulse binder stands for, if any. A conversion (R9.15)
+    /// produces a reference with no C# name at all, so the binder — not the source name —
+    /// is what identifies it once it has been emitted.
     /// </summary>
     private Slot? SlotByBinder(string binder) =>
         _objectLocals.FirstOrDefault(l => l.Binder == binder)
-        ?? _slots.Values.FirstOrDefault(l => l.Kind == SlotKind.Object && l.Binder == binder);
+        ?? _slots.Values.FirstOrDefault(l => l.Kind is SlotKind.Object or SlotKind.Array && l.Binder == binder);
 
     /// <summary>
     /// R4.7: a lemma is applied to the values the program holds, so its arguments are
@@ -5189,9 +5194,9 @@ public sealed class CodeEmitter(
         for (var i = 0; i < args.Length; i++)
         {
             if (!positions.Contains(i)) continue;
-            if (SlotByBinder(args[i]) is not { Kind: SlotKind.Object } obj) continue;
-            _slots[obj.Name] = obj with { Kind = SlotKind.Value, Index = null, Given = call.Callee };
-            _objectLocals.RemoveAll(l => l.Binder == obj.Binder);
+            if (SlotByBinder(args[i]) is not { Kind: SlotKind.Object or SlotKind.Array } owned) continue;
+            _slots[owned.Name] = owned with { Kind = SlotKind.Value, Index = null, Given = call.Callee };
+            _objectLocals.RemoveAll(l => l.Binder == owned.Binder);
         }
     }
 

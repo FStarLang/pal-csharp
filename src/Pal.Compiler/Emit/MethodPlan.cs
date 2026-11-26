@@ -14,15 +14,17 @@ namespace Pal.Compiler.Emit;
 public sealed class MethodPlan
 {
     /// <summary>
-    /// R4.9c and R4.12b. Whether an object parameter's invariant moves into the callee.
+    /// R4.9c and R4.12b. Whether an object or array parameter's ownership moves into the
+    /// callee.
     /// Both halves of the rule are here rather than at the two places that need them,
     /// because the caller and the callee have to agree: the callee stops owing the
-    /// invariant back, and the caller stops owning it, and a rule read differently at the
+    /// resource back, and the caller stops owning it, and a rule read differently at the
     /// two ends is a resource that is owned twice or not at all.
     /// </summary>
     public static bool Consumed(IrMethod method, IrParam p, IReadOnlyDictionary<string, IrMethod>? methods = null) =>
-        p.Type is IrClassType &&
-        (p.Consumes || (method.IsConstructor && p.Name != Names.This && Stored(method, p.Name, methods, [])));
+        (p.Type is IrArrayType && p.Consumes) ||
+        (p.Type is IrClassType &&
+         (p.Consumes || (method.IsConstructor && p.Name != Names.This && Stored(method, p.Name, methods, []))));
 
     /// <summary>
     /// R27.45. Whether a constructor body may store the parameter: it uses the reference as
@@ -254,7 +256,12 @@ public sealed class MethodPlan
                     if (p.Fraction is not null) ghostBinders.Add($"(#{p.Fraction}: perm)");
 
                     preResources.Add($"A.pts_to {name} {perm}{preValue}");
-                    if (p.Fraction is null)
+                    var consumed = Consumed(method, p, methods);
+                    if (consumed)
+                    {
+                        post.Bind(p.Name, new Term($"(reveal {preValue})", TermKind.Seq, p.Type));
+                    }
+                    else if (p.Fraction is null)
                     {
                         postResources.Add($"A.pts_to {name} {postValue}");
                         postExistentials.Add(postValue);
@@ -270,6 +277,7 @@ public sealed class MethodPlan
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Array, name)
                     {
                         Fraction = p.Fraction,
+                        Consumed = consumed,
                     };
                     break;
                 }

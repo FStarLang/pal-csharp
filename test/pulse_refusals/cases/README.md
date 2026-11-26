@@ -61,6 +61,7 @@ a third of it.
 | `AliasedArrays` | Two array parameters are separate; a caller cannot pass one twice. |
 | `AliasedObjects` | The same, for objects. |
 | `FracMutates` | A write needs full ownership, which `[Frac]` does not grant. |
+| `ConsumeSharedArray` | A constructor taking full array ownership cannot consume a fractional observation. |
 | `BorrowNotReturned` | A span's borrow is given back before the parent is spoken about again. |
 
 ## Objects and inheritance
