@@ -102,12 +102,21 @@ HasEqualComparer uses logical sequence frames instead of redundant structural
 frames; exact calls still preserve their full models in the spatial contract.
 Its ordinary/view implementations also verify with abstract nominal arguments.
 
-The new view SetEquals contract is limited to at most **126 underlying items**.
-This is sufficient for the constructed ten-item regression and keeps its proof
-on the checked bitmap path: the height bound is at most 12. The existing admitted
-large-tree fallback does not promise view-cache coherence; its trusted contract
-has not been strengthened. The helper's new cache-preservation guarantee is
-conditional on this bound, rather than assuming a new fallback guarantee.
+The view SetEquals contract has **no 126-item restriction**. The ordinary and
+view HashSet fallbacks prove their counting and cache-preservation contracts,
+using the actual lazy allocation, reference-key membership, insertion, and
+early exit. The main helper therefore preserves view coherence and conditional
+count validity on both paths. Capacity exhaustion is exposed as a possible
+`ArgumentException` only for input lengths above `0x7FFFFFC3`, not hidden behind
+a smaller input precondition.
+
+`CreateLargeSet` constructs all 256 distinct keys with a proved exact sequence.
+`LargeSetEqualsListTrue` constructs the matching List and proves public equality;
+`LargeViewSetEqualsListFalse` supplies duplicates and an out-of-range key and
+proves public view equality false. Runtime checks independently require the
+height bound to exceed 12 and exercise duplicates, growth, misses, and empty
+input against the same source. HashSet insertion/resizing snapshots use erased
+`Pal.Capture` calls rather than executable specification-only initializers.
 
 `SortedSetInductive.RangeCounts` proves that range-restricted found/unfound counts
 are exactly the ordinary counts over the filtered logical sequence. This checked
@@ -139,6 +148,12 @@ and the unchanged generated call. It is packaged as
 `tools/fstar-core-freshness.patch`, digest-pinned by `tools/fstar-source.txt`,
 and installed locally. The original compiler is preserved for the before/after
 experiment; no contract or allocation workaround is used.
+The pinned patch also deep-compresses solved annotation unification nodes before
+Pulse's return and bind-continuation freshness checks. This fixes a false
+free-variable clash in stack-local cleanup posts without bypassing either check.
+Its `ReturnPostCompression` regression and the compiler's generic optional-owner
+regression retain inferred dictionary annotations. Both repairs must be included
+in the same installed executable and native compiler artifacts.
 The other three comparison methods retain their existing Exactly restriction.
 Generalizing them also reaches the separately unsupported
 nongeneric `ICollection` test. The logical `SpecItems` and `SpecComparer`

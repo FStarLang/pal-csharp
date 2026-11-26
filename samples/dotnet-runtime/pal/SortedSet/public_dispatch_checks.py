@@ -46,7 +46,7 @@ def run(mode, verify=True):
         "internal static class PublicDispatchProbe {\n"
         f'[Ensures("{postcondition}")] internal static bool Run() {{\n'
         + body + "\n} } }\n")
-    refs = [HERE.parent / n / "out" for n in ("List", "Queue", "Stack")]
+    refs = [HERE.parent / n / "out" for n in ("List", "Queue", "Stack", "HashSet")]
     sources = [work / "SortedSet.cs"] + [
         GENERIC / name for name in
         ("SortedSet.TreeSubSet.cs", "SortedSetEqualityComparer.cs", "SortedDictionary.cs")]

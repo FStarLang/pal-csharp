@@ -2655,6 +2655,7 @@ namespace System.Collections.Generic
         [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
         [Ensures("Result == SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems)")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Throws(typeof(ArgumentException), "other.SpecItems.Length > 0x7FFFFFC3")]
         public bool IsSubsetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
@@ -2721,6 +2722,7 @@ namespace System.Collections.Generic
         [Requires("Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, other.SpecComparer), @this.SpecComparer == other.SpecComparer)")]
         [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems) && !SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, other.SpecItems))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
+        [Throws(typeof(ArgumentException), "other.SpecItems.Length > 0x7FFFFFC3")]
         public bool IsProperSubsetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
@@ -2810,6 +2812,7 @@ namespace System.Collections.Generic
         [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, other.SpecItems) && !SortedSetCount.AllHit(@this.SpecComparer, other.SpecItems, @this.SpecItems))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Rlimit(8)]
+        [Throws(typeof(ArgumentException), "other.SpecItems.Length > 0x7FFFFFC3")]
         public bool IsProperSupersetOf([Exactly(typeof(SortedSet<>))] IEnumerable<T> other)
         {
             ArgumentNullException.ThrowIfNull(other);
@@ -2865,13 +2868,13 @@ namespace System.Collections.Generic
         // R37.10. This set and the enumerable hold the same keys under this set's comparer.
         // With the same comparer, two strictly sorted sequences are position by
         // position equal exactly when they hold the same set (`SortedSetCount.sorted_hits`).
-        // The view proof stays on the checked bitmap path (at most 126 underlying items);
-        // it does not extend the admitted large-tree fallback's contract.
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3 && !(other is SortedSet<T> && SpecSortDedupe.ComparerEquals(@this.SpecComparer, ((SortedSet<T>)other).SpecComparer))")]
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3 && !(other is SortedSet<T> && SpecSortDedupe.ComparerEquals(@this.SpecComparer, ((SortedSet<T>)other).SpecComparer))", At = typeof(SortedSet<>.TreeSubSet))]
         [Requires("Pal.Contents(other).Length <= int.MaxValue")]
         [Requires("Pal.Implies(other is SortedSet<T>, Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, ((SortedSet<T>)other).SpecComparer), @this.SpecComparer == ((SortedSet<T>)other).SpecComparer))")]
         [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, Pal.Contents(other), @this.SpecItems) && SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems) && Pal.Contents(other) == Pal.Old(Pal.Contents(other))")]
-        [Requires("@this.SpecCoherent && @this.SpecCountOk && @this._underlying.SpecItems.Length <= 126 && Pal.Implies(other is SortedSet<T>, Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, ((SortedSet<T>)other).SpecComparer), @this.SpecComparer == ((SortedSet<T>)other).SpecComparer))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Requires("@this.SpecCoherent && @this.SpecCountOk && Pal.Implies(other is SortedSet<T>, Pal.Implies(SpecSortDedupe.ComparerEquals(@this.SpecComparer, ((SortedSet<T>)other).SpecComparer), @this.SpecComparer == ((SortedSet<T>)other).SpecComparer))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Result == (SortedSetCount.AllHit(@this.SpecComparer, Pal.Contents(other), @this.SpecItems) && SortedSetCount.AllHit(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("@this.SpecItems == Pal.Old(@this.SpecItems) && Pal.Contents(other) == Pal.Old(Pal.Contents(other))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("@this.SpecCoherent && @this.SpecCountOk", At = typeof(SortedSet<>.TreeSubSet))]
@@ -2900,6 +2903,8 @@ namespace System.Collections.Generic
                 {
                     Pal.Invariant(mine.SpecReady && theirs.SpecReady &&
                                   this.SpecCountOk &&
+                                  this.SpecComparer == Pal.Old(this.SpecComparer) &&
+                                  this.SpecItems == Pal.Old(this.SpecItems) &&
                                   this.SpecRangeLo == Pal.Old(this.SpecRangeLo) &&
                                   this.SpecRangeHi == Pal.Old(this.SpecRangeHi) &&
                                   mine.SpecPending.Length <= this.SpecItems.Length &&
@@ -3053,13 +3058,15 @@ namespace System.Collections.Generic
         // pal: §37. As dotnet/runtime#133116 rewrites it, `BitHelper` over `stackalloc`ed or
         // allocated ints included (R37.2). At a view the method's body is checked again
         // (R32.13): the range is the view's, and the tree its range root.
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3")]
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3", At = typeof(SortedSet<>.TreeSubSet))]
         [Requires("Pal.Contents(other).Length <= int.MaxValue")]
         [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Requires("@this.SpecCoherent && @this.SpecCountOk && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
-        [Ensures("Pal.Implies(@this._underlying.SpecItems.Length <= 126, @this.SpecCoherent && @this.SpecCountOk)", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("@this.SpecCoherent && @this.SpecCountOk", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
@@ -3200,20 +3207,29 @@ namespace System.Collections.Generic
             return result;
         }
 
-        // pal: R37.3. Trusted: `HashSet<Node>` (reference equality on nodes) is not modelled.
-        // Its contract is the bitmap version's.
-        [Admit]
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3")]
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3", At = typeof(SortedSet<>.TreeSubSet))]
         [Requires("Pal.Contents(other).Length <= int.MaxValue")]
         [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)) > 0)")]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundAll(@this.SpecComparer, @this.SpecItems, Pal.Contents(other)))")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
-        [Requires("@this.SpecCoherent && @this.SpecRootOk && @this.version == @this._underlying.SpecVersion && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
+        [Requires("@this.SpecCoherent && @this.SpecCountOk && @this.SpecRootOk && Pal.Contents(other).Length <= int.MaxValue", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("@this.SpecCoherent && @this.SpecCountOk", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Result.UnfoundCount >= 0 && (Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)) > 0)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, @this._underlying.SpecItems, Pal.Contents(other)))", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
         private ElementCount CheckUniqueAndUnfoundElementsFallback(IEnumerable<T> other, bool returnIfUnfound)
         {
+            Ghost<SortedSetLabels<T>> labels = default;
+            Pal.Capture(ref labels, this is TreeSubSet view ? view.ReadLabels : this.SpecLabels);
+            SortedSetOwnershipProof.RootFacts(labels);
+            Ghost<SortedSetSnapshot<T>> snapshot = default;
+            Pal.Capture(ref snapshot, this is TreeSubSet subset
+                ? subset.ReadSnapshot
+                : SortedSetOwnership.Snapshot(this.SpecSnapshot));
+            Ghost<SortedSetRetainedPayload<T>> preservedViewState = default;
+            Pal.Capture(ref preservedViewState, SortedSetRetainedHolder.Payload(ownershipState));
             ElementCount result;
             HashSet<Node>? seenNodes = null;
             // count of items in other not found in this
@@ -3221,27 +3237,85 @@ namespace System.Collections.Generic
             // count of unique items in other found in this
             int uniqueFoundCount = 0;
 
+            SortedSetFallback.Start(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                labels.Value, Pal.Contents(other));
             foreach (T item in other)
             {
+                Pal.Invariant(this is TreeSubSet
+                    ? SlProp.Emp
+                    : SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
+                Pal.Invariant(this is TreeSubSet || SortedSetState.Matches(root, ownershipState, comparer, count, version, snapshot.Value));
+                Pal.Invariant(this.SpecRangeReady);
+                Pal.Invariant(!(this is TreeSubSet) ||
+                    Pal.Same(ownershipState, SortedSetRetainedHolder.State(preservedViewState.Value)));
+                Pal.Invariant(this.SpecRangeTree == SortedSetOwnership.Values(labels.Value) &&
+                    this.SpecRangeComparer == Pal.Old(this.SpecRangeComparer) &&
+                    this.SpecRangeLo == Pal.Old(this.SpecRangeLo) && this.SpecRangeHi == Pal.Old(this.SpecRangeHi));
+                Pal.Invariant(seenNodes == null ||
+                    (HashSet<Node>.SameEquality(null, seenNodes.SpecComparer) && seenNodes.SpecSlots <= Pal.Index(item)));
+                Pal.Invariant(0 <= uniqueFoundCount && 0 <= unfoundCount && uniqueFoundCount + unfoundCount <= Pal.Index(item));
+                Pal.Invariant(Pal.Implies(!Pal.Broke(),
+                    Pal.Implies(returnIfUnfound, unfoundCount == 0) &&
+                    SortedSetFallback.Counts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                        labels.Value, Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount) &&
+                    SortedSetFallback.Seen(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                        labels.Value, Pal.Contents(other), Pal.Index(item), seenNodes == null ? Pal.EmptySeq<Node>() : seenNodes.SpecItems)));
+                Pal.Invariant(Pal.Implies(Pal.Broke(), returnIfUnfound && unfoundCount > 0 &&
+                    SortedSetCount.UnfoundS(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                        SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other)) > 0));
+                SortedSetFallback.Step(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                    labels.Value, Pal.Contents(other), Pal.Index(item) - 1, uniqueFoundCount, unfoundCount);
                 Node? node = FindNode(item);
+                Ghost<Seq<Node>> before = default;
+                Pal.Capture(ref before, seenNodes == null ? Pal.EmptySeq<Node>() : seenNodes.SpecItems);
                 if (node != null)
                 {
                     seenNodes ??= new HashSet<Node>();
+                    Pal.Join(this is TreeSubSet
+                        ? SlProp.Emp
+                        : SortedSetOwnership.Owner(root, ownershipState, Perm.Full));
+                    Pal.Join(seenNodes != null && seenNodes.SpecItems == before.Value &&
+                        HashSet<Node>.SameEquality(null, seenNodes.SpecComparer) && seenNodes.SpecSlots <= Pal.Index(item) - 1);
+                    SortedSetFallback.Lookup(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                        labels.Value, Pal.Contents(other), Pal.Index(item) - 1, before.Value, node, item);
+                    Ghost<IEqualityComparer<Node>?> beforeComparer = default;
+                    Pal.Capture(ref beforeComparer, seenNodes!.SpecComparer);
+                    SortedSetFallback.ReferenceMem(beforeComparer.Value, before.Value, node);
                     if (seenNodes.Add(node))
                     {
+                        SortedSetFallback.Added(before.Value, seenNodes.SpecItems, node);
+                        SortedSetFallback.Hit(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                            labels.Value, Pal.Contents(other), Pal.Index(item) - 1, before.Value, seenNodes.SpecItems, node);
+                        SortedSetFallback.DefaultAfter(beforeComparer.Value, seenNodes.SpecComparer);
                         uniqueFoundCount++;
+                    }
+                    else
+                    {
+                        SortedSetFallback.DefaultAfter(beforeComparer.Value, seenNodes.SpecComparer);
+                        SortedSetFallback.ReferenceMem(seenNodes.SpecComparer, seenNodes.SpecItems, node);
+                        SortedSetFallback.Unchanged(before.Value, node);
+                        SortedSetFallback.Hit(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                            labels.Value, Pal.Contents(other), Pal.Index(item) - 1, before.Value, seenNodes.SpecItems, node);
                     }
                 }
                 else
                 {
+                    SortedSetFallback.Miss(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                        labels.Value, Pal.Contents(other), Pal.Index(item) - 1, before.Value);
                     unfoundCount++;
                     if (returnIfUnfound)
                     {
+                        SortedSetFallback.Done(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                            labels.Value, Pal.Contents(other), Pal.Index(item), uniqueFoundCount, unfoundCount, returnIfUnfound);
                         break;
                     }
                 }
             }
 
+            SortedSetFallback.Finish(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                labels.Value, Pal.Contents(other), uniqueFoundCount, unfoundCount, returnIfUnfound && unfoundCount > 0);
+            SortedSetCount.Counts(comparer, this.SpecRangeLo, this.SpecRangeHi, this.SpecRangeLa, this.SpecRangeUa,
+                SpecSearchTree.Keys(this.SpecRangeTree), Pal.Contents(other));
             result.UniqueCount = uniqueFoundCount;
             result.UnfoundCount = unfoundCount;
             return result;

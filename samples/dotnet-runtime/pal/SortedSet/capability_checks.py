@@ -39,7 +39,7 @@ def fresh():
     sources = [GENERIC / n for n in (
         "SortedSet.cs", "SortedSet.TreeSubSet.cs", "SortedSetEqualityComparer.cs", "SortedDictionary.cs")]
     sources += [COMMON / "GlobalUsings.cs", COMMON / "Scope.cs", *sorted(HERE.glob("*.cs"))]
-    refs = [REF / "out", HERE.parent / "Queue/out", HERE.parent / "Stack/out"]
+    refs = [REF / "out", HERE.parent / "Queue/out", HERE.parent / "Stack/out", HERE.parent / "HashSet/out"]
     run([PALCS, "-o", WORK / "out", "--preview", "--unsafe",
          *[v for p in refs for v in ("--reference", p)], *sources])
     shutil.copy2(HERE / "SortedSetCapability.fst", WORK / "out/SortedSetCapability.fst")
@@ -48,7 +48,7 @@ def fresh():
     targets = ["SortedSetCapability", "Func_SortedSetCapabilityRegression_StaticView"]
     run(["make", "-C", HERE, "PHASE=verify", "OUT=obj/capability/out",
          "CACHE_DIR=obj/capability-fresh/_cache", "REFERENCES_BUILT=1",
-         "REFERENCES=obj/capability-references ../Queue ../Stack",
+         "REFERENCES=obj/capability-references ../Queue ../Stack ../HashSet",
          f"EXTRA_INCLUDES=. {ROOT / 'pulse/_cache'}",
          *[f"obj/capability-fresh/_cache/{n}.fst.checked" for n in targets], "-j10"])
     for name in targets:

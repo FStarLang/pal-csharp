@@ -30,7 +30,7 @@ path.write_text(text[:start] + body + text[end:])
 sources = [path, *[GENERIC / n for n in (
     "SortedSet.TreeSubSet.cs", "SortedSetEqualityComparer.cs", "SortedDictionary.cs")],
     HERE.parent / "common/GlobalUsings.cs", HERE.parent / "common/Scope.cs", *sorted(HERE.glob("*.cs"))]
-refs = [HERE.parent / n / "out" for n in ("List", "Queue", "Stack")]
+refs = [HERE.parent / n / "out" for n in ("List", "Queue", "Stack", "HashSet")]
 subprocess.run([ROOT / "src/Pal.Tool/bin/Debug/net10.0/palcs", "-o", work / "out",
     "--preview", "--unsafe", *[str(v) for p in refs for v in ("--reference", p)], *sources], check=True)
 target = "Func_SortedSet_Enumerator_MoveNext.fst"
@@ -41,7 +41,7 @@ shutil.copytree(positive, work / "deps", ignore=shutil.ignore_patterns(target + 
 cache = work / "_cache"
 cache.mkdir()
 includes = [work / "out", work / "deps", cache, HERE, ROOT / "pulse/_cache", ROOT / "pulse"]
-for name in ("List", "Queue", "Stack", "common"):
+for name in ("List", "Queue", "Stack", "HashSet", "HashCommon", "common"):
     includes += [HERE.parent / name / "_cache", HERE.parent / name / "out"]
 result = subprocess.run([ROOT / "tools/run-fstar.sh", "--force", "--z3refresh", "--z3rlimit", "10",
     "--cache_checked_modules", "--cache_dir", cache,

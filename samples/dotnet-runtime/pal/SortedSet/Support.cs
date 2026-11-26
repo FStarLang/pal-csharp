@@ -2,15 +2,6 @@ using System.Collections.Generic;
 
 namespace System
 {
-    // Stands in for System.Collections' generated resource class. Messages are not
-    // modelled (doc/translation.md R21.7, R25.1), so the strings are placeholders.
-    internal static class Obsoletions
-    {
-        internal const string LegacyFormatterImplMessage = nameof(LegacyFormatterImplMessage);
-        internal const string LegacyFormatterImplDiagId = nameof(LegacyFormatterImplDiagId);
-        internal const string SharedUrlFormat = nameof(SharedUrlFormat);
-    }
-
     internal static class SR
     {
         internal static string Arg_HTCapacityOverflow => nameof(Arg_HTCapacityOverflow);

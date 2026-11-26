@@ -161,6 +161,7 @@ namespace System.Collections.Generic
         // parameter, not `this`: a view of another object is held at that object's heaps
         // (§32), so the view's root keeps its facts between the two calls.
         [Requires("Pal.Compare(s.SpecComparer, lo, hi) <= 0 && s.SpecVersion != -1 && Pal.Contents(other).Length <= int.MaxValue")]
+        [Throws(typeof(ArgumentException), "Pal.Contents(other).Length > 0x7FFFFFC3")]
         [Ensures("(Result.UnfoundCount > 0) == (SortedSetCount.UnfoundRange(s.SpecComparer, lo, hi, true, true, s.SpecItems, Pal.Contents(other)) > 0)")]
         [Ensures("Pal.Implies(!returnIfUnfound || Result.UnfoundCount == 0, Result.UniqueCount == SortedSetCount.FoundRange(s.SpecComparer, lo, hi, true, true, s.SpecItems, Pal.Contents(other)))")]
         internal ElementCount ViewCounts(SortedSet<T> s, T lo, T hi, IEnumerable<T> other, bool returnIfUnfound)

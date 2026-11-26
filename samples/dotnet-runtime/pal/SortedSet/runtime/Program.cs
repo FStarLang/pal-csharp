@@ -48,6 +48,31 @@ var publicRegression = typeof(ActualSet).Assembly
         System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
 Check(!(bool)publicRegression.Invoke(null, null)!);
 
+var largeSet = new ActualSet(Enumerable.Range(0, 256));
+var largeView = largeSet.GetViewBetween(0, 255);
+Check(largeView.Count == 256);
+var maxHeight = typeof(ActualSet).GetMethod("GetApproximateMaxHeight",
+    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+Check((int)maxHeight.Invoke(largeSet, null)! > 12 && (int)maxHeight.Invoke(largeView, null)! > 12);
+var repeated = Enumerable.Range(0, 256).Concat(new[] { 2, 2, 255 }).ToList();
+Check(largeSet.SetEquals(repeated) && largeView.SetEquals(repeated));
+Check(!largeView.SetEquals(new List<int> { 2, 3, 4, 4, 5, 300 }));
+Check(!largeSet.SetEquals(Array.Empty<int>()));
+Check(largeSet.IsSubsetOf(repeated));
+Check(largeSet.IsProperSubsetOf(repeated.Append(300)));
+Check(largeSet.IsProperSupersetOf(new List<int> { 2, 3, 3, 4 }));
+foreach (var (name, expected) in new[]
+{
+    ("LargeViewSetEqualsListFalse", false),
+    ("LargeSetEqualsListTrue", true),
+})
+{
+    var regression = typeof(ActualSet).Assembly
+        .GetType("System.Collections.Generic.SortedSetPublicRegression")!
+        .GetMethod(name, System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+    Check((bool)regression.Invoke(null, null)! == expected);
+}
+
 foreach (var comparer in new[]
 {
     Comparer<int>.Default,

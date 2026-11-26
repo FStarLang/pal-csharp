@@ -9,9 +9,9 @@ PAL_CS_FLAGS := --preview --unsafe
 export PAL_CS_NOWARN := CS0436
 export PAL_CS_UNSAFE := true
 export PAL_CS_EXCLUDE := $(abspath ../common/SR.cs)
-# List, Queue and Stack are units of their own (doc/translation.md §36): referenced, not
+# List, Queue, Stack and HashSet are units of their own (doc/translation.md §36): referenced, not
 # translated again.
-REFERENCES   := ../List ../Queue ../Stack
+REFERENCES   := ../List ../Queue ../Stack ../HashSet
 # The checked branch predicate keeps its representation behind a local F* interface.
 export EXTRA_INCLUDES := .
 

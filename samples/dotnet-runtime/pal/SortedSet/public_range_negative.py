@@ -36,7 +36,7 @@ def run():
         "SortedSet.TreeSubSet.cs", "SortedSetEqualityComparer.cs", "SortedDictionary.cs")],
         HERE.parent / "common/GlobalUsings.cs", HERE.parent / "common/Scope.cs",
         *sorted(HERE.glob("*.cs")), work / "PublicDispatchProbe.cs"]
-    refs = [HERE.parent / name / "out" for name in ("List", "Queue", "Stack")]
+    refs = [HERE.parent / name / "out" for name in ("List", "Queue", "Stack", "HashSet")]
     subprocess.run([public.PALCS, "-o", work / "out", "--preview", "--unsafe",
         *[str(value) for path in refs for value in ("--reference", path)], *sources], check=True)
     shutil.copytree(positive / "_cache", work / "deps",
@@ -46,7 +46,7 @@ def run():
     cache = work / "_cache"
     cache.mkdir()
     includes = [work / "out", work / "deps", cache, HERE, ROOT / "pulse/_cache", ROOT / "pulse"]
-    for name in ("List", "Queue", "Stack", "common"):
+    for name in ("List", "Queue", "Stack", "HashSet", "HashCommon", "common"):
         includes += [HERE.parent / name / "_cache", HERE.parent / name / "out"]
     result = subprocess.run([ROOT / "tools/run-fstar.sh", "--force", "--z3refresh",
         "--cache_checked_modules", "--cache_dir", cache,

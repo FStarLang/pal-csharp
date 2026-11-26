@@ -653,10 +653,15 @@ namespace System.Collections.Generic
                     {
                         processQueue.Enqueue(current!.Left);
                     }
-                    Pal.Join(SortedSetOwnership.HandleWindow(lease.Value, labels.Value, current, Pal.Permission()));
+                    Pal.Join(SortedSetOwnership.HandleOrClosed(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease.Value, labels.Value, current, Pal.Permission(), false));
                     Pal.Join(processQueue.Items == (SortedSetRangeBreadth.TakeLeft<T>(labels.Value, comparer, _min!, _lBoundActive, current)
                         ? Pal.Snoc(Pal.Slice(q0.Value, 1, q0.Value.Length), SortedSetWalk.Near(false, labels.Value, current))
                         : Pal.Slice(q0.Value, 1, q0.Value.Length)));
+                    SortedSetOwnershipProof.ContinueHandle(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease, labels, current, Pal.Permission(), false);
                     Ghost<Seq<Node?>> q1 = default;
                     Pal.Capture(ref q1, processQueue.Items);
                     Pal.Assert(processQueue.SpecCount < int.MaxValue);
@@ -664,10 +669,15 @@ namespace System.Collections.Generic
                     {
                         processQueue.Enqueue(current!.Right);
                     }
-                    Pal.Join(SortedSetOwnership.HandleWindow(lease.Value, labels.Value, current, Pal.Permission()));
+                    Pal.Join(SortedSetOwnership.HandleOrClosed(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease.Value, labels.Value, current, Pal.Permission(), false));
                     Pal.Join(processQueue.Items == (SortedSetRangeBreadth.TakeRight<T>(labels.Value, comparer, _min!, _max!, _uBoundActive, current)
                         ? Pal.Snoc(q1.Value, SortedSetWalk.Far(false, labels.Value, current))
                         : q1.Value));
+                    SortedSetOwnershipProof.ContinueHandle(_underlying,
+                        SortedSetOwnership.Snapshot(Pal.Old(_underlying.SpecSnapshot)),
+                        lease, labels, current, Pal.Permission(), false);
                     Pal.Assert(processQueue.Items == SortedSetRangeBreadth.Next<T>(labels.Value, comparer,
                         _min!, _max!, _lBoundActive, _uBoundActive, q0.Value));
                     SortedSetOwnershipProof.WindowFromHandle(_underlying,
@@ -684,6 +694,7 @@ namespace System.Collections.Generic
             [Ensures("Result == null || SortedSetOwnership.Member(@this._underlying.SpecLabels, Result) && Pal.Compare(@this._underlying.SpecComparer, SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this._underlying.SpecLabels, Result), item), item) == 0")]
             [Ensures("@this.SpecCoherent")]
             [Ensures("Pal.Implies(Pal.Old(@this.SpecCountOk), @this.SpecCountOk)")]
+            [Ensures("Pal.Implies(Pal.Old(@this.SpecRootOk), @this.SpecRootOk)")]
             [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override SortedSet<T>.Node? FindNode(T item)
             {
