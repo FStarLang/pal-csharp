@@ -6,11 +6,12 @@ module N = Class_Node
 module O = SortedSetInductive.Ownership
 module R = SortedSetInductive.Read
 module H = SortedSetInductive.Read.Branch
+module EQ = Pulse.Lib.CSharp.EqualityModel
 open SortedSetInductive.Read.Branch
 
 #set-options "--z3rlimit 5"
 
-ghost fn closed (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn closed (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires R.inv owner snapshot p ** pure returned
@@ -19,7 +20,7 @@ ghost fn closed (#a: Type0) (owner: S.class_SortedSet a)
   H.returned_handle owner snapshot h t x p returned;
 }
 
-ghost fn closed_automatic (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn closed_automatic (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires R.inv owner snapshot p ** pure returned
@@ -28,7 +29,7 @@ ghost fn closed_automatic (#a: Type0) (owner: S.class_SortedSet a)
   ();
 }
 
-ghost fn conditional (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn conditional (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires R.handle_window h t x p ** pure (R.handle_matches h owner snapshot)
@@ -43,7 +44,7 @@ ghost fn conditional (#a: Type0) (owner: S.class_SortedSet a)
   }
 }
 
-ghost fn restored_automatic (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn restored_automatic (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires H.handle_or_closed owner snapshot h t x p returned ** pure returned

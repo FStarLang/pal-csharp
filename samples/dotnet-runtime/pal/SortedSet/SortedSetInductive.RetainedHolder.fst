@@ -11,6 +11,7 @@ module B = Pulse.Lib.Box
 module Q = SortedSetInductive.State
 module C = SortedSetInductive.StateCorrespondence
 module G = Pulse.Lib.GhostReference
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
@@ -22,7 +23,7 @@ let merged (#a: Type0) (old cloned: O.state a) (frame: O.frame_ref) : GTot (O.st
       (O.Forest (O.active old)
         (O.append_retired (O.retired_state old) (O.retired_state cloned))))
 
-ghost fn transfer (#a: Type0) (previous: N.class_Node__opt a) (old: O.state a)
+ghost fn transfer (#a: Type0) {| equality_a: EQ.has_equality a |} (previous: N.class_Node__opt a) (old: O.state a)
     (dummy: S.class_SortedSet a) (m: S.class_SortedSet__model a)
   requires O.owner previous old 1.0R ** S.class_SortedSet__inv dummy m
   returns result: O.state a
@@ -53,7 +54,7 @@ let payload (a: Type0) = O.tree a & O.retired a
 let state_of (#a: Type0) (value: payload a) : Tot (O.state a) = hide value
 let payload_of (#a: Type0) (s: O.state a) : GTot (payload a) = reveal s
 
-ghost fn transfer_payload (#a: Type0) (previous: N.class_Node__opt a) (old: O.state a)
+ghost fn transfer_payload (#a: Type0) {| equality_a: EQ.has_equality a |} (previous: N.class_Node__opt a) (old: O.state a)
     (dummy: S.class_SortedSet a) (m: S.class_SortedSet__model a) (adopted: N.class_Node__opt a)
   requires O.owner previous old 1.0R ** S.class_SortedSet__inv dummy m **
     pure (adopted == O.top (SortedSetInductive.Read.labels m))
@@ -71,7 +72,7 @@ ghost fn transfer_payload (#a: Type0) (previous: N.class_Node__opt a) (old: O.st
 
 // Sharing the transferred owner splits both retained collections and the
 // actual dummy holder box/ghost witness; gathering recovers all of them.
-ghost fn transfer_share_gather (#a: Type0) (previous: N.class_Node__opt a) (old: O.state a)
+ghost fn transfer_share_gather (#a: Type0) {| equality_a: EQ.has_equality a |} (previous: N.class_Node__opt a) (old: O.state a)
     (dummy: S.class_SortedSet a) (m: S.class_SortedSet__model a)
   requires O.owner previous old 1.0R ** S.class_SortedSet__inv dummy m
   returns result: O.state a

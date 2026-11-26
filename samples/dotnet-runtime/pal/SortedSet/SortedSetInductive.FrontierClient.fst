@@ -10,10 +10,12 @@ module D = Pulse.Lib.CSharp.TopDown
 module B = Pulse.Lib.Box
 module M = SortedSetInductive.MergeFrontier
 module R = Pulse.Lib.CSharp.TopDownRemove
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
-fn is2 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
+fn is2 (a: Type0) {| equality_a: EQ.has_equality a |}
+    (x: N.class_Node a) (#n: erased (O.tree a))
   preserves F.read_cells x n
   returns result: bool
   ensures pure (result == R.is2 n)
@@ -27,7 +29,8 @@ fn is2 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
   result
 }
 
-fn merge2 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
+fn merge2 (a: Type0) {| equality_a: EQ.has_equality a |}
+    (x: N.class_Node a) (#n: erased (O.tree a))
   requires F.split_cells x n
   ensures M.after x n
 {
@@ -43,7 +46,8 @@ fn merge2 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
 }
 
 // Exercise the real translated accessors, not replacement implementations.
-fn is4 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
+fn is4 (a: Type0) {| equality_a: EQ.has_equality a |}
+    (x: N.class_Node a) (#n: erased (O.tree a))
   preserves F.read_cells x n
   returns result: bool
   ensures pure (result == D.is4 n)
@@ -57,7 +61,8 @@ fn is4 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
   result
 }
 
-fn split4 (a: Type0) (x: N.class_Node a) (#n: erased (O.tree a))
+fn split4 (a: Type0) {| equality_a: EQ.has_equality a |}
+    (x: N.class_Node a) (#n: erased (O.tree a))
   requires F.split_cells x n
   ensures F.split_after x n
 {

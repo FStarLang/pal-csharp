@@ -9,6 +9,7 @@ module S = Class_SortedSet
 module M = Struct_SortedSetModel
 module N = Class_Node
 module B = Pulse.Lib.Box
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
@@ -49,44 +50,46 @@ ghost fn end_owner (#a: Type0) (root: N.class_Node__opt a)
   Pulse.Lib.Trade.Util.elim _ _;
 }
 
-unfold let inv (#a: Type0) (set: S.class_SortedSet a)
+// Collection handles retain their receiver's equality evidence. The tree-only
+// leases above deliberately do not acquire an equality constraint.
+unfold let inv (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (p: perm) =
   S.class_SortedSet__inv set #p m
 
-let labels (#a: Type0) (m: S.class_SortedSet__model a) = m.M.fld_Labels
+let labels (#a: Type0) {| equality_a: EQ.has_equality a |} (m: S.class_SortedSet__model a) = m.M.fld_Labels
 
-type handle (a: Type0) = S.class_SortedSet a & S.class_SortedSet__model a
+type handle (a: Type0) {| equality_a: EQ.has_equality a |} = S.class_SortedSet a & S.class_SortedSet__model a
 
-let snapshot_of (#a: Type0) (m: S.class_SortedSet__model a)
+let snapshot_of (#a: Type0) {| equality_a: EQ.has_equality a |} (m: S.class_SortedSet__model a)
   : r:S.class_SortedSet__model a{r == m} = m
 
-let handle_of_view (#a: Type0) (view: Struct_SortedSet_TreeSubSet.struct_SortedSet_TreeSubSet a)
+let handle_of_view (#a: Type0) {| equality_a: EQ.has_equality a |} (view: Struct_SortedSet_TreeSubSet.struct_SortedSet_TreeSubSet a)
     (snapshot: S.class_SortedSet__model a) : handle a =
   view.Struct_SortedSet_TreeSubSet.fld__underlying, snapshot
 
-let handle_of_view_facts (#a: Type0) (view: Struct_SortedSet_TreeSubSet.struct_SortedSet_TreeSubSet a)
+let handle_of_view_facts (#a: Type0) {| equality_a: EQ.has_equality a |} (view: Struct_SortedSet_TreeSubSet.struct_SortedSet_TreeSubSet a)
     (snapshot: S.class_SortedSet__model a)
   : Lemma (fst (handle_of_view view snapshot) == view.Struct_SortedSet_TreeSubSet.fld__underlying /\
            snd (handle_of_view view snapshot) == snapshot) = ()
 
-let handle_matches_view (#a: Type0) (h: handle a)
+let handle_matches_view (#a: Type0) {| equality_a: EQ.has_equality a |} (h: handle a)
     (view: Struct_SortedSet_TreeSubSet.struct_SortedSet_TreeSubSet a)
     (snapshot: S.class_SortedSet__model a) : prop =
   fst h == view.Struct_SortedSet_TreeSubSet.fld__underlying /\ snd h == snapshot
 
-unfold let handle_window (#a: Type0) (h: handle a) (t: O.tree a)
+unfold let handle_window (#a: Type0) {| equality_a: EQ.has_equality a |} (h: handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) =
   C.window t x p ** (O.owns t p @==> inv (fst h) (snd h) p)
 
-let handle_matches (#a: Type0) (h: handle a) (owner: S.class_SortedSet a)
+let handle_matches (#a: Type0) {| equality_a: EQ.has_equality a |} (h: handle a) (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) : prop =
   fst h == owner /\ snd h == snapshot
 
-unfold let set_window (#a: Type0) (owner: S.class_SortedSet a)
+unfold let set_window (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm) =
   C.window t x p ** (O.owns t p @==> inv owner snapshot p)
 
-ghost fn window_to_handle (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn window_to_handle (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: handle a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm)
   requires set_window owner snapshot t x p ** pure (handle_matches h owner snapshot)
   ensures handle_window h t x p
@@ -94,7 +97,7 @@ ghost fn window_to_handle (#a: Type0) (owner: S.class_SortedSet a)
   rewrite (set_window owner snapshot t x p) as (handle_window h t x p);
 }
 
-ghost fn window_from_handle (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn window_from_handle (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: handle a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm)
   requires handle_window h t x p ** pure (handle_matches h owner snapshot)
   ensures set_window owner snapshot t x p
@@ -102,11 +105,11 @@ ghost fn window_from_handle (#a: Type0) (owner: S.class_SortedSet a)
   rewrite (handle_window h t x p) as (set_window owner snapshot t x p);
 }
 
-unfold let set_lease (#a: Type0) (set: S.class_SortedSet a)
+unfold let set_lease (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (t: O.tree a) (p: perm) =
   O.owns t p ** (O.owns t p @==> inv set m p)
 
-ghost fn begin_set (#a: Type0) (set: S.class_SortedSet a)
+ghost fn begin_set (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (t: O.tree a) (p: perm)
   requires inv set m p ** pure (t == m.M.fld_Labels)
   ensures set_lease set m t p
@@ -126,8 +129,10 @@ ghost fn begin_set (#a: Type0) (set: S.class_SortedSet a)
     };
 }
 
+// Introduction rules infer evidence from the matched resource, rather than
+// running typeclass search before the element type has been determined.
 [@@pulse_intro]
-ghost fn end_set (#a: Type0) (set: S.class_SortedSet a)
+ghost fn end_set (#a: Type0) (#equality_a: EQ.has_equality a) (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (p: perm)
   requires exists* (t: O.tree a).
     (O.owns t p @==> inv set m p) ** O.owns t p
@@ -141,7 +146,7 @@ ghost fn end_set (#a: Type0) (set: S.class_SortedSet a)
 // restoration trade. Unlike a generic `owns` introduction rule, this cannot
 // recursively try to manufacture the cursor's child-tree ownership.
 [@@pulse_intro]
-ghost fn end_set_window (#a: Type0) (set: S.class_SortedSet a)
+ghost fn end_set_window (#a: Type0) (#equality_a: EQ.has_equality a) (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (p: perm)
   requires exists* (t: O.tree a) (x: N.class_Node__opt a).
     (O.owns t p @==> inv set m p) ** C.window t x p
@@ -155,7 +160,7 @@ ghost fn end_set_window (#a: Type0) (set: S.class_SortedSet a)
 
 // The caller can have exposed the cursor already to read a field. Check that
 // owner restoration still follows from those ordinary resources alone.
-ghost fn end_set_window_unfolded (#a: Type0) (set: S.class_SortedSet a)
+ghost fn end_set_window_unfolded (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm)
   requires C.window t x p ** (O.owns t p @==> inv set m p)
   ensures S.class_SortedSet__inv set #p m

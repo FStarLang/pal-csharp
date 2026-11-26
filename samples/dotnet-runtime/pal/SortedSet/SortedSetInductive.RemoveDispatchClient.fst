@@ -13,10 +13,12 @@ module R = Pulse.Lib.CSharp.TopDownRemove
 module P = Pulse.Lib.CSharp.RegionPath
 module T = Pulse.Lib.CSharp.Tree
 module B = Pulse.Lib.Box
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
-fn nested (#a: Type0) (root current sibling: N.class_Node a)
+fn nested (#a: Type0) {| equality_a: EQ.has_equality a |}
+    (root current sibling: N.class_Node a)
     (n: erased (O.tree a)) (dir: erased bool)
   requires O.owns (reveal n) 1.0R **
     pure (O.good n /\ root == P.top n /\ T.Branch? n /\
@@ -38,7 +40,8 @@ fn nested (#a: Type0) (root current sibling: N.class_Node a)
   pivot
 }
 
-fn nested_recolored (#a: Type0) (root current sibling: N.class_Node a)
+fn nested_recolored (#a: Type0) {| equality_a: EQ.has_equality a |}
+    (root current sibling: N.class_Node a)
     (n: erased (O.tree a)) (dir: erased bool)
   requires O.owns (reveal n) 1.0R **
     pure (O.good n /\ root == P.top n /\ T.Branch? n /\ D.nred n /\

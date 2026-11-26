@@ -5,17 +5,18 @@ module S = Class_SortedSet
 module N = Class_Node
 module O = SortedSetInductive.Ownership
 module R = SortedSetInductive.Read
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 5"
 
 // Both branches retain all permissions; the interface hides only their case split.
-let handle_or_closed (#a: Type0) (owner: S.class_SortedSet a)
+let handle_or_closed (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool) =
   if returned then R.inv owner snapshot p else R.handle_window h t x p
 
 [@@pulse_intro]
-ghost fn returned_handle (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn returned_handle (#a: Type0) (#equality_a: EQ.has_equality a) (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires R.inv owner snapshot p ** pure returned
@@ -25,7 +26,7 @@ ghost fn returned_handle (#a: Type0) (owner: S.class_SortedSet a)
 }
 
 [@@pulse_intro]
-ghost fn continuing_handle (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn continuing_handle (#a: Type0) (#equality_a: EQ.has_equality a) (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires R.handle_window h t x p ** pure (~returned)
@@ -35,7 +36,7 @@ ghost fn continuing_handle (#a: Type0) (owner: S.class_SortedSet a)
 }
 
 [@@pulse_intro]
-ghost fn returned_handle_inv (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn returned_handle_inv (#a: Type0) (#equality_a: EQ.has_equality a) (owner: S.class_SortedSet a)
     (expected: S.class_SortedSet__model a) (p: perm)
   requires exists* (snapshot: S.class_SortedSet__model a) (h: R.handle a)
     (t: O.tree a) (x: N.class_Node__opt a) (returned: bool).
@@ -48,7 +49,7 @@ ghost fn returned_handle_inv (#a: Type0) (owner: S.class_SortedSet a)
   rewrite (handle_or_closed owner snapshot h t x p returned) as (R.inv owner expected p);
 }
 
-ghost fn continuing_handle_window (#a: Type0) (owner: S.class_SortedSet a)
+ghost fn continuing_handle_window (#a: Type0) {| equality_a: EQ.has_equality a |} (owner: S.class_SortedSet a)
     (snapshot: S.class_SortedSet__model a) (h: R.handle a) (t: O.tree a)
     (x: N.class_Node__opt a) (p: perm) (returned: bool)
   requires handle_or_closed owner snapshot h t x p returned ** pure (~returned)

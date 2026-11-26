@@ -12,14 +12,16 @@ module M = Struct_SortedSetModel
 module N = Class_Node
 module B = Pulse.Lib.Box
 module T = Pulse.Lib.CSharp.Tree
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
-let observation (#a: Type0) (m: S.class_SortedSet__model a) = m.M.fld_Observation
+let observation (#a: Type0) {| equality_a: EQ.has_equality a |} (m: S.class_SortedSet__model a) = m.M.fld_Observation
 
 // An opened owner may be re-abstracted by a readonly call. The loop preserves
 // this observable model equality, NOT identity of its private retired witness.
-let matches (#a: Type0) (root: N.class_Node__opt a) (s: O.state a)
+// Keep the record equality transparent at generated loop and branch joins.
+unfold let matches (#a: Type0) {| equality_a: EQ.has_equality a |} (root: N.class_Node__opt a) (s: O.state a)
     (c: Pulse.Lib.CSharp.Order.comparer a) (count version: int) (m: S.class_SortedSet__model a) =
   m == { M.fld_Tree=O.values (O.active s); M.fld_Comparer=c; M.fld_Count=count;
          M.fld_Version=version; M.fld_Root=root; M.fld_Labels=O.active s; M.fld_Observation=Q.observe s }
@@ -27,7 +29,7 @@ let matches (#a: Type0) (root: N.class_Node__opt a) (s: O.state a)
 // Ordinary C# field reads expose the owner before a proof operation. Closing
 // it uses the actual raw record and its existing abstraction equality.
 [@@pulse_intro]
-ghost fn refold_owner (#a: Type0) (set: S.class_SortedSet a) (p: perm)
+ghost fn refold_owner (#a: Type0) (#equality_a: EQ.has_equality a) (set: S.class_SortedSet a) (p: perm)
     (m: S.class_SortedSet__model a)
   requires exists* (r: S.class_SortedSet__raw a).
     B.pts_to set #p r ** O.owner r.S.fld_root r.S.fld_ownershipState p **
@@ -38,7 +40,7 @@ ghost fn refold_owner (#a: Type0) (set: S.class_SortedSet a) (p: perm)
   fold (S.class_SortedSet__inv set #p m);
 }
 
-ghost fn root_facts (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
+ghost fn root_facts (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
     (h: Q.observation a) (t: O.tree a) (p: perm)
   preserves I.inv set m p
   requires pure (h == observation m /\ t == m.M.fld_Labels)
@@ -52,7 +54,7 @@ ghost fn root_facts (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet
   fold (I.inv set m p);
 }
 
-ghost fn node_facts (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
+ghost fn node_facts (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
     (h: Q.observation a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm)
   preserves I.inv set m p
   requires pure (h == observation m /\ t == m.M.fld_Labels /\ (B.is_null x \/ O.member t x))
@@ -66,7 +68,7 @@ ghost fn node_facts (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet
   fold (I.inv set m p);
 }
 
-unfold let window (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
+unfold let window (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
     (h: Q.observation a) (x: N.class_Node__opt a) (p: perm) =
   exists* (v: N.class_Node__raw a).
     O.raw x v p ** (O.raw x v p @==> I.inv set m p) **
@@ -74,7 +76,7 @@ unfold let window (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__
       Q.tree_at h x == T.Branch (Q.tree_n (fst h) h (O.left v)) (O.entry v)
                                (Q.tree_n (fst h) h (O.right v)))
 
-ghost fn open_set (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
+ghost fn open_set (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
     (h: Q.observation a) (x: N.class_Node__opt a) (p: perm)
   requires I.inv set m p ** pure (h == observation m /\ Q.mem h x)
   ensures window set m h x p
@@ -96,7 +98,7 @@ ghost fn open_set (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__
     };
 }
 
-ghost fn close_set (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
+ghost fn close_set (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (m: S.class_SortedSet__model a)
     (h: Q.observation a) (x: N.class_Node__opt a) (p: perm)
   requires window set m h x p
   ensures I.inv set m p
@@ -109,7 +111,7 @@ ghost fn close_set (#a: Type0) (set: S.class_SortedSet a) (m: S.class_SortedSet_
 // The unchanged C# `return _current.Item` closes this read window in the
 // ordinary return epilogue. The captured raw owner/model is restored exactly.
 [@@pulse_intro]
-ghost fn close_return (#a: Type0) (set: S.class_SortedSet a)
+ghost fn close_return (#a: Type0) (#equality_a: EQ.has_equality a) (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (p: perm)
   requires exists* (x: N.class_Node__opt a) (v: N.class_Node__raw a).
     O.raw x v p ** (O.raw x v p @==> I.inv set m p)
@@ -122,7 +124,7 @@ ghost fn close_return (#a: Type0) (set: S.class_SortedSet a)
 
 // Short-circuit child reads may follow a call that already restored the owner.
 [@@pulse_intro]
-ghost fn auto_read (#a: Type0) (x: N.class_Node__opt a) (set: S.class_SortedSet a)
+ghost fn auto_read (#a: Type0) (#equality_a: EQ.has_equality a) (x: N.class_Node__opt a) (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a{Q.mem (observation m) x}) (p: perm)
   requires S.class_SortedSet__inv set #p m
   ensures B.pts_to x #p (Q.get (observation m) x) **

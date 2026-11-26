@@ -11,6 +11,7 @@ module M = Struct_SortedSetModel
 module N = Class_Node
 module P = Pulse.Lib.CSharp.RegionPath
 module T = Pulse.Lib.CSharp.Tree
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
@@ -52,14 +53,14 @@ ghost fn close_tree (#a: Type0) (t: O.tree a) (p: perm)
   elim (O.raw x v p) (O.owns t p);
 }
 
-unfold let point (#a: Type0) (set: S.class_SortedSet a)
+unfold let point (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm) =
   exists* (v: N.class_Node__raw a).
     O.raw x v p ** (O.raw x v p @==> I.inv set m p) **
     pure (O.lookup t x ==
       T.Branch (O.lookup t v.N.fld_Left) (O.entry v) (O.lookup t v.N.fld_Right))
 
-ghost fn open_set (#a: Type0) (set: S.class_SortedSet a)
+ghost fn open_set (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (t: O.tree a) (x: N.class_Node__opt a) (p: perm)
   requires I.inv set m p ** pure (t == m.M.fld_Labels /\ O.good t /\ O.member t x)
   ensures point set m t x p
@@ -81,7 +82,7 @@ ghost fn open_set (#a: Type0) (set: S.class_SortedSet a)
 }
 
 [@@pulse_intro; allow_ambiguous]
-ghost fn close_return (#a: Type0) (set: S.class_SortedSet a)
+ghost fn close_return (#a: Type0) (#equality_a: EQ.has_equality a) (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (p: perm)
   requires exists* (x: N.class_Node__opt a) (v: N.class_Node__raw a).
     O.raw x v p ** (O.raw x v p @==> I.inv set m p)

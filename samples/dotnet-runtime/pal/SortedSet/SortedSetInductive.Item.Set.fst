@@ -13,27 +13,28 @@ module M = Struct_SortedSetModel
 module N = Class_Node
 module ST = Pulse.Lib.CSharp.SearchTree
 module Seq = FStar.Seq
+module EQ = Pulse.Lib.CSharp.EqualityModel
 
 #set-options "--z3rlimit 10"
 
-noeq type ticket (a: Type0) = {
+noeq type ticket (a: Type0) {| equality_a: EQ.has_equality a |} = {
   holder: I.holder_snapshot a;
   node: N.class_Node__raw a;
   model: S.class_SortedSet__model a;
 }
 
-noeq type result (a: Type0) = {
+noeq type result (a: Type0) {| equality_a: EQ.has_equality a |} = {
   payload: H.payload a;
   after: S.class_SortedSet__model a;
 }
 
-let holder_of (#a: Type0) (q: ticket a) = q.holder
-let node_of (#a: Type0) (q: ticket a) = q.node
-let model_of (#a: Type0) (q: ticket a) = q.model
-let payload_of (#a: Type0) (r: result a) = r.payload
-let model_after (#a: Type0) (r: result a) = r.after
+let holder_of (#a: Type0) {| equality_a: EQ.has_equality a |} (q: ticket a) = q.holder
+let node_of (#a: Type0) {| equality_a: EQ.has_equality a |} (q: ticket a) = q.node
+let model_of (#a: Type0) {| equality_a: EQ.has_equality a |} (q: ticket a) = q.model
+let payload_of (#a: Type0) {| equality_a: EQ.has_equality a |} (r: result a) = r.payload
+let model_after (#a: Type0) {| equality_a: EQ.has_equality a |} (r: result a) = r.after
 
-unfold let rest (#a: Type0) (set: S.class_SortedSet a) (x: N.class_Node__opt a)
+unfold let rest (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (x: N.class_Node__opt a)
     (q: ticket a) =
   I.raw set q.holder **
   O.retained (O.retired_state q.holder.S.fld_ownershipState) 1.0R **
@@ -42,7 +43,7 @@ unfold let rest (#a: Type0) (set: S.class_SortedSet a) (x: N.class_Node__opt a)
     O.member q.model.M.fld_Labels x /\
     O.item q.node == ST.root_key (O.lookup q.model.M.fld_Labels x) (O.item q.node))
 
-ghost fn open_set (#a: Type0) (set: S.class_SortedSet a)
+ghost fn open_set (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a)
     (m: S.class_SortedSet__model a) (x: N.class_Node__opt a)
   requires SortedSetInductive.Read.inv set m 1.0R ** pure (O.member m.M.fld_Labels x)
   returns q: erased (ticket a)
@@ -62,7 +63,7 @@ ghost fn open_set (#a: Type0) (set: S.class_SortedSet a)
   hide ({ holder=r; node=reveal v; model=m })
 }
 
-ghost fn finish (#a: Type0) (set: S.class_SortedSet a) (x: N.class_Node__opt a)
+ghost fn finish (#a: Type0) {| equality_a: EQ.has_equality a |} (set: S.class_SortedSet a) (x: N.class_Node__opt a)
     (q: ticket a) (item: a)
   requires rest set x q ** O.raw x (P.with_item q.node item) 1.0R **
     pure (U.equivalent q.model.M.fld_Comparer (O.item q.node) item)

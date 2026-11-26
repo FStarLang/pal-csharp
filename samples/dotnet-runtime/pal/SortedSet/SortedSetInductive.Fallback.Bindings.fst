@@ -105,30 +105,30 @@ let finish (#a: Type0) (c: O.comparer a) (los his: Seq.seq a) (la ua: bool)
         (not stopped ==> unique == Count.found_s c los his la ua (ST.keys (Own.values tree)) all))
   = if not stopped then done_ c los his la ua tree all (Seq.length all) unique unfound false
 
-let node_mem (#a: Type0) (nodes: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a) =
+let node_mem (a: Type0) (nodes: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a) =
   F.node_mem nodes node
 
-let reference_mem (#a: Type0) (comparer: option (E.comparer (N.class_Node__opt a)))
+let reference_mem (a: Type0) (comparer: option (E.comparer (N.class_Node__opt a)))
     (nodes: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a)
   : Lemma
       (requires H.same_equality #(N.class_Node__opt a) #(E.reference_equality (N.class_Node__raw a)) None comparer)
       (ensures H.mem #(N.class_Node__opt a) #(E.reference_equality (N.class_Node__raw a)) comparer nodes node
-               <==> node_mem nodes node)
+               <==> node_mem a nodes node)
   = Ref.mem comparer nodes node
 
-let added (#a: Type0) (before after: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a)
+let added (a: Type0) (before after: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a)
   : Lemma (requires H.added before after node)
           (ensures forall (p: N.class_Node__opt a).
-            node_mem after p == (R.eq_box p node || node_mem before p))
+            node_mem a after p == (R.eq_box p node || node_mem a before p))
   = Ref.added before after node
 
-let unchanged (#a: Type0) (nodes: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a)
-  : Lemma (requires node_mem nodes node)
+let unchanged (a: Type0) (nodes: Seq.seq (N.class_Node__opt a)) (node: N.class_Node__opt a)
+  : Lemma (requires node_mem a nodes node)
           (ensures forall (p: N.class_Node__opt a).
-            node_mem nodes p == (R.eq_box p node || node_mem nodes p))
+            node_mem a nodes p == (R.eq_box p node || node_mem a nodes p))
   = Ref.unchanged nodes node
 
-let default_after (#a: Type0) (before after: option (E.comparer (N.class_Node__opt a)))
+let default_after (a: Type0) (before after: option (E.comparer (N.class_Node__opt a)))
   : Lemma
       (requires
         H.same_equality #(N.class_Node__opt a) #(E.reference_equality (N.class_Node__raw a)) None before /\
