@@ -111,7 +111,20 @@ public sealed record IrSpanType(IrType Element) : IrType
 /// </summary>
 public sealed record IrEnumerableType(IrType Element, bool Collection) : IrType
 {
+    public IrEnumerationSchema? Capability { get; init; }
+    /// <summary>A target-relative, source-owning loan for one nominal model class.</summary>
+    public IrClassType? CastTarget { get; init; }
+    /// <summary>Declared pure [Spec] enumeration projection; null is the identity
+    /// projection when the complete model itself is a sequence.</summary>
+    public string? CastProjection { get; init; }
     protected override string Describe() => Collection ? $"ICollection<{Element}>" : $"IEnumerable<{Element}>";
+}
+
+/// <summary>A linear, source-retaining nominal iterator, never a concrete struct alias.</summary>
+public sealed record IrNominalIteratorType(IrType Element, string Source,
+    IrIterationSchema Protocol) : IrType
+{
+    protected override string Describe() => $"nominal iterator of {Source}";
 }
 
 /// <summary>The spec-only ghost box <c>Ghost&lt;T&gt;</c>.</summary>
@@ -127,6 +140,7 @@ public sealed record IrGhostType(IrType Inner) : IrType
 /// </summary>
 public sealed record IrClassType(string Name, bool Nullable = false) : IrType
 {
+    public bool EqualityStorage { get; init; }
     protected override string Describe()
     {
         var head = TypeArguments.IsEmpty
@@ -172,12 +186,15 @@ public sealed record IrSpecListType(IrType Element) : IrType
 /// </summary>
 public sealed record IrUserSpecType(string Name, string FStar, ImmutableArray<IrType> Args) : IrType
 {
+    public string? BoxFunction { get; init; }
+    public string? OptionalBoxFunction { get; init; }
     protected override string Describe() =>
         Args.IsEmpty ? Name : $"{Name}<{string.Join(", ", Args)}>";
 }
 
 public sealed record IrNamedType(string Name) : IrType
 {
+    public bool EqualityStorage { get; init; }
     protected override string Describe() =>
         TypeArguments.IsEmpty ? Name : $"{Name}<{string.Join(", ", TypeArguments)}>";
 
@@ -283,6 +300,10 @@ public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> A
 /// </summary>
 public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
 {
+    /// <summary>Bound implicit operands after explicit type arguments, before values.</summary>
+    public int ImplicitArguments { get; init; }
+    /// <summary>A model-specific conversion to object, including a custom boxing binding.</summary>
+    public bool IsObjectBox { get; init; }
     /// <summary>
     /// The declared type of each argument's parameter, positionally, or empty when the
     /// operation is not a method (a property has no parameters to declare). R10.2b/R10.2c
@@ -310,6 +331,13 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// `I32.t` <c>i</c>, not about <c>I32.v i</c>.
     /// </summary>
     public bool MachineArgs { get; init; }
+
+    /// <summary>
+    /// Arguments declared as a type parameter and instantiated at a machine
+    /// integer. Substitution preserves the element type: T=int is I32.t, not
+    /// the mathematical int used by explicitly numeric specification parameters.
+    /// </summary>
+    public ImmutableArray<int> GenericValueArgs { get; init; } = [];
 
     /// <summary>
     /// R11.3. When this is a <c>[SpecCtor]</c>, the F* name of its type's <em>empty</em>
@@ -530,9 +558,19 @@ public sealed record IrLambdaRef(IrLoc Loc, string Method, ImmutableArray<IrExpr
 /// </summary>
 public sealed record IrCallback(IrClassType Region, IrType View, IrType Result)
 {
+    /// <summary>A user-defined borrow instead of the legacy implicit region borrow.</summary>
+    public IrCallbackBorrow? Borrow { get; init; }
+
     /// <summary>R32.11. <c>[Callback(Bounded = true)]</c>: the caller passes a bound on the calls.</summary>
     public bool Bounded { get; init; }
 }
+
+public sealed record IrCallbackBorrow(
+    string SnapshotName, IrType SnapshotType, IrExpr Ownership, IrExpr Observation);
+
+/// <summary>Instantiate a callback's observation at its argument and borrowed snapshot.</summary>
+public sealed record IrCallbackObservation(
+    IrLoc Loc, IrCallbackBorrow Borrow, IrExpr Argument, IrExpr Snapshot) : IrExpr(Loc);
 
 /// <summary>
 /// R27.39. A lifted lambda: its first parameter is the trace, its last the node, and the
@@ -650,6 +688,7 @@ public sealed record IrBlock(IrLoc Loc, ImmutableArray<IrStmt> Statements) : IrS
 
 public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? Init) : IrStmt(Loc)
 {
+    public bool GhostOnly { get; init; }
     /// <summary>
     /// Set on R13.3's snapshot of an incremented variable. Such a binding is written
     /// once and read once, so it is an immutable <c>let</c> rather than R5.2's cell —
@@ -676,7 +715,10 @@ public sealed record IrLocalDecl(IrLoc Loc, string Name, IrType Type, IrExpr? In
     public string? HeldOwner { get; init; }
 }
 
-public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc);
+public sealed record IrAssign(IrLoc Loc, IrExpr Target, IrExpr Value) : IrStmt(Loc)
+{
+    public bool GhostOnly { get; init; }
+}
 
 public sealed record IrIf(IrLoc Loc, IrExpr Cond, IrStmt Then, IrStmt? Else) : IrStmt(Loc)
 {
@@ -823,9 +865,51 @@ public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, 
 /// statement's call (an <see cref="IrEnumerableType"/> of the node's type), and taken back after it.</item>
 /// </list>
 /// </summary>
-public enum EnumOpKind { Count, Start, MoveNext, Current, Lend }
+public sealed record IrEnumerationSchema(string LengthGetter, string Items, string ScalarGetter,
+    string Scalar, IrType ScalarType)
+{
+    public IrIterationSchema? Iteration { get; init; }
+}
 
-public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+public sealed record IrIterationSchema(string Factory, string Ready, string Pending,
+    string CurrentItems, string Valid)
+{
+    public string? Evidence { get; init; }
+}
+
+/// <summary>Checked installer inputs. Projections are spec IR, not user-provided Pulse.</summary>
+public sealed record IrEnumerationInstallation(string Module, ImmutableArray<string> TypeParameters,
+    IrEnumerableType Enumerable, IrClassType Owner, IrNamedType? View, string? OwnerField,
+    IrExpr Items, IrExpr Scalar, string LengthMethod, string ScalarMethod,
+    ImmutableArray<IrType> LengthTypeArguments, ImmutableArray<IrType> ScalarTypeArguments)
+{
+    // False only with exact-source nominal disjointness evidence. Missing
+    // observations or enumeration evidence never authorize an absent API.
+    public bool Matches { get; init; } = true;
+    public IrEnumerationCursor? Cursor { get; init; }
+    public ImmutableArray<string> DefaultedTypes { get; init; } = [];
+}
+
+public sealed record IrEnumerationCursor(IrNamedType Type, string OwnerField,
+    IrExpr Ready, IrExpr Pending, IrExpr Current, IrExpr Valid,
+    IrCall Factory, IrCall Next, IrCall Value, IrCall Dispose,
+    ImmutableArray<(string Field, string Local, IrClassType Type)> Owned)
+{
+    public ImmutableDictionary<string, IrType> SpecTypes { get; init; } = ImmutableDictionary<string, IrType>.Empty;
+}
+
+public enum EnumOpKind { Count, Start, MoveNext, Current, Lend, Matches, OpenMatch, CloseMatch, Forward, Observation,
+    IteratorStart, IteratorNext, IteratorValue, IteratorDispose }
+
+public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
+{
+    /// <summary>Nominal CLR classification established at a sealed source call site,
+    /// never inferred by the emitter from representation or generated names.</summary>
+    public bool? CastMatch { get; init; }
+    public string? SourceProjection { get; init; }
+    public IrEnumerationInstallation? Installation { get; init; }
+    public bool ScalarObservation { get; init; }
+}
 
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 {
@@ -872,6 +956,8 @@ public sealed record IrGhostStmt(IrLoc Loc, GhostKind Kind, IrExpr? Prop, string
 {
     /// <summary>R24.12. For <see cref="GhostKind.Let"/>, the ghost local's type.</summary>
     public IrType? Type { get; init; }
+    /// <summary>A named ghost-parameter snapshot already has an erased binder.</summary>
+    public bool ErasedSource { get; init; }
 }
 
 // ---------------------------------------------------------------------------
@@ -887,6 +973,8 @@ public sealed record IrParam(
     ParamMode Mode)
 {
     public bool IsGhost { get; init; }
+    /// <summary>A contract-only [GhostArg] binder, inferred even on ghost lemmas.</summary>
+    public bool InferredGhost { get; init; }
     /// <summary>R20.12. Stands for a readonly receiver field, so it is never written.</summary>
     public bool IsContext { get; init; }
     /// <summary>Ownership is transferred to the callee (<c>[Consumes]</c>).</summary>
@@ -1036,6 +1124,9 @@ public sealed record IrSpecFunction(
 
 public sealed record IrFieldDecl(IrLoc Loc, string Name, IrType Type)
 {
+    /// <summary>Logical storage only: the actual F* type must be structurally erased.</summary>
+    public bool IsGhost { get; init; }
+
     /// <summary>R10.10. A back pointer: constrained by the invariant, not owned by it.</summary>
     public bool IsBackward { get; init; }
 
@@ -1154,6 +1245,8 @@ public sealed record IrClass(
     ImmutableArray<IrExpr> Invariants,
     ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name)
 {
+    /// <summary>Plain storage can itself contain an evidence-indexed owner.</summary>
+    public bool EqualityStorage { get; init; }
     /// <summary>R15.1. The class's own type parameters, in declaration order.</summary>
     public ImmutableArray<string> TypeParameters { get; init; } = [];
 
@@ -1164,6 +1257,13 @@ public sealed record IrClass(
     /// said by the user, in a predicate the user also wrote.
     /// </summary>
     public bool IsPlain { get; init; }
+
+    /// <summary>
+    /// The source type is a sealed plain reference class directly inheriting object,
+    /// without an Equals override or IEquatable implementation. This is nominal
+    /// evidence, never inferred from the class's Box storage representation.
+    /// </summary>
+    public bool HasReferenceDefaultEquality { get; init; }
 
     /// <summary>
     /// R27.3. <c>[Region]</c>: a plain class whose objects an owner holds as one region.

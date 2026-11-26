@@ -14,12 +14,17 @@ noeq type array (t: Type0) = {
   raw_storage: (a: Raw.array t {
     (Raw.is_null a ==> I32.v raw_count == 0) /\
     (not (Raw.is_null a) ==> Raw.length a == I32.v raw_count)
+  });
+  backing: (v:option (V.vec t) {
+    match v with
+    | None -> Raw.is_null raw_storage
+    | Some v -> raw_storage == V.vec_to_array v /\ V.is_full_vec v
   })
 }
 
-let count (#t: Type0) (a: array t) = a.raw_count
+let count (#t: Type0) (a: array t) : n:I32.t { I32.v n >= 0 } = a.raw_count
 let storage (#t: Type0) (a: array t) = a.raw_storage
-let null (#t: Type0) : array t = { raw_count = 0l; raw_storage = Raw.null }
+let null (#t: Type0) : array t = { raw_count = 0l; raw_storage = Raw.null; backing = None }
 
 let pts_to (#t: Type0) ([@@@mkey] a: array t)
   (#[T.exact (`1.0R)] p: perm) (s: Seq.seq t) : slprop =
@@ -129,10 +134,25 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
   V.to_array_pts_to v;
   rewrite each (V.vec_to_array v) as raw;
   Raw.pts_to_not_null raw;
-  let a: array t = { raw_count = n; raw_storage = raw };
+  let a: array t = { raw_count = n; raw_storage = raw; backing = Some v };
   rewrite each raw as (storage a);
   of_raw a;
   a
+}
+
+fn free (#t: Type0) (a: array t) (#s: Ghost.erased (Seq.seq t))
+  requires pts_to a s
+{
+  to_raw a;
+  Raw.pts_to_not_null (storage a);
+  match a.backing {
+    None -> { unreachable (); }
+    Some v -> {
+      rewrite (Raw.pts_to (storage a) s) as (Raw.pts_to (V.vec_to_array v) s);
+      V.to_vec_pts_to v;
+      V.free v;
+    }
+  }
 }
 
 fn memcpy_l (#t: Type0) (n: SZ.t)

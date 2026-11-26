@@ -1,0 +1,45 @@
+using System;
+using PalLang;
+
+[Plain]
+public sealed class JoinCell { public int value; }
+
+[SpecType("Class_JoinCell.class_JoinCell__raw")]
+public readonly struct JoinSnapshot { }
+
+public static class JoinSpec
+{
+    [SpecOp("Pulse.Lib.Box.pts_to")]
+    public static SlProp Held(JoinCell? cell, JoinSnapshot record) => throw new InvalidOperationException();
+}
+
+public static class PlainJoinResourceNegative
+{
+    public static void Terminal(bool choose)
+    {
+        if (choose) { }
+        else { }
+        Pal.Join(false);
+    }
+
+    public static void Loop(bool choose)
+    {
+        int i = 0;
+        while (i < 1)
+        {
+            Pal.Invariant(0 <= i && i <= 1);
+            Pal.Decreases(1 - i);
+            i++;
+            if (choose) { }
+            else { }
+            Pal.Join(false);
+        }
+    }
+
+    public static void Forge(JoinCell? cell, Ghost<JoinSnapshot> record)
+    {
+        if (cell != null) { }
+        else { }
+        Pal.Join(JoinSpec.Held(cell, record.Value));
+    }
+}

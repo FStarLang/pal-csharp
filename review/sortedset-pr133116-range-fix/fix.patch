@@ -1,0 +1,12 @@
+diff --git a/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs b/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+--- a/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
++++ b/src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+@@ -1409,7 +1409,7 @@
+ 
+             foreach (T item in other)
+             {
+-                int index = InternalIndexOf(item);
++                int index = IsWithinRange(item) ? InternalIndexOf(item) : -1;
+                 if ((uint)index < (uint)indexLimit) // Equivalent of "index >= 0 && index < indexLimit"
+                 {
+                     if (!bitHelper.IsMarked(index))

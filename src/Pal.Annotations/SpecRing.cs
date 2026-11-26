@@ -145,10 +145,12 @@ public static class SpecRing
     public static SpecInt LastFrom<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
 
     /// <summary>A lemma: a forward search from <paramref name="i"/> (at least 0) is -1 past the end, <paramref name="i"/> when the element there matches, and the search from <c>i + 1</c> otherwise.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RegionRing.find_step")]
     public static void FindStep<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
 
     /// <summary>A lemma: a backward search from <paramref name="i"/> (before the end) is -1 before 0, <paramref name="i"/> when the element there matches, and the search from <c>i - 1</c> otherwise.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.RegionRing.last_step")]
     public static void LastStep<T>(Seq<T> s, T value, SpecInt i) => throw Ghost();
 

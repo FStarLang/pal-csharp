@@ -26,6 +26,7 @@ public enum TermKind
 /// <summary>A Pulse term together with what it denotes.</summary>
 public readonly record struct Term(string Text, TermKind Kind, IrType? Type = null)
 {
+    public bool OptionalOwner { get; init; }
     public override string ToString() => Text;
 }
 
@@ -39,6 +40,8 @@ public static class Names
     public static string Local(string name) => name == "result" ? "var_result'" : "var_" + name;
     public static string Argument(string name) => "arg_" + name;
     public static string Function(string name) => "func_" + name;
+    public static string FunctionOutcome(string name) => Function(name) + "__outcome";
+    public static string FunctionNoThrow(string name) => Function(name) + "__nothrow";
     public static string SpecFunction(string name) => "spec_" + name;
     public static string Lemma(string name) => "lemma_" + name;
     public static string FunctionModule(string name) => "Func_" + name;
@@ -461,23 +464,28 @@ public static class Types
         // whole array.
         IrSpanType s => $"Span.span {Atom(s.Element)}",
         // R34.1. An enumerable argument is the abstract `enumerable`, lent read-only.
+        IrNominalIteratorType => "FStar.Dyn.dyn",
+        IrEnumerableType { Capability: not null } e =>
+            $"{EnumerableAdapter.Capability}.enumerable {Atom(e.Element)}",
+        IrEnumerableType { CastTarget: { } c } e =>
+            $"{EnumerableAdapter.Module}.enumerable {Atom(c)} ({EnumerableAdapter.ModelType(c)}) {Atom(e.Element)}",
         IrEnumerableType e => $"Pulse.Lib.CSharp.Enumerable.enumerable {Atom(e.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),
-        IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments),
+        IrNamedType n => Applied($"{Names.StructModule(n.Name)}.{Names.StructType(n.Name)}", n.TypeArguments, n.EqualityStorage),
         // R14.4. A type parameter is a type like any other; only its name changes.
         IrTypeParamType t => Names.TypeParam(t.Name),
         // R10.2. A nullable reference is `class_C__opt`, named through the class's own
         // abbreviation so that every rule below reads the same whether or not the class
         // is recursive.
         IrClassType { Nullable: true } c =>
-            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}", c.TypeArguments),
+            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassOpt(c.Name)}", c.TypeArguments, !c.Plain || c.EqualityStorage),
         IrClassType c =>
-            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}", c.TypeArguments),
+            Applied($"{Names.ClassModule(c.Name)}.{Names.ClassType(c.Name)}", c.TypeArguments, !c.Plain || c.EqualityStorage),
         IrSpecListType l => $"list {Atom(l.Element)}",
         // R27.21. A region's heap maps its boxes to the class's record, not to the class.
         IrUserSpecType { FStar: "Pulse.Lib.CSharp.Region.heap", Args: [IrClassType k] } =>
-            $"Pulse.Lib.CSharp.Region.heap {Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments)}",
+            $"Pulse.Lib.CSharp.Region.heap {Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments, k.EqualityStorage)}",
         IrUserSpecType u => u.Args.IsEmpty
             ? u.FStar
             : $"{u.FStar} {string.Join(" ", u.Args.Select(Atom))}",
@@ -511,8 +519,10 @@ public static class Types
     /// where the bare application would associate wrongly.
     /// A nullary application is left bare, so every pre-M9 emission is unchanged.
     /// </summary>
-    public static string Applied(string head, ImmutableArray<IrType> args) =>
-        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Atom))})";
+    public static string Applied(string head, ImmutableArray<IrType> args, bool withEquality = false) =>
+        args.IsEmpty ? head : $"({head} {string.Join(" ", args.Select(Atom))}" +
+            (withEquality ? string.Concat(args.Select(a => a is IrTypeParamType t
+                ? " #equality_" + Names.TypeParam(t.Name) : " #_")) : "") + ")";
 
     /// <summary>The literal syntax for a value of a machine-integer type.</summary>
     /// <summary>R20.3. An F* string literal. F* strings are UTF-8; only the escapes it reads are used.</summary>
@@ -583,28 +593,32 @@ public static class Types
 /// parameter, so writing it again would be writing the same thing twice, and leaving it
 /// implicit is what keeps every emitted *call site* unchanged from the monomorphic case.
 /// </summary>
-internal readonly record struct TypeBinders(ImmutableArray<string> Parameters)
+internal readonly record struct TypeBinders(ImmutableArray<string> Parameters, bool WithEquality = false)
 {
     public static readonly TypeBinders None = new([]);
 
-    public static TypeBinders Of(IrClass c) => new(c.TypeParameters);
+    public static TypeBinders Of(IrClass c) => new(c.TypeParameters, !c.IsPlain || c.EqualityStorage);
 
     public bool IsEmpty => Parameters.IsEmpty;
 
     /// <summary>Explicit binders, with a leading space: <c> (ty_T: Type0)</c>.</summary>
-    public string Explicit => Render(p => $"({p}: Type0)");
+    public string Explicit => Render(p => $"({p}: Type0)") + (WithEquality ? Equality : "");
 
     /// <summary>Implicit binders, with a leading space: <c> (#ty_T: Type0)</c>.</summary>
-    public string Implicit => Render(p => $"(#{p}: Type0)");
+    public string Implicit => Render(p => $"(#{p}: Type0)") + (WithEquality ? Equality : "");
+
+    public string Equality => Render(p => $"{{| equality_{p}: Pulse.Lib.CSharp.EqualityModel.has_equality {p} |}}");
 
     /// <summary>The parameters as arguments, with a leading space: <c> ty_T</c>.</summary>
     public string Arguments => Render(p => p);
+    public string ImplicitArguments => Render(p => "#" + p);
 
     /// <summary>
     /// A head applied to the parameters, parenthesised. The parentheses matter: the
     /// result appears in argument position (<c>B.box (class_C__raw ty_T)</c>).
     /// </summary>
-    public string App(string head) => IsEmpty ? head : $"({head}{Arguments})";
+    public string App(string head) => IsEmpty ? head :
+        $"({head}{Arguments}{(WithEquality ? Render(p => "#equality_" + p) : "")})";
 
     private string Render(System.Func<string, string> f) => IsEmpty
         ? ""

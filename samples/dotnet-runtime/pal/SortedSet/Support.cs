@@ -2,17 +2,9 @@ using System.Collections.Generic;
 
 namespace System
 {
-    // Stands in for System.Collections' generated resource class. Messages are not
-    // modelled (doc/translation.md R21.7, R25.1), so the strings are placeholders.
-    internal static class Obsoletions
-    {
-        internal const string LegacyFormatterImplMessage = nameof(LegacyFormatterImplMessage);
-        internal const string LegacyFormatterImplDiagId = nameof(LegacyFormatterImplDiagId);
-        internal const string SharedUrlFormat = nameof(SharedUrlFormat);
-    }
-
     internal static class SR
     {
+        internal static string Arg_HTCapacityOverflow => nameof(Arg_HTCapacityOverflow);
         internal static string Arg_ArrayPlusOffTooSmall => nameof(Arg_ArrayPlusOffTooSmall);
         internal static string Arg_KeyNotFoundWithKey => nameof(Arg_KeyNotFoundWithKey);
         internal static string Arg_NonZeroLowerBound => nameof(Arg_NonZeroLowerBound);
@@ -22,9 +14,12 @@ namespace System
         internal static string ArgumentOutOfRange_IndexMustBeLessOrEqual => nameof(ArgumentOutOfRange_IndexMustBeLessOrEqual);
         internal static string ArgumentOutOfRange_SmallCapacity => nameof(ArgumentOutOfRange_SmallCapacity);
         internal static string Argument_AddingDuplicate => nameof(Argument_AddingDuplicate);
+        internal static string Argument_AddingDuplicateWithKey => nameof(Argument_AddingDuplicateWithKey);
         internal static string Argument_InvalidOffLen => nameof(Argument_InvalidOffLen);
         internal static string Argument_IncompatibleArrayType => nameof(Argument_IncompatibleArrayType);
         internal static string InvalidOperation_EnumFailedVersion => nameof(InvalidOperation_EnumFailedVersion);
+        internal static string InvalidOperation_EnumEnded => nameof(InvalidOperation_EnumEnded);
+        internal static string InvalidOperation_EnumNotStarted => nameof(InvalidOperation_EnumNotStarted);
         internal static string InvalidOperation_EnumOpCantHappen => nameof(InvalidOperation_EnumOpCantHappen);
         internal static string InvalidOperation_EmptyStack => nameof(InvalidOperation_EmptyStack);
         internal static string InvalidOperation_EmptyQueue => nameof(InvalidOperation_EmptyQueue);

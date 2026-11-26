@@ -15,7 +15,10 @@ module I32 = FStar.Int32
 open Pulse.Lib.CSharp.HashChain
 
 /// The table `o` seen through the projection `f`: same links, other items.
-let view (#e #k #a: Type0) (o: ops e k) (f: e -> a) : ops e a = { hc = o.hc; nx = o.nx; key = f }
+// This is a structural projection for items/positions only; no equality query
+// is made through the projected descriptor.
+let view (#e #k #a: Type0) (o: ops e k) (f: e -> a) : ops e a =
+  { hc = o.hc; nx = o.nx; key = f; equality = Eq.opaque_equality a }
 
 let rec items_len_view (#e #k #a: Type0) (o: ops e k) (f: e -> a) (es: seq e) (n: nat{n <= Seq.length es}) (h: int)
   : Lemma (ensures Seq.length (items (view o f) es n h) == Seq.length (items o es n h) /\

@@ -223,25 +223,25 @@ let reversed (#t: Type) (s: Seq.seq t) (i: nat) (n: nat { i + n <= Seq.length s 
 
 /// `Array.IndexOf(s, x, i, n)`: the first position in `[i, i+n)` whose element
 /// `EqualityComparer<T>.Default` calls equal to `x`, or -1.
-let rec index_of (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+let rec index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
   : Tot int (decreases n)
   = if n = 0 then -1
     else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s i) x then i
     else index_of s x (i + 1) (n - 1)
 
 /// `Array.LastIndexOf`, over `[lo, lo+n)` from the top: the last such position.
-let rec last_index_of (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+let rec last_index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
   : Tot int (decreases n)
   = if n = 0 then -1
     else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s (lo + n - 1)) x then lo + n - 1
     else last_index_of s x lo (n - 1)
 
 /// `Pal.IndexOf(s, x)` and `Pal.LastIndexOf(s, x)`: the searches over all of `s`.
-let index_of_all (#t: Type) (s: Seq.seq t) (x: t) : int = index_of s x 0 (Seq.length s)
-let last_index_of_all (#t: Type) (s: Seq.seq t) (x: t) : int = last_index_of s x 0 (Seq.length s)
+let index_of_all (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) : int = index_of s x 0 (Seq.length s)
+let last_index_of_all (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) : int = last_index_of s x 0 (Seq.length s)
 
 /// A search of a slice is a search of the whole, shifted.
-let rec index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
+let rec index_of_slice (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
     (i: nat) (n: nat { i + n <= hi - lo })
   : Lemma (ensures index_of (Seq.slice s lo hi) x i n ==
                    (let r = index_of s x (lo + i) n in if r = -1 then -1 else r - lo))
@@ -249,7 +249,7 @@ let rec index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo 
           [SMTPat (index_of (Seq.slice s lo hi) x i n)]
   = if n = 0 then () else index_of_slice s x lo hi (i + 1) (n - 1)
 
-let rec last_index_of_slice (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
+let rec last_index_of_slice (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (hi: nat { lo <= hi /\ hi <= Seq.length s })
     (i: nat) (n: nat { i + n <= hi - lo })
   : Lemma (ensures last_index_of (Seq.slice s lo hi) x i n ==
                    (let r = last_index_of s x (lo + i) n in if r = -1 then -1 else r - lo))
@@ -272,11 +272,11 @@ let reverse_all_index (#t: Type) (s: Seq.seq t) (k: nat { k < Seq.length s })
   = ()
 
 /// `Pal.LastIndexOf(s, x, index, count)`, in C#'s `(index, count)` convention.
-let last_index_of_at (#t: Type) (s: Seq.seq t) (x: t) (index: int) (count: nat { index - count + 1 >= 0 /\ index + 1 <= Seq.length s })
+let last_index_of_at (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (index: int) (count: nat { index - count + 1 >= 0 /\ index + 1 <= Seq.length s })
   : int = last_index_of s x (index - count + 1) count
 
 /// What a search returns: -1, or a position in the range holding a match.
-let rec index_of_range (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+let rec index_of_range (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
   : Lemma (ensures (let r = index_of s x i n in
                     r == -1 \/ (i <= r /\ r < i + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s r) x)))
           (decreases n)
@@ -284,7 +284,7 @@ let rec index_of_range (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n
   = if n = 0 then () else if Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s i) x then ()
     else index_of_range s x (i + 1) (n - 1)
 
-let rec last_index_of_range (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+let rec last_index_of_range (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
   : Lemma (ensures (let r = last_index_of s x lo n in
                     r == -1 \/ (lo <= r /\ r < lo + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s r) x)))
           (decreases n)
@@ -298,20 +298,20 @@ let rec last_index_of_range (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat {
 // implemented by `LastIndexOf`.
 // ---------------------------------------------------------------------------
 
-let rec index_of_found (#t: Type) (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
+let rec index_of_found (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (i: nat) (n: nat { i + n <= Seq.length s })
   : Lemma (ensures (index_of s x i n >= 0 <==>
                     (exists (k: nat). i <= k /\ k < i + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s k) x)))
           (decreases n)
   = if n = 0 then () else index_of_found s x (i + 1) (n - 1)
 
-let rec last_index_of_found (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+let rec last_index_of_found (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
   : Lemma (ensures (last_index_of s x lo n >= 0 <==>
                     (exists (k: nat). lo <= k /\ k < lo + n /\ Pulse.Lib.CSharp.Bcl.default_equals (Seq.index s k) x)))
           (decreases n)
   = if n = 0 then () else last_index_of_found s x lo (n - 1)
 
 /// The two searches of one range agree on whether they find anything.
-let last_index_of_found_iff (#t: Type) (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
+let last_index_of_found_iff (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (lo: nat) (n: nat { lo + n <= Seq.length s })
   : Lemma (last_index_of s x lo n >= 0 <==> index_of s x lo n >= 0)
           [SMTPat (last_index_of s x lo n)]
   = index_of_found s x lo n; last_index_of_found s x lo n
@@ -344,7 +344,7 @@ let ring_index (#t: Type) (s: Seq.seq t) (h: int) (n: int) (k: nat)
 
 /// A search of a ring is a search of the store: of one range when the live elements do
 /// not wrap, of the head's part and then the tail's when they do.
-let ring_index_of (#t: Type) (s: Seq.seq t) (x: t) (h: int) (n: int)
+let ring_index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (x: t) (h: int) (n: int)
   : Lemma (requires 0 <= h /\ h <= Seq.length s /\ 0 <= n /\ n <= Seq.length s)
           (ensures (index_of_all (ring s h n) x >= 0 <==>
                     (if h + n <= Seq.length s then index_of s x h n >= 0

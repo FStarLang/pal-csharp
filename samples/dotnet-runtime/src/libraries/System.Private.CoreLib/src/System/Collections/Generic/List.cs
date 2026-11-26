@@ -57,7 +57,7 @@ namespace System.Collections.Generic
         };
 
         /// <summary>The elements, in order.</summary>
-        [Spec]
+        [Spec, EnumerationModel]
         public Seq<T> Items => Model.Items;
 
         [Spec]
@@ -879,6 +879,25 @@ namespace System.Collections.Generic
 
         IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable<T>)this).GetEnumerator();
 
+        [EnumerationProtocol]
+        [Frac("p")]
+        [Ensures("Pal.Yielded<T>().Length == @this.SpecCount")]
+        [Ensures("Pal.Forall((SpecInt i) => Pal.Implies(0 <= i && i < Pal.Yielded<T>().Length && i < @this.SpecCount, Pal.Same(Pal.Yielded<T>()[i], @this.Items[i])))")]
+        internal IEnumerable<T> EnumerationProof()
+        {
+            Enumerator e = GetEnumerator();
+            while (e.MoveNext())
+            {
+                Pal.Invariant(e.SpecReady && Pal.Yielded<T>().Length + e.SpecRemaining.Length == this.SpecCount);
+                Pal.Invariant(Pal.Forall((SpecInt i) => Pal.Implies(
+                    0 <= i && i < Pal.Yielded<T>().Length && i < this.SpecCount,
+                    Pal.Same(Pal.Yielded<T>()[i], this.Items[i]))));
+                Pal.Decreases(e.SpecRemaining.Length);
+                yield return e.Current;
+            }
+            e.Dispose();
+        }
+
         [Throws(typeof(ArgumentOutOfRangeException), "index < 0 || count < 0")]
         [Throws(typeof(ArgumentException), "@this.SpecCount - index < count")]
         [Ensures("0 <= index && 0 <= count && index + count <= @this.SpecCount")]
@@ -1512,6 +1531,7 @@ namespace System.Collections.Generic
             return true;
         }
 
+        [EnumerationState(nameof(SpecReady), nameof(SpecRemaining), nameof(SpecValue), nameof(SpecValid))]
         public struct Enumerator : IEnumerator<T>, IEnumerator
         {
             private readonly List<T> _list;
@@ -1519,6 +1539,14 @@ namespace System.Collections.Generic
 
             private int _index;
             private T? _current;
+
+            [Spec] public bool SpecReady =>
+                _version == _list.SpecVersion && -1 <= _index && _index <= _list.SpecCount;
+            [Spec] public Seq<T> SpecRemaining => 0 <= _index && _index <= _list.SpecCount
+                ? Pal.Slice(_list.Items, _index, _list.SpecCount)
+                : Pal.EmptySeq<T>();
+            [Spec] public T SpecValue => _current!;
+            [Spec] public bool SpecValid => 0 < _index && _index <= _list.SpecCount;
 
             [Ensures("ReferenceEquals(@this._list, list) && @this._version == list.SpecVersion && @this._index == 0")]
             internal Enumerator(List<T> list)

@@ -2,6 +2,18 @@ using System;
 
 namespace PalLang;
 
+/// <summary>
+/// A specification-only logical instance field, with no CLR storage. Apply to a
+/// nonvirtual ref-returning throwing property. The initializer is an independent
+/// pure specification expression; F* checks that the field's actual type is erased.
+/// Read only in specifications and update only through Pal.UpdateGhost.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class GhostFieldAttribute(string initializer) : Attribute
+{
+    public string Initializer { get; } = initializer;
+}
+
 // ---------------------------------------------------------------------------
 // Contracts on declarations.
 //
@@ -262,6 +274,54 @@ public sealed class RefineAlwaysAttribute(string predicate) : Attribute
 public sealed class ModelAttribute : Attribute;
 
 /// <summary>
+/// Marks a pure [Spec] property as the enumeration projection of a class model.
+/// Adapters must prove that Count, CopyTo and the actual iterator agree with it.
+/// This attribute asserts no correspondence and does not make runtime methods pure.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class EnumerationModelAttribute : Attribute;
+
+/// <summary>
+/// Requests a checked observation slot for an enumerable capability. The named
+/// property must be a pure [Spec] observation. The getter must return that
+/// observation (or its sequence length), and preserve it on its original domain.
+/// This is a proof obligation, not a dispatch or purity assumption. It does not
+/// by itself authorize installing a descriptor for an unknown runtime subclass.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class EnumerationObservationAttribute(string property) : Attribute
+{
+    public string Property { get; } = property;
+    public bool Length { get; init; }
+}
+
+/// <summary>
+/// Marks a checked, complete traversal used to establish an ordinary enumerator's
+/// correspondence to the enumeration model. Its body must create the nominal
+/// interface factory's borrowing struct, loop on its MoveNext, yield its Current,
+/// and finally call Dispose. Loop invariants and a decreases clause are proofs,
+/// not trusted protocol declarations.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class EnumerationProtocolAttribute : Attribute;
+
+/// <summary>
+/// Declares the logical state of a borrowing IEnumerator&lt;T&gt;. The named [Spec]
+/// properties are a validity invariant, remaining sequence, current value, and
+/// current-position validity. The compiler CHECKS universal transition laws on
+/// the nominal MoveNext/Current/Dispose implementations. In particular Dispose
+/// must preserve this state at every valid position, not just at the end.
+/// </summary>
+[AttributeUsage(AttributeTargets.Struct)]
+public sealed class EnumerationStateAttribute(string ready, string remaining, string value, string valid) : Attribute
+{
+    public string Ready { get; } = ready;
+    public string Remaining { get; } = remaining;
+    public string Value { get; } = value;
+    public string Valid { get; } = valid;
+}
+
+/// <summary>
 /// A predicate relating an object's fields, which every method may assume on entry and
 /// must re-establish on exit (translation.md R3.10).
 /// </summary>
@@ -385,8 +445,11 @@ public sealed class ImplementsAttribute(string body) : Attribute
     public string Body { get; } = body;
 }
 
-/// <summary>Declare an extra erased parameter, for ghost types with no C# surface.</summary>
-[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+/// <summary>
+/// Declare an inferred erased parameter using a C# declaration, for example
+/// <c>[GhostArg("SpecInt before")]</c>, without changing the runtime signature.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method | AttributeTargets.Property, AllowMultiple = true)]
 public sealed class GhostArgAttribute(string declaration) : Attribute
 {
     public string Declaration { get; } = declaration;
@@ -553,11 +616,11 @@ public sealed class IncludePulseFileAttribute(string path) : Attribute
 public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
 
 /// <summary>
-/// R27.39. A delegate parameter the method calls back with pointers into a region it holds.
-/// The delegate takes one reference to a <c>[Region]</c> class and returns a value; the method
-/// lends it the region at a fraction and states its contract about the calls through
-/// <c>Pal.Trace</c>. An argument at this position is a lambda whose first statement is
-/// <c>Pal.Protocol</c>, the invariant it keeps over the trace.
+/// A delegate parameter called with a borrowed reference. The three-string form declares
+/// a snapshot, an ownership predicate, and a trace observation for a <c>[Plain]</c> reference.
+/// The parameterless form retains the region-based R27.39 contract. Both preserve the
+/// borrowed ownership and state their call history through <c>Pal.Trace</c>.
+/// An argument is a lambda whose first proof statement is <c>Pal.Protocol</c>.
 /// </summary>
 /// <remarks>
 /// R32.11. With <c>Bounded = true</c> the callee takes a bound from the caller,
@@ -568,6 +631,23 @@ public sealed class TranslateAnnotatedOnlyAttribute : Attribute;
 [AttributeUsage(AttributeTargets.Parameter)]
 public sealed class CallbackAttribute : Attribute
 {
+    public CallbackAttribute() { }
+
+    /// <summary>
+    /// Borrow a user-defined spatial predicate over <c>argument</c>, an inferred
+    /// snapshot, and <c>permission</c>. Record the observation and result in the trace.
+    /// All three strings are bound as C# declarations or expressions.
+    /// </summary>
+    public CallbackAttribute(string snapshot, string ownership, string observation)
+    {
+        Snapshot = snapshot;
+        Ownership = ownership;
+        Observation = observation;
+    }
+
+    public string? Snapshot { get; }
+    public string? Ownership { get; }
+    public string? Observation { get; }
     public bool Bounded { get; set; }
 }
 

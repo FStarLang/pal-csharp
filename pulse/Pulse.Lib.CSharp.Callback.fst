@@ -24,6 +24,15 @@ unfold let callable (#e: Type0) (tr: Seq.seq e) : bool = Seq.length tr < max_cal
 /// assume. A callee that promises none passes `max_bound`.
 unfold let max_bound : erased int = hide max_calls
 
+let borrowed_cb (#a #s #v #r: Type0)
+    (owns: a -> s -> perm -> slprop) (view: a -> s -> GTot v)
+    (p: Seq.seq (v & r) -> slprop) (n: erased int) =
+  (#tr: erased (Seq.seq (v & r))) -> (#q: perm) -> (#snapshot: erased s) ->
+  (x: a) ->
+  stt r (p tr ** owns x snapshot q **
+         pure (Seq.length tr < max_calls /\ Seq.length tr < reveal n))
+        (fun res -> p (Seq.snoc tr (view x snapshot, res)) ** owns x snapshot q)
+
 let region_cb (#a #v #r: Type0) (view: B.box a -> a -> v) (p: Seq.seq (v & r) -> slprop)
     (n: erased int) =
   (#tr: erased (Seq.seq (v & r))) -> (#q: perm) -> (#h: erased (heap a)) ->

@@ -1,0 +1,18 @@
+using PalLang;
+
+[Plain]
+public sealed class PatternCell<T> { public T item = default!; }
+
+public static class UnsupportedPlainPatterns
+{
+    public static bool Different<T>(PatternCell<T>? cell)
+    {
+        if (cell is PatternCell<int> bound) { return true; }
+        return false;
+    }
+
+    public static bool Compound<T>(PatternCell<T>? cell) =>
+        cell is PatternCell<T> bound && bound != null;
+
+    public static bool Shape<T>(PatternCell<T>? cell) => cell is { };
+}

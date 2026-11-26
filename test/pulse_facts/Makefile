@@ -21,7 +21,21 @@ all: $(CACHE_DIR)/PulseFacts.fst.checked $(CACHE_DIR)/StructFacts.fst.checked \
      $(CACHE_DIR)/GenericFacts.fst.checked $(CACHE_DIR)/StringFacts.fst.checked \
      $(CACHE_DIR)/GenericClassFacts.fst.checked $(CACHE_DIR)/CursorFacts.fst.checked \
      $(CACHE_DIR)/TreeCursorFacts.fst.checked $(CACHE_DIR)/NullFacts.fst.checked \
-     $(CACHE_DIR)/SliceFacts.fst.checked $(CACHE_DIR)/ExceptionFacts.fst.checked
+     $(CACHE_DIR)/SliceFacts.fst.checked $(CACHE_DIR)/ExceptionFacts.fst.checked \
+     $(CACHE_DIR)/InterfaceCastFacts.fst.checked $(CACHE_DIR)/InterfaceViewFacts.fst.checked \
+     $(CACHE_DIR)/ComparerFacts.fst.checked
+
+$(CACHE_DIR)/ComparerFacts.fst.checked: ComparerFacts.fst ../../pulse/_cache/Pulse.Lib.CSharp.Order.fsti.checked
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) ComparerFacts.fst
+
+$(CACHE_DIR)/InterfaceCastFacts.fst.checked: InterfaceCastFacts.fst
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) InterfaceCastFacts.fst
+
+$(CACHE_DIR)/InterfaceViewFacts.fst.checked: InterfaceViewFacts.fst ../../pulse/_cache/Pulse.Lib.CSharp.Enumerable.Source.fst.checked
+	@mkdir -p $(CACHE_DIR)
+	$(FSTAR_EXE) $(FSTAR_OPTIONS) $(LIB_OPTIONS) InterfaceViewFacts.fst
 
 $(CACHE_DIR)/PulseFacts.fst.checked: PulseFacts.fst
 	@mkdir -p $(CACHE_DIR)

@@ -767,33 +767,33 @@ let owns (#a #t #b: Type0) (view: B.box a -> a -> (t & B.box b)) (nx pv: a -> B.
 
 /// What `Find` and `FindLast` look for: when `v` is null, a null item (`x == null`, R25.4);
 /// otherwise one `EqualityComparer<T>.Default` calls equal to it (R22.25).
-let matches (#t: Type) (v x: t) : bool =
+let matches (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (v x: t) : bool =
   if Pulse.Lib.CSharp.Null.is_null v then Pulse.Lib.CSharp.Null.is_null x
   else Pulse.Lib.CSharp.Bcl.default_equals x v
 
 /// The first position at or after `i` whose element matches `v`, or -1.
-let rec index_from (#t: Type) (s: Seq.seq t) (v: t) (i: int)
+let rec index_from (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) (i: int)
   : Tot (r: int { -1 <= r /\ r < Seq.length s }) (decreases (Seq.length s - i)) =
   if i < 0 || i >= Seq.length s then -1
   else if matches v (Seq.index s i) then i
   else index_from s v (i + 1)
 
 /// The first position whose element matches `v`, or -1.
-let index_of (#t: Type) (s: Seq.seq t) (v: t) : r: int { -1 <= r /\ r < Seq.length s } = index_from s v 0
+let index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) : r: int { -1 <= r /\ r < Seq.length s } = index_from s v 0
 
 /// The last position at or before `i` whose element matches `v`, or -1.
-let rec last_from (#t: Type) (s: Seq.seq t) (v: t) (i: int)
+let rec last_from (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) (i: int)
   : Tot (r: int { -1 <= r /\ r < Seq.length s }) (decreases (if i < 0 then 0 else i + 1)) =
   if i < 0 || i >= Seq.length s then -1
   else if matches v (Seq.index s i) then i
   else last_from s v (i - 1)
 
 /// The last position whose element matches `v`, or -1.
-let last_index_of (#t: Type) (s: Seq.seq t) (v: t) : r: int { -1 <= r /\ r < Seq.length s } =
+let last_index_of (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) : r: int { -1 <= r /\ r < Seq.length s } =
   last_from s v (Seq.length s - 1)
 
 /// One step of a forward search: the element at `i`, then the rest; nothing past the end.
-let find_step (#t: Type) (s: Seq.seq t) (v: t) (i: int)
+let find_step (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) (i: int)
   : Lemma (requires 0 <= i)
           (ensures index_from s v i ==
                    (if i >= Seq.length s then -1
@@ -802,7 +802,7 @@ let find_step (#t: Type) (s: Seq.seq t) (v: t) (i: int)
   = ()
 
 /// One step of a backward search: the element at `i`, then the ones before; nothing before 0.
-let last_step (#t: Type) (s: Seq.seq t) (v: t) (i: int)
+let last_step (#t: Type0) {| Pulse.Lib.CSharp.EqualityModel.has_equality t |} (s: Seq.seq t) (v: t) (i: int)
   : Lemma (requires i < Seq.length s)
           (ensures last_from s v i ==
                    (if i < 0 then -1

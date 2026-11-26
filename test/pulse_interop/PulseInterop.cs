@@ -1,5 +1,7 @@
 using PalLang;
 
+[assembly: IncludePulseFile("ObjectCellRegression.fst")]
+
 // Raw Pulse, carried into the translation as its own module. This is the escape
 // hatch for definitions that have no C# surface at all -- here, a pure predicate
 // stated directly over `FStar.Seq`.

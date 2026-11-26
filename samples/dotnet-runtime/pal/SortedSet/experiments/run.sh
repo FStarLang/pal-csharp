@@ -28,7 +28,7 @@ cd "$harness"
 make --no-print-directory translate || exit 2
 targets=$(for m in $modules; do printf '_cache/%s.fst.checked ' "$m"; done)
 # REFERENCES as in ../Makefile.
-make --no-print-directory -k -f "$root/test/verify.mk" PHASE=verify REFERENCES="../List ../Queue ../Stack" $targets
+make --no-print-directory -k -f "$root/test/verify.mk" PHASE=verify REFERENCES="../List ../Queue ../Stack ../HashSet" $targets
 rc=$?
 if [ $rc -ne 0 ]; then echo "run.sh $1: verification failed (expected)"; else echo "run.sh $1: verified (UNEXPECTED)"; fi
 exit $rc

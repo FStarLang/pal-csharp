@@ -152,6 +152,8 @@ public sealed class MethodPlan
         // so no F* inference is relied on.
         foreach (var tp in method.TypeParameters)
             binders.Add($"({Names.TypeParam(tp)}: Type0)");
+        foreach (var tp in method.TypeParameters)
+            binders.Add($"{{| equality_{Names.TypeParam(tp)}: Pulse.Lib.CSharp.EqualityModel.has_equality {Names.TypeParam(tp)} |}}");
         // R14.2a. A type parameter the body takes `default` at needs its default supplied.
         foreach (var tp in method.DefaultedTypeParameters)
             binders.Add($"{{| _: Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(tp)} |}}");
@@ -219,9 +221,21 @@ public sealed class MethodPlan
                 var boundName = Frontend.ExprLowerer.CallBoundName(p.Name);
                 var bound = cb.Bounded ? "n_" + name : "Pulse.Lib.CSharp.Callback.max_bound";
                 if (cb.Bounded) binders.Add($"({bound}: erased int)");
-                binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
-                            $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
-                            $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
+                if (cb.Borrow is { } borrow)
+                {
+                    var scope = SpecEmitter.CallbackScope(borrow,
+                        new Term("x", TermKind.Other, cb.Region),
+                        new Term("s", KindOf(borrow.SnapshotType), borrow.SnapshotType), "q");
+                    var owns = _spec.Emit(borrow.Ownership, scope).Text;
+                    var view = _spec.Emit(borrow.Observation, scope).Text;
+                    binders.Add($"({name}: Pulse.Lib.CSharp.Callback.borrowed_cb #{Types.Atom(cb.Region)} " +
+                                $"#{Types.Atom(borrow.SnapshotType)} #{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
+                                $"(fun x s q -> {owns}) (fun x s -> {view}) {protocol} {bound})");
+                }
+                else
+                    binders.Add($"({name}: Pulse.Lib.CSharp.Callback.region_cb #{PulseEmitter.RegionRaw(cb.Region)} " +
+                                $"#{Types.Atom(cb.View)} #{Types.Atom(cb.Result)} " +
+                                $"{Names.ClassModule(cb.Region.Name)}.{Frontend.Region.ViewOf(cb.Region.Name)} {protocol} {bound})");
                 var boundTerm = new Term($"(reveal {bound})", TermKind.Math, IrPrim.SpecIntType);
                 pre.Bind(boundName, boundTerm);
                 post.Bind(boundName, boundTerm);
@@ -324,20 +338,54 @@ public sealed class MethodPlan
                 {
                     var preValue = "pre_" + p.Name;
                     var perm = "p_" + p.Name;
-                    binders.Add($"({name}: Pulse.Lib.CSharp.Enumerable.enumerable {Types.Atom(enumerable.Element)})");
-                    ghostBinders.Add($"(#{preValue}: erased (Seq.seq {Types.Atom(enumerable.Element)}))");
+                    if (enumerable.Capability is { } capability)
+                    {
+                        var m = "enum_model_" + p.Name;
+                        var api = "enum_api_" + p.Name;
+                        var contents = "enum_contents_" + p.Name;
+                        var scalar = "enum_scalar_" + p.Name;
+                        binders.Add($"(#{m}: Type0)");
+                        binders.Add($"(#{api}: Pulse.Lib.CSharp.Capability.api_kind {m})");
+                        binders.Add($"({contents}: {m} -> Seq.seq {Types.Atom(enumerable.Element)})");
+                        binders.Add($"({scalar}: {m} -> {Types.Render(capability.ScalarType)})");
+                        binders.Add($"(enum_length_reader_{p.Name}: Pulse.Lib.CSharp.Capability.reader {m} I32.t {api} (fun m n -> I32.v n == Seq.length ({contents} m)))");
+                        binders.Add($"(enum_scalar_reader_{p.Name}: Pulse.Lib.CSharp.Capability.reader {m} {Types.Atom(capability.ScalarType)} {api} (fun m n -> n == {scalar} m))");
+                        if (capability.Iteration is not null)
+                        {
+                            binders.Add($"(enum_fact_reader_{p.Name}: Pulse.Lib.CSharp.Capability.reader {m} unit {api} (fun m _ -> {EnumerableAdapter.Fact(enumerable, $"({contents} m)", $"({scalar} m)")}))");
+                            binders.Add($"(enum_iterator_{p.Name}: {EnumerableAdapter.IteratorModel}.selector {m} {Types.Atom(enumerable.Element)} {api} {contents})");
+                        }
+                    }
+                    binders.Add($"({name}: {Types.Render(enumerable)})");
+                    ghostBinders.Add($"(#{preValue}: erased ({(enumerable.Capability is not null ? "enum_model_" + p.Name : $"Seq.seq {Types.Atom(enumerable.Element)}")}))");
                     ghostBinders.Add($"(#{perm}: perm)");
-                    preResources.Add($"Pulse.Lib.CSharp.Enumerable.pts_to {name} #{perm} {preValue}");
-                    postResources.Add($"Pulse.Lib.CSharp.Enumerable.pts_to {name} #{perm} {preValue}");
+                    if (enumerable.Capability is not null)
+                    {
+                        ghostBinders.Add($"(#descriptor_{p.Name}: erased (Pulse.Lib.CSharp.Capability.descriptor enum_model_{p.Name} enum_api_{p.Name}))");
+                        foreach (var scope in new[] { pre, post })
+                        {
+                            scope.Bind("$nominal:" + p.Name, new Term($"(reveal {preValue})", TermKind.Other));
+                            scope.Bind("$descriptor:" + p.Name, new Term($"(reveal descriptor_{p.Name})", TermKind.Other));
+                        }
+                    }
+                    else if (enumerable.CastTarget is not null)
+                        ghostBinders.Add($"(#{EnumerableAdapter.Misses(p.Name)}: FStar.Dyn.dyn -> perm -> Seq.seq {Types.Atom(enumerable.Element)} -> slprop)");
+                    var resource = enumerable.CastTarget is null
+                        ? $"Pulse.Lib.CSharp.Enumerable.pts_to {name} #{perm} {preValue}"
+                        : EnumerableAdapter.PtsTo(enumerable, p.Name, name, perm, preValue);
+                    preResources.Add(resource);
+                    postResources.Add(resource);
                     if (enumerable.Collection)
-                        preResources.Add($"pure (Pulse.Lib.CSharp.Enumerable.is_collection {name})");
-                    var items = new Term($"(reveal {preValue})", TermKind.Seq, p.Type);
+                        preResources.Add($"pure ({(enumerable.CastTarget is null ? "Pulse.Lib.CSharp.Enumerable" : EnumerableAdapter.Source)}.is_collection {name})");
+                    var itemText = enumerable.Capability is not null
+                        ? $"(enum_contents_{p.Name} (reveal {preValue}))" : $"(reveal {preValue})";
+                    var items = new Term(itemText, TermKind.Seq, p.Type);
                     pre.Bind(p.Name, items);
                     post.Bind(p.Name, items);
                     slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Enumerable, name)
                     {
                         Fraction = perm,
-                        Items = $"(reveal {preValue})",
+                        Items = itemText,
                     };
                     break;
                 }
@@ -361,20 +409,22 @@ public sealed class MethodPlan
                         // (R4.2), holding the *nullable* pointer as R27.23's `ref` does: C# lets
                         // the body store `null` through a `!`, and the runtime does.
                         var source = Names.Argument(p.Name);
-                        binders.Add($"({source}: {Types.Render(p.Type)})");
-                        prologue.Add(($"{name} : {Types.Render(klass with { Nullable = true })}", source));
-                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name);
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments, !klass.Plain)})";
+                        binders.Add($"({source}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
+                        prologue.Add(($"{name} : {(klass.Plain ? Types.Render(klass with { Nullable = true }) : rawType)}", source));
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name) { RawReference = true };
                         pre.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
                         post.Bind(p.Name, new Term(source, TermKind.Other, p.Type));
                         break;
                     }
                     if (p.Plain)
                     {
-                        binders.Add($"({name}: {Types.Render(p.Type)})");
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments, !klass.Plain)})";
+                        binders.Add($"({name}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
                         // An ordinary immutable binder: the reference is a value like any
                         // other. What is *owned* through it is not the slot's business,
                         // because with `[Plain]` it never was the compiler's.
-                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name);
+                        slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Value, name) { RawReference = true };
                         pre.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
                         post.Bind(p.Name, new Term(name, TermKind.Other, p.Type));
                         break;
@@ -588,7 +638,12 @@ public sealed class MethodPlan
                     if (p.Fraction is null)
                     {
                         postResources.Add($"R.pts_to {name} {postValue}");
-                        postExistentials.Add(postValue);
+                        // Keep the declared refined struct alias at both normal
+                        // and exceptional exits. Inference from pts_to otherwise
+                        // selects its raw representation, changing the type index
+                        // of Ghost.reveal in imported transition contracts.
+                        postExistentials.Add(p.Type is IrNamedType
+                            ? $"({postValue}: {Types.Render(p.Type)})" : postValue);
                         post.Bind(p.Name, new Term(postValue, KindOf(p.Type), p.Type));
                     }
                     else
@@ -643,6 +698,21 @@ public sealed class MethodPlan
         // the heap held at each end, so `Pal.Old` reads the one it was given.
         ParamBinders = [.. binders];
         ParamPreResources = [.. preResources];
+        if (method.Lambda is { Callback.Borrow: { } borrowed } lambda)
+        {
+            var snapshot = Frontend.ExprLowerer.CallbackSnapshot;
+            var permission = Frontend.ExprLowerer.CallbackPermission;
+            ghostBinders.Add($"(#{snapshot}: erased ({Types.Render(borrowed.SnapshotType)}))");
+            ghostBinders.Add($"(#{permission}: perm)");
+            var value = new Term($"(reveal {snapshot})", KindOf(borrowed.SnapshotType), borrowed.SnapshotType);
+            pre.Bind(snapshot, value);
+            post.Bind(snapshot, value);
+            var scope = SpecEmitter.CallbackScope(borrowed,
+                new Term(Names.Local(lambda.Node), TermKind.Other, lambda.Callback.Region), value, permission);
+            var resource = _spec.Emit(borrowed.Ownership, scope).Text;
+            preResources.Add(resource);
+            postResources.Add(resource);
+        }
         foreach (var use in held.IsDefault ? [] : held)
         {
             var k = use.Region;
@@ -727,12 +797,22 @@ public sealed class MethodPlan
             ResultOwned = owned.ToImmutable();
         }
 
-        // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method
-        // takes the unit argument its Pulse counterpart is called with.
-        Binders = binders.Count == 0 && ghostBinders.Count == 0
-            ? ["()"]
+        // A value argument also forces elaboration of trailing implicit evidence:
+        // applying only the explicit type arguments otherwise leaves a function.
+        Binders = method.Parameters.IsEmpty
+            ? [.. binders, "()", .. ghostBinders]
             : [.. binders, .. ghostBinders];
         Prologue = prologue.ToImmutable();
+        if (slots.TryGetValue(Names.This, out var owner))
+        {
+            var permission = new Term(owner.Fraction ?? "1.0R", TermKind.Other);
+            pre.Bind("$permission", permission);
+            post.Bind("$permission", permission);
+        }
+        else if (method.IsConstructor)
+            post.Bind("$permission", new Term("1.0R", TermKind.Other));
+        if (method.IsConstructor && method.ReturnType is IrClassType { Plain: true } plainResult)
+            post.Bind(Names.This, new Term(Names.Result, TermKind.Other, plainResult));
         PreScope = pre;
         PostScope = post;
         Slots = slots.ToImmutable();
@@ -827,15 +907,18 @@ public sealed class MethodPlan
     /// declares nothing may throw nothing, and Pulse makes it prove so.
     /// </summary>
     public string ThrowsProp(string exn)
+        => ThrowsProp(_throws, PreScope, _spec, exn);
+
+    internal static string ThrowsProp(ImmutableArray<IrThrows> clauses, SpecScope pre, SpecEmitter spec, string exn)
     {
-        if (_throws.IsEmpty) return "False";
-        var scope = new SpecScope(PreScope);
-        var cases = _throws.Select(t =>
+        if (clauses.IsEmpty) return "False";
+        var scope = new SpecScope(pre);
+        var cases = clauses.Select(t =>
         {
             scope.Bind(Frontend.FrontendPass.ThrownParameter, new Term(exn, TermKind.Other, t.Type));
             var parts = new List<string>();
             if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {exn}");
-            if (t.When is { } w) parts.Add(_spec.AsProp(_spec.Emit(w, scope)));
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, scope)));
             return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
         });
         return string.Join(" \\/ ", cases);

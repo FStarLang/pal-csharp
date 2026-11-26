@@ -15,7 +15,9 @@ val storage (#t: Type0) (a: array t) : r: Raw.array t {
   (not (Raw.is_null r) ==> Raw.length r == I32.v (count a))
 }
 
-let length (#t: Type0) (a: array t) : nat = I32.v (count a)
+let length (#t: Type0) (a: array t) : nat =
+  let n = count a in
+  I32.v n
 val null (#t: Type0) : a: array t { Raw.is_null (storage a) }
 let is_null (#t: Type0) (a: array t) : bool = Raw.is_null (storage a)
 
@@ -80,6 +82,11 @@ fn alloc (#t: Type0) (n: I32.t { I32.v n >= 0 }) (init: t)
   requires emp
   returns a: array t
   ensures pts_to a (Seq.create (I32.v n) init)
+
+// Explicit reclamation for compiler-owned, nonescaping temporary storage.
+// Full ownership is required; shared source arrays cannot be released.
+fn free (#t: Type0) (a: array t) (#s: Ghost.erased (Seq.seq t))
+  requires pts_to a s
 
 fn memcpy_l (#t: Type0) (n: SZ.t)
   (src dst: (a:array t { SZ.v n <= length a }))

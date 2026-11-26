@@ -61,6 +61,13 @@ public static class Normalize
         },
         IrWhile w => w with { Body = Joins(w.Body, diagnostics), Step = Joins(w.Step, diagnostics) },
         IrFor f => f with { Body = Joins(f.Body, diagnostics), Init = Joins(f.Init, diagnostics), Step = Joins(f.Step, diagnostics) },
+        IrSwitch s => s with
+        {
+            Sections = [.. s.Sections.Select(section => section with
+            {
+                Statements = Joins(section.Statements, diagnostics),
+            })],
+        },
         IrTry t => t with
         {
             Body = (IrBlock)Joins(t.Body, diagnostics),
@@ -71,6 +78,9 @@ public static class Normalize
 
     private static ImmutableArray<IrStmt> Joins(ImmutableArray<IrStmt> stmts, DiagnosticBag diagnostics)
     {
+        // Lowered pointer-pattern conditions introduce a capture and an if in a
+        // splice-only block. Its following Join still belongs to that same if.
+        stmts = [.. Flat(stmts)];
         var result = ImmutableArray.CreateBuilder<IrStmt>();
         for (var k = 0; k < stmts.Length; k++)
         {
@@ -412,7 +422,11 @@ public static class Normalize
                 }
                 // Again, because R5.14 turns a `switch` into an `if` chain and a section
                 // that ended in `return` is a guard clause that was not one before.
-                return block with { Statements = Returns(result.ToImmutable()) };
+                var expanded = result.ToImmutable();
+                // A mixed switch has become a mixed if only now, after LoopReturns.
+                // Reuse the same continuation sinking on these newly exposed exits.
+                var exposedReturn = !NestedReturn(block.Statements) && NestedReturn(expanded);
+                return block with { Statements = Returns(exposedReturn ? Sink(expanded) : expanded) };
             }
 
             case IrIf i:
@@ -995,7 +1009,7 @@ public static class Normalize
                 return;
             case IrRefArg r: AssignedByCalls(r.Operand, into); return;
             // R34.6. Moving an enumerator on writes its cursor.
-            case IrEnumOp { Op: EnumOpKind.MoveNext, Args: [IrVar cursor] }: into.Add(cursor.Name); return;
+            case IrEnumOp { Op: EnumOpKind.MoveNext or EnumOpKind.IteratorNext, Args: [IrVar cursor] }: into.Add(cursor.Name); return;
             case IrLambdaRef l:
                 foreach (var c in l.Captures)
                 {

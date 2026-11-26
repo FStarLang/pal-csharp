@@ -3,6 +3,14 @@ using System.Numerics;
 
 namespace PalLang;
 
+/// <summary>A specification-only fractional permission.</summary>
+[SpecType("PulseCore.FractionalPermission.perm")]
+public readonly struct Perm
+{
+    [SpecOp("1.0R")]
+    public static Perm Full => throw new InvalidOperationException("Specification only");
+}
+
 /// <summary>
 /// A ghost (proof-only) parameter of type <typeparamref name="T"/>.
 /// </summary>
@@ -116,6 +124,7 @@ public readonly struct SlProp
         "SlProp is a specification-only construct and has no runtime meaning.");
 
     /// <summary>The empty resource, Pulse's <c>emp</c>.</summary>
+    [SpecOp("emp")]
     public static SlProp Emp => default;
 
     /// <summary>Separating conjunction (Pulse <c>**</c>).</summary>

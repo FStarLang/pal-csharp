@@ -13,6 +13,7 @@ namespace Pal.Compiler.Emit;
 public sealed class SpecScope
 {
     private readonly Dictionary<string, Term> _values = [];
+    private readonly Dictionary<string, IrType> _types = [];
 
     public SpecScope? Pre { get; init; }
     public string? ResultTerm { get; init; }
@@ -22,6 +23,7 @@ public sealed class SpecScope
     /// observation of *that* class is then written unqualified (R3.7).
     /// </summary>
     public string? DefiningClass { get; init; }
+    public bool QualifySpecCalls { get; init; }
 
     /// <summary>
     /// What kind of value <c>Result</c> denotes. A method's result is a machine value,
@@ -43,14 +45,26 @@ public sealed class SpecScope
     public SpecScope(SpecScope other)
     {
         _values = new Dictionary<string, Term>(other._values);
+        _types = new Dictionary<string, IrType>(other._types);
         Pre = other.Pre;
         ResultTerm = other.ResultTerm;
         DefiningClass = other.DefiningClass;
+        QualifySpecCalls = other.QualifySpecCalls;
         ResultKind = other.ResultKind;
         ResultType = other.ResultType;
     }
 
     public void Bind(string name, Term term) => _values[name] = term;
+    public void BindType(string name, IrType type) => _types[name] = type;
+    public IrType Instantiate(IrType type) => type switch {
+        IrTypeParamType p when _types.TryGetValue(p.Name, out var actual) => actual,
+        IrNamedType n => n with { TypeArguments = [.. n.TypeArguments.Select(Instantiate)] },
+        IrClassType c => c with { TypeArguments = [.. c.TypeArguments.Select(Instantiate)] },
+        IrSeqType s => s with { Element = Instantiate(s.Element) },
+        IrArrayType a => a with { Element = Instantiate(a.Element) },
+        IrOptionType o => o with { Inner = Instantiate(o.Inner) },
+        _ => type
+    };
 
     public bool TryGet(string name, out Term term) => _values.TryGetValue(name, out term);
 
@@ -74,6 +88,17 @@ public sealed class SpecScope
 /// </summary>
 public sealed class SpecEmitter(DiagnosticBag diagnostics)
 {
+    internal static string ReferenceKey(string name) => "$reference:" + name;
+
+    public static SpecScope CallbackScope(IrCallbackBorrow borrow, Term argument, Term snapshot, string permission)
+    {
+        var scope = new SpecScope();
+        scope.Bind("argument", argument);
+        scope.Bind(borrow.SnapshotName, snapshot);
+        scope.Bind("permission", new Term(permission, TermKind.Other));
+        return scope;
+    }
+
     /// <summary>
     /// R9.19. Each class's immediate base, which is what <see cref="Forget"/> walks.
     /// Set once per program; empty for a program with no hierarchy.
@@ -152,14 +177,22 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             // machinery: it is this same case emitted in the pre-state scope.
             case IrObserve ob:
             {
+                if (ob.Receiver is IrVar { Name: Names.This } &&
+                    scope.TryGet("$projection:" + ob.Class + ":" + ob.Member, out var projected))
+                    return projected;
                 var receiver = Emit(ob.Receiver, scope);
+                if (receiver.OptionalOwner)
+                    receiver = receiver with { Text = $"(Some?.v {receiver.Text})", OptionalOwner = false };
                 // R3.7's rule about field qualifiers applies to observations too: inside
                 // the class's own module the qualifier is not merely redundant, it makes
                 // F*'s dependency scan read the module as depending on itself.
                 var qualifier = scope.DefiningClass == ob.Class
                     ? "" : Names.ClassModule(ob.Class) + ".";
+                var typeArguments = receiver.Type is IrClassType observed && observed.Name == ob.Class
+                    ? string.Concat(observed.TypeArguments.Select(t => $" #{Types.Atom(t)}"))
+                    : "";
                 return new Term(
-                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)} {Forget(ob, receiver, scope)})",
+                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)}{typeArguments} {Forget(ob, receiver, scope)})",
                     MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
             }
 
@@ -231,11 +264,15 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
             case IrSpecOp o:
                 return SpecOp(o, scope);
+            case IrCallbackObservation o:
+                return Emit(o.Borrow.Observation,
+                    CallbackScope(o.Borrow, Emit(o.Argument, scope), Emit(o.Snapshot, scope), ""));
 
             // R28.3. The reference itself: the parameter's Pulse binder, in scope in the
             // pre- and the postcondition alike.
             case IrRefOf r:
-                return new Term(Names.Local(r.Parameter), TermKind.Other);
+                return scope.TryGet(ReferenceKey(r.Parameter), out var reference)
+                    ? reference : new Term(Names.Local(r.Parameter), TermKind.Other);
 
             // R10.2. `null` is `B.null`. The type annotation is what lets F* infer the
             // box's parameter in `pure (x == B.null)` positions where nothing else
@@ -310,6 +347,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrQuantifier q:
                 return Quantifier(q, scope);
 
+            case IrCall { Kind: CalleeKind.Lemma } call:
+                diagnostics.Unsupported(call.Loc,
+                    "A lemma call in a pure specification expression",
+                    "Call the checked ghost computation in a statement, binding a Ghost<T> result before using its witness.");
+                return new Term("()", TermKind.Other);
+
             case IrCall { Kind: CalleeKind.Spec } call:
                 // R4.6: a [Spec] function returning `bool` denotes a proposition; one
                 // returning an integer denotes a mathematical value, and so may be used
@@ -318,8 +361,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // exactly as a generic method is: a specification is emitted from the same
                 // IR call node and has no reason to differ.
                 return new Term(
-                    $"({Names.SpecFunction(call.Callee)} " +
-                    string.Join(" ", call.TypeArguments.Select(Types.Atom)
+                    $"({(scope.QualifySpecCalls ? Names.SpecModule(call.Callee) + "." : "")}{Names.SpecFunction(call.Callee)} " +
+                    string.Join(" ", call.TypeArguments.Select(scope.Instantiate).Select(Types.Atom)
+                        .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
                         .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
@@ -406,11 +450,22 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             case IrBinary b when DecimalOrder(b, scope) is { } ordered:
                 return ordered;
 
+            case IrBinary b when OptionalOwnerNullTest(b, scope) is { } optionalTest:
+                return optionalTest;
+
             // A reference tested against null as a boolean (a conditional's guard): the
             // box type has no decidable equality, so `=` would not typecheck.
             case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
                 (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is { Type: IrClassType } boxed:
                 return b.Op == BinOp.Eq ? $"(B.is_null {Emit(boxed, scope).Text})" : $"(not (B.is_null {Emit(boxed, scope).Text}))";
+
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
+                (b.Left.Type ?? Emit(b.Left, scope).Type) is IrClassType { Plain: true } &&
+                (b.Right.Type ?? Emit(b.Right, scope).Type) is IrClassType { Plain: true }:
+            {
+                var equal = $"(Pulse.Lib.CSharp.RefEq.ref_eq {Emit(b.Left, scope).Text} {Emit(b.Right, scope).Text})";
+                return b.Op == BinOp.Eq ? equal : $"(not {equal})";
+            }
 
             case IrBinary b:
             {
@@ -492,8 +547,20 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         _ => null,
     };
 
+    private string? OptionalOwnerNullTest(IrBinary b, SpecScope scope)
+    {
+        if (b.Op is not (BinOp.Eq or BinOp.Ne)) return null;
+        var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
+        if (tested is not IrVar v || !scope.TryGet(v.Name, out var term) || !term.OptionalOwner)
+            return null;
+        return $"({(b.Op == BinOp.Eq ? "None?" : "Some?")} {term.Text})";
+    }
+
     private Term Binary(IrBinary b, SpecScope scope)
     {
+        if (OptionalOwnerNullTest(b, scope) is { } optionalTest)
+            return new Term(optionalTest, TermKind.Bool, IrPrim.Bool);
+
         string Infix(string op, TermKind kind, bool mathematical = true)
         {
             var left = mathematical ? Math(b.Left, scope) : AsProp(Emit(b.Left, scope));
@@ -760,10 +827,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// its arguments. There is nothing to decide — the name came from the user's
     /// <c>[SpecOp]</c> or <c>[SpecCtor]</c> and is emitted verbatim.
     ///
-    /// <para>Every argument goes through <see cref="AsMath"/>, which is a no-op except on
+    /// <para>Numeric specification arguments go through <see cref="AsMath"/>, a no-op except on
     /// a machine integer: a specification type's arguments are mathematical, so an
     /// <c>Int32.t</c> in argument position needs <c>.v</c>. This is the same coercion the
-    /// built-in operations applied, stated once.</para>
+    /// built-in operations applied, stated once. A polymorphic element argument
+    /// retains its substituted program type; T=int is I32.t, not Prims.int.</para>
     ///
     /// <para>The result's <see cref="TermKind"/> is read off the member's C# return type
     /// rather than declared, because C# already says whether it is a number, a
@@ -771,7 +839,8 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private Term SpecOp(IrSpecOp op, SpecScope scope)
     {
-        var operands = op.TypeArgs.Select(Types.Atom)
+        var operands = op.TypeArgs.Select(scope.Instantiate).Select(Types.Atom)
+            .Concat(Enumerable.Repeat("#_", op.ImplicitArguments))
             .Concat(op.Args.Select((a, i) =>
                 // R31.5. A method body's `this` is its model (R4.2); a region operation over
                 // heaps asks about the reference, which is the receiver itself -- the owner a
@@ -786,7 +855,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     : i < op.ParamTypes.Length && op.ParamTypes[i] is IrPrim { Kind: PrimKind.Bool } &&
                       a is IrLiteral { Value: bool pb }
                         ? (pb ? "true" : "false")
-                    : op.MachineArgs
+                    : op.MachineArgs || op.GenericValueArgs.Contains(i)
                         ? a is IrLiteral { Value: not (null or string or decimal) } l
                             ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)
                             : DecidedEquality(a, scope) ?? Emit(a, scope).Text
@@ -846,7 +915,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             var name = Names.Local(b.Name);
             // Quantifier binders range over the mathematical values a spec talks about
             // (R4.6), so `forall (int i)` is `forall (var_i: int)`.
-            var rendered = b.Type is IrPrim { IsMachineInt: true } ? "int" : Types.Render(b.Type);
+            var rendered = b.Type is IrPrim { IsMachineInt: true } ? "int" : Types.Render(scope.Instantiate(b.Type));
             binders.Add($"({name}: {rendered})");
             var term = new Term(name, TermKind.Math, b.Type);
             inner.Bind(b.Name, term);
@@ -1037,6 +1106,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// </summary>
     internal string Argument(IrExpr arg, IrType? paramType, SpecScope scope)
     {
+        if (arg is IrLiteral { Value: bool value } &&
+            paramType is IrPrim { Kind: PrimKind.Bool } or IrGhostType { Inner: IrPrim { Kind: PrimKind.Bool } })
+            return value ? "true" : "false";
         var term = Emit(arg, scope);
         return term.Kind == TermKind.Machine && paramType is not IrPrim { IsMachineInt: true }
             ? AsMath(term)

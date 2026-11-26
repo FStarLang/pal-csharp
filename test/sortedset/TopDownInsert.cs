@@ -307,6 +307,7 @@ public sealed class RbSet<T>
     [Requires("Pal.Unshared(x)")]
     [Ensures("Pal.Unshared(x)")]
     [Ensures("@this.comparer == Pal.Old(@this.comparer) && @this.count == Pal.Old(@this.count) && @this.version == Pal.Old(@this.version)")]
+    [Fuel(0, 0)]
     private void RepaintOpen(RbNode x, int n, bool red)
     {
         int i = 0;
@@ -441,6 +442,7 @@ public sealed class RbSet<T>
         // body, so what the arm proves about the heap it leaves reaches the invariant.
         [Requires("Pal.Unshared(@this)")]
         [Ensures("Pal.Unshared(@this)")]
+        [Fuel(0, 0)]
         public void Repaint(int n, bool red)
         {
             int i = 0;

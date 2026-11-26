@@ -1,0 +1,8 @@
+cfc21f5e8bd655ae997eec916138b707b1d290b83272c02a95c9f821b8c87310  ./LICENSE.TXT
+bdd8b1044f25e4ccc88587f1fb630ecd858f2aa4e163c18d553f5677a36afee1  ./src/libraries/Common/src/System/Collections/Generic/BitHelper.cs
+3351ab4a308ce78630d18e3433f1683f2aa92ba9cbddadb9416002b0584c7299  ./src/libraries/Common/src/System/Collections/Generic/EnumerableHelpers.cs
+8183c8497339ad0dcbadc0933c96387c7840681755a7425098640ca6ae392452  ./src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.TreeSubSet.cs
+50194fe38bf0864990e7024cd201babb75ba061a028ef5de94cb0549fd5f2ec9  ./src/libraries/System.Collections/src/System/Collections/Generic/SortedSet.cs
+844cd449c38e3a1ba2deea01a02ab4c9d10cf84f4fed7023ea0261900160827c  ./src/libraries/System.Collections/src/System/Collections/Generic/SortedSetEqualityComparer.cs
+93fbc6b2b2101ef727360bce1bbb2b58cb1760bd1931791e1b3edcc77c36af23  ./src/libraries/System.Collections/tests/Generic/SortedSet/SortedSet.Generic.Tests.cs
+06f11b8e66008736bf44b9bebf597d1744eb01d061f3c47f7bf87be7c8df7535  ./src/libraries/System.Collections/tests/Generic/SortedSet/SortedSet.TreeSubSet.Tests.cs

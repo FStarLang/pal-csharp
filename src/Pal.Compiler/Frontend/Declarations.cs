@@ -18,7 +18,7 @@ public static class Declarations
     public static ImmutableArray<IrType?> ParamTypes(
         IMethodSymbol method, WellKnown known, bool receiver)
     {
-        var declared = method.Parameters.Select(p => known.MapType(p.Type));
+        var declared = method.Parameters.Select(p => EnumerableCasts.ParameterType(p, known) ?? known.MapType(p.Type));
         return receiver ? [null, .. declared] : [.. declared];
     }
 
@@ -83,13 +83,15 @@ public static class Declarations
         if (known.AnnotatedOnly &&
             method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
             method.ContainingType is { TypeKind: TypeKind.Class } plainOwner &&
-            !known.HasModel(plainOwner) && !known.IsRegionClass(plainOwner))
+            !known.HasModel(plainOwner) && !known.IsPlainLike(plainOwner))
             return CalleeKind.Method;
 
         // R27.16. A member of a `[Region]` class is a function of the object and the region.
         if (method is { IsStatic: false,
-                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet } &&
-            known.IsRegionClass(method.ContainingType))
+                        MethodKind: MethodKind.Ordinary or MethodKind.PropertyGet or MethodKind.PropertySet
+                            or MethodKind.Constructor } &&
+            known.IsPlainLike(method.ContainingType) &&
+            (method.MethodKind != MethodKind.Constructor || !known.IsRegionClass(method.ContainingType)))
             return CalleeKind.Method;
 
         // R28.2. A member of a struct that borrows an enclosing object is a member of that
@@ -262,6 +264,15 @@ public static class Declarations
 
             if (node is InvocationExpressionSyntax call)
             {
+                // Conditional at runtime, but a real logical write in the proof.
+                // Do this before the general "proof intrinsics only read" case.
+                if (known is not null &&
+                    model.GetSymbolInfo(call).Symbol is IMethodSymbol update &&
+                    known.IsPalIntrinsic(update) && update.Name == nameof(PalLang.Pal.UpdateGhost) &&
+                    call.ArgumentList.Arguments.FirstOrDefault() is { } destination &&
+                    (model.GetSymbolInfo(destination.Expression).Symbol is IFieldSymbol { IsStatic: false } ||
+                     GhostStorage.Is(model.GetSymbolInfo(destination.Expression).Symbol, known)))
+                    return true;
                 // R30.29. `Unsafe.IsNullRef(ref r)` only tests the reference.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol isNull && RefSnapshots.IsIsNullRef(isNull))
                     continue;
@@ -303,10 +314,33 @@ public static class Declarations
                     (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
                      Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
                     continue;
+                var bulkCopy = model.GetSymbolInfo(call).Symbol is IMethodSymbol {
+                    IsStatic: true, Name: "Copy",
+                    ContainingType.SpecialType: SpecialType.System_Array
+                } copy && copy.Parameters.Length is 3 or 5 &&
+                    copy.Parameters.Where(p => p.Ordinal != 0 &&
+                        p.Ordinal != (copy.Parameters.Length == 3 ? 1 : 2))
+                        .All(p => p.Type.SpecialType == SpecialType.System_Int32)
+                    ? copy : null;
                 foreach (var argument in call.ArgumentList.Arguments)
                 {
+                    // The checked Array.Copy primitive preserves its source.
+                    // Keep checking the destination, including aliases through
+                    // locals; a copy within an owned array is still a write.
+                    var ordinal = argument.NameColon is { } name
+                        ? bulkCopy?.Parameters.FirstOrDefault(p =>
+                            p.Name == name.Name.Identifier.ValueText)?.Ordinal
+                        : call.ArgumentList.Arguments.IndexOf(argument);
+                    if (bulkCopy is not null && ordinal == 0)
+                        continue;
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
+                        return true;
+                    if (bulkCopy is not null &&
+                        ordinal == (bulkCopy.Parameters.Length == 3 ? 1 : 2) &&
+                        model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is ILocalSymbol { Type: IArrayTypeSymbol } copyDestination &&
+                        !AlwaysFresh(copyDestination, syntax, model))
                         return true;
                     // R33.24. A `ref` argument the callee may write through: a `ref` local
                     // (R33.16's `ref entry` into a field's array) or a field itself.
@@ -378,7 +412,7 @@ public static class Declarations
         known.AnnotatedOnly &&
         method is { IsStatic: false, MethodKind: MethodKind.Ordinary } &&
         method.ContainingType is { TypeKind: TypeKind.Class } owner &&
-        !known.HasModel(owner) && !known.IsRegionClass(owner);
+        !known.HasModel(owner) && !known.IsPlainLike(owner);
 
     /// <summary>The R20.12 name a context field is bound to in a receiver-free method.</summary>
     public static string ContextName(ISymbol field) => "this__" + field.Name;
@@ -585,6 +619,7 @@ public static class Declarations
     public static bool IsAnnotatedDeclaration(ISymbol symbol, WellKnown known) =>
         Has(symbol, known.ModelAttribute)
         || Has(symbol, known.SpecAttribute)
+        || Has(symbol, known.GhostFieldAttribute)
         || Has(symbol, known.LemmaAttribute)
         || Has(symbol, known.PlainAttribute)
         || Has(symbol, known.RegionAttribute);

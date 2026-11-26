@@ -1131,7 +1131,7 @@ public sealed class HierarchyEmitter(SpecEmitter spec, DiagnosticBag diagnostics
         sb.AppendLine($"  {pred}");
         sb.AppendLine();
         sb.AppendLine($"type {Names.ClassModel(c.Name)}{tb.Explicit} = " +
-                      $"{Model}: {Types.Render(c.ModelType)} {{ {Names.ClassModelPred(c.Name)} {Model} }}");
+                      $"{Model}: {Types.Render(c.ModelType)} {{ {Names.ClassModelPred(c.Name)}{tb.ImplicitArguments} {Model} }}");
         sb.AppendLine();
     }
 

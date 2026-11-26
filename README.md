@@ -132,9 +132,14 @@ nightly binary release, which bundles Pulse. [`tools/fstar-source.txt`](tools/fs
 when present, takes precedence: it pins F\* built from source at fixed commits, which is how
 the repository tracks an F\* pull request that has no release yet. The current pin is
 FStarLang/FStar#4798 (native Pulse exceptions, §19 of the translation document) merged with
-master. A source build needs an OCaml switch with F\*'s dependencies; `make tools` then
-clones, builds and installs it into `tools/fstar` in the binary-release layout, with the
-pinned Z3 (5.3.0).
+master, with a digest-pinned local patch fixing core/global binder-ID collisions.
+The patch and its regression are in `tools/fstar-core-freshness.patch`; no
+upstream publication is required to reproduce this local toolchain.
+A source build needs an initialized opam switch with F\*'s dependencies; `make
+tools` uses that switch automatically, without needing `eval "$(opam env)"` first.
+Set `OPAMSWITCH` to choose another switch, or `FSTAR_OPAM_DEPS=1` to install the pinned
+source tree's opam dependencies before building. The installer clones, builds and installs
+F\* into `tools/fstar` in the binary-release layout, with the pinned Z3 (5.3.0).
 
 ### Reading the generated Pulse interactively
 
@@ -194,7 +199,8 @@ excluded, for the reason they are red above.
 not a reimplementation of it, so CI and a working copy cannot disagree about what passing
 means. The pinned toolchain is cached on both pin files and CI asserts that the F\* it
 ended up with is the one the pin names (for a source pin, the merged commit recorded in
-`tools/fstar/version.txt` against the pin's `result=`), so neither a stale cache nor a silent
+`tools/fstar/version.txt` against the pin's `result=` plus any `patch_sha256=`),
+so neither a stale cache nor a silent
 upgrade can go unnoticed. The analyzer check runs again as its own job, where it needs no
 F\* and so reports a regression in minutes rather than after a verification run.
 

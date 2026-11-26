@@ -26,20 +26,25 @@ namespace System.Collections.Generic
         internal static bool Marked(Seq<int> ws, SpecInt p) => throw Ghost();
 
         // Zero words hold no bit; `MarkBit(p)` sets bit `p` alone; `IsMarked(p)` reads it.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("BitHelperBits.zero_bits")]
         internal static void ZeroBits(Seq<int> ws) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("BitHelperBits.set_bits")]
         internal static void SetBits(Seq<int> ws, SpecInt p) => throw Ghost();
 
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("BitHelperBits.marked_bits")]
         internal static void MarkedBits(Seq<int> ws, SpecInt p) => throw Ghost();
 
         // Both at any position: past the words, `IsMarked` reads false and `MarkBit` does nothing.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("BitHelperBits.bits_at")]
         internal static void BitsAt(Seq<int> ws, SpecInt p) => throw Ghost();
 
         // `ToIntArrayLength(n)` words hold at least `n` bits.
+        [System.Diagnostics.Conditional("PAL")]
         [SpecOp("BitHelperBits.words_cover")]
         internal static void WordsCover(SpecInt n) => throw Ghost();
     }

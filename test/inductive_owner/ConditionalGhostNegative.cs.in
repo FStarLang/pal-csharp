@@ -1,0 +1,39 @@
+using System;
+using PalLang;
+
+[SpecType("Prims.int")]
+public readonly struct InformativeState { }
+
+public static class InformativeSpec
+{
+    [SpecOp("FStar.Int32.v")]
+    public static InformativeState Make(int value) => throw new InvalidOperationException();
+}
+
+public sealed class InformativeOwner
+{
+    private InformativeState state;
+    [Model] private InformativeState Model => state;
+
+    public void BadUpdate()
+    {
+        Pal.UpdateGhost(ref state, InformativeSpec.Make(1));
+    }
+
+    public void BadLocalUpdate()
+    {
+        InformativeState progress = default;
+        Pal.UpdateGhost(ref progress, InformativeSpec.Make(1));
+        Pal.UpdateGhost(ref progress, InformativeSpec.Make(2));
+    }
+}
+
+public static class ConditionalGhostLeak
+{
+    public static int Leak()
+    {
+        Ghost<int> snapshot = default;
+        Pal.Capture(ref snapshot, 42);
+        return snapshot.Value;
+    }
+}

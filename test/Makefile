@@ -19,6 +19,7 @@ all: $(TESTS) lint
 .PHONY: lint
 lint: $(TESTS)
 	@python3 trust-boundary.py
+	@python3 toolchain-pin.py
 	@bash no-example-names.sh
 	@bash diagnostic-ids.sh
 	@bash provenance-lint.sh

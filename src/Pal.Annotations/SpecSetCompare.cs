@@ -23,10 +23,12 @@ public static class SpecSetCompare
     public static bool SameKeys<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 
     /// <summary>A lemma: one step of a walk over the suffixes <c>s[i..]</c> and <c>t[j..]</c>.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetCompare.same_keys_step")]
     public static void SameKeysStep<T>(IComparer<T> c, Seq<T> s, Seq<T> t, SpecInt i, SpecInt j) => throw Ghost();
 
     /// <summary>A lemma: the whole sequences are their suffixes from 0.</summary>
+    [System.Diagnostics.Conditional("PAL")]
     [SpecOp("Pulse.Lib.CSharp.SetCompare.same_keys_whole")]
     public static void SameKeysWhole<T>(IComparer<T> c, Seq<T> s, Seq<T> t) => throw Ghost();
 }

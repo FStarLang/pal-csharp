@@ -1,0 +1,14 @@
+using PalLang;
+
+[Plain]
+public sealed class UnassignedCell { }
+
+public static class MissingAssignment
+{
+    public static UnassignedCell Bad(bool choose, UnassignedCell supplied)
+    {
+        UnassignedCell result;
+        if (choose) result = supplied;
+        return result;
+    }
+}

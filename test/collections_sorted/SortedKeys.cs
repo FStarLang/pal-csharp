@@ -8,6 +8,12 @@ using PalLang;
 // member that names it.
 [assembly: TranslateAnnotatedOnly]
 
+public static class DefaultInt32Comparison
+{
+    [Ensures("(Result < 0) == (x < y) && (Result == 0) == (x == y) && (Result > 0) == (x > y)")]
+    public static int Compare(int x, int y) => Comparer<int>.Default.Compare(x, y);
+}
+
 [Spec]
 public struct SortedKeysModel<T>
 {

@@ -12,3 +12,6 @@ merge=b09d608ca5a580ceebbb3ffae3d8cad4bbbfaf69
 z3=5.3.0
 # The merged HEAD the replay must produce (checked by install-fstar.sh and CI).
 result=b6b10e72d9cd42a56e5b09c25208de61119bf484
+# Core binder freshness and Pulse free-variable checks after solving annotations.
+patch=fstar-core-freshness.patch
+patch_sha256=36718ea1d9eedf88460aafc0146983a02010fa1f47e0d72e64a060db10ccf8ff

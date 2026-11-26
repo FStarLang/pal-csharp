@@ -65,6 +65,7 @@ internal sealed class RecursiveEmitter(SpecEmitter spec, HierarchyEmitter hierar
         sb.AppendLine();
         sb.AppendLine("module T = FStar.Tactics");
         sb.AppendLine();
+        GhostStorageEmitter.Checks(sb, c);
 
         // R10.1/F35. The representation, the nullable reference and the reference are one
         // mutually recursive group. A `type … and …` may mix a record with a type

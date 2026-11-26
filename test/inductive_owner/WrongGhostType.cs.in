@@ -1,0 +1,27 @@
+using PalLang;
+
+namespace PalCSharp.Tests.WrongGhostType;
+
+[Plain] public sealed class Cell<T> { public int value; }
+[Plain] public sealed class Other<T> { public int value; }
+
+public static class WrongGhostType
+{
+    [GhostArg("Cell<T>? witness")]
+    public static void Nullability<T>()
+    {
+        Pal.Assert(Pal.Ghost<Cell<T>>("witness") != null);
+    }
+
+    [GhostArg("Cell<T>? witness")]
+    public static void TypeArgument<T>()
+    {
+        Pal.Assert(Pal.Ghost<Cell<int>?>("witness") != null);
+    }
+
+    [GhostArg("Cell<T>? witness")]
+    public static void ClassName<T>()
+    {
+        Pal.Assert(Pal.Ghost<Other<T>?>("witness") != null);
+    }
+}

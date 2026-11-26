@@ -66,6 +66,11 @@ namespace System.Collections
             return true;
         }
 
+        [Throws(typeof(ArgumentException), "min < 0")]
+        [Ensures("min >= 0 && Result >= min && Result >= 3")]
+        [Ensures("Pal.Implies(min <= 0x7FFFFFC3, Result <= 0x7FFFFFC3)")]
+        [Ensures("PrimeSize(Result)")]
+        [Implements("Pulse.Lib.CSharp.HashSize.Checked.get_prime $(min)")]
         public static int GetPrime(int min)
         {
             if (min < 0)
@@ -162,7 +167,8 @@ namespace System.Collections
 
         // Returns the size of the hashtable to grow to.
         [Wrapping]
-        [Requires("0 <= oldSize && oldSize < 0x7FFFFFC3")]
+        [Requires("0 <= oldSize")]
+        [Throws(typeof(ArgumentException), "oldSize >= 0x7FFFFFC3")]
         [Ensures("oldSize < Result && Result <= 0x7FFFFFC3")]
         [Ensures("PrimeSize(Result)")]
         public static int ExpandPrime(int oldSize)
