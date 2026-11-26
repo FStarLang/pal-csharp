@@ -205,6 +205,14 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     /// <summary>R17.9. The order span locals were declared in, for releasing the latest first.</summary>
     public int Serial { get; init; }
 
+    public string ObjectOwner => Type is IrClassType c
+        ? $"(fun (p: {Types.Render(c with { Nullable = false })}) model -> " +
+          $"{Names.ClassModule(c.Name)}.{Names.ClassInv(c.Name)} p model)"
+        : throw new InvalidOperationException("An object cell must have a class type.");
+
+    public Term ModelTerm(string value) =>
+        new(value, MethodPlan.KindOf(Type), Type) { OptionalOwner = Kind == SlotKind.ObjectCell };
+
     /// <summary>The resource conjunct owning this slot, given a value binder.</summary>
     public string Resource(string value) => Kind switch
     {
@@ -219,6 +227,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
             $"{EnumerableAdapter.Iterator}.at enum_contents_{it.Source} enum_iterator_{it.Source} " +
             $"{Names.Local(it.Source)} {Binder} descriptor_{it.Source} p_{it.Source} pre_{it.Source} {value}",
         SlotKind.ArrayCell => $"Pulse.Lib.CSharp.ArrayCell.pts_to {Binder} {value}",
+        SlotKind.ObjectCell => $"Pulse.Lib.CSharp.ObjectCell.pts_to {ObjectOwner} {Binder} {value}",
         // R27.23. An `[Open]` receiver is held as its record.
         SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
         // R27.41. A receiver held at its heaps and not opened, carried across a loop at
@@ -236,7 +245,7 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     };
 
     public bool Owns => !Lent && Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
-        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell or SlotKind.NominalIterator;
+        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell or SlotKind.ObjectCell or SlotKind.NominalIterator;
 }
 
 public enum SlotKind
@@ -272,6 +281,7 @@ public enum SlotKind
     /// owned with it through <c>Pulse.Lib.CSharp.ArrayCell.pts_to</c>.
     /// </summary>
     ArrayCell,
+    ObjectCell,
 }
 
 /// <summary>
@@ -2353,6 +2363,46 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         }
 
         sb.AppendLine("}");
+        if (plan.Raises is { } outcomeRaises)
+        {
+            var outcome = "call_outcome";
+            var resultType = $"FStar.Pervasives.either ({Types.Render(method.ReturnType)}) exn";
+            var settled = $"(match {outcome} with\n" +
+                $"    | Inl {Names.Result} -> ({plan.Ensures})\n" +
+                $"    | Inr {MethodPlan.Thrown} -> ({outcomeRaises} {MethodPlan.Thrown}))";
+            sb.AppendLine();
+            sb.Append("fn ").Append(Names.FunctionOutcome(method.Name));
+            foreach (var b in plan.Binders) sb.Append(' ').Append(b);
+            sb.AppendLine();
+            sb.AppendLine($"  requires {plan.Requires}");
+            sb.AppendLine($"  returns {outcome}: {resultType}");
+            sb.AppendLine($"  ensures {settled}");
+            sb.AppendLine("{");
+            sb.AppendLine("  try");
+            sb.AppendLine($"    returns {outcome}: {resultType}");
+            sb.AppendLine($"    ensures {settled}");
+            sb.AppendLine($"    raises {outcomeRaises}");
+            sb.AppendLine("  {");
+            var arguments = plan.Binders.Select(b => b.StartsWith("{|")
+                ? "#" + CodeEmitter.BinderName(b) : CodeEmitter.CallArgument(b));
+            sb.AppendLine($"    let {Names.Result} = {Names.Function(method.Name)} {string.Join(" ", arguments)};");
+            sb.AppendLine($"    Inl {Names.Result}");
+            sb.AppendLine("  } catch {");
+            sb.AppendLine($"    {MethodPlan.Thrown} -> {{ Inr {MethodPlan.Thrown} }}");
+            sb.AppendLine("  }");
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.Append("fn ").Append(Names.FunctionNoThrow(method.Name));
+            foreach (var b in plan.Binders) sb.Append(' ').Append(b);
+            sb.AppendLine();
+            sb.AppendLine($"  requires {plan.Requires} ** pure (forall (e: exn). ~({plan.ThrowsProp("e")}))");
+            if (method.ReturnType is not IrPrim { Kind: PrimKind.Void })
+                sb.AppendLine($"  returns {Names.Result}: {Types.Render(method.ReturnType)}");
+            sb.AppendLine($"  ensures {plan.Ensures}");
+            sb.AppendLine("{");
+            sb.AppendLine($"  {Names.Function(method.Name)} {string.Join(" ", arguments)}");
+            sb.AppendLine("}");
+        }
         if (method.Lambda is { } lambda) EmitLambdaWrapper(sb, method, lambda, plan);
 
         return new EmittedModule(Names.FunctionModule(method.Name), sb.ToString())

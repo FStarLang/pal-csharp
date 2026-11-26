@@ -13,6 +13,7 @@ using static System.Collections.ThrowHelper;
 [assembly: SpecBinding("M:System.Collections.Generic.IEqualityComparer`1.Equals(`0,`0)", "Pulse.Lib.CSharp.Equality.equals")]
 [assembly: SpecBinding("T:System.Collections.Generic.EqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
 [assembly: SpecBinding("P:System.Collections.Generic.EqualityComparer`1.Default", "Pulse.Lib.CSharp.Equality.default_comparer")]
+[assembly: SpecBinding("implicit:P:System.Collections.Generic.EqualityComparer`1.Default", "1")]
 
 public static class SlotSpecs
 {
@@ -291,6 +292,104 @@ public sealed class Row : IRow, IRowReadOnly
     [Ensures("@this.SpecValue == v")]
     public Row(bool v) => _value = v;
 
+    [Ensures("Result == @this.SpecValue")]
+    public bool ReadValue() => _value;
+
+    [Ensures("Result == @this.SpecValue && @this.SpecValue == !Pal.Old(@this.SpecValue)")]
+    [Throws(typeof(NotSupportedException), "fail")]
+    public bool ChangeOrFail(bool fail)
+    {
+        _value = !_value;
+        if (fail) throw new NotSupportedException();
+        return _value;
+    }
+
+    [Ensures("!Result")]
+    [Throws(typeof(NotSupportedException), "fail")]
+    public static bool LazyOwnedThrow(bool fail)
+    {
+        Row? row = null;
+        row ??= new Row(true);
+        Pal.Join(row != null && row.SpecValue);
+        return row!.ChangeOrFail(fail);
+    }
+
+    [Ensures("true")]
+    public static bool LazyOwnedCatch()
+    {
+        Row? row = null;
+        row ??= new Row(true);
+        Pal.Join(row != null && row.SpecValue);
+        bool result = false;
+        try
+        {
+            Pal.Invariant(row != null);
+            result = row!.ChangeOrFail(true);
+        }
+        catch (NotSupportedException)
+        {
+            result = row!.ReadValue();
+        }
+        return result;
+    }
+
+    [Ensures("Result == initialize")]
+    public static bool LazyOwned(bool initialize)
+    {
+        Row? row = null;
+        if (initialize) row = new Row(true);
+        Pal.Join(Pal.Implies(initialize, row != null && row.SpecValue));
+        Pal.Join(Pal.Implies(!initialize, row == null));
+        row ??= new Row(false);
+        Pal.Join(row != null && row.SpecValue == initialize);
+        row ??= new Row(!initialize);
+        Pal.Join(row != null && row.SpecValue == initialize);
+        Pal.Assert(row != null && row.SpecValue == initialize);
+        return row!.ReadValue();
+    }
+
+    [Ensures("Result == value")]
+    public static bool InitializedOwned(bool value)
+    {
+        Row? row = new Row(value);
+        row ??= new Row(!value);
+        Pal.Join(row != null && row.SpecValue == value);
+        return row!.ReadValue();
+    }
+
+    [Ensures("Result")]
+    public static bool LazyOwnedLoop()
+    {
+        Row? row = null;
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2);
+            Pal.Invariant(Pal.Implies(i == 0, row == null));
+            Pal.Invariant(Pal.Implies(i > 0, row != null && row.SpecValue));
+            row ??= new Row(i == 0);
+            Pal.Join(row != null && row.SpecValue);
+        }
+        return row!.ReadValue();
+    }
+
+    [Ensures("Result")]
+    public static bool LazyOwnedBreak()
+    {
+        Row? row = null;
+        int i = 0;
+        while (i < 2)
+        {
+            Pal.Decreases(2 - i);
+            Pal.Invariant(i == 0);
+            Pal.Invariant(Pal.Implies(!Pal.Broke(), row == null));
+            Pal.Invariant(Pal.Implies(Pal.Broke(), row != null && row.SpecValue));
+            row ??= new Row(true);
+            Pal.Join(row != null && row.SpecValue);
+            break;
+        }
+        return row!.ReadValue();
+    }
+
     bool IRow.this[int i]
     {
         [Ensures("Result == @this.SpecValue")]
@@ -302,6 +401,65 @@ public sealed class Row : IRow, IRowReadOnly
 
     [Ensures("Result == @this.SpecValue")]
     bool IRowReadOnly.this[int i] => _value;
+}
+
+[Plain]
+public sealed class RowToken<T>
+{
+    public T Item;
+    public RowToken(T item) => Item = item;
+}
+
+public sealed class GenericRow<T>
+{
+    private T _value;
+
+    [Model] private T Model => _value;
+    [Spec] internal T SpecValue => Model;
+    [Spec, PulseBody("$(value) == true")]
+    internal static bool Good(bool value) => throw new InvalidOperationException();
+
+    [Ensures("true")]
+    public GenericRow(T value) => _value = value;
+
+    [Frac("p")]
+    [Ensures("Result")]
+    public bool SnapshotLoop()
+    {
+        Ghost<T> snapshot = default;
+        Pal.Capture(ref snapshot, this.SpecValue);
+        for (int i = 0; i < 2; i++)
+        {
+            Pal.Invariant(0 <= i && i <= 2 && Pal.Same(this.SpecValue, snapshot));
+        }
+        return true;
+    }
+
+    [Throws(typeof(NotSupportedException), "fail")]
+    [Ensures("GenericRow<T>.Good(Result) && Pal.Same(@this.SpecValue, Pal.Old(@this.SpecValue))")]
+    public bool ReadOrFail(bool fail)
+    {
+        if (fail) throw new NotSupportedException();
+        return true;
+    }
+
+    [Throws(typeof(NotSupportedException), "fail")]
+    [Ensures("Result")]
+    public static bool LazyGenericOwner(RowToken<T> token, bool fail)
+    {
+        GenericRow<RowToken<T>>? row = null;
+        row ??= new GenericRow<RowToken<T>>(token);
+        Pal.Join(row != null);
+        return row!.ReadOrFail(fail);
+    }
+
+    [Ensures("Result")]
+    public static bool ReferenceComparer(RowToken<T>? token)
+    {
+        System.Collections.Generic.IEqualityComparer<RowToken<T>> comparer =
+            System.Collections.Generic.EqualityComparer<RowToken<T>>.Default;
+        return comparer.Equals(token, token);
+    }
 }
 
 // R33.15. An `[Open]` helper of a class that owns arrays.

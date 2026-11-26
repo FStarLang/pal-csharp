@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using PalLang;
@@ -77,6 +78,78 @@ public class Stream<T> : IEnumerable<T>
 
 public static class SequenceProtocolClient
 {
+    [Throws(typeof(InvalidOperationException), "!valid")]
+    [Ensures("Result")]
+    private static bool RequireValid(bool valid)
+    {
+        if (!valid) throw new InvalidOperationException();
+        return true;
+    }
+
+    [Throws(typeof(InvalidOperationException), "!valid")]
+    [Ensures("Result == (Pal.Contents(input).Length > 0)")]
+    private static bool HasItemsChecked<T>(IEnumerable<T> input, bool valid)
+    {
+        RequireValid(valid);
+        using var iterator = input.GetEnumerator();
+        return iterator.MoveNext();
+    }
+
+    [Throws(typeof(InvalidOperationException), "!valid")]
+    [Ensures("Result == (source.Elements.Length > 0)")]
+    public static bool BorrowedSnapshot<T>(Stream<T> source, bool valid) => HasItemsChecked(source, valid);
+
+    [Throws(typeof(InvalidOperationException), "!valid")]
+    [Ensures("Result")]
+    public static bool OwnedSnapshot<T>(T item, bool valid)
+    {
+        var source = new Stream<T>(item);
+        return HasItemsChecked(source, valid);
+    }
+
+    [Throws(typeof(InvalidOperationException), "!valid")]
+    [Ensures("Result == ((input is Stream<T>) && Pal.Contents(input).Length > 0)")]
+    public static bool AnyChecked<T>(IEnumerable<T> input, bool valid)
+    {
+        var source = input as Stream<T>;
+        if (source != null)
+        {
+            using var iterator = source.GetEnumerator();
+            RequireValid(valid);
+            return iterator.MoveNext();
+        }
+        return false;
+    }
+
+    [Ensures("Result == ((input is Stream<T>) && Pal.Contents(input).Length > 0)")]
+    public static bool AnyValid<T>(IEnumerable<T> input)
+    {
+        var source = input as Stream<T>;
+        if (source != null)
+        {
+            using var iterator = source.GetEnumerator();
+            RequireValid(true);
+            return iterator.MoveNext();
+        }
+        return false;
+    }
+
+    [Ensures("Result")]
+    public static bool CheckedLoop<T>(IEnumerable<T> input)
+    {
+        var source = input as Stream<T>;
+        if (source != null)
+        {
+            using var iterator = source.GetEnumerator();
+            while (RequireValid(true) && iterator.MoveNext())
+            {
+                Pal.Invariant(iterator.Ready);
+                Pal.Decreases(iterator.Pending.Length);
+            }
+        }
+        return true;
+    }
+
     [Ensures("Result == ((input is Stream<T>) && Pal.Contents(input).Length > 0)")]
     public static bool Consume<T>(IEnumerable<T> input)
     {

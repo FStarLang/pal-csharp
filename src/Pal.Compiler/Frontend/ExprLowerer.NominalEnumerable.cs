@@ -292,7 +292,8 @@ public sealed partial class ExprLowerer
                 Invoke(IteratorSlot("System.IDisposable", "Dispose")),
                 [.. owned.Select(f => (f.Name, iteratorContext.OwnedLocal(f), (IrClassType)known.MapType(f.Type)!))]) {
                 SpecTypes = WellKnown.AllTypeParameters(st).Select(t => t.Name)
-                    .Zip(known.TypeArguments(st.GetMembers(protocol.Ready).OfType<IPropertySymbol>().Single().GetMethod!))
+                    .Zip(known.TypeArguments(st.GetMembers(protocol.Ready).OfType<IPropertySymbol>().Single().GetMethod!),
+                        (first, second) => (First: first, Second: second))
                     .ToImmutableDictionary(pair => pair.First, pair => pair.Second)
             };
         }

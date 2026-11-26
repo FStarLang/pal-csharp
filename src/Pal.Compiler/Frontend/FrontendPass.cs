@@ -476,12 +476,11 @@ public static partial class FrontendPass
                 if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
                 // R11.1a. A specification type's members declare F* names; they are not
                 // executable code and have no bodies to translate.
-                // A static binding container may also contain checked lemma
+                // A static binding container may also contain checked method
                 // bodies. Adding a SpecOp sibling must not silently suppress
                 // those implementations and their exported proof modules.
                 if (known.IsSpecTypeDeclaration(symbol.ContainingType) &&
                     !(symbol.IsStatic && known.SpecTypeName(symbol.ContainingType) is null &&
-                      Declarations.Has(symbol, known.LemmaAttribute) &&
                       known.SpecOpName(symbol) is null && known.SpecCtorName(symbol) is null &&
                       known.RegionOpName(symbol) is null)) continue;
                 if (Declarations.KindOf(symbol, known) is not { } kind) continue;
@@ -3486,7 +3485,8 @@ public static partial class FrontendPass
             }
             if (!bound.TryGetValue($"{Naming.Of(symbol)}_throws_{k}", out var spec)) continue;
             var when = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
-                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow }
+                { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow,
+                  CastParameters = EnumerableCasts.Parameters(symbol, known) }
                 .Lower(spec.Expression);
             var clause = new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when);
             // R27.57. A clause for the replica at a subclass is not the member's own.

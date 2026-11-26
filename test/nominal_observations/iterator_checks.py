@@ -10,6 +10,10 @@ ROOT = HERE.parents[1]
 BASE = HERE / "obj/iterator"
 TEXT = (HERE / "SequenceProtocol.cs").read_text()
 CASES = (
+    ("exception-domain", TEXT.replace("RequireValid(true);", "RequireValid(false);"),
+     "Func_SequenceProtocolClient_AnyValid"),
+    ("loop-exception-domain", TEXT.replace("RequireValid(true) &&", "RequireValid(false) &&"),
+     "Func_SequenceProtocolClient_CheckedLoop"),
     ("next", TEXT.replace("index = 1; return true;", "index = 1; return false;"),
      "Func_Stream_Cursor_MoveNext"),
     ("current", TEXT.replace("public T Current => owner.item;", "public T Current => default(T)!;"),

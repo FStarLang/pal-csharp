@@ -92,6 +92,7 @@ public sealed class CodeEmitter(
     private int _temp;
     private int _ghost;
     private int _loop;
+    private int _loopConditionDepth;
 
     /// <summary>
     /// R5.10. The escape flags of the innermost loop being emitted, or null outside any
@@ -470,11 +471,11 @@ public sealed class CodeEmitter(
 
     private static readonly System.Text.RegularExpressions.Regex Identifier = new(@"^[A-Za-z_][\w']*$");
 
-    private static string BinderName(string binder) =>
+    internal static string BinderName(string binder) =>
         System.Text.RegularExpressions.Regex.Match(binder, @"^[\(\{]\|?\s*#?([^:\s\)]+)").Groups[1].Value;
 
     /// <summary>R30.39. How the outlined function is handed one of the method's binders.</summary>
-    private static string? CallArgument(string binder) => binder switch
+    internal static string? CallArgument(string binder) => binder switch
     {
         "()" => "()",
         _ when binder.StartsWith("{|") => null,
@@ -1681,6 +1682,8 @@ public sealed class CodeEmitter(
             var selfArg = PulseEmitter.InvariantNamesThis(decl) ? receiver.Binder + " " : "";
             pure.Add($"{prefix}{Names.ClassAbsRep(klass.Name)}_current_model {selfArg}{record}");
             pure.Add($"{prefix}{Names.ClassAbsModel(klass.Name)}_current {selfArg}{record} == {receiver.PreModel}");
+            if (receiver.PreModel is { } model)
+                measureScope.Bind(receiver.Name, new Term($"(reveal {model})", TermKind.Math, receiver.Type));
         }
         else if (reopened && unchanged && receiver.ViewBase is null &&
             !decl.Invariants.Any(i => i.Type is IrPrim { Kind: PrimKind.SlProp }) &&
@@ -1867,7 +1870,7 @@ public sealed class CodeEmitter(
     // another owner. Loops must quantify that fresh raw record as well.
     private bool WholeRaisingBracket(IrCall call) =>
         raising?.Contains(call.Callee) == true && !call.DoesNotReturn && _windows.Count == 0 &&
-        !_receiverClosedForThrow && !call.Args.Any(a => a is IrField { Type: IrClassType });
+        !_receiverClosedForThrow && !_catching && !call.Args.Any(a => a is IrField { Type: IrClassType });
 
     private static bool WholeBracketReceiver(Slot receiver) =>
         receiver.Name == Names.This && receiver.Fraction is null && receiver.ViewBase is null &&
@@ -2732,6 +2735,11 @@ public sealed class CodeEmitter(
                 Line($"Pulse.Lib.CSharp.ArrayCell.release {local.Binder};");
                 continue;
             }
+            if (local.Kind == SlotKind.ObjectCell)
+            {
+                Line($"Pulse.Lib.CSharp.ObjectCell.release {local.ObjectOwner} {local.Binder};");
+                continue;
+            }
             if (local.Kind == SlotKind.Array && _nominalSnapshots.Contains(local.Binder))
             {
                 Line($"A.free {local.Binder};");
@@ -3229,6 +3237,21 @@ public sealed class CodeEmitter(
                 // `inv var_y _` while every later mention asked for `inv var_x _`, and no
                 // pure equality closes that gap (Error 228).
                 _slots[d.Name] = aliased with { Name = d.Name };
+                return;
+            }
+
+            case IrLocalDecl { Type: IrClassType { Nullable: true, Plain: false } oc, Init: IrNull or IrCall } d
+                when classes is not null && classes.TryGetValue(oc.Name, out var optionalClass) &&
+                     optionalClass.Recursion is null && (d.Init is IrNull || Reassigned(d)):
+            {
+                var binder = Names.Local(d.Name);
+                var local = new Slot(d.Name, oc, SlotKind.ObjectCell, binder);
+                Line($"let mut {binder}: {Types.Render(oc with { Nullable = false })} = B.null;");
+                Line($"Pulse.Lib.CSharp.ObjectCell.init {local.ObjectOwner} {binder};");
+                _slots[d.Name] = local;
+                _objectLocals.Add(local);
+                if (d.Init is not IrNull)
+                    Assign(new IrAssign(d.Loc, new IrVar(d.Loc, d.Name) { Type = d.Type }, d.Init));
                 return;
             }
 
@@ -3737,6 +3760,23 @@ public sealed class CodeEmitter(
         Adopt(a);
         switch (a.Target)
         {
+            case IrVar v when Lookup(v.Name) is { Kind: SlotKind.ObjectCell } cell:
+                if (a.Value is IrCall { Kind: CalleeKind.Method, ResultType: IrClassType } produced)
+                {
+                    var result = Fresh();
+                    Call(produced, result);
+                    var model = FreshValue(v.Name);
+                    var held = new Slot(v.Name, cell.Type, SlotKind.Object, result);
+                    Line($"with {model}. assert ({held.Resource(model)});");
+                    Line($"unfold ({held.Resource(model)});");
+                    Line($"B.pts_to_not_null {result};");
+                    Line($"fold ({held.Resource(model)});");
+                    Line($"Pulse.Lib.CSharp.ObjectCell.set {cell.ObjectOwner} {cell.Binder} {result};");
+                }
+                else
+                    diagnostics.Unsupported(a.Loc, "Reassigning an optional owned local from a non-producing expression");
+                return;
+
             // R34.10. `Array.Resize(ref arr, n)` on a reassigned array local.
             case IrVar v when ArrayCellOf(v) is { } resized:
                 if (a.Value is IrNewArray { Source: IrVar src } grown && src.Name == v.Name)
@@ -4191,7 +4231,22 @@ public sealed class CodeEmitter(
         var arms = new IrBlock(i.Loc, i.Else is null ? [i.Then] : [i.Then, i.Else]);
         var framed = _lines.Count;
         var frame = Frame(new IrWhile(i.Loc, i.Cond, i.JoinFacts, null, arms)
-            { Live = i.Live, Unassigned = i.Unassigned }, plan);
+            { Live = i.Live, Unassigned = i.Unassigned }, plan, includeUnchangedObjects: true);
+        if (_escape is { } escape)
+        {
+            foreach (var flag in new[] { escape.Break, escape.Continue }.OfType<string>().Distinct())
+            {
+                if (_slots.Values.Any(s => s.Binder == flag)) continue;
+                var before = FreshValue("escape");
+                Line($"with {before}. assert (R.pts_to {flag} {before});");
+                var changes = flag == escape.Break ? ContainsBreak(arms) : ContainsContinue(arms);
+                var value = changes ? FreshValue("escape") : before;
+                if (changes) frame.Existentials.Add(value);
+                frame.Resources.Add($"R.pts_to {flag} {value}");
+                if (flag == escape.Break)
+                    frame.Scope.Bind(Frontend.StmtLowerer.BrokeFlag, new Term(value, TermKind.Bool, IrPrim.Bool));
+            }
+        }
         // R30.39. Every value the frame named before the `if`, for an outlined function.
         frame = frame with
         {
@@ -4587,15 +4642,21 @@ public sealed class CodeEmitter(
         return false;
     }
 
-    private LoopFrame Frame(IrWhile w, MethodPlan plan)
+    private LoopFrame Frame(IrWhile w, MethodPlan plan, bool includeUnchangedObjects = false)
     {
         // R5.12. The unfolded receiver is not among the ordinary live slots: inside R4.10's
         // window it is a representation, not an object, and its folded invariant is exactly
         // the thing that does not hold here.
+        // An explicit resource predicate naming a readonly owner replaces its automatic
+        // class frame; its checked contract must retain the owner's actual permissions.
+        var resourceReferences = new HashSet<string>(w.Invariants.Where(i => i.Type is IrPrim { Kind: PrimKind.SlProp })
+            .SelectMany(Check.Subexpressions).OfType<IrRefOf>().Select(r => r.Parameter));
         var live = w.Live.Where(n => _slots.TryGetValue(n, out var s) && s.Owns)
             .Select(n => _slots[n])
             .Where(s => !_objects.Any(o => o.Name == s.Name))
-            .Where(s => s.Kind != SlotKind.Object || s.Open || !s.Heaps.IsEmpty ||
+            .Where(s => s is not { Kind: SlotKind.Object, Fraction: not null, Open: false } ||
+                !resourceReferences.Contains(s.Name))
+            .Where(s => includeUnchangedObjects || s.Kind != SlotKind.Object || s.Open || !s.Heaps.IsEmpty ||
                 !s.LoopHeaps.IsDefaultOrEmpty || LoopNeedsOwnership(w, s.Name))
             .ToImmutableArray();
         var unassigned = w.Unassigned.ToImmutableHashSet();
@@ -4648,7 +4709,9 @@ public sealed class CodeEmitter(
             fixedNames[slot.Name] = value;
             if (!unassigned.Contains(slot.Name)) existentials.Add(value);
             resources.Add(slot.Resource(value));
-            scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            var model = unassigned.Contains(slot.Name) && slot is { Kind: SlotKind.Object, Open: false }
+                ? $"(reveal {value})" : value;
+            scope.Bind(slot.Name, slot.ModelTerm(model));
             // R27.41. An object the loop leaves alone is at its fixed model in the measure too.
             if (slot is { Kind: SlotKind.Object, LoopHeaps.IsDefaultOrEmpty: false } && unassigned.Contains(slot.Name))
                 measureScope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
@@ -4663,7 +4726,9 @@ public sealed class CodeEmitter(
         // one value for the whole loop, and the invariant may mention it as such.
         foreach (var (name, slot) in _slots)
             if (!slot.Owns && !_objects.Any(o => o.Name == name) && !scope.TryGet(name, out _))
-                scope.Bind(name, new Term(slot.Binder, MethodPlan.KindOf(slot.Type), slot.Type));
+                scope.Bind(name, new Term(
+                    _ghostLets.ContainsKey(slot.Binder) ? $"(reveal {slot.Binder})" : slot.Binder,
+                    MethodPlan.KindOf(slot.Type), slot.Type));
 
         // R5.12. Everything R4.10 opened has to be carried across the loop.
         var pure = ImmutableArray.CreateBuilder<string>();
@@ -4727,9 +4792,10 @@ public sealed class CodeEmitter(
         // known to be what went in. For the receiver that is not an optimisation — a
         // read-only method re-folds its invariant at the model it was handed (R4.11a), and
         // an existentially quantified representation could not possibly satisfy it.
-        var fixedAll = repFixed
-            .Concat(live.Where(s => unassigned.Contains(s.Name))
-                        .Select(s => (Name: fixedNames[s.Name], Resource: s.Resource(fixedNames[s.Name]))))
+        // Establish record types before projecting fields that need their equality evidence.
+        var fixedAll = live.Where(s => unassigned.Contains(s.Name))
+            .Select(s => (Name: fixedNames[s.Name], Resource: s.Resource(fixedNames[s.Name])))
+            .Concat(repFixed)
             .ToList();
         // R33.20. An `[Open]` receiver the loop changes keeps, across it, the fields that
         // neither the loop nor an `[Open]` callee of it assigns.
@@ -4792,7 +4858,12 @@ public sealed class CodeEmitter(
             scope.Bind(Frontend.StmtLowerer.BrokeFlag, new Term(value, TermKind.Bool, IrPrim.Bool));
         }
 
-        var guard = Capture(() => Expr(w.Cond));
+        var guard = Capture(() =>
+        {
+            _loopConditionDepth++;
+            try { return Expr(w.Cond); }
+            finally { _loopConditionDepth--; }
+        });
         Line("while (");
         _indent++;
         _lines.AddRange(guard.Lines);
@@ -5156,7 +5227,7 @@ public sealed class CodeEmitter(
             if (unassigned.Contains(slot.Name)) fixedAll.Add((value, slot.Resource(value)));
             else existentials.Add(value);
             resources.Add(slot.Resource(value));
-            scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            scope.Bind(slot.Name, slot.ModelTerm(value));
         }
         // R19.5. The invariant is stated over the same names, so that what is assigned is
         // spoken of at whatever value it has when control leaves.
@@ -5714,13 +5785,13 @@ public sealed class CodeEmitter(
                 var hs = slot.Heaps.Select(h => FreshValue(Frontend.Region.HeapBinder(h.Region.Name))).ToList();
                 named.Add((string.Join(" ", [value, .. hs]),
                     $"{InvHeap(hc)} {slot.Binder} {slot.PermArg}{value} {string.Join(" ", hs)}"));
-                scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+                scope.Bind(slot.Name, slot.ModelTerm(value));
                 for (var i = 0; i < hs.Count; i++)
                     scope.Bind(Frontend.Region.HeapNameOf(slot.Heaps[i].Region.Name, slot.Name), new Term(hs[i], TermKind.Other));
                 continue;
             }
             named.Add((value, slot.Resource(value)));
-            scope.Bind(slot.Name, new Term(value, MethodPlan.KindOf(slot.Type), slot.Type));
+            scope.Bind(slot.Name, slot.ModelTerm(value));
             if (slot.Type is IrEnumerableType { Capability: not null })
             {
                 scope.Bind(slot.Name, new Term($"(enum_contents_{slot.Name} {value})", TermKind.Seq, slot.Type));
@@ -6022,6 +6093,15 @@ public sealed class CodeEmitter(
     {
         switch (expr)
         {
+            case IrBinary { Op: BinOp.Eq or BinOp.Ne } b when
+                (b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null) is IrVar v &&
+                Lookup(v.Name) is { Kind: SlotKind.ObjectCell } cell:
+            {
+                var result = Fresh();
+                Line($"let {result} = Pulse.Lib.CSharp.ObjectCell.is_null {cell.ObjectOwner} {cell.Binder};");
+                return b.Op == BinOp.Eq ? result : $"(not {result})";
+            }
+
             case IrLiteral l:
                 return Types.Literal(l.Value, l.Type);
 
@@ -6051,6 +6131,11 @@ public sealed class CodeEmitter(
                 return "()";
 
             case IrVar v when _slots.TryGetValue(v.Name, out var slot):
+                if (slot.Kind == SlotKind.ObjectCell)
+                {
+                    diagnostics.Unsupported(v.Loc, "Using an optional owned local outside a null test or receiver call");
+                    return "()";
+                }
                 if (slot.Kind is SlotKind.Cell or SlotKind.RefParam)
                 {
                     var t = Fresh();
@@ -6640,6 +6725,25 @@ public sealed class CodeEmitter(
 
     private string Call(IrCall call, string binder)
     {
+        if (call.HasReceiver && call.Args[0] is IrVar receiver &&
+            Lookup(receiver.Name) is { Kind: SlotKind.ObjectCell, Type: IrClassType type } cell)
+        {
+            if (_loopConditionDepth == 0 && raising?.Contains(call.Callee) == true)
+            {
+                return OptionalOwnerRaisingCall(call, binder, receiver, cell, type);
+            }
+            var pointer = Fresh();
+            Line($"let {pointer} = Pulse.Lib.CSharp.ObjectCell.take {cell.ObjectOwner} {cell.Binder};");
+            _slots[receiver.Name] = new Slot(receiver.Name, type with { Nullable = false }, SlotKind.Object, pointer);
+            string called;
+            try { called = Call(call, binder); }
+            finally { _slots[receiver.Name] = cell; }
+            var model = FreshValue(receiver.Name);
+            var held = new Slot(receiver.Name, type, SlotKind.Object, pointer);
+            Line($"with {model}. assert ({held.Resource(model)});");
+            Line($"Pulse.Lib.CSharp.ObjectCell.put {cell.ObjectOwner} {cell.Binder} {pointer} {model};");
+            return called;
+        }
         // R34.26. An array lent as an enumerable argument is taken back once the call is done.
         var mark = _unlends.Count;
         var result = CallCore(call, binder);
@@ -6650,6 +6754,115 @@ public sealed class CodeEmitter(
             _unlends.RemoveAt(k);
         }
         return result;
+    }
+
+    private string OptionalOwnerRaisingCall(IrCall call, string binder, IrVar receiver, Slot cell, IrClassType type)
+    {
+        if ((Methods ?? methods) is not { } declaredMethods ||
+            !declaredMethods.TryGetValue(call.Callee, out var callee) ||
+            call.ResultType is not IrPrim ||
+            call.Args.Skip(1).Any(a => a is not (IrVar or IrLiteral) ||
+                a.Type is not (IrPrim or IrTypeParamType or IrClassType { Plain: true })) ||
+            !call.KeepsArguments)
+        {
+            diagnostics.Unsupported(call.Loc,
+                "A raising optional-owner call with owned arguments, effectful arguments, or an owned result");
+            return "()";
+        }
+
+        var pointer = Fresh();
+        Line($"let {pointer} = Pulse.Lib.CSharp.ObjectCell.take {cell.ObjectOwner} {cell.Binder};");
+        var held = new Slot(receiver.Name, type with { Nullable = false }, SlotKind.Object, pointer);
+        var before = FreshValue(receiver.Name);
+        Line($"with {before}. assert ({held.Resource(before)});");
+        var pre = new SpecScope { QualifySpecCalls = true };
+        var arguments = call.Args.ToBuilder();
+        var temporaries = new List<string>();
+        for (var i = 0; i < callee.TypeParameters.Length && i < call.TypeArguments.Length; i++)
+            pre.BindType(callee.TypeParameters[i], call.TypeArguments[i]);
+        pre.Bind(callee.Parameters[0].Name, new Term(before, TermKind.Math, held.Type));
+        for (var i = 1; i < call.Args.Length; i++)
+        {
+            var argument = call.Args[i];
+            var text = Fresh();
+            Line($"let {text} = {Expr(argument)};");
+            var name = "$optional_arg_" + text;
+            _slots[name] = new Slot(name, argument.Type!, SlotKind.Value, text);
+            temporaries.Add(name);
+            arguments[i] = new IrVar(argument.Loc, name) { Type = argument.Type };
+            pre.Bind(callee.Parameters[i].Name,
+                new Term(text, MethodPlan.KindOf(argument.Type!), argument.Type));
+        }
+
+        var after = call.MutatesReceiver ? FreshValue(receiver.Name) : before;
+        var outcome = FreshValue("outcome");
+        var exception = $"ex_{_try++}";
+        var post = new SpecScope(pre)
+        {
+            Pre = pre,
+            ResultTerm = $"(Inl?.v {outcome})",
+            ResultType = call.ResultType,
+            ResultKind = MethodPlan.KindOf(call.ResultType),
+        };
+        post.Bind(callee.Parameters[0].Name, new Term(after, TermKind.Math, held.Type));
+        var normal = string.Join(" /\\ ", callee.Ensures.Select(e => spec.AsProp(spec.Emit(e, post))).DefaultIfEmpty("True"));
+        var thrown = MethodPlan.ThrowsProp(callee.Throws, pre, spec, exception);
+        var restored = (call.MutatesReceiver ? $"exists* {after}. " : "") + held.Resource(after);
+        var settled = $"{restored} ** " +
+            $"pure (Inl? {outcome} ==> ({normal})) ** " +
+            $"pure (Inr? {outcome} ==> (let {exception} = Inr?.v {outcome} in {thrown}))";
+        var helper = $"catch_{_try++}";
+        var resultType = $"FStar.Pervasives.either ({Types.Render(call.ResultType)}) exn";
+        Line($"fn {helper} ()");
+        _indent++;
+        Line($"requires {held.Resource(before)}");
+        Line($"returns {outcome}: {resultType}");
+        Line($"ensures {settled}");
+        _indent--;
+        Line("{");
+        _indent++;
+        Line("try");
+        _indent++;
+        Line($"returns {outcome}: {resultType}");
+        Line($"ensures {settled}");
+        Line($"raises (fun ({exception}: exn) -> {restored} ** pure ({thrown}))");
+        _indent--;
+        Line("{");
+        _indent++;
+        var catching = _catching;
+        _catching = true;
+        _slots[receiver.Name] = held;
+        var value = Fresh();
+        try { Call(call with { Args = arguments.ToImmutable() }, value); }
+        finally
+        {
+            _catching = catching;
+            _slots[receiver.Name] = cell;
+            foreach (var name in temporaries) _slots.Remove(name);
+        }
+        Line($"Inl {value}");
+        _indent--;
+        Line("} catch {");
+        _indent++;
+        Line($"{exception} -> {{ Inr {exception} }}");
+        _indent--;
+        Line("}");
+        _indent--;
+        Line("};");
+        var caught = Fresh();
+        Line($"let {caught} = {helper} ();");
+        var model = FreshValue(receiver.Name);
+        Line($"with {model}. assert ({held.Resource(model)});");
+        Line($"Pulse.Lib.CSharp.ObjectCell.put {cell.ObjectOwner} {cell.Binder} {pointer} {model};");
+        Line($"if (Inr? {caught}) {{");
+        _indent++;
+        ReleaseForThrow(_plan!);
+        Line($"raise (Inr?.v {caught});");
+        Line("()");
+        _indent--;
+        Line("} else { () };");
+        Line($"let {binder} = Inl?.v {caught};");
+        return binder;
     }
 
     private string CallCore(IrCall call, string binder)
@@ -6777,6 +6990,8 @@ public sealed class CodeEmitter(
                             ViewBase: null, Index: null, Heaps.IsEmpty: true,
                             Window: false, Open: false, Consumed: false, RawReference: false } stable &&
             stable.PostModel == stable.PreModel && _method?.IsReadOnly == true &&
+            !((Methods ?? methods)?.TryGetValue(call.Callee, out var receiverMethod) == true &&
+              receiverMethod.Parameters.FirstOrDefault()?.Plain == true) &&
             !_receiverDirty && (_pristineLoops.Count == 0 || _pristineLoops.Peek()) &&
             readOnlyMethods?.Contains(call.Callee) == true &&
             !DirtiesReceiver(new IrExprStmt(call.Loc, call)))
@@ -6834,8 +7049,35 @@ public sealed class CodeEmitter(
         var keptRecords = KeptReferenceStates(call, raw).ToArray();
         foreach (var (slot, before) in keptRecords)
             Line($"with {before}. assert ({slot.Resource(before)});");
-        var application = $"{callee} {applied}";
-        Line($"let {binder} = {application};");
+        var noThrow = _loopConditionDepth > 0 && owner is null && raising?.Contains(call.Callee) == true;
+        var application = $"{(noThrow ? Names.FunctionNoThrow(call.Callee) : callee)} {applied}";
+        if (!noThrow && !_catching && !_receiverClosedForThrow && owner is null && convert is null && view is null &&
+            !call.DoesNotReturn && raising?.Contains(call.Callee) == true &&
+            (_objectLocals.Count > 0 || _unlends.Count > 0 ||
+             _slots.Values.Any(s => s.Kind == SlotKind.NominalIterator)))
+        {
+            // Reify the checked exception before unwinding local ownership; a native
+            // raising call would forward directly to the enclosing exception post.
+            var outcome = Fresh();
+            Line($"let {outcome} = {Names.FunctionOutcome(call.Callee)} {applied};");
+            Line($"if (Inr? {outcome}) {{");
+            _indent++;
+            Line($"rewrite each {outcome} as (Inr (Inr?.v {outcome}));");
+            for (var k = _unlends.Count - 1; k >= 0; k--)
+                Line(_unlends[k].Text);
+            var opened = _objects;
+            _objects = [.. opened.Where(o => o != self && !bracketed.Contains(o) && !closedAround.Contains(o))];
+            try { ReleaseForThrow(_plan!); }
+            finally { _objects = opened; }
+            Line($"raise (Inr?.v {outcome});");
+            Line("()");
+            _indent--;
+            Line("} else { () };");
+            Line($"rewrite each {outcome} as (Inl (Inl?.v {outcome}));");
+            Line($"let {binder} = Inl?.v {outcome};");
+        }
+        else
+            Line($"let {binder} = {application};");
         // Plain results are raw pointers, not registered object/model binders.
         // Keep structured information about this exact binding; Capture will
         // retain it only if no cleanup or proof statement follows the call.

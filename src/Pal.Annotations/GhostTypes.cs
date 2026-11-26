@@ -124,6 +124,7 @@ public readonly struct SlProp
         "SlProp is a specification-only construct and has no runtime meaning.");
 
     /// <summary>The empty resource, Pulse's <c>emp</c>.</summary>
+    [SpecOp("emp")]
     public static SlProp Emp => default;
 
     /// <summary>Separating conjunction (Pulse <c>**</c>).</summary>

@@ -2125,6 +2125,11 @@ public sealed class StmtLowerer(
                 return new IrAssign(loc, coalesced,
                     new IrConditional(loc, Sorted.IsNull(loc, coalesced), _code.Lower(node.Right), coalesced)
                         { Type = coalescedType });
+            if (coalescedType is IrClassType { Nullable: true })
+                return new IrIf(loc,
+                    new IrBinary(loc, BinOp.Eq, coalesced, new IrNull(loc) { Type = coalescedType })
+                        { Type = IrPrim.Bool },
+                    new IrAssign(loc, coalesced, _code.Lower(node.Right)), null);
             if (coalescedType is IrOptionType && _code.Lower(node.Right) is { Type: { } fallbackType } fallback)
                 return new IrAssign(loc, coalesced,
                     new IrConditional(loc,

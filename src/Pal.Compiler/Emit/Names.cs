@@ -26,6 +26,7 @@ public enum TermKind
 /// <summary>A Pulse term together with what it denotes.</summary>
 public readonly record struct Term(string Text, TermKind Kind, IrType? Type = null)
 {
+    public bool OptionalOwner { get; init; }
     public override string ToString() => Text;
 }
 
@@ -39,6 +40,8 @@ public static class Names
     public static string Local(string name) => name == "result" ? "var_result'" : "var_" + name;
     public static string Argument(string name) => "arg_" + name;
     public static string Function(string name) => "func_" + name;
+    public static string FunctionOutcome(string name) => Function(name) + "__outcome";
+    public static string FunctionNoThrow(string name) => Function(name) + "__nothrow";
     public static string SpecFunction(string name) => "spec_" + name;
     public static string Lemma(string name) => "lemma_" + name;
     public static string FunctionModule(string name) => "Func_" + name;

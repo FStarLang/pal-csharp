@@ -907,15 +907,18 @@ public sealed class MethodPlan
     /// declares nothing may throw nothing, and Pulse makes it prove so.
     /// </summary>
     public string ThrowsProp(string exn)
+        => ThrowsProp(_throws, PreScope, _spec, exn);
+
+    internal static string ThrowsProp(ImmutableArray<IrThrows> clauses, SpecScope pre, SpecEmitter spec, string exn)
     {
-        if (_throws.IsEmpty) return "False";
-        var scope = new SpecScope(PreScope);
-        var cases = _throws.Select(t =>
+        if (clauses.IsEmpty) return "False";
+        var scope = new SpecScope(pre);
+        var cases = clauses.Select(t =>
         {
             scope.Bind(Frontend.FrontendPass.ThrownParameter, new Term(exn, TermKind.Other, t.Type));
             var parts = new List<string>();
             if (t.Type.Name is { } n) parts.Add($"{Names.Qualified(Names.ExnIs(n))} {exn}");
-            if (t.When is { } w) parts.Add(_spec.AsProp(_spec.Emit(w, scope)));
+            if (t.When is { } w) parts.Add(spec.AsProp(spec.Emit(w, scope)));
             return parts.Count == 0 ? "True" : "(" + string.Join(" /\\ ", parts) + ")";
         });
         return string.Join(" \\/ ", cases);

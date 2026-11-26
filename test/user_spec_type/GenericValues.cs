@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using PalLang;
 
 [assembly: IncludePulse("GenericSpecValues", """
@@ -24,10 +25,31 @@ public static class GenericValueOperations
     [SpecOp("GenericSpecValues.check")]
     public static void Check<T>(Seq<T> items, T value, SpecInt index) =>
         throw new InvalidOperationException();
+
+    [Ensures("Result == value")]
+    public static int CheckedIdentity(int value)
+    {
+        Pal.Assert(Identity(value) == value);
+        return value;
+    }
 }
 
 public static class GenericValues
 {
+    [Lemma, Conditional("PAL"), Requires("!flag")]
+    public static void FalseWitness(Ghost<bool> flag) => Pal.Assert(!flag.Value);
+
+    [Lemma, Conditional("PAL"), Requires("flag")]
+    public static void TrueWitness(Ghost<bool> flag) => Pal.Assert(flag.Value);
+
+    [Ensures("Result")]
+    public static bool BooleanWitnesses()
+    {
+        FalseWitness(false);
+        TrueWitness(true);
+        return true;
+    }
+
     [Ensures("Result == value")]
     public static int Variable(int value)
     {
@@ -35,7 +57,7 @@ public static class GenericValues
         items[0] = value;
         GenericValueOperations.Check(Pal.Contents(items), value, 0);
         Pal.Assert(Pal.Same(GenericValueOperations.Identity(value), value));
-        return value;
+        return GenericValueOperations.CheckedIdentity(value);
     }
 
     [Ensures("true")]

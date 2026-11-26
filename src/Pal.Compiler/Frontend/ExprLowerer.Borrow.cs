@@ -1310,5 +1310,5 @@ public static class BorrowFacts
             .Select(f => (f.Name, f.Type))
             .Concat(view.PreservedFields.Select(f => (f.Name, f.Type)))
             .Concat(view.PreservedGhost.Select(p => (p.Name, p.Type)))
-            .DistinctBy(f => f.Name);
+            .GroupBy(f => f.Name).Select(g => g.First());
 }

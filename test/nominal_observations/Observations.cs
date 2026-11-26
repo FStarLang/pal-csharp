@@ -135,6 +135,16 @@ public class Packet<T> : IEnumerable<T>
 
 public static class ObservationClient
 {
+    [Throws(typeof(InvalidOperationException), "!(source is Packet<T> && ((Packet<T>)source).Items.Length >= 0)")]
+    [Ensures("Result")]
+    public static bool RequirePacket<T>(IEnumerable<T> source)
+    {
+        var candidate = source as Packet<T>;
+        if (candidate != null)
+            return true;
+        throw new InvalidOperationException();
+    }
+
     [Ensures("Result == (source is Packet<T>)")]
     public static bool Observe<T>(IEnumerable<T> source)
     {

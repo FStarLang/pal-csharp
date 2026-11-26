@@ -486,11 +486,12 @@ public sealed class WellKnown
     /// R11.1a. Whether this type is part of a <em>specification-type declaration</em>:
     /// it carries <c>[SpecType]</c>, or it declares the constructors and operations of one.
     ///
-    /// <para>Such a type is not translated, and neither is any member of it. Its members
+    /// <para>Such a type has no translated representation. Its bound members
     /// have no bodies to translate — each says what it means in F* and throws — and its
     /// signatures mention specification-only types and open type parameters that no
     /// program method could. Recognising the declaration as a whole is what lets a user
-    /// write one in an ordinary source file beside the code that uses it.</para>
+    /// write one in an ordinary source file beside the code that uses it. A container
+    /// without [SpecType] may also contain checked static methods, collected separately.</para>
     /// </summary>
     public bool IsSpecTypeDeclaration(INamedTypeSymbol? type) =>
         type is not null &&

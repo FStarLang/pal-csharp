@@ -23,6 +23,7 @@ public sealed class SpecScope
     /// observation of *that* class is then written unqualified (R3.7).
     /// </summary>
     public string? DefiningClass { get; init; }
+    public bool QualifySpecCalls { get; init; }
 
     /// <summary>
     /// What kind of value <c>Result</c> denotes. A method's result is a machine value,
@@ -48,6 +49,7 @@ public sealed class SpecScope
         Pre = other.Pre;
         ResultTerm = other.ResultTerm;
         DefiningClass = other.DefiningClass;
+        QualifySpecCalls = other.QualifySpecCalls;
         ResultKind = other.ResultKind;
         ResultType = other.ResultType;
     }
@@ -179,6 +181,8 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     scope.TryGet("$projection:" + ob.Class + ":" + ob.Member, out var projected))
                     return projected;
                 var receiver = Emit(ob.Receiver, scope);
+                if (receiver.OptionalOwner)
+                    receiver = receiver with { Text = $"(Some?.v {receiver.Text})", OptionalOwner = false };
                 // R3.7's rule about field qualifiers applies to observations too: inside
                 // the class's own module the qualifier is not merely redundant, it makes
                 // F*'s dependency scan read the module as depending on itself.
@@ -357,7 +361,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // exactly as a generic method is: a specification is emitted from the same
                 // IR call node and has no reason to differ.
                 return new Term(
-                    $"({Names.SpecFunction(call.Callee)} " +
+                    $"({(scope.QualifySpecCalls ? Names.SpecModule(call.Callee) + "." : "")}{Names.SpecFunction(call.Callee)} " +
                     string.Join(" ", call.TypeArguments.Select(scope.Instantiate).Select(Types.Atom)
                         .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
                         .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
@@ -445,6 +449,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
 
             case IrBinary b when DecimalOrder(b, scope) is { } ordered:
                 return ordered;
+
+            case IrBinary b when OptionalOwnerNullTest(b, scope) is { } optionalTest:
+                return optionalTest;
 
             // A reference tested against null as a boolean (a conditional's guard): the
             // box type has no decidable equality, so `=` would not typecheck.
@@ -540,8 +547,20 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
         _ => null,
     };
 
+    private string? OptionalOwnerNullTest(IrBinary b, SpecScope scope)
+    {
+        if (b.Op is not (BinOp.Eq or BinOp.Ne)) return null;
+        var tested = b.Left is IrNull ? b.Right : b.Right is IrNull ? b.Left : null;
+        if (tested is not IrVar v || !scope.TryGet(v.Name, out var term) || !term.OptionalOwner)
+            return null;
+        return $"({(b.Op == BinOp.Eq ? "None?" : "Some?")} {term.Text})";
+    }
+
     private Term Binary(IrBinary b, SpecScope scope)
     {
+        if (OptionalOwnerNullTest(b, scope) is { } optionalTest)
+            return new Term(optionalTest, TermKind.Bool, IrPrim.Bool);
+
         string Infix(string op, TermKind kind, bool mathematical = true)
         {
             var left = mathematical ? Math(b.Left, scope) : AsProp(Emit(b.Left, scope));
@@ -1087,6 +1106,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// </summary>
     internal string Argument(IrExpr arg, IrType? paramType, SpecScope scope)
     {
+        if (arg is IrLiteral { Value: bool value } &&
+            paramType is IrPrim { Kind: PrimKind.Bool } or IrGhostType { Inner: IrPrim { Kind: PrimKind.Bool } })
+            return value ? "true" : "false";
         var term = Emit(arg, scope);
         return term.Kind == TermKind.Machine && paramType is not IrPrim { IsMachineInt: true }
             ? AsMath(term)
