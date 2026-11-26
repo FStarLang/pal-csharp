@@ -162,7 +162,8 @@ namespace System.Collections
 
         // Returns the size of the hashtable to grow to.
         [Wrapping]
-        [Requires("0 <= oldSize && oldSize < 0x7FFFFFC3")]
+        [Requires("0 <= oldSize")]
+        [Throws(typeof(ArgumentException), "oldSize >= 0x7FFFFFC3")]
         [Ensures("oldSize < Result && Result <= 0x7FFFFFC3")]
         [Ensures("PrimeSize(Result)")]
         public static int ExpandPrime(int oldSize)
