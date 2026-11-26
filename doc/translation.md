@@ -1255,8 +1255,10 @@ by a write-set analysis, not by a heuristic.
 2. A **write into an array the object owns**. `items[i] = v` assigns no field symbol, but
    R3.10a says the contents *are* part of the model, so a method doing only this moves its
    model and must not be given `preserves`. The test peels an assignment target down to its
-   root before asking whether it is a field. Handing an owned array to any callee counts
-   too: it may come back written.
+   root before asking whether it is a field. Handing an owned array to a callee counts
+   too, unless the corresponding by-value array parameter is `[Frac]`: that permission
+   rules out writes. The parameter is resolved semantically, not by its position in the
+   argument list. Full-ownership parameters and `ref`/`out` arguments remain writes.
 3. A **call to an instance method that is not itself read-only**. This one *follows the
    call*, and R3.10b is why it must. An owner reads its state by calling its sub-objects'
    read-only methods, so a rule counting any instance call as a write would classify every
