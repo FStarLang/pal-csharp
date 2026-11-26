@@ -117,6 +117,29 @@ let rec node_mem (#r: Type0) (nodes: Seq.seq (B.box r)) (node: B.box r)
   Seq.length nodes > 0 &&
     (R.eq_box (Seq.last nodes) node || node_mem (Count.init nodes) node)
 
+let rec node_mem_index (#r: Type0) (nodes: Seq.seq (B.box r))
+    (i: nat { i < Seq.length nodes })
+  : Lemma (ensures node_mem nodes (Seq.index nodes i))
+          (decreases Seq.length nodes)
+  = if i < Seq.length nodes - 1 then node_mem_index (Count.init nodes) i
+
+let rec node_mem_witness (#r: Type0) (nodes: Seq.seq (B.box r)) (node: B.box r)
+  : Lemma (requires node_mem nodes node)
+          (ensures exists (i: nat). i < Seq.length nodes /\ Seq.index nodes i == node)
+          (decreases Seq.length nodes)
+  = if R.eq_box (Seq.last nodes) node then
+      assert (Seq.index nodes (Seq.length nodes - 1) == node)
+    else node_mem_witness (Count.init nodes) node
+
+let node_mem_exists (#r: Type0) (nodes: Seq.seq (B.box r)) (node: B.box r)
+  : Lemma (node_mem nodes node <==>
+           (exists (i: nat). i < Seq.length nodes /\ Seq.index nodes i == node))
+  = if node_mem nodes node then node_mem_witness nodes node
+    else
+      let absent (i: nat) : Lemma (i < Seq.length nodes ==> Seq.index nodes i =!= node) =
+        if i < Seq.length nodes then node_mem_index nodes i in
+      FStar.Classical.forall_intro absent
+
 let seen_matches (#r #a: Type0) (c: O.comparer a) (ok: a -> bool) (t: D.nt r a)
     (items: Seq.seq a) (nodes: Seq.seq (B.box r)) : prop =
   forall (p: B.box r) (d: a). L.memP p (P.nboxes t) /\ ok (ST.root_key (D.strip (P.sub t p)) d) ==>
