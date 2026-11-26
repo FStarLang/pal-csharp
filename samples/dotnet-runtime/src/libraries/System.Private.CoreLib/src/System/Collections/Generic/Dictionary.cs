@@ -481,8 +481,8 @@ namespace System.Collections.Generic
         private static bool NonRandomized(IEqualityComparer<TKey>? comparer) => throw new InvalidOperationException();
 
         [Spec]
-        [PulseBody("DictionaryChain.randomized $(comparer)")]
-        private static IEqualityComparer<TKey>? Randomized(IEqualityComparer<TKey>? comparer) => throw new InvalidOperationException();
+        [PulseBody("DictionaryChain.randomized $(comparer) $(result)")]
+        private static bool Randomized(IEqualityComparer<TKey>? comparer, IEqualityComparer<TKey>? result) => throw new InvalidOperationException();
 
         /// <summary>Whether two comparers deem the same keys equal.</summary>
         [Spec]
@@ -490,11 +490,11 @@ namespace System.Collections.Generic
         public static bool SameEquality(IEqualityComparer<TKey>? comparer1, IEqualityComparer<TKey>? comparer2) => throw new InvalidOperationException();
 
         [Lemma]
-        [Requires("Dictionary<TKey, TValue>.NonRandomized(comparer)")]
-        [Ensures("Dictionary<TKey, TValue>.SameEquality(comparer, Dictionary<TKey, TValue>.Randomized(comparer)) && Dictionary<TKey, TValue>.Randomized(comparer) != null")]
-        [PulseBody("DictionaryChain.randomized_same $(comparer)")]
+        [Requires("Dictionary<TKey, TValue>.NonRandomized(comparer) && Dictionary<TKey, TValue>.Randomized(comparer, result)")]
+        [Ensures("Dictionary<TKey, TValue>.SameEquality(comparer, result) && result != null")]
+        [PulseBody("DictionaryChain.randomized_same $(comparer) $(result)")]
         [Conditional("PAL")]
-        private static void RandomizedSame(IEqualityComparer<TKey>? comparer) { }
+        private static void RandomizedSame(IEqualityComparer<TKey>? comparer, IEqualityComparer<TKey>? result) { }
 
         [Lemma]
         [Ensures("Dictionary<TKey, TValue>.SameEquality(comparer, comparer)")]
@@ -2096,10 +2096,12 @@ namespace System.Collections.Generic
             if (!typeof(TKey).IsValueType && forceNewHashCodes)
             {
                 Debug.Assert(_comparer is NonRandomizedStringEqualityComparer);
-                RandomizedSame(_comparer);
+                Ghost<IEqualityComparer<TKey>?> previousComparer = default;
+                Pal.Capture(ref previousComparer, _comparer);
                 PreFreeOf(Pal.Contents(entries), count, _freeList, _freeCount, _comparer);
                 Ghost<Seq<Entry>> copied = Pal.Contents(entries);
                 IEqualityComparer<TKey> comparer = _comparer = (IEqualityComparer<TKey>)((NonRandomizedStringEqualityComparer)_comparer).GetRandomizedEqualityComparer();
+                RandomizedSame(previousComparer.Value, _comparer);
 
                 RehashStart(copied.Value, count, _comparer);
                 for (int i = 0; i < count; i++)

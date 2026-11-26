@@ -66,6 +66,11 @@ namespace System.Collections
             return true;
         }
 
+        [Throws(typeof(ArgumentException), "min < 0")]
+        [Ensures("min >= 0 && Result >= min && Result >= 3")]
+        [Ensures("Pal.Implies(min <= 0x7FFFFFC3, Result <= 0x7FFFFFC3)")]
+        [Ensures("PrimeSize(Result)")]
+        [Implements("Pulse.Lib.CSharp.HashSize.Checked.get_prime $(min)")]
         public static int GetPrime(int min)
         {
             if (min < 0)
