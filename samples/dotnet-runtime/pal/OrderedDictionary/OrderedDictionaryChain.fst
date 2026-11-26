@@ -28,7 +28,8 @@ let entry (tk tv: Type0) = E.struct_OrderedDictionary_Entry tk tv
 let sx (u: U32.t) : int = if U32.v u >= pow2 31 then U32.v u - pow2 32 else U32.v u
 
 /// `Entry.HashCode`, `Entry.Next` and `Entry.Key`.
-let ops (tk tv: Type0) : HC.ops (entry tk tv) tk = {
+let ops (tk tv: Type0) {| d: Eq.has_equality tk |} : HC.ops (entry tk tv) tk = {
+  HC.equality = d;
   HC.hc = (fun (x: entry tk tv) -> sx x.E.fld_HashCode);
   HC.nx = (fun (x: entry tk tv) -> I32.v x.E.fld_Next);
   HC.key = (fun (x: entry tk tv) -> x.E.fld_Key);
@@ -36,7 +37,7 @@ let ops (tk tv: Type0) : HC.ops (entry tk tv) tk = {
 
 /// The comparer the dictionary uses: `_comparer`, or `EqualityComparer<TKey>.Default` when
 /// it is null, which the constructors allow only for a value type.
-let eff (#t: Type0) (c: option (Eq.comparer t)) : Eq.handle =
+let eff (#t: Type0) {| Eq.has_equality t |} (c: option (Eq.comparer t)) : Eq.handle =
   match c with
   | None -> Eq.default_comparer t
   | Some h -> h
@@ -44,34 +45,34 @@ let eff (#t: Type0) (c: option (Eq.comparer t)) : Eq.handle =
 /// Opaque to the solver: the methods reach it only through the lemmas below, which keeps
 /// its quantifiers out of every query that does not need them.
 [@@"opaque_to_smt"]
-let wf (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) : prop =
+let wf (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) : prop =
   HC.wf (ops tk tv) (eff c) bs es n (-1) 0
 
-let keys (#tk #tv: Type0) (es: seq (entry tk tv)) (n: int) : seq tk =
+let keys (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n: int) : seq tk =
   if 0 <= n && n <= Seq.length es then Seq.init n (fun j -> (Seq.index es j).E.fld_Key) else Seq.empty
 
-let values (#tk #tv: Type0) (es: seq (entry tk tv)) (n: int) : seq tv =
+let values (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n: int) : seq tv =
   if 0 <= n && n <= Seq.length es then Seq.init n (fun j -> (Seq.index es j).E.fld_Value) else Seq.empty
 
-let mem (#t: Type0) (c: option (Eq.comparer t)) (xs: seq t) (x: t) : prop =
+let mem (#t: Type0) {| Eq.has_equality t |} (c: option (Eq.comparer t)) (xs: seq t) (x: t) : prop =
   HC.mem (eff c) xs x
 
 /// The hash code a lookup of `x` computes: `(uint)(comparer?.GetHashCode(x) ?? x.GetHashCode())`.
-let hash_of (#t: Type0) (c: option (Eq.comparer t)) (x: t) : int = I32.v (Eq.hash (eff c) x) % pow2 32
+let hash_of (#t: Type0) {| Eq.has_equality t |} (c: option (Eq.comparer t)) (x: t) : int = I32.v (Eq.hash (eff c) x) % pow2 32
 
 /// `c` deems `k` equal to `x`.
-let key_eq (#t: Type0) (c: option (Eq.comparer t)) (k x: t) : bool = Eq.equals (eff c) k x
+let key_eq (#t: Type0) {| Eq.has_equality t |} (c: option (Eq.comparer t)) (k x: t) : bool = Eq.equals (eff c) k x
 
 (* ---------------------------------------------------------------------------------- *)
 (* Every entry below the count is live *)
 
-let rec live_all (#tk #tv: Type0) (es: seq (entry tk tv)) (n: nat{n <= Seq.length es}) (j: nat{j < n})
+let rec live_all (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n: nat{n <= Seq.length es}) (j: nat{j < n})
   : Lemma (requires HC.ndead (ops tk tv) es n (-1) == 0)
           (ensures I32.v (Seq.index es j).E.fld_Next >= -1)
           (decreases n)
   = if j = n - 1 then () else live_all es (n - 1) j
 
-let rec items_keys (#tk #tv: Type0) (es: seq (entry tk tv)) (n: nat{n <= Seq.length es})
+let rec items_keys (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n: nat{n <= Seq.length es})
   : Lemma (requires HC.ndead (ops tk tv) es n (-1) == 0)
           (ensures HC.items (ops tk tv) es n (-1) == keys es n)
           (decreases n)
@@ -81,7 +82,7 @@ let rec items_keys (#tk #tv: Type0) (es: seq (entry tk tv)) (n: nat{n <= Seq.len
       assert (Seq.equal (keys es n) (Seq.snoc (keys es (n - 1)) (Seq.index es (n - 1)).E.fld_Key))
     end
 
-let wf_keys (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let wf_keys (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c)
           (ensures 0 <= n /\ n <= Seq.length es /\ HC.items (ops tk tv) es n (-1) == keys es n /\
                    (forall (j: nat). j < n ==> j < Seq.length es /\ I32.v (Seq.index es j).E.fld_Next >= -1))
@@ -96,19 +97,19 @@ let wf_keys (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c
 (* IndexOf *)
 
 /// The bucket `x` hashes to, as stored (1-based).
-let bucket (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) : int =
+let bucket (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) : int =
   if Seq.length es > 0 && Seq.length bs = Seq.length es
   then I32.v (Seq.index bs (hash_of c x % Seq.length es))
   else 0
 
 /// The search for `x` has followed `q` links of its chain to `i`, passing no hit.
 [@@"opaque_to_smt"]
-let search (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let search (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
            (x: tk) (i q: int) : prop =
   q >= 0 /\ HC.search (ops tk tv) (eff c) bs es n (-1) 0 x i q
 
 /// Entry `i` stores `x`'s hash code and a key `c` deems equal to `x`: what `IndexOf` stops at.
-let hit (#tk #tv: Type0) (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) (i: int) : bool =
+let hit (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) (i: int) : bool =
   0 <= i && i < Seq.length es &&
   U32.v (Seq.index es i).E.fld_HashCode = hash_of c x &&
   Eq.equals (eff c) (Seq.index es i).E.fld_Key x
@@ -117,18 +118,18 @@ let sx_hash (u: U32.t) (h: I32.t)
   : Lemma ((U32.v u = I32.v h % pow2 32) <==> (sx u = I32.v h))
   = ()
 
-let hit_hc (#tk #tv: Type0) (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) (i: int)
+let hit_hc (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (c: option (Eq.comparer tk)) (x: tk) (i: int)
   : Lemma (hit es c x i == HC.hit (ops tk tv) (eff c) es (HC.hv (eff c) x) x i)
   = if 0 <= i && i < Seq.length es then sx_hash (Seq.index es i).E.fld_HashCode (Eq.hash (eff c) x)
 
-let search_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) (x: tk)
+let search_start (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) (x: tk)
   : Lemma (requires wf bs es n c /\ Seq.length es > 0)
           (ensures search bs es n c x (bucket bs es c x - 1) 0 /\
                    0 <= bucket bs es c x /\ bucket bs es c x <= Seq.length es)
-  = reveal_opaque (`%wf) (wf #tk #tv); reveal_opaque (`%search) (search #tk #tv);
+  = reveal_opaque (`%wf) (wf #tk #tv #_); reveal_opaque (`%search) (search #tk #tv #_);
     HC.search_start (ops tk tv) (eff c) bs es n (-1) 0 x
 
-let search_step (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let search_step (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
                 (x: tk) (i q: int)
   : Lemma (requires search bs es n c x i q /\ 0 <= i /\ i < Seq.length es /\ ~ (hit es c x i))
           (ensures search bs es n c x (I32.v (Seq.index es i).E.fld_Next) (q + 1) /\
@@ -137,7 +138,7 @@ let search_step (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int
     hit_hc es c x i;
     HC.search_step (ops tk tv) (eff c) bs es n (-1) 0 x i q
 
-let search_hit (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let search_hit (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
                (x: tk) (i q: int)
   : Lemma (requires search bs es n c x i q /\ hit es c x i)
           (ensures 0 <= i /\ i < n /\ i < Seq.length (keys es n) /\
@@ -148,7 +149,7 @@ let search_hit (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int)
     reveal_opaque (`%wf) (wf #tk #tv);
     wf_keys bs es n c
 
-let search_absent (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let search_absent (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
                   (x: tk) (i q: int)
   : Lemma (requires search bs es n c x i q /\ ~ (0 <= i /\ i < Seq.length es))
           (ensures ~ (mem c (keys es n) x))
@@ -165,7 +166,7 @@ let search_absent (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: i
 
 /// A change to the entries that keeps every pair's link, hash code and key below the count
 /// (`SetAt(index, value)`) keeps the table and its keys.
-let wf_frame (#tk #tv: Type0) (bs: seq I32.t) (es es': seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let wf_frame (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es es': seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ Seq.length es' == Seq.length es /\
                     (forall (j: nat). j < n /\ j < Seq.length es ==>
                        (Seq.index es' j).E.fld_Next == (Seq.index es j).E.fld_Next /\
@@ -186,7 +187,7 @@ let wf_frame (#tk #tv: Type0) (bs: seq I32.t) (es es': seq (entry tk tv)) (n: in
     assert (Seq.equal (keys es' n) (keys es n))
 
 /// `Array.Clear(_buckets)` and `_count = 0`.
-let wf_clear (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (c: option (Eq.comparer tk))
+let wf_clear (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (c: option (Eq.comparer tk))
   : Lemma (requires Seq.length bs == Seq.length es /\
                     (forall (b: nat). b < Seq.length bs ==> I32.v (Seq.index bs b) == 0))
           (ensures wf bs es 0 c /\ keys es 0 == Seq.empty /\ values es 0 == Seq.empty)
@@ -197,15 +198,15 @@ let wf_clear (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (c: option
 
 /// An empty table is well formed whatever the comparer: the constructor sets `_comparer`
 /// after `EnsureBucketsAndEntriesInitialized` built the table.
-let wf_rebind (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (c c': option (Eq.comparer tk))
+let wf_rebind (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (c c': option (Eq.comparer tk))
   : Lemma (wf bs es 0 c ==> wf bs es 0 c')
   = reveal_opaque (`%wf) (wf #tk #tv)
 
 /// `_entries[i].Value = v`.
-let set_value (#tk #tv: Type0) (es: seq (entry tk tv)) (i: int) (v: tv) : seq (entry tk tv) =
+let set_value (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (i: int) (v: tv) : seq (entry tk tv) =
   if 0 <= i && i < Seq.length es then Seq.upd es i { Seq.index es i with E.fld_Value = v } else es
 
-let wf_set_value (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let wf_set_value (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
                  (i: int) (v: tv)
   : Lemma (requires wf bs es n c /\ 0 <= i /\ i < n)
           (ensures wf bs (set_value es i v) n c /\ keys (set_value es i v) n == keys es n /\
@@ -217,7 +218,7 @@ let wf_set_value (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: in
     assert (Seq.equal (values (set_value es i v) n) (Seq.upd (values es n) i v))
 
 /// `EqualityComparer<TValue>.Default.Equals(x, vs[p])` for some `p < i`.
-let has_value (#t: Type0) (vs: seq t) (x: t) (i: int) : prop =
+let has_value (#t: Type0) {| Eq.has_equality t |} (vs: seq t) (x: t) (i: int) : prop =
   exists (p: nat). p < i /\ p < Seq.length vs /\ Eq.equals (Eq.default_comparer t) x (Seq.index vs p)
 
 (* ---------------------------------------------------------------------------------- *)
@@ -227,39 +228,39 @@ let has_value (#t: Type0) (vs: seq t) (x: t) (i: int) : prop =
 /// they go. In between, one entry `h` below the limit `m` is in no chain: the hole the next
 /// entry moves into. `wfm` is that state, and `keysh`/`valuesh` the pairs it holds, in order.
 
-let rec ndead_zero (#tk #tv: Type0) (es: seq (entry tk tv)) (n: nat{n <= Seq.length es}) (hole: int)
+let rec ndead_zero (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n: nat{n <= Seq.length es}) (hole: int)
   : Lemma (requires forall (j: nat). j < n /\ j <> hole ==> I32.v (Seq.index es j).E.fld_Next >= -1)
           (ensures HC.ndead (ops tk tv) es n hole == 0)
           (decreases n)
   = if n = 0 then () else ndead_zero es (n - 1) hole
 
 [@@"opaque_to_smt"]
-let wfm_core (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) : prop =
+let wfm_core (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) : prop =
   HC.chains (ops tk tv) bs es m h /\
   (forall (j: nat). j < m /\ j < Seq.length es /\ j <> h ==> I32.v (Seq.index es j).E.fld_Next >= -1) /\
   HC.hashes_ok (ops tk tv) (eff c) es m h
 
-let wfm (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) : prop =
+let wfm (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) : prop =
   0 <= h /\ h < m /\ m <= Seq.length es /\ Seq.length bs == Seq.length es /\ wfm_core bs es m h c
 
 let skip1 (h j: int) : int = if j < h then j else j + 1
 
-let keysh (#tk #tv: Type0) (es: seq (entry tk tv)) (m h: int) : seq tk =
+let keysh (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (m h: int) : seq tk =
   if 0 <= h && h < m && m <= Seq.length es
   then Seq.init (m - 1) (fun (j: nat{j < m - 1}) -> (Seq.index es (skip1 h j)).E.fld_Key)
   else Seq.empty
 
-let valuesh (#tk #tv: Type0) (es: seq (entry tk tv)) (m h: int) : seq tv =
+let valuesh (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (m h: int) : seq tv =
   if 0 <= h && h < m && m <= Seq.length es
   then Seq.init (m - 1) (fun (j: nat{j < m - 1}) -> (Seq.index es (skip1 h j)).E.fld_Value)
   else Seq.empty
 
 /// Entries `h` and `i` are the same: `entries[h] = entries[i]` has just run.
-let copied (#tk #tv: Type0) (es: seq (entry tk tv)) (h i: int) : prop =
+let copied (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (h i: int) : prop =
   0 <= h /\ h < Seq.length es /\ 0 <= i /\ i < Seq.length es /\ Seq.index es h == Seq.index es i
 
 /// `es'` is `es` but for links: what fixing a chain changes.
-let same_data (#tk #tv: Type0) (es es': seq (entry tk tv)) : prop =
+let same_data (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) : prop =
   Seq.length es' == Seq.length es /\
   (forall (j: nat). {:pattern Seq.index es' j} j < Seq.length es ==>
      (Seq.index es' j).E.fld_Key == (Seq.index es j).E.fld_Key /\
@@ -267,7 +268,7 @@ let same_data (#tk #tv: Type0) (es es': seq (entry tk tv)) : prop =
      (Seq.index es' j).E.fld_HashCode == (Seq.index es j).E.fld_HashCode)
 
 /// `Insert` opens a hole at the end.
-let open_ok (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let open_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ n < Seq.length es)
           (ensures wfm bs es (n + 1) n c /\ keysh es (n + 1) n == keys es n /\ valuesh es (n + 1) n == values es n)
   = reveal_opaque (`%wf) (wf #tk #tv);
@@ -284,7 +285,7 @@ let open_ok (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c
     assert (Seq.equal (valuesh es (n + 1) n) (values es n))
 
 /// Whatever the hole holds is no pair.
-let hole_set (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
+let hole_set (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
              (x: entry tk tv)
   : Lemma (requires wfm bs es m h c)
           (ensures wfm bs (Seq.upd es h x) m h c /\ keysh (Seq.upd es h x) m h == keysh es m h /\
@@ -302,7 +303,7 @@ let hole_set (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int)
     assert (Seq.equal (valuesh es' m h) (valuesh es m h))
 
 /// `RemoveAt` closes the hole at the end.
-let close_ok (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let close_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
              (x: entry tk tv)
   : Lemma (requires wfm bs es n (n - 1) c)
           (ensures wf bs (Seq.upd es (n - 1) x) (n - 1) c /\
@@ -326,31 +327,31 @@ let close_ok (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (
 (* Finding an entry's predecessor in its chain *)
 
 /// The bucket of entry `i`.
-let bof (#tk #tv: Type0) (es: seq (entry tk tv)) (i: int) : int =
+let bof (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (i: int) : int =
   if 0 <= i && i < Seq.length es then U32.v (Seq.index es i).E.fld_HashCode % Seq.length es else 0
 
 let bkt_sx (u: U32.t) (len: pos) : Lemma (HC.bkt (sx u) len == U32.v u % len) = ()
 
 /// The head of the chain of entry `t`'s bucket.
-let head (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (t: int) : int =
+let head (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (t: int) : int =
   if Seq.length bs = Seq.length es && 0 <= t && t < Seq.length es then I32.v (Seq.index bs (bof es t)) - 1 else -1
 
 /// The walk from the head of `t`'s chain, with `m` and hole `h`, has reached `i` after `q`
 /// links, and `t` is further on.
 [@@"opaque_to_smt"]
-let pred (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int) : prop =
+let pred (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int) : prop =
   Seq.length es > 0 /\ Seq.length bs == Seq.length es /\ 0 <= t /\ t < Seq.length es /\ q >= 0 /\
   (exists (l qt: nat). HC.chain_at (ops tk tv) es m h (bof es t) (head bs es t) l /\
                      qt < l /\ HC.walk (ops tk tv) es (head bs es t) qt == t /\ q < qt /\
                      i == HC.walk (ops tk tv) es (head bs es t) q)
 
-let in_bucket_bof (#tk #tv: Type0) (es: seq (entry tk tv)) (t: int)
+let in_bucket_bof (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (t: int)
   : Lemma (requires 0 <= t /\ t < Seq.length es)
           (ensures HC.in_bucket (ops tk tv) es (bof es t) t)
   = bkt_sx (Seq.index es t).E.fld_HashCode (Seq.length es)
 
 /// A chain node is found by the walk from its bucket's head.
-let find_in_chain (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t: int)
+let find_in_chain (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t: int)
   : Ghost (nat & nat)
           (requires HC.chains (ops tk tv) bs es m h /\ HC.lvx (ops tk tv) es m h t)
           (ensures fun (l, qt) -> HC.chain_at (ops tk tv) es m h (bof es t) (head bs es t) l /\
@@ -368,7 +369,7 @@ let find_in_chain (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h 
     (l, qt)
 
 /// The walk starts at the head; if that is not `t`, it has a predecessor to find.
-let pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t: int)
+let pred_start (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t: int)
   : Lemma (requires HC.chains (ops tk tv) bs es m h /\ HC.lvx (ops tk tv) es m h t /\
                     I32.v (Seq.index bs (bof es t)) <> t + 1)
           (ensures pred bs es m h t (head bs es t) 0)
@@ -376,12 +377,12 @@ let pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t: 
     let (l, qt) = find_in_chain bs es m h t in
     ()
 
-let pred_range (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
+let pred_range (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
   : Lemma (requires pred bs es m h t i q)
           (ensures 0 <= i /\ i < Seq.length es /\ q < Seq.length es)
   = reveal_opaque (`%pred) (pred #tk #tv)
 
-let pred_step (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
+let pred_step (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
   : Lemma (requires pred bs es m h t i q /\ 0 <= i /\ i < Seq.length es /\
                     I32.v (Seq.index es i).E.fld_Next <> t)
           (ensures pred bs es m h t (I32.v (Seq.index es i).E.fld_Next) (q + 1) /\ q + 1 < Seq.length es)
@@ -407,7 +408,7 @@ let sigma (i h j: int) : int = if j = i then h else j
 /// to `h`: the head, or the link of the predecessor `p` (the `qp`th node), now leads to `h`,
 /// whose link is `i`'s.
 [@@"opaque_to_smt"]
-let moved (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) : prop =
+let moved (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) : prop =
   HC.chain_at (ops tk tv) es m h b hd l /\ Seq.length es' == Seq.length es /\
   0 <= h /\ h < Seq.length es /\ HC.lvx (ops tk tv) es m h i /\
   I32.v (Seq.index es' h).E.fld_Next == I32.v (Seq.index es i).E.fld_Next /\
@@ -420,7 +421,7 @@ let moved (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l:
      (Seq.index es' j).E.fld_Next == (Seq.index es j).E.fld_Next)
 
 #push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
-let move_step (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
+let move_step (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
               (qi: nat) (q: pos)
   : Lemma (requires moved es es' m h i b hd hd' l p qp /\ q <= l /\ qi < l /\ HC.walk (ops tk tv) es hd qi == i /\
                     HC.walk (ops tk tv) es' hd' (q - 1) == sigma i h (HC.walk (ops tk tv) es hd (q - 1)))
@@ -446,7 +447,7 @@ let move_step (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int)
       end
     end
 
-let rec move_walk (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
+let rec move_walk (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
                   (qi: nat) (q: nat)
   : Lemma (requires moved es es' m h i b hd hd' l p qp /\ q <= l /\ qi < l /\ HC.walk (ops tk tv) es hd qi == i)
           (ensures HC.walk (ops tk tv) es' hd' q == sigma i h (HC.walk (ops tk tv) es hd q))
@@ -464,7 +465,7 @@ let same_but (bs bs': seq I32.t) (b: int) : prop =
 /// The changes `UpdateBucketIndex(i, h - i)` makes, `h` being the hole and `entries[h]`
 /// already a copy of `entries[i]`: through the head of `i`'s bucket if `i` is it (`p < 0`),
 /// otherwise through the predecessor `p`, which the search found after `q` links.
-let move_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) : prop =
+let move_writes (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) : prop =
   Seq.length es > 0 /\ Seq.length bs == Seq.length es /\
   Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\
   0 <= i /\ i < Seq.length es /\ 0 <= h /\ h < Seq.length es /\
@@ -478,8 +479,19 @@ let move_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv))
         (Seq.index es' p).E.fld_Key == (Seq.index es p).E.fld_Key /\
         (Seq.index es' p).E.fld_Value == (Seq.index es p).E.fld_Value)
 
+let move_head_writes (#tk #tv: Type0) {| Eq.has_equality tk |}
+    (bs: seq I32.t) (es: seq (entry tk tv)) (m h i: int) (value: I32.t)
+  : Lemma (requires Seq.length bs == Seq.length es /\
+                    0 <= i /\ i < Seq.length es /\ 0 <= h /\ h < Seq.length es /\
+                    0 <= bof es i /\ bof es i < Seq.length bs /\
+                    I32.v (Seq.index bs (bof es i)) == i + 1 /\
+                    I32.v value == h + 1)
+          (ensures move_writes bs (Seq.upd bs (bof es i) value)
+                     es es m h i (-1) 0)
+  = ()
+
 /// The live nodes before and after the move: `σ` maps one onto the other, buckets kept.
-let move_live (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (x: int)
+let move_live (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (x: int)
   : Lemma (requires moved es es' m h i b hd hd' l p qp /\ same_data es es' /\ copied es h i /\ HC.lvx (ops tk tv) es m h x /\ h < m)
           (ensures HC.lvx (ops tk tv) es' m i (sigma i h x) /\
                    (HC.in_bucket (ops tk tv) es' b (sigma i h x) <==> HC.in_bucket (ops tk tv) es b x))
@@ -491,20 +503,20 @@ let move_live (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int)
     else if x = p then assert (o.HC.nx (Seq.index es' y) == h)
     else assert (o.HC.nx (Seq.index es' y) == o.HC.nx (Seq.index es x))
 
-let move_live_inv (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (j: int)
+let move_live_inv (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (j: int)
   : Lemma (requires moved es es' m h i b hd hd' l p qp /\ same_data es es' /\ copied es h i /\ HC.lvx (ops tk tv) es' m i j)
           (ensures (let x = if j = h then i else j in
                     HC.lvx (ops tk tv) es m h x /\ sigma i h x == j /\
                     (HC.in_bucket (ops tk tv) es' b j <==> HC.in_bucket (ops tk tv) es b x)))
   = reveal_opaque (`%moved) (moved #tk #tv)
 
-let moved_len (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
+let moved_len (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat)
   : Lemma (requires moved es es' m h i b hd hd' l p qp)
           (ensures HC.chain_at (ops tk tv) es m h b hd l /\ 0 <= i /\ i <> h /\ Seq.length es' == Seq.length es)
   = reveal_opaque (`%moved) (moved #tk #tv)
 
 #push-options "--z3rlimit 40 --fuel 0 --ifuel 0"
-let move_chain (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (qi: nat)
+let move_chain (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i b hd hd': int) (l: nat) (p: int) (qp: nat) (qi: nat)
   : Lemma (requires moved es es' m h i b hd hd' l p qp /\ same_data es es' /\ copied es h i /\
                     qi < l /\ HC.walk (ops tk tv) es hd qi == i /\ HC.complete_at (ops tk tv) es m h b hd l /\ h < m)
           (ensures HC.chain_at (ops tk tv) es' m i b hd' l /\ HC.complete_at (ops tk tv) es' m i b hd' l)
@@ -551,7 +563,7 @@ let move_chain (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i b hd hd': int
 
 
 /// The node the search found is in the chain of `t`.
-let pred_live (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
+let pred_live (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int)
   : Lemma (requires pred bs es m h t i q)
           (ensures HC.lvx (ops tk tv) es m h i /\ HC.in_bucket (ops tk tv) es (bof es t) i)
   = reveal_opaque (`%pred) (pred #tk #tv);
@@ -563,7 +575,7 @@ let pred_live (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i 
     HC.chain_live o es m h (bof es t) hd l q
 
 /// The predecessor's position in the chain.
-let pred_pos (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int) (l: nat)
+let pred_pos (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q: int) (l: nat)
   : Lemma (requires pred bs es m h t i q /\ HC.chain_at (ops tk tv) es m h (bof es t) (head bs es t) l /\
                     0 <= i /\ i < Seq.length es /\ I32.v (Seq.index es i).E.fld_Next == t)
           (ensures q >= 0 /\ q + 1 < l /\ HC.walk (ops tk tv) es (head bs es t) q == i /\
@@ -578,7 +590,7 @@ let pred_pos (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h t i q
     assert (HC.walk o es hd (q + 1) == HC.nxt o es i)
 
 #push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
-let moved_pred (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (l: nat)
+let moved_pred (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (l: nat)
   : Lemma (requires HC.chain_at (ops tk tv) es m h (bof es i) (head bs es i) l /\ HC.lvx (ops tk tv) es m h i /\
                     0 <= h /\ copied es h i /\ move_writes bs bs' es es' m h i p q /\ p >= 0)
           (ensures q >= 0 /\ moved es es' m h i (bof es i) (head bs es i) (head bs es i) l p q /\ bs' == bs)
@@ -591,13 +603,13 @@ let moved_pred (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) 
     assert (Seq.index es' h == Seq.index es h);
     reveal_opaque (`%moved) (moved #tk #tv)
 
-let moved_head (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (l: nat)
+let moved_head (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (l: nat)
   : Lemma (requires HC.chain_at (ops tk tv) es m h (bof es i) (head bs es i) l /\ HC.lvx (ops tk tv) es m h i /\
                     0 <= h /\ copied es h i /\ move_writes bs bs' es es' m h i p q /\ p < 0)
           (ensures moved es es' m h i (bof es i) (head bs es i) h l p 0 /\ I32.v (Seq.index bs' (bof es i)) - 1 == h)
   = reveal_opaque (`%moved) (moved #tk #tv)
 
-let move_bucket (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
+let move_bucket (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ 0 <= i /\ i < m /\ i <> h /\ copied es h i /\ same_data es es' /\
                     move_writes bs bs' es es' m h i p q)
           (ensures HC.bucket_ok (ops tk tv) bs' es' m i (bof es i))
@@ -618,7 +630,7 @@ let move_bucket (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv))
 #pop-options
 
 /// What `move_writes` amounts to, entry by entry.
-let move_facts (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
+let move_facts (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ 0 <= i /\ i < m /\ i <> h /\ copied es h i /\ move_writes bs bs' es es' m h i p q)
           (ensures same_data es es' /\ same_but bs bs' (bof es i) /\ Seq.length es' == Seq.length es /\
                    Seq.index es' h == Seq.index es h /\
@@ -630,7 +642,7 @@ let move_facts (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) 
       assert (Seq.index bs' (bof es i) == Seq.index bs (bof es i))
     end
 
-let move_other (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
+let move_other (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
                (b': nat)
   : Lemma (requires wfm bs es m h c /\ 0 <= i /\ i < m /\ i <> h /\ copied es h i /\ move_writes bs bs' es es' m h i p q /\
                     b' < Seq.length bs /\ b' <> bof es i)
@@ -642,7 +654,7 @@ let move_other (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) 
     assert (HC.bucket_ok o bs es m h b');
     HC.bucket_frame o bs bs' es es' m h m i b'
 
-let move_rest (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
+let move_rest (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ 0 <= i /\ i < m /\ i <> h /\ copied es h i /\ move_writes bs bs' es es' m h i p q)
           (ensures (forall (j: nat). j < m /\ j < Seq.length es' /\ j <> i ==> I32.v (Seq.index es' j).E.fld_Next >= -1) /\
                    HC.hashes_ok (ops tk tv) (eff c) es' m i)
@@ -657,7 +669,7 @@ let move_rest (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (
     in
     FStar.Classical.forall_intro hs
 
-let move_keys (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i: int)
+let move_keys (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (m h i: int)
   : Lemma (requires 0 <= h /\ h < m /\ 0 <= i /\ i < m /\ m <= Seq.length es /\ (i == h + 1 \/ i == h - 1) /\
                     copied es h i /\ same_data es es')
           (ensures keysh es' m i == keysh es m h /\ valuesh es' m i == valuesh es m h)
@@ -665,7 +677,7 @@ let move_keys (#tk #tv: Type0) (es es': seq (entry tk tv)) (m h i: int)
     assert (Seq.equal (valuesh es' m i) (valuesh es m h))
 
 /// `UpdateBucketIndex(i, h - i)` moves the hole from `h` to `i`.
-let move_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
+let move_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h i p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ 0 <= i /\ i < m /\ (i == h + 1 \/ i == h - 1) /\ copied es h i /\
                     move_writes bs bs' es es' m h i p q)
           (ensures wfm bs' es' m i c /\ keysh es' m i == keysh es m h /\ valuesh es' m i == valuesh es m h)
@@ -681,7 +693,7 @@ let move_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m 
     reveal_opaque (`%wfm_core) (wfm_core #tk #tv)
 
 /// The searches start at the head of the chain.
-let wf_pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n x: int) (c: option (Eq.comparer tk))
+let wf_pred_start (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n x: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ 0 <= x /\ x < n /\ x < Seq.length es /\ Seq.length bs == Seq.length es /\
                     I32.v (Seq.index bs (bof es x)) <> x + 1)
           (ensures pred bs es n (-1) x (head bs es x) 0)
@@ -689,7 +701,7 @@ let wf_pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n x:
     reveal_opaque (`%wf) (wf #tk #tv);
     pred_start bs es n (-1) x
 
-let wfm_pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h x: int) (c: option (Eq.comparer tk))
+let wfm_pred_start (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h x: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ 0 <= x /\ x < m /\ x <> h /\ I32.v (Seq.index bs (bof es x)) <> x + 1)
           (ensures pred bs es m h x (head bs es x) 0)
   = reveal_opaque (`%wfm_core) (wfm_core #tk #tv);
@@ -700,7 +712,7 @@ let wfm_pred_start (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h
 
 /// A pair's link is the end of its chain or an entry.
 #push-options "--fuel 1 --ifuel 1"
-let wf_next (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n x: int) (c: option (Eq.comparer tk))
+let wf_next (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n x: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ 0 <= x /\ x < n)
           (ensures x < Seq.length es /\ -1 <= I32.v (Seq.index es x).E.fld_Next /\
                    I32.v (Seq.index es x).E.fld_Next < Seq.length es)
@@ -715,7 +727,7 @@ let wf_next (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n x: int) 
 
 /// The changes `RemoveEntryFromBucket(x)` makes: the head of `x`'s bucket, or the link of
 /// its predecessor `p`, now skips `x`.
-let unlink_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) : prop =
+let unlink_writes (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) : prop =
   Seq.length es > 0 /\ Seq.length bs == Seq.length es /\
   Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\
   0 <= x /\ x < Seq.length es /\
@@ -730,7 +742,7 @@ let unlink_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv
         (Seq.index es' p).E.fld_Value == (Seq.index es p).E.fld_Value)
 
 #push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
-let unlink_chains (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) (c: option (Eq.comparer tk))
+let unlink_chains (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ x < n /\ unlink_writes bs bs' es es' n x p q)
           (ensures HC.chains (ops tk tv) bs' es' n x /\ same_data es es' /\
                    (p >= 0 ==> HC.lvx (ops tk tv) es n (-1) p))
@@ -758,7 +770,7 @@ let unlink_chains (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv
 #pop-options
 
 /// `RemoveEntryFromBucket(x)` leaves `x` the hole.
-let unlink_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) (c: option (Eq.comparer tk))
+let unlink_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (n x p q: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ x < n /\ unlink_writes bs bs' es es' n x p q)
           (ensures wfm bs' es' n x c /\ keysh es' n x == keysh es n x /\ valuesh es' n x == valuesh es n x)
   = unlink_chains bs bs' es es' n x p q c;
@@ -784,9 +796,9 @@ let del (#a: Type) (s: seq a) (i: int) : seq a =
   if 0 <= i && i < Seq.length s then Seq.append (Seq.slice s 0 i) (Seq.slice s (i + 1) (Seq.length s)) else s
 
 /// The bucket an entry's stored hash code selects, in a table of `len` buckets.
-let bk (#tk #tv: Type0) (y: entry tk tv) (len: pos) : nat = U32.v y.E.fld_HashCode % len
+let bk (#tk #tv: Type0) {| Eq.has_equality tk |} (y: entry tk tv) (len: pos) : nat = U32.v y.E.fld_HashCode % len
 
-let wfm_head (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) (b: int)
+let wfm_head (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk)) (b: int)
   : Lemma (requires wfm bs es m h c /\ 0 <= b /\ b < Seq.length bs)
           (ensures 0 <= I32.v (Seq.index bs b) /\ I32.v (Seq.index bs b) <= Seq.length es)
   = reveal_opaque (`%wfm_core) (wfm_core #tk #tv);
@@ -798,7 +810,7 @@ let wfm_head (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (m h: int)
     if l > 0 then assert (HC.lvx o es m h (HC.walk o es hd 0))
     else assert (HC.walk o es hd 0 == -1)
 
-let fill_keys (#tk #tv: Type0) (es: seq (entry tk tv)) (m h: int) (y: entry tk tv)
+let fill_keys (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (m h: int) (y: entry tk tv)
   : Lemma (requires 0 <= h /\ h < m /\ m <= Seq.length es)
           (ensures keys (Seq.upd es h y) m == ins (keysh es m h) h y.E.fld_Key /\
                    values (Seq.upd es h y) m == ins (valuesh es m h) h y.E.fld_Value)
@@ -818,7 +830,7 @@ let fill_keys (#tk #tv: Type0) (es: seq (entry tk tv)) (m h: int) (y: entry tk t
     assert (Seq.equal (values es' m) rv)
 
 #push-options "--z3rlimit 40 --fuel 1 --ifuel 1"
-let fill_chains (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
+let fill_chains (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
                 (y: entry tk tv)
   : Lemma (requires wfm bs es m h c /\
                     I32.v y.E.fld_Next == I32.v (Seq.index bs (bk y (Seq.length es))) - 1 /\
@@ -835,7 +847,7 @@ let fill_chains (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (m 
     HC.chains_link o bs bs' es es' m h m (-1) h
 #pop-options
 
-let fill_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
+let fill_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
             (y: entry tk tv)
   : Lemma (requires wfm bs es m h c /\
                     I32.v y.E.fld_Next == I32.v (Seq.index bs (bk y (Seq.length es))) - 1 /\
@@ -858,7 +870,7 @@ let fill_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (m h: i
     fill_keys es m h y
 
 /// The pairs with a hole, against the pairs: one removed, or one to be inserted.
-let keysh_del (#tk #tv: Type0) (es: seq (entry tk tv)) (n x: int)
+let keysh_del (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n x: int)
   : Lemma (requires 0 <= x /\ x < n /\ n <= Seq.length es)
           (ensures keysh es n x == del (keys es n) x /\ valuesh es n x == del (values es n) x)
   = assert (Seq.equal (keysh es n x) (del (keys es n) x));
@@ -873,7 +885,7 @@ let ins_del (#a: Type) (s: seq a) (i: int) (x: a)
 (* Rebuilding the chains (Resize) *)
 
 /// A pair's stored hash code is its key's.
-let wf_hash (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n j: int) (c: option (Eq.comparer tk))
+let wf_hash (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n j: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ 0 <= j /\ j < n)
           (ensures j < Seq.length es /\ sx (Seq.index es j).E.fld_HashCode == HC.hv (eff c) (Seq.index es j).E.fld_Key)
   = wf_keys bs es n c;
@@ -881,7 +893,7 @@ let wf_hash (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n j: int) 
     assert (HC.lvx (ops tk tv) es n (-1) j)
 
 /// `PushEntryIntoBucket(ref newEntries[i], i)`: one more entry in the chains.
-let push_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (i: int) (c: option (Eq.comparer tk))
+let push_ok (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es: seq (entry tk tv)) (i: int) (c: option (Eq.comparer tk))
             (y: entry tk tv)
   : Lemma (requires 0 <= i /\ i < Seq.length es /\ wf bs es i c /\ Seq.length bs == Seq.length es /\
                     I32.v y.E.fld_Next == I32.v (Seq.index bs (bk y (Seq.length es))) - 1 /\
@@ -892,7 +904,7 @@ let push_ok (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv)) (i: int
     fill_ok bs bs' es (i + 1) i c y
 
 /// The pairs are the keys and values below the count, whatever the links.
-let pairs_same (#tk #tv: Type0) (es es': seq (entry tk tv)) (n: int)
+let pairs_same (#tk #tv: Type0) {| Eq.has_equality tk |} (es es': seq (entry tk tv)) (n: int)
   : Lemma (requires 0 <= n /\ n <= Seq.length es /\ n <= Seq.length es' /\
                     (forall (j: nat). {:pattern Seq.index es' j} j < n ==>
                        (Seq.index es' j).E.fld_Key == (Seq.index es j).E.fld_Key /\
@@ -902,7 +914,7 @@ let pairs_same (#tk #tv: Type0) (es es': seq (entry tk tv)) (n: int)
     assert (Seq.equal (values es' n) (values es n))
 
 /// A head is the end of a chain or an entry.
-let wf_head (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) (b: int)
+let wf_head (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk)) (b: int)
   : Lemma (requires wf bs es n c /\ 0 <= b /\ b < Seq.length bs)
           (ensures 0 <= I32.v (Seq.index bs b) /\ I32.v (Seq.index bs b) <= Seq.length es)
   = reveal_opaque (`%wf) (wf #tk #tv);
@@ -915,7 +927,7 @@ let wf_head (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c
     else assert (HC.walk o es hd 0 == -1)
 
 /// Below `n`, `es` holds `old`'s pairs and hash codes (whatever the links).
-let same_kvh (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int) : prop =
+let same_kvh (#tk #tv: Type0) {| Eq.has_equality tk |} (es old: seq (entry tk tv)) (n: int) : prop =
   0 <= n /\ n <= Seq.length es /\ n <= Seq.length old /\
   (forall (j: nat). {:pattern Seq.index es j} j < n ==>
      (Seq.index es j).E.fld_Key == (Seq.index old j).E.fld_Key /\
@@ -923,7 +935,7 @@ let same_kvh (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int) : prop =
      (Seq.index es j).E.fld_HashCode == (Seq.index old j).E.fld_HashCode)
 
 /// `Array.Copy(_entries, newEntries, count)`.
-let same_kvh_copy (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int)
+let same_kvh_copy (#tk #tv: Type0) {| Eq.has_equality tk |} (es old: seq (entry tk tv)) (n: int)
   : Lemma (requires 0 <= n /\ n <= Seq.length es /\ n <= Seq.length old /\ Seq.slice es 0 n == Seq.slice old 0 n)
           (ensures same_kvh es old n)
   = let aux (j: nat) : Lemma (j < n ==> Seq.index es j == Seq.index old j) =
@@ -933,7 +945,7 @@ let same_kvh_copy (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int)
     FStar.Classical.forall_intro aux
 
 /// What `PushEntryIntoBucket(ref es[i], i)` changes.
-let push_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (i: int) : prop =
+let push_writes (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (i: int) : prop =
   0 <= i /\ i < Seq.length es /\ Seq.length bs == Seq.length es /\ Seq.length es' == Seq.length es /\
   (let x = Seq.index es i in
    let y = Seq.index es' i in
@@ -943,7 +955,7 @@ let push_writes (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv))
    same_but bs bs' b /\ I32.v (Seq.index bs' b) == i + 1) /\
   es' == Seq.upd es i (Seq.index es' i)
 
-let push_writes_entry (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv))
+let push_writes_entry (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es: seq (entry tk tv))
                       (y: entry tk tv) (i: int)
   : Lemma
       (requires 0 <= i /\ i < Seq.length es /\ Seq.length es == Seq.length bs /\
@@ -959,7 +971,7 @@ let push_writes_entry (#tk #tv: Type0) (bs bs': seq I32.t) (es: seq (entry tk tv
   = ()
 
 /// One more step of `Resize`'s loop.
-let push_step (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (ob: seq I32.t) (old: seq (entry tk tv))
+let push_step (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (ob: seq I32.t) (old: seq (entry tk tv))
               (i n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es i c /\ wf ob old n c /\ 0 <= i /\ i < n /\ same_kvh es old n /\ push_writes bs bs' es es' i)
           (ensures wf bs' es' (i + 1) c /\ same_kvh es' old n)
@@ -967,7 +979,7 @@ let push_step (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (
     push_ok bs bs' es i c (Seq.index es' i)
 
 /// `Resize` keeps the pairs.
-let resize_pairs (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int)
+let resize_pairs (#tk #tv: Type0) {| Eq.has_equality tk |} (es old: seq (entry tk tv)) (n: int)
   : Lemma (requires same_kvh es old n)
           (ensures keys es n == keys old n /\ values es n == values old n)
   = pairs_same old es n
@@ -976,11 +988,11 @@ let resize_pairs (#tk #tv: Type0) (es old: seq (entry tk tv)) (n: int)
 (* Callers: `TryInsert`, `RemoveAt`, `SetAt` *)
 
 /// `es2` is `es` but at `h`: writes into the hole.
-let same_off (#tk #tv: Type0) (es es2: seq (entry tk tv)) (h: int) : prop =
+let same_off (#tk #tv: Type0) {| Eq.has_equality tk |} (es es2: seq (entry tk tv)) (h: int) : prop =
   Seq.length es2 == Seq.length es /\
   (forall (j: nat). j < Seq.length es /\ j <> h ==> Seq.index es2 j == Seq.index es j)
 
-let hole_eq (#tk #tv: Type0) (bs: seq I32.t) (es es2: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
+let hole_eq (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es es2: seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ same_off es es2 h)
           (ensures wfm bs es2 m h c /\ keysh es2 m h == keysh es m h /\ valuesh es2 m h == valuesh es m h /\
                    Seq.length es2 == Seq.length es)
@@ -988,7 +1000,7 @@ let hole_eq (#tk #tv: Type0) (bs: seq I32.t) (es es2: seq (entry tk tv)) (m h: i
     hole_set bs es m h c (Seq.index es2 h)
 
 /// `PushEntryIntoBucket(ref es[h], h)` fills the hole with the entry written there.
-let fill_step (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
+let fill_step (#tk #tv: Type0) {| Eq.has_equality tk |} (bs bs': seq I32.t) (es es': seq (entry tk tv)) (m h: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es m h c /\ push_writes bs bs' es es' h /\
                     U32.v (Seq.index es h).E.fld_HashCode == hash_of c (Seq.index es h).E.fld_Key)
           (ensures wf bs' es' m c /\ Seq.length es' == Seq.length es /\ Seq.length bs' == Seq.length bs /\
@@ -998,18 +1010,18 @@ let fill_step (#tk #tv: Type0) (bs bs': seq I32.t) (es es': seq (entry tk tv)) (
     sx_hash y.E.fld_HashCode (Eq.hash (eff c) y.E.fld_Key);
     fill_ok bs bs' es m h c y
 
-let open_ok' (#tk #tv: Type0) (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let open_ok' (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wf bs es n c /\ 0 <= n /\ n < Seq.length es /\ Seq.length bs == Seq.length es)
           (ensures wfm bs es (n + 1) n c /\ keysh es (n + 1) n == keys es n /\ valuesh es (n + 1) n == values es n)
   = open_ok bs es n c
 
-let close_ok' (#tk #tv: Type0) (bs: seq I32.t) (es es2: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
+let close_ok' (#tk #tv: Type0) {| Eq.has_equality tk |} (bs: seq I32.t) (es es2: seq (entry tk tv)) (n: int) (c: option (Eq.comparer tk))
   : Lemma (requires wfm bs es n (n - 1) c /\ same_off es es2 (n - 1))
           (ensures wf bs es2 (n - 1) c /\ keys es2 (n - 1) == keysh es n (n - 1) /\ values es2 (n - 1) == valuesh es n (n - 1))
   = assert (Seq.equal es2 (Seq.upd es (n - 1) (Seq.index es2 (n - 1))));
     close_ok bs es n c (Seq.index es2 (n - 1))
 
-let keysh_del' (#tk #tv: Type0) (es: seq (entry tk tv)) (n x: int)
+let keysh_del' (#tk #tv: Type0) {| Eq.has_equality tk |} (es: seq (entry tk tv)) (n x: int)
   : Lemma (requires 0 <= x /\ x < n /\ n <= Seq.length es)
           (ensures keysh es n x == del (keys es n) x /\ valuesh es n x == del (values es n) x /\
                    Seq.length (keys es n) == n /\ Seq.length (values es n) == n)

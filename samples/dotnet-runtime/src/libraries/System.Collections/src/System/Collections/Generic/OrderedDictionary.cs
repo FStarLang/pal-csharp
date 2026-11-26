@@ -244,6 +244,15 @@ namespace System.Collections.Generic
             => throw new InvalidOperationException();
 
         [Lemma]
+        [Requires("bs.Length == es.Length && 0 <= i && i < es.Length && 0 <= h && h < es.Length")]
+        [Requires("0 <= OrderedDictionary<TKey, TValue>.Bof(es, i) && OrderedDictionary<TKey, TValue>.Bof(es, i) < bs.Length")]
+        [Requires("bs[OrderedDictionary<TKey, TValue>.Bof(es, i)] == i + 1 && value == h + 1")]
+        [Ensures("OrderedDictionary<TKey, TValue>.MoveWrites(bs, Pal.SetAt(bs, OrderedDictionary<TKey, TValue>.Bof(es, i), value), es, es, m, h, i, -1, 0)")]
+        [PulseBody("OrderedDictionaryChain.move_head_writes $(bs) $(es) $(m) $(h) $(i) $(value)")]
+        [Conditional("PAL")]
+        private static void MoveHeadWrites(Seq<int> bs, Seq<Entry> es, SpecInt m, SpecInt h, SpecInt i, int value) { }
+
+        [Lemma]
         [Requires("OrderedDictionary<TKey, TValue>.Wfm(buckets, entries, m, h, comparer) && 0 <= t && t < m && t != h && t < entries.Length && buckets.Length == entries.Length")]
         [Requires("buckets[OrderedDictionary<TKey, TValue>.Bof(entries, t)] != t + 1")]
         [Ensures("OrderedDictionary<TKey, TValue>.Pred(buckets, entries, m, h, t, buckets[OrderedDictionary<TKey, TValue>.Bof(entries, t)] - 1, 0)")]
@@ -871,6 +880,7 @@ namespace System.Collections.Generic
         [Ensures("Pal.Implies(!Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, key)), Result && keyIndex == (index < 0 ? Pal.Old(@this.SpecCount) : index) && @this.SpecCount == Pal.Old(@this.SpecCount) + 1)")]
         [Ensures("Pal.Implies(!Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, key)), @this.SpecKeys == OrderedDictionary<TKey, TValue>.InsK(Pal.Old(@this.SpecKeys), keyIndex, key) && @this.SpecValues == OrderedDictionary<TKey, TValue>.InsV(Pal.Old(@this.SpecValues), keyIndex, value))")]
         [Ensures("Pal.Implies(Pal.Old(OrderedDictionary<TKey, TValue>.Mem(@this.SpecComparer, @this.SpecKeys, key)), behavior != InsertionBehavior.ThrowOnExisting)")]
+        [OpaqueSpecs("Wf", "Wfm", "PushWrites")]
         private bool TryInsert(int index, TKey key, TValue value, InsertionBehavior behavior, out int keyIndex)
         {
             // Search for the key in the dictionary.
@@ -967,8 +977,8 @@ namespace System.Collections.Generic
             Ghost<Seq<int>> b3 = Pal.Contents(_buckets);
             Ghost<Seq<Entry>> e3 = Pal.Contents(_entries);
             WfmHead(Pal.Contents(_buckets), Pal.Contents(_entries), count + 1, index, _comparer, Bof(Pal.Contents(_entries), index));
+            Pal.Assert(index < Pal.Contents(_entries).Length);
             PushEntryIntoBucket(ref entry, index);
-            RecordPushWrites(b3.Value, Pal.Contents(_buckets), e3.Value, entry, index);
             Pal.Assert(Pal.Contents(_entries) == Pal.SetAt(e3.Value, index, entry));
             FillStep(b3.Value, Pal.Contents(_buckets), e3.Value, Pal.Contents(_entries), count + 1, index, _comparer);
             Pal.Assert(Keysh(e3.Value, count + 1, index) == keys0.Value);
@@ -1205,6 +1215,8 @@ namespace System.Collections.Generic
                 hashCode = (uint)key.GetHashCode();
                 Pal.Assert(hashCode == HashOf(_comparer, key));
                 SearchStart(Pal.Contents(_buckets), Pal.Contents(entries), _count, _comparer, key);
+                Pal.Assert(Bucket(Pal.Contents(_buckets), Pal.Contents(entries), _comparer, key) ==
+                    (SpecInt)Pal.Contents(_buckets)[HashOf(_comparer, key) % entries.Length]);
                 i = GetBucket(hashCode) - 1; // Value in _buckets is 1-based; subtract 1 from i. We do it here so it fuses with the following conditional.
                 Pal.Assert(i == Bucket(Pal.Contents(_buckets), Pal.Contents(entries), _comparer, key) - 1);
                 do
@@ -1247,6 +1259,8 @@ namespace System.Collections.Generic
                 hashCode = (uint)comparer.GetHashCode(key);
                 Pal.Assert(hashCode == HashOf(_comparer, key));
                 SearchStart(Pal.Contents(_buckets), Pal.Contents(entries), _count, _comparer, key);
+                Pal.Assert(Bucket(Pal.Contents(_buckets), Pal.Contents(entries), _comparer, key) ==
+                    (SpecInt)Pal.Contents(_buckets)[HashOf(_comparer, key) % entries.Length]);
                 i = GetBucket(hashCode) - 1; // Value in _buckets is 1-based; subtract 1 from i. We do it here so it fuses with the following conditional.
                 Pal.Assert(i == Bucket(Pal.Contents(_buckets), Pal.Contents(entries), _comparer, key) - 1);
                 do
@@ -1634,7 +1648,9 @@ namespace System.Collections.Generic
         [Ensures("Pal.Forall((int b) => Pal.Implies(0 <= b && b < Pal.Contents(@this._buckets).Length && b != (int)(entry.HashCode % (uint)Pal.Contents(@this._buckets).Length), Pal.Contents(@this._buckets)[b] == Pal.Old(Pal.Contents(@this._buckets))[b]))")]
         [Ensures("entry.Next == Pal.Old(Pal.Contents(@this._buckets))[(int)(entry.HashCode % (uint)Pal.Contents(@this._buckets).Length)] - 1")]
         [Ensures("entry.HashCode == Pal.Old(entry.HashCode) && entry.Key == Pal.Old(entry.Key) && entry.Value == Pal.Old(entry.Value)")]
-        [Ensures("Pal.Contents(@this._entries) == Pal.Old(Pal.Contents(@this._entries))")]
+        [Ensures("Pal.Same(Pal.Contents(@this._entries), Pal.Old(Pal.Contents(@this._entries)))")]
+        [Ensures("Pal.Implies(entryIndex < Pal.Old(Pal.Contents(@this._entries)).Length, entryIndex < Pal.Contents(@this._entries).Length)")]
+        [Ensures("Pal.Implies(0 <= entryIndex && entryIndex < Pal.Old(Pal.Contents(@this._entries)).Length && Pal.Old(Pal.Contents(@this._entries)).Length == Pal.Old(Pal.Contents(@this._buckets)).Length && Pal.Same(Pal.Old(entry), Pal.Old(Pal.Contents(@this._entries))[entryIndex]), OrderedDictionary<TKey, TValue>.PushWrites(Pal.Old(Pal.Contents(@this._buckets)), Pal.Contents(@this._buckets), Pal.Old(Pal.Contents(@this._entries)), Pal.SetAt(Pal.Old(Pal.Contents(@this._entries)), entryIndex, entry), entryIndex))")]
         private void PushEntryIntoBucket(ref Entry entry, int entryIndex)
         {
             ref int bucket = ref GetBucket(entry.HashCode);
@@ -1755,6 +1771,7 @@ namespace System.Collections.Generic
                 // If the entry was at the head of its bucket list, the only thing that needs to be updated
                 // is the bucket head value itself, since no other entries' Next will be referencing this node.
                 bucket += shiftAmount;
+                MoveHeadWrites(buckets0.Value, entries0.Value, m.Value, entryIndex + shiftAmount, entryIndex, bucket);
                 MoveOk(buckets0.Value, Pal.Contents(_buckets), entries0.Value, Pal.Contents(entries), m.Value, entryIndex + shiftAmount, entryIndex, -1, 0, _comparer);
             }
             else
