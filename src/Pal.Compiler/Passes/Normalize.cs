@@ -1009,7 +1009,7 @@ public static class Normalize
                 return;
             case IrRefArg r: AssignedByCalls(r.Operand, into); return;
             // R34.6. Moving an enumerator on writes its cursor.
-            case IrEnumOp { Op: EnumOpKind.MoveNext, Args: [IrVar cursor] }: into.Add(cursor.Name); return;
+            case IrEnumOp { Op: EnumOpKind.MoveNext or EnumOpKind.IteratorNext, Args: [IrVar cursor] }: into.Add(cursor.Name); return;
             case IrLambdaRef l:
                 foreach (var c in l.Captures)
                 {

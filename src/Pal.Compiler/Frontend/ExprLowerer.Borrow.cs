@@ -74,6 +74,14 @@ public sealed record BorrowContext(
     /// <summary>R32.13. For a view, the class it derives from, whose instance fields are its state too.</summary>
     public INamedTypeSymbol? ViewBase { get; init; }
 
+    /// <summary>The actual borrowing view retained as this record's owner.</summary>
+    public BorrowContext? OwnerView { get; init; }
+
+    /// <summary>Inherited ghost fields this specialized member preserves on its view owner.</summary>
+    public ImmutableArray<IPropertySymbol> PreservedGhost { get; init; } = [];
+    /// <summary>Untouched runtime state of an additional retained view owner.</summary>
+    public ImmutableArray<IFieldSymbol> PreservedFields { get; init; } = [];
+
     /// <summary>R32.13. The struct is a method's result, read in its postcondition.</summary>
     public bool SelfIsResult { get; init; }
 
@@ -101,7 +109,36 @@ public sealed partial class ExprLowerer
     /// </summary>
     public bool BorrowBody { get; init; }
 
-    private IrVar BorrowedObject(IrLoc loc) => new(loc, Borrow!.OwnerName) { Type = Borrow!.OwnerType };
+    private IrExpr BorrowedObject(IrLoc loc) => Borrow!.OwnerView is { } view
+        ? new IrRefOf(loc, view.SelfName) { Type = BorrowedOwners.Reference(view) }
+        : new IrVar(loc, Borrow.OwnerName) { Type = Borrow.OwnerType };
+
+    internal BorrowContext? BorrowingView(ExpressionSyntax expression)
+    {
+        expression = Unparenthesized(expression);
+        if (expression is ThisExpressionSyntax)
+            return Borrow is { ViewBase: not null } self ? self : null;
+        return HeldContext(expression) is { ViewBase: not null } held ? held : null;
+    }
+
+    private BorrowContext? OwnerViewSource(ExpressionSyntax expression)
+    {
+        if (Borrow is { OwnerView: { } view } bw)
+        {
+            var symbol = model.GetSymbolInfo(expression).Symbol;
+            var selfField = expression is IdentifierNameSyntax ||
+                expression is MemberAccessExpressionSyntax access &&
+                (Unparenthesized(access.Expression) is ThisExpressionSyntax ||
+                 model.GetSymbolInfo(access.Expression).Symbol is IParameterSymbol { Name: Names.This } self &&
+                 IsShim(self.ContainingSymbol));
+            if (symbol is IFieldSymbol f && bw.IsOwner(f) && selfField ||
+                symbol is IParameterSymbol p && bw.OwnerParameter is { } op &&
+                (p.Name == op.Name && (IsShim(p.ContainingSymbol) ||
+                    SymbolEqualityComparer.Default.Equals(p, op))))
+                return view;
+        }
+        return null;
+    }
 
     /// <summary>R27.49. The heap of a region class: the borrowed object's, inside a held struct of another owner.</summary>
     private string HeapVarName(string regionClass) =>
@@ -208,7 +245,7 @@ public sealed partial class ExprLowerer
         bound is IrVar v && v.Name == bw.SelfName;
 
     private BorrowContext? HeldContext(ExpressionSyntax e) =>
-        WrappedField(Unparenthesized(e)) ??
+        OwnerViewSource(Unparenthesized(e)) ?? WrappedField(Unparenthesized(e)) ??
         (model.GetSymbolInfo(Unparenthesized(e)).Symbol is ILocalSymbol l0 &&
         (_aliases.TryGetValue(l0, out var l) ? l : l0) is var l1 && _held.TryGetValue(l1, out var c) ? c
         : ForEachEnumerator(Unparenthesized(e))) ??
@@ -251,14 +288,15 @@ public sealed partial class ExprLowerer
     /// when the member writes the struct), the objects the local's struct owns, and the
     /// arguments. <c>null</c> when the receiver is not such a local.
     /// </summary>
-    private IrExpr? HeldInvocation(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc)
+    internal IrExpr? HeldInvocation(InvocationExpressionSyntax node, IMethodSymbol method, IrLoc loc)
     {
         if (node.Expression is not MemberAccessExpressionSyntax { Expression: var receiver } ||
             HeldContext(receiver) is not { } held)
             return null;
+        method = EnumerationProtocols.Implementation(held.Struct, method) as IMethodSymbol ?? method;
         if (SpecPosition || !(Borrowing.IsMember(method, known) || held.ViewBase is not null) || method.IsStatic)
             return HeldRefused(node, loc);
-        var args = node.ArgumentList.Arguments.Select(a => Lower(a.Expression)).ToList();
+        var args = node.ArgumentList.Arguments.Select((a, i) => LowerCallArgument(a, i, method)).ToList();
         return WithHeld(held, () => HeldCall(held, method, args, loc, node));
     }
 
@@ -279,11 +317,15 @@ public sealed partial class ExprLowerer
             ResultView(rp.ContainingType) is { } rv)
             return InlineSpec(rv, rp, loc);
         if (symbol is IMethodSymbol || HeldContext(node.Expression) is not { } held) return null;
+        if (symbol is not null) symbol = EnumerationProtocols.Implementation(held.Struct, symbol);
+        if (held.ViewBase is not null && symbol is IFieldSymbol field && held.IsState(field))
+            return new IrField(loc, SelfOf(held, loc), field.Name) { Type = known.MapType(field.Type) };
         // R35.5. A held struct's auto-property is its backing field (R33.26).
         if (Borrowing.IsAutoProperty(symbol, held.Struct) && symbol is IPropertySymbol autoProp)
             return new IrField(loc, SelfOf(held, loc), autoProp.Name) { Type = known.MapType(autoProp.Type) };
         if (symbol is IPropertySymbol sp && SpecPosition && Declarations.Has(sp, known.SpecAttribute))
-            return InlineSpec(held, sp, loc) ?? HeldRefused(node, loc);
+            return InlineSpec(held, held.ViewBase is not null && ViewOverride(held.Struct, sp) is { } ov ? ov : sp, loc)
+                ?? HeldRefused(node, loc);
         if (symbol is IPropertySymbol { GetMethod: { } getter, IsStatic: false } && !SpecPosition &&
             (Borrowing.IsMember(getter, known) || held.ViewBase is not null))
             return WithHeld(held, () => HeldCall(held, getter, [], loc, node));
@@ -407,6 +449,16 @@ public sealed partial class ExprLowerer
             _ => null,
         };
         if (body is null || _inlineDepth > 16) return null;
+        if (held.ViewBase is not null && known.MapType(property.Type) is IrClassType &&
+            Unparenthesized(body) is ThisExpressionSyntax)
+        {
+            // A view's cell is not an ordinary base-class pointer. Its actual
+            // override may project the borrowed source, but `this` must never
+            // silently mean that source.
+            diagnostics.Unsupported(loc,
+                "A borrowed view's receiver identity as an ordinary class reference");
+            return new IrLiteral(loc, null);
+        }
         var nested = new ExprLowerer(model.Compilation.Model(body.SyntaxTree), known, diagnostics, specPosition: true)
         {
             Borrow = held,
@@ -414,6 +466,9 @@ public sealed partial class ExprLowerer
         };
         nested._inlineDepth = _inlineDepth + 1;
         var inlined = nested.Lower(body);
+        if (known.MapType(property.Type) is IrClassType &&
+            inlined is IrVar { Type: IrClassType } reference && reference.Name == held.OwnerName)
+            return new IrRefOf(loc, reference.Name) { Type = reference.Type };
         // The getter's own return type is the conversion C# applies to its body.
         return known.MapType(property.Type) is IrPrim { Kind: PrimKind.SpecInt or PrimKind.SpecNat } spec &&
                inlined.Type is IrPrim { IsMachineInt: true }
@@ -583,6 +638,10 @@ public sealed partial class ExprLowerer
             lowered = Unboxed(lowered);
             switch (lowered)
             {
+                case IrRefOf:
+                    return lowered;
+                case IrField { Type: IrUserSpecType { FStar: "Pulse.Lib.Reference.ref" } }:
+                    return lowered;
                 case IrVar { Type: IrClassType } v when model.GetSymbolInfo(e).Symbol is IParameterSymbol || v.Name == Names.This:
                     return new IrRefOf(lowered.Loc, v.Name) { Type = v.Type };
                 case IrField { Type: IrClassType, Receiver.Type: IrNamedType }:
@@ -623,7 +682,8 @@ public sealed partial class ExprLowerer
         var self = Borrowing.WritesState(decl, model.Compilation.Model(decl.SyntaxTree), bw.Struct)
             ? new IrRefArg(loc, new IrVar(loc, BorrowContext.Self) { Type = bw.StructType })
             : SelfExpr(loc);
-        return BorrowingCall(callee, self, args.Select(Lower), loc);
+        return BorrowingCall(callee, self, args.Select((a, i) =>
+            a.Parent is ArgumentSyntax arg ? LowerCallArgument(arg, i, callee) : Lower(a)), loc);
     }
 
     /// <summary>
@@ -663,7 +723,8 @@ public sealed partial class ExprLowerer
             a.Parent is ArgumentSyntax { NameColon: null } arg && i < callee.Parameters.Length &&
             CallbackOf(callee.Parameters[i], known, diagnostics) is { } cb
                 ? AtViewCall(() => LowerCallbackArgument(arg, cb, Locations.From(arg)))
-                : Lower(a)).ToList();
+                : a.Parent is ArgumentSyntax argument
+                    ? LowerCallArgument(argument, i, callee) : Lower(a)).ToList();
         return WithFieldCaptures(ViewCall(bw, name, callee, self, lowered, loc), args, loc);
     }
 
@@ -739,7 +800,9 @@ public sealed partial class ExprLowerer
         return new IrCall(loc, name, [new IrVar(loc, bw.OwnerName) { Type = bw.OwnerType }, self, .. given])
         {
             Kind = CalleeKind.Method,
-            ResultType = ViewResultType(callee),
+            ResultType = callee.ReturnType is INamedTypeSymbol { TypeKind: TypeKind.Struct } record &&
+                Borrowing.IsBorrowing(record, known)
+                ? BorrowedOwners.Type(record, bw.Struct, known) : ViewResultType(callee),
             HasReceiver = true,
             ParamTypes = [null, null, .. callee.Parameters.Select(p => known.MapType(p.Type))],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
@@ -796,12 +859,18 @@ public sealed partial class ExprLowerer
         var bw = Borrow!;
         var targs = WellKnown.AllTypeArguments(bw.Struct).Select(known.MapType).ToList();
         var owned = bw.Owned.Select(f => OwnedObject(f, loc)).ToList();
-        return new IrCall(loc, Naming.Of(callee), [BorrowedObject(loc), self, .. owned, .. args])
+        var prefix = bw.OwnerView is { } view
+            ? new IrExpr[] {
+                new IrVar(loc, view.OwnerName) { Type = view.OwnerType },
+                new IrRefArg(loc, SelfOf(view, loc)) }
+            : [BorrowedObject(loc)];
+        var name = bw.OwnerView is { } ownerView ? BorrowedOwners.Demand(callee, ownerView.Struct, known) : Naming.Of(callee);
+        return new IrCall(loc, name, [.. prefix, self, .. owned, .. args])
         {
             Kind = CalleeKind.Method,
             ResultType = known.MapReturnType(callee.ReturnType),
             HasReceiver = true,
-            ParamTypes = [null, null, .. owned.Select(o => o.Type), .. callee.Parameters.Select(p => known.MapType(p.Type))],
+            ParamTypes = [.. prefix.Select(_ => (IrType?)null), null, .. owned.Select(o => o.Type), .. callee.Parameters.Select(p => known.MapType(p.Type))],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
             MutatesReceiver = false,
         };
@@ -846,22 +915,33 @@ public sealed partial class ExprLowerer
     {
         if (!ArgumentsInOrder(argList)) return new IrLiteral(loc, null);
         var receiver = default(IrExpr);
+        BorrowContext? ownerView = null;
         var rest = new List<IrExpr>();
         var types = new List<IrType?> { null };
         foreach (var a in argList.Arguments)
         {
             var p = model.GetOperation(a) is Microsoft.CodeAnalysis.Operations.IArgumentOperation ao ? ao.Parameter : null;
-            if (SymbolEqualityComparer.Default.Equals(p, op)) receiver = Lower(a.Expression);
+            if (SymbolEqualityComparer.Default.Equals(p, op))
+            {
+                ownerView = BorrowingView(a.Expression);
+                receiver = Lower(a.Expression);
+            }
             else { rest.Add(Lower(a.Expression)); types.Add(p is null ? null : known.MapType(p.Type)); }
         }
         if (receiver is null) return new IrLiteral(loc, null);
         var targs = WellKnown.AllTypeArguments(named).Select(known.MapType).ToList();
-        return new IrCall(loc, Naming.Of(ctor), [receiver, .. rest])
+        var prefix = ownerView is { } view
+            ? new IrExpr[] {
+                new IrVar(loc, view.OwnerName) { Type = view.OwnerType },
+                new IrRefArg(loc, SelfOf(view, loc)) }
+            : [receiver];
+        return new IrCall(loc, ownerView is null ? Naming.Of(ctor) : BorrowedOwners.Demand(ctor, ownerView.Struct, known),
+            [.. prefix, .. rest])
         {
             Kind = CalleeKind.Method,
-            ResultType = known.MapType(named),
+            ResultType = ownerView is null ? known.MapType(named) : BorrowedOwners.Type(named, ownerView.Struct, known),
             HasReceiver = true,
-            ParamTypes = [.. types],
+            ParamTypes = ownerView is null ? [.. types] : [null, .. types],
             TypeArguments = targs.All(t => t is not null) ? [.. targs.Select(t => t!)] : [],
             MutatesReceiver = false,
         };
@@ -1015,7 +1095,10 @@ public sealed partial class ExprLowerer
                 "constructor assigns each field at most once, and does nothing else (doc/translation.md R28.5, R27.37).");
         }
         var built = Construct(loc, WellKnown.StructName(bw.Struct), bw.Struct, given);
-        var structValue = built is IrNew n ? n with { Type = bw.StructType } : built;
+        var structValue = built is IrNew n ? n with {
+            Struct = bw.StructType is IrNamedType specialized ? specialized.Name : n.Struct,
+            Type = bw.StructType
+        } : built;
         if (!extended) return new IrReturn(loc, structValue);
         if (tail.Count > 0)
         {
@@ -1167,14 +1250,41 @@ public static class BorrowFacts
         foreach (var (f, type) in ReadOnlyFields(borrow, known))
             yield return new IrGhostStmt(loc, GhostKind.Let, new IrField(loc, self, f.Name) { Type = type }, Snapshot(f))
                 { Type = type };
+        foreach (var p in borrow.PreservedGhost)
+            if (known.MapType(p.Type) is { } type)
+                yield return new IrGhostStmt(loc, GhostKind.Let,
+                    new IrField(loc, self, p.Name) { Type = type }, "__pal_entry_ghost_" + p.Name)
+                    { Type = type, ErasedSource = true };
+        if (borrow.OwnerView is { } view)
+            foreach (var f in OwnerFrames(view))
+                if (known.MapType(f.Type) is { } type)
+                    yield return new IrGhostStmt(loc, GhostKind.Let,
+                        new IrField(loc, new IrVar(loc, view.SelfName) { Type = view.StructType }, f.Name) { Type = type },
+                        "__pal_owner_entry_" + f.Name) {
+                            Type = type, ErasedSource = view.PreservedGhost.Any(p => p.Name == f.Name)
+                        };
     }
 
     public static IEnumerable<IrExpr> Invariants(BorrowContext borrow, WellKnown known, IrLoc loc, bool snapshots = true)
     {
         var self = new IrVar(loc, borrow.SelfName) { Type = borrow.StructType };
         yield return new IrBinary(loc, BinOp.Eq,
-            new IrField(loc, borrow.Core(self, known), borrow.Owner.Name) { Type = borrow.OwnerType },
-            new IrRefOf(loc, borrow.OwnerName) { Type = borrow.OwnerType }) { Type = IrPrim.Bool };
+            new IrField(loc, borrow.Core(self, known), borrow.Owner.Name) {
+                Type = borrow.OwnerView is { } ov ? BorrowedOwners.Reference(ov) : borrow.OwnerType },
+            new IrRefOf(loc, borrow.OwnerView?.SelfName ?? borrow.OwnerName) {
+                Type = borrow.OwnerView is { } rv ? BorrowedOwners.Reference(rv) : borrow.OwnerType }) { Type = IrPrim.Bool };
+        if (borrow.OwnerView is { } ownerView)
+        {
+            foreach (var fact in Invariants(ownerView, known, loc, snapshots: false)) yield return fact;
+            if (snapshots)
+                foreach (var f in OwnerFrames(ownerView))
+                    if (known.MapType(f.Type) is { } type)
+                        yield return new IrBinary(loc, BinOp.Eq,
+                            new IrField(loc, new IrVar(loc, ownerView.SelfName) { Type = ownerView.StructType }, f.Name) { Type = type },
+                            new IrVar(loc, "__pal_owner_entry_" + f.Name) {
+                                Type = type is IrPrim { IsMachineInt: true } ? new IrPrim(PrimKind.SpecInt) : type
+                            }) { Type = IrPrim.Bool };
+        }
         // R27.37. Each owned field holds its parameter.
         foreach (var f in borrow.Owned)
             if (known.MapType(f.Type) is IrClassType ot)
@@ -1187,5 +1297,18 @@ public static class BorrowFacts
             yield return new IrBinary(loc, BinOp.Eq, new IrField(loc, self, f.Name) { Type = type },
                 new IrVar(loc, Snapshot(f)) { Type = snapshotType }) { Type = IrPrim.Bool };
         }
+        foreach (var p in borrow.PreservedGhost)
+            if (known.MapType(p.Type) is { } type)
+                yield return new IrBinary(loc, BinOp.Eq,
+                    new IrField(loc, self, p.Name) { Type = type },
+                    new IrVar(loc, "__pal_entry_ghost_" + p.Name) { Type = type }) { Type = IrPrim.Bool };
+
     }
+
+    private static IEnumerable<(string Name, ITypeSymbol Type)> OwnerFrames(BorrowContext view) =>
+        view.Struct.GetMembers().OfType<IFieldSymbol>().Where(f => f.IsReadOnly && !f.IsStatic)
+            .Select(f => (f.Name, f.Type))
+            .Concat(view.PreservedFields.Select(f => (f.Name, f.Type)))
+            .Concat(view.PreservedGhost.Select(p => (p.Name, p.Type)))
+            .DistinctBy(f => f.Name);
 }

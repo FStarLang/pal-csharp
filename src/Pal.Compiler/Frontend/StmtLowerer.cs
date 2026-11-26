@@ -60,6 +60,8 @@ public sealed class StmtLowerer(
             // R35.18. In a specialization, an `if` its constants decide is the branch taken.
             IfStatementSyntax i when Decided(i.Condition) is { } taken =>
                 taken ? Lower(i.Statement) : i.Else is null ? new IrBlock(loc, []) : Lower(i.Else.Statement),
+            IfStatementSyntax i when EnumerablePatternIf(i, loc) is { } eb => eb,
+            IfStatementSyntax i when EnumerableAsIf(i, loc) is { } eb => eb,
             IfStatementSyntax i when PointerPatternIf(i, loc) is { } bound => bound,
             // R33.9. `out var x` in an `if`'s condition: as R27.43's loop, declared ahead.
             IfStatementSyntax i when OutDeclarations(i.Condition, loc) is { IsEmpty: false } outs =>
@@ -383,7 +385,7 @@ public sealed class StmtLowerer(
         var inner = body is IrBlock b ? b.Statements : [body];
         return new IrBlock(loc,
             [new IrLocalDecl(loc, Iterators.Trace, new IrSeqType(_iterator!), empty), .. inner,
-             new IrReturn(loc, TraceVar(loc))]);
+             .. inner.LastOrDefault() is IrReturn ? ImmutableArray<IrStmt>.Empty : [new IrReturn(loc, TraceVar(loc))]]);
     }
 
     /// <summary>
@@ -472,6 +474,164 @@ public sealed class StmtLowerer(
             new IrLocalDecl(loc, name, nullable, _code.Lower(isp.Expression)),
             new IrIf(loc, new IrBinary(loc, BinOp.Ne, x, new IrNull(loc) { Type = nullable }) { Type = IrPrim.Bool },
                 Lower(i.Statement), i.Else is null ? null : Lower(i.Else.Statement)),
+        ]) { Splice = true };
+    }
+
+    private IrStmt? EnumerablePatternIf(IfStatementSyntax i, IrLoc loc)
+    {
+        if (i.Condition is not IsPatternExpressionSyntax
+            { Expression: IdentifierNameSyntax id,
+              Pattern: DeclarationPatternSyntax { Designation: SingleVariableDesignationSyntax v } d } ||
+            model.GetSymbolInfo(id).Symbol is not IParameterSymbol p ||
+            EnumerableCasts.ParameterType(p, known) is not { CastTarget: { } target } e ||
+            known.MapType(model.GetTypeInfo(d.Type).Type) is not IrClassType tested ||
+            (tested.Name != target.Name || !tested.TypeArguments.SequenceEqual(target.TypeArguments)))
+            return null;
+        return EnumerableLoanIf(p, e, v.Identifier.ValueText, i.Statement, i.Else?.Statement, loc);
+    }
+
+    private readonly Dictionary<ILocalSymbol, (IParameterSymbol Source, IrEnumerableType Type)> _enumerableAs =
+        new(SymbolEqualityComparer.Default);
+    private int _castResults;
+
+    private IrStmt? EnumerableAsIf(IfStatementSyntax i, IrLoc loc)
+    {
+        ExpressionSyntax test = i.Condition;
+        ExpressionSyntax? guard = null;
+        if (test is BinaryExpressionSyntax { RawKind: (int)SyntaxKind.LogicalAndExpression } both)
+        {
+            test = Unparenthesized(both.Left);
+            guard = both.Right;
+        }
+        if (test is not BinaryExpressionSyntax b ||
+            b.Kind() is not (SyntaxKind.NotEqualsExpression or SyntaxKind.EqualsExpression))
+            return null;
+        var id = ExprLowerer.Unparenthesized(b.Left) as IdentifierNameSyntax;
+        var other = ExprLowerer.Unparenthesized(b.Right);
+        if (id is null || !other.IsKind(SyntaxKind.NullLiteralExpression))
+        {
+            id = ExprLowerer.Unparenthesized(b.Right) as IdentifierNameSyntax;
+            other = ExprLowerer.Unparenthesized(b.Left);
+        }
+        if (id is null || !other.IsKind(SyntaxKind.NullLiteralExpression) ||
+            model.GetSymbolInfo(id).Symbol is not ILocalSymbol local ||
+            !_enumerableAs.TryGetValue(local, out var loan))
+            return null;
+        var positive = b.IsKind(SyntaxKind.NotEqualsExpression);
+        if (guard is not null && (!positive || i.Else is not null))
+        {
+            diagnostics.Error("PALCS0866", loc,
+                "A compound enumerable cast guard currently supports a positive null test without else; " +
+                "other forms need a separate restored-loan failure continuation.");
+            return new IrBlock(loc, []);
+        }
+        if (!positive && i.Else is null)
+        {
+            diagnostics.Error("PALCS0866", loc,
+                "A null-first enumerable cast currently needs an explicit else for the successful loan.");
+            return new IrBlock(loc, []);
+        }
+        var captured = new IrVar(loc, local.Name) { Type = loan.Type.CastTarget! };
+        _code.Alias(local, captured);
+        _spec.Alias(local, captured);
+        IrStmt success;
+        try
+        {
+            success = EnumerableLoanIf(loan.Source, loan.Type, local.Name,
+                positive ? i.Statement : i.Else!.Statement, null, loc, guard);
+        }
+        finally { _code.ReleaseAlias(local); _spec.ReleaseAlias(local); }
+        if (success is not IrIf branch) return success;
+        return branch with { Else = (positive ? i.Else?.Statement : i.Statement) is { } fail ? Lower(fail) : null };
+    }
+
+    private IrStmt EnumerableLoanIf(IParameterSymbol p, IrEnumerableType e, string name,
+        StatementSyntax success, StatementSyntax? failure, IrLoc loc, ExpressionSyntax? guard = null)
+    {
+        // A return from an inner loop is already lowered by AfterLoop to a
+        // return *after* that loop. RestoreCastReturns closes the loan there,
+        // not at the loop's break edge (which must preserve the loop invariant).
+        // A cast nested in an enclosing loop is different: its deferred return
+        // can escape the loan's scope, and still needs a dedicated cleanup edge.
+        bool ExternalJump(SyntaxNode n) => n is BreakStatementSyntax or ContinueStatementSyntax &&
+            !n.Ancestors().TakeWhile(a => a != success).Any(a =>
+                a is ForStatementSyntax or WhileStatementSyntax or DoStatementSyntax or
+                    CommonForEachStatementSyntax ||
+                n is BreakStatementSyntax && a is SwitchStatementSyntax);
+        if (_loopDepth != 0 || success.DescendantNodesAndSelf().Any(n =>
+            n is ThrowStatementSyntax or GotoStatementSyntax or TryStatementSyntax || ExternalJump(n)))
+        {
+            diagnostics.Error("PALCS0866", loc,
+                "This enumerable loan supports normal returns and internal loops; casts in an enclosing loop, " +
+                "exceptions and nonlocal jumps need their own cleanup edges.");
+            return new IrIf(loc, new IrLiteral(loc, true) { Type = IrPrim.Bool }, new IrBlock(loc, []), null);
+        }
+        if (e.Capability is null && success.DescendantNodesAndSelf().Concat(guard?.DescendantNodesAndSelf() ?? [])
+            .OfType<IdentifierNameSyntax>()
+            .Any(n => SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(n).Symbol, p)))
+        {
+            diagnostics.Error("PALCS0866", loc,
+                "The enumerable source is lent to the concrete pattern variable in this branch. " +
+                "Use the source again only after the branch restores its ownership.");
+            return new IrIf(loc, new IrLiteral(loc, true) { Type = IrPrim.Bool }, new IrBlock(loc, []), null);
+        }
+        var source = new IrVar(loc, p.Name) { Type = e };
+        if (e.Capability is not null)
+        {
+            // Diagnose each use at its actual operation. The expression lowerer
+            // rejects pointer escapes and uninstalled receiver slots, while a
+            // private self helper gets a separately checked capability signature.
+            _code.NominalCaptures[name] = source;
+            _spec.NominalCaptures[name] = source;
+            IrStmt nominalBody;
+            try
+            {
+                nominalBody = Lower(success);
+                if (guard is not null) nominalBody = new IrIf(loc, _code.Lower(guard), nominalBody, null);
+            }
+            finally { _code.NominalCaptures.Remove(name); _spec.NominalCaptures.Remove(name); }
+            return new IrIf(loc, new IrEnumOp(loc, EnumOpKind.Matches, source, []) { Type = IrPrim.Bool },
+                nominalBody, failure is null ? null : Lower(failure));
+        }
+        var target = e.CastTarget!;
+        var captured = new IrVar(loc, name) { Type = target };
+        var close = new IrExprStmt(loc, new IrEnumOp(loc, EnumOpKind.CloseMatch, source, [captured]) { Type = IrPrim.Void });
+        var body = Lower(success);
+        if (guard is not null) body = new IrIf(loc, _code.Lower(guard), body, null);
+        body = RestoreCastReturns(body, close);
+        var statements = body is IrBlock block ? block.Statements : [body];
+        return new IrIf(loc, new IrEnumOp(loc, EnumOpKind.Matches, source, []) { Type = IrPrim.Bool },
+            new IrBlock(loc, [
+                new IrLocalDecl(loc, name, target,
+                    new IrEnumOp(loc, EnumOpKind.OpenMatch, source, []) { Type = target }),
+                .. statements,
+                .. CastReturns(body) ? ImmutableArray<IrStmt>.Empty : [close]
+            ]), failure is null ? null : Lower(failure));
+    }
+
+    private static bool CastReturns(IrStmt s) => s switch {
+        IrReturn => true,
+        IrBlock { Statements: [.., var last] } => CastReturns(last),
+        IrIf { Else: { } otherwise } i => CastReturns(i.Then) && CastReturns(otherwise),
+        _ => false
+    };
+
+    private IrStmt RestoreCastReturns(IrStmt s, IrStmt close) => s switch {
+        IrReturn { Value: { } value } r => CastReturn(r, value, close),
+        IrReturn r => new IrBlock(r.Loc, [close, r]) { Splice = true },
+        IrBlock b => b with { Statements = [.. b.Statements.Select(x => RestoreCastReturns(x, close))
+            .SelectMany(x => x is IrBlock { Splice: true } sp ? sp.Statements : ImmutableArray.Create(x))] },
+        IrIf i => i with { Then = RestoreCastReturns(i.Then, close),
+            Else = i.Else is { } other ? RestoreCastReturns(other, close) : null },
+        _ => s
+    };
+
+    private IrStmt CastReturn(IrReturn r, IrExpr value, IrStmt close)
+    {
+        var name = "__pal_cast_result" + _castResults++;
+        return new IrBlock(r.Loc, [
+            new IrLocalDecl(r.Loc, name, value.Type!, value),
+            close, r with { Value = new IrVar(r.Loc, name) { Type = value.Type } }
         ]) { Splice = true };
     }
 
@@ -734,6 +894,17 @@ public sealed class StmtLowerer(
                 _spec.Alias(symbol, arrayField);
                 continue;
             }
+            if (symbol is not null && v.Initializer?.Value is BinaryExpressionSyntax
+                { RawKind: (int)SyntaxKind.AsExpression, Left: IdentifierNameSyntax source, Right: TypeSyntax cast } &&
+                NeverWritten(symbol, node.Parent ?? node) &&
+                model.GetSymbolInfo(source).Symbol is IParameterSymbol ep &&
+                EnumerableCasts.ParameterType(ep, known) is { CastTarget: { } ct } enumerable &&
+                known.MapType(model.GetTypeInfo(cast).Type) is IrClassType tested &&
+                tested.Name == ct.Name && tested.TypeArguments.SequenceEqual(ct.TypeArguments))
+            {
+                _enumerableAs[symbol] = (ep, enumerable);
+                continue;
+            }
             // R34.20. `var c = e as ICollection<T>;`, never written, on an enumerable argument
             // `e`: `c` is another name for `e`, and null exactly when `e` is no collection.
             if (symbol is not null && v.Initializer?.Value is BinaryExpressionSyntax collInit &&
@@ -778,8 +949,12 @@ public sealed class StmtLowerer(
                 _spec.Alias(symbol, folded);
                 continue;
             }
-            // R27.41. A borrowing struct of the method's own object, held in a local.
-            if (borrow is null && symbol is not null && HeldStruct(v, symbol, type, statements)) continue;
+            // A view member can hold iterators too. Record each local's actual
+            // owner: `this` retains the view cell, while a peer retains its own
+            // ordinary object. Do not fall back to the enclosing view context.
+            if (symbol is not null && NominalIterator(v, symbol, statements)) continue;
+            if ((borrow is null or { ViewBase: not null }) &&
+                symbol is not null && HeldStruct(v, symbol, type, statements)) continue;
             // R17.10. `Span<T> s = _span;` in a span wrapper's member, `s` never written, is
             // another name for the span the member was handed: nothing is bound.
             if (symbol is not null && v.Initializer?.Value is { } wrappedInit &&
@@ -919,6 +1094,49 @@ public sealed class StmtLowerer(
     /// lowerers record the local, so that its members can be called and its <c>[Spec]</c>
     /// properties read. <c>false</c> when the declaration is not one.
     /// </summary>
+    private bool NominalIterator(VariableDeclaratorSyntax v, ILocalSymbol symbol,
+        ImmutableArray<IrStmt>.Builder statements)
+    {
+        if (v.Initializer?.Value is not InvocationExpressionSyntax {
+                Expression: MemberAccessExpressionSyntax { Expression: IdentifierNameSyntax receiver },
+                ArgumentList.Arguments.Count: 0 } init ||
+            !_code.NominalCaptures.TryGetValue(receiver.Identifier.ValueText, out var source))
+            return false;
+        var loc = Locations.From(v);
+        if (source.Type is not IrEnumerableType { Capability.Iteration: { } protocol } e ||
+            model.GetSymbolInfo(init).Symbol is not IMethodSymbol {
+                IsStatic: false, IsVirtual: false, ReturnType: INamedTypeSymbol st } factory ||
+            EnumerationProtocols.Factory(factory.ContainingType,
+                ((INamedTypeSymbol)factory.ContainingType.AllInterfaces.First(i =>
+                    i.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_IEnumerable_T)).TypeArguments[0],
+                known) is not { } selected ||
+            !EnumerationProtocols.Same(factory, selected) ||
+            v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax } declaration ||
+            declaration.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
+                .Any(a => a is WhileStatementSyntax or ForStatementSyntax or DoStatementSyntax or
+                    CommonForEachStatementSyntax or AnonymousFunctionExpressionSyntax or TryStatementSyntax) ||
+            declaration.Ancestors().First(a => a is BaseMethodDeclarationSyntax or AccessorDeclarationSyntax).DescendantNodes()
+                .OfType<IdentifierNameSyntax>().Any(id =>
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol) &&
+                    !(id.Parent is MemberAccessExpressionSyntax access && access.Expression == id)))
+        {
+            diagnostics.Error("PALCS0866", loc,
+                "A nominal iterator needs the checked protocol factory and a nonescaping, unaliased block local.");
+            return true;
+        }
+        var type = new IrNominalIteratorType(e.Element, source.Name, protocol);
+        var cursor = new IrVar(loc, symbol.Name) { Type = type };
+        foreach (var lowerer in new[] { _code, _spec })
+        {
+            lowerer.NominalIterators[symbol.Name] = cursor;
+            lowerer.NominalIteratorSources[symbol.Name] = source;
+            lowerer.NominalIteratorTypes[symbol.Name] = st;
+        }
+        statements.Add(new IrLocalDecl(loc, symbol.Name, type,
+            new IrEnumOp(loc, EnumOpKind.IteratorStart, source, []) { Type = type }) { Immutable = true });
+        return true;
+    }
+
     private bool HeldStruct(VariableDeclaratorSyntax v, ILocalSymbol symbol, IrType type,
         ImmutableArray<IrStmt>.Builder statements)
     {
@@ -933,7 +1151,11 @@ public sealed class StmtLowerer(
             _ => null,
         } : null;
         INamedTypeSymbol st;
+        var boxed = v.Initializer?.Value is { } boxInit
+            ? EnumerationProtocols.BoxedFactory(boxInit, model, known) : null;
         if (symbol.Type is INamedTypeSymbol { TypeKind: TypeKind.Struct } bst && Borrowing.IsBorrowing(bst, known)) st = bst;
+        else if (boxed is { Plan.Method.ReturnType: INamedTypeSymbol boxedType } &&
+                 known.MapType(boxedType) is { } boxedIr) { st = boxedType; type = boxedIr; }
         else if (viewInit is not null && known.MapType(viewInit) is { } viewType) { st = viewInit; type = viewType; }
         else return false;
         var loc = Locations.From(v);
@@ -949,7 +1171,22 @@ public sealed class StmtLowerer(
         // R27.49. `x.GetEnumerator()`: a method of the owner class that returns the struct,
         // called on `this` or on another object of the class.
         ExpressionSyntax? init = creation;
-        if (creation is null && v.Initializer?.Value is InvocationExpressionSyntax inv &&
+        if (boxed is { } box)
+        {
+            init = v.Initializer!.Value;
+            ownerArg = box.Receiver;
+            // A box is one mutable iterator, not a copyable value. The local may
+            // only be used as a member-call receiver; no aliases or escapes.
+            if (v.Ancestors().OfType<BlockSyntax>().First().DescendantNodes()
+                .OfType<IdentifierNameSyntax>().Any(id =>
+                    SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(id).Symbol, symbol) &&
+                    !(id.Parent is MemberAccessExpressionSyntax access && access.Expression == id)))
+            {
+                diagnostics.Error("PALCS0866", loc, "A specialized boxed enumerator cannot be aliased, reassigned, or escape its local scope.");
+                return true;
+            }
+        }
+        if (boxed is null && creation is null && v.Initializer?.Value is InvocationExpressionSyntax inv &&
             model.GetSymbolInfo(inv).Symbol is IMethodSymbol { IsStatic: false } getter &&
             SymbolEqualityComparer.Default.Equals(
                 (FrontendPass.ExactReturn(getter, known) ?? getter.ReturnType).OriginalDefinition, st.OriginalDefinition) &&
@@ -958,17 +1195,38 @@ public sealed class StmtLowerer(
             init = inv;
             ownerArg = inv.Expression is MemberAccessExpressionSyntax ma ? ma.Expression : SyntaxFactory.ThisExpression();
         }
-        // R27.49. The owner: `this`, or a parameter of the owner class (or a local naming one).
-        string? ownerName = ownerArg is ThisExpressionSyntax ? Pal.Compiler.Emit.Names.This
-            : ownerArg is IdentifierNameSyntax && _code.Lower(ownerArg) is IrVar { Name: var ov } &&
-              self?.Parameters.FirstOrDefault(q => q.Name == ov) is { } oq &&
-              (SymbolEqualityComparer.Default.Equals(oq.Type.OriginalDefinition, owner.Type.OriginalDefinition) ||
+        // A named, nonnullable collection whose invariant the current method
+        // owns: this, a parameter, or an owned local (also in static clients).
+        var ownerView = ownerArg is null ? null : _code.BorrowingView(ownerArg);
+        if (ownerView is not null && ownerArg is IdentifierNameSyntax &&
+            model.GetSymbolInfo(ownerArg).Symbol is ILocalSymbol viewLocal &&
+            v.Ancestors().OfType<BlockSyntax>().Last().DescendantNodes().Any(n =>
+                (n is AssignmentExpressionSyntax assign &&
+                 SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(assign.Left).Symbol, viewLocal)) ||
+                (n is ArgumentSyntax { RefKindKeyword.RawKind: not 0 } argument &&
+                 SymbolEqualityComparer.Default.Equals(model.GetSymbolInfo(argument.Expression).Symbol, viewLocal))))
+        {
+            diagnostics.Error("PALCS0715", loc,
+                "A view retained as a borrowing record's owner cannot be reassigned or passed by ref/out. " +
+                "Its stable state-cell reference represents the identity retained by the record.");
+            return true;
+        }
+        if (ownerView is not null) type = BorrowedOwners.Type(st, ownerView.Struct, known);
+        string? ownerName = ownerView?.OwnerName ?? (ownerArg is ThisExpressionSyntax ? Pal.Compiler.Emit.Names.This
+            : ownerArg is IdentifierNameSyntax &&
+              _code.Lower(ownerArg) is IrVar { Name: var ov, Type: IrClassType } &&
+              model.GetTypeInfo(ownerArg).Nullability.FlowState == NullableFlowState.NotNull &&
+              model.GetSymbolInfo(ownerArg).Symbol is ILocalSymbol or IParameterSymbol &&
+              model.GetTypeInfo(ownerArg).Type is { } ownerArgType &&
+              (SymbolEqualityComparer.Default.Equals(ownerArgType.OriginalDefinition, owner.Type.OriginalDefinition) ||
+               model.GetSymbolInfo(ownerArg).Symbol is IParameterSymbol oq &&
                SymbolEqualityComparer.Default.Equals(
                    FrontendPass.ExactParameter(oq, known.Compilation, known)?.OriginalDefinition, owner.Type.OriginalDefinition))
-                ? ov : null;
+                ? ov : null);
         if (init is null || ownerName is null ||
-            self is null || self.IsStatic || self.MethodKind == MethodKind.LambdaMethod ||
-            !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition) ||
+            self is null || self.MethodKind == MethodKind.LambdaMethod ||
+            ownerName == Pal.Compiler.Emit.Names.This && ownerView is null &&
+                (self.IsStatic || !SymbolEqualityComparer.Default.Equals(self.ContainingType?.OriginalDefinition, owner.Type.OriginalDefinition)) ||
             known.MapType(owner.Type) is not IrClassType ownerType ||
             v.Parent?.Parent is not LocalDeclarationStatementSyntax { Parent: BlockSyntax } decl ||
             decl.Ancestors().TakeWhile(a => a is not (BaseMethodDeclarationSyntax or AccessorDeclarationSyntax))
@@ -978,10 +1236,9 @@ public sealed class StmtLowerer(
         {
             diagnostics.Error("PALCS0710", loc,
                 $"The local `{v.Identifier.ValueText}` holds a struct that borrows its collection. Such a " +
-                "local is declared in a block of an instance method of the borrowed class, outside any loop, " +
-                "lambda or `try`, " +
+                "local is declared in a method block outside any loop, lambda or `try`, " +
                 "and initialised by the struct's constructor, or a method of the class returning it, applied " +
-                "to `this` or to a parameter of the class (doc/translation.md R27.41, R27.49).");
+                "to `this` or a named nonnullable collection parameter or owned local (doc/translation.md R27.41, R27.49).");
             return true;
         }
         var name = v.Identifier.ValueText;
@@ -993,11 +1250,16 @@ public sealed class StmtLowerer(
             SelfName = name,
             OwnerName = ownerName,
             OwnedNames = owned.ToImmutableDictionary(f => f.Name, f => $"__pal_own_{name}{f.Name}"),
+            OwnerView = ownerView,
         };
         var ownedLocals = ImmutableArray.CreateBuilder<(string, string, IrClassType)>();
         foreach (var f in owned)
             if (known.MapType(f.Type) is IrClassType ot) ownedLocals.Add((f.Name, held.OwnedLocal(f), ot));
-        statements.Add(new IrLocalDecl(loc, name, type, _code.Lower(init))
+        if (boxed is { } guarded)
+            statements.AddRange(EnumerationProtocols.Guard(guarded.Plan, _code, _code.Lower(guarded.Receiver),
+                $"__pal_box_guard_{name}", loc));
+        statements.Add(new IrLocalDecl(loc, name, type, boxed is { } b
+            ? _code.OwnerCall(b.Plan.Method, _code.Lower(b.Receiver), loc) : _code.Lower(init))
         {
             Owned = ownedLocals.ToImmutable(),
             HeldOwner = ownerName == Pal.Compiler.Emit.Names.This ? null : ownerName,
@@ -2216,6 +2478,10 @@ public sealed class StmtLowerer(
         // position, so it is lowered by the same code: the receiver threading of §4.5 and
         // the `MutatesReceiver` flag of R4.11 are decided in exactly one place.
         if (kind == CalleeKind.Method) return new IrExprStmt(loc, _code.Lower(node));
+        if (_code.NominalIteratorCall(node, method, loc) is { } nominalIteratorCall)
+            return new IrExprStmt(loc, nominalIteratorCall);
+        if (_code.HeldInvocation(node, method, loc) is { } heldCall)
+            return new IrExprStmt(loc, heldCall);
         // R35.4. A helper forwarding to a held struct's member is that member's call.
         if (_code.ForwardedToHeld(node, method, loc) is { } forwarded)
             return new IrExprStmt(loc, forwarded);
@@ -2252,6 +2518,8 @@ public sealed class StmtLowerer(
             !_code.IsEnumerableArgument(access.Expression))
             return null;
         var source = _code.Lower(access.Expression);
+        if (source.Type is IrEnumerableType { Capability: not null })
+            diagnostics.Error("PALCS0866", loc, "Iterator slots on a nominal observation capability are not installed.");
         var name = v.Identifier.ValueText;
         _code.HoldCursor(name, source);
         _spec.HoldCursor(name, _spec.Lower(access.Expression));
@@ -2293,6 +2561,11 @@ public sealed class StmtLowerer(
     {
         var cursorName = ExprLowerer.ForEachIndex(name);
         var source = _code.Lower(expression);
+        if (source.Type is IrEnumerableType { Capability: not null })
+        {
+            diagnostics.Error("PALCS0866", loc, "Iterator slots on a nominal observation capability are not installed.");
+            return new IrBlock(loc, []);
+        }
         var (invariants, decreases, body) = ExtractLoopSpecs(statement);
         IrExpr Cursor() => new IrVar(vloc, cursorName) { Type = IrPrim.Int };
         var moved = new IrEnumOp(vloc, EnumOpKind.MoveNext, source, [Cursor()]) { Type = IrPrim.Bool };

@@ -68,8 +68,44 @@ public static partial class FrontendPass
         // R27.57. The replicas the bodies asked for, each a base body verified again at a
         // representation-sharing subclass; a replica's own calls may ask for more.
         Subclasses.Check(candidates.Select(c => (c.Syntax, c.Symbol)), compilation, known, diagnostics);
-        while (known.ReplicaDemand.Count > 0 || known.SpecializationDemand.Count > 0)
+        while (known.ReplicaDemand.Count > 0 || known.SpecializationDemand.Count > 0 ||
+               known.BorrowedOwnerDemand.Count > 0)
         {
+            if (known.BorrowedOwnerDemand.Count > 0)
+            {
+                var ownerRequest = known.BorrowedOwnerDemand.Dequeue();
+                var ownerSource = candidates.FirstOrDefault(c => Naming.Of(c.Symbol) == ownerRequest.Source);
+                var ordinaryType = (IrNamedType)known.MapType(ownerRequest.Struct)!;
+                var specializedType = BorrowedOwners.Type(ownerRequest.Struct, ownerRequest.View, known);
+                var ordinary = declarations.OfType<IrStruct>().FirstOrDefault(s => s.Name == ordinaryType.Name);
+                if (ownerSource is null || ordinary is null || !ordinary.Refinements.IsEmpty ||
+                    Borrowing.IsWrapping(ownerRequest.Struct, known))
+                {
+                    diagnostics.Error("PALCS0715", IrLoc.None,
+                        $"`{ownerRequest.Source}` at a borrowing owner needs a translated, nonwrapping record " +
+                        "without additional record refinements.");
+                    continue;
+                }
+                if (!declarations.OfType<IrStruct>().Any(s => s.Name == specializedType.Name))
+                {
+                    var owner = Borrowing.OwnerField(ownerRequest.Struct, known)!;
+                    var viewType = known.MapType(ownerRequest.View)!;
+                    declarations.Add(ordinary with {
+                        Name = specializedType.Name,
+                        Fields = [.. ordinary.Fields.Select(f => f.Name == owner.Name
+                            ? f with { Type = new IrUserSpecType("BorrowedOwnerReference", "Pulse.Lib.Reference.ref", [viewType]) } : f)]
+                    });
+                }
+                var ownerLifted = new List<IrMethod>();
+                var ownerDecl = LowerBorrowingMember(ownerSource, compilation.Model(ownerSource.Syntax.SyntaxTree), known, bound,
+                    diagnostics, Locations.From(ownerSource.Syntax), ownerLifted, ownerView: ownerRequest.View);
+                if (ownerDecl is IrMethod member)
+                {
+                    declarations.Add(member with { Name = ownerRequest.Name });
+                    declarations.AddRange(ownerLifted);
+                }
+                continue;
+            }
             if (known.SpecializationDemand.Count > 0)
             {
                 LowerSpecialization(known.SpecializationDemand.Dequeue(), candidates, compilation, known, bound, diagnostics, declarations);
@@ -191,14 +227,19 @@ public static partial class FrontendPass
         var model = compilation.Model(source.Syntax.SyntaxTree);
         var lifted = new List<IrMethod>();
         var outer = known.Specialization;
+        var outerReplica = known.Replica;
         known.Specialization = request;
+        known.Replica = request.Replica;
         var decl = LowerDeclaration(source, model, known, bound, diagnostics, lifted);
         known.Specialization = outer;
+        known.Replica = outerReplica;
         if (decl is not IrMethod m) return;
         var loc = m.Loc;
         var pins = request.Values.Select(kv => (IrExpr)new IrBinary(loc, BinOp.Eq,
             new IrVar(loc, kv.Key) { Type = IrPrim.Bool }, new IrLiteral(loc, kv.Value) { Type = IrPrim.Bool })
-            { Type = IrPrim.Bool });
+            { Type = IrPrim.Bool })
+            .Concat(request.NominalParameters.Keys.Select(p => (IrExpr)new IrSpecOp(loc,
+                "Pulse.Lib.CSharp.Capability.supports", [new IrVar(loc, "$descriptor:" + p)]) { Type = IrPrim.Bool }));
         declarations.Add(m with { Name = request.Name, Requires = [.. pins, .. m.Requires] });
         declarations.AddRange(lifted.Select(l => l with { RlimitFactor = m.RlimitFactor, InitialFuel = m.InitialFuel }));
     }
@@ -435,7 +476,14 @@ public static partial class FrontendPass
                 if (model.GetDeclaredSymbol(method) is not IMethodSymbol symbol) continue;
                 // R11.1a. A specification type's members declare F* names; they are not
                 // executable code and have no bodies to translate.
-                if (known.IsSpecTypeDeclaration(symbol.ContainingType)) continue;
+                // A static binding container may also contain checked lemma
+                // bodies. Adding a SpecOp sibling must not silently suppress
+                // those implementations and their exported proof modules.
+                if (known.IsSpecTypeDeclaration(symbol.ContainingType) &&
+                    !(symbol.IsStatic && known.SpecTypeName(symbol.ContainingType) is null &&
+                      Declarations.Has(symbol, known.LemmaAttribute) &&
+                      known.SpecOpName(symbol) is null && known.SpecCtorName(symbol) is null &&
+                      known.RegionOpName(symbol) is null)) continue;
                 if (Declarations.KindOf(symbol, known) is not { } kind) continue;
                 result.Add(new Candidate(method, symbol, kind));
             }
@@ -2215,6 +2263,9 @@ public static partial class FrontendPass
                     .Lower(spec.Expression));
 
         var observations = c.Observations
+            // Identity needs an actual receiver, not just this class's model.
+            // Its pure body is expanded at supported reference-bearing uses.
+            .Where(o => !ReceiverObservations.IsIdentity(o.Symbol, known))
             .Select(o => new IrObservation(
                 Locations.From(o.Symbol.Locations.FirstOrDefault() ?? Location.None),
                 o.Name,
@@ -2498,22 +2549,59 @@ public static partial class FrontendPass
                 });
             }
 
+            var observationLaws = EnumerationObservations.Laws(candidate.Symbol, known, diagnostics);
+            // Like authored At contracts, inherited observation laws must bind
+            // their receiver at the actual borrowing view. Binding at the base
+            // first loses virtual Spec overrides before lowering can dispatch.
+            INamedTypeSymbol?[] observationViews = observationLaws.IsEmpty ? [] : [null, .. candidate.Symbol.ContainingType.GetTypeMembers()
+                .Where(v => Borrowing.IsView(v, known))];
+            foreach (var observationView in observationViews)
+            {
+                var viewObservationLaws = observationView is null ? observationLaws :
+                    EnumerationObservations.Laws(candidate.Symbol, known, diagnostics, observationView);
+                for (int k = 0; k < viewObservationLaws.Length; k++)
+                    sites.Add(new SpecSite(
+                        ObservationKey(candidate.Symbol, observationView, k), viewObservationLaws[k],
+                        candidate.Declaration.Locations.FirstOrDefault() ?? Location.None,
+                        ShimParameters(candidate.Symbol, compilation, known, true, observationView), usings) {
+                            TypeParameters = observationView is null ? SiteTypeParameters(candidate.Symbol, known) :
+                                [.. WellKnown.AllTypeParameters(observationView).Select(t => t.Name),
+                                 .. candidate.Symbol.TypeParameters.Select(t => t.Name)],
+                            Private = true
+                        });
+            }
+
+            var protocolLaws = EnumerationProtocols.Laws(candidate.Symbol, known);
+            for (int k = 0; k < protocolLaws.Length; k++)
+                sites.Add(new SpecSite(
+                    $"{Naming.Of(candidate.Symbol)}_protocol_{k}", protocolLaws[k].Text,
+                    candidate.Declaration.Locations.FirstOrDefault() ?? Location.None,
+                    ShimParameters(candidate.Symbol, compilation, known, protocolLaws[k].Post),
+                    usings) {
+                        TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                        Private = true
+                    });
+
             // R19.2. A `[Throws]` predicate is over the parameters and `Thrown`, the
             // exception at its declared type. It describes an abortive exit, so there is
             // no `Result` to name.
             foreach (var (attribute, k, thrown) in ThrowsAttributes(candidate.Declaration, known))
             {
+                var throwsView = AtView(attribute, candidate.Symbol, known);
                 sites.Add(new SpecSite(
                     Key: $"{Naming.Of(candidate.Symbol)}_throws_{k}",
                     Text: Declarations.StringArgument(attribute, 1) ?? "true",
                     Location: Declarations.ArgumentLocation(attribute, 1),
-                    Parameters: [.. ShimParameters(candidate.Symbol, compilation, known, false),
+                    Parameters: [.. ShimParameters(candidate.Symbol, compilation, known, false, throwsView),
                                  new SpecParam(ThrownParameter, thrown)],
                     Usings: usings)
                 {
                     GhostParameters = ghostParameters,
-                    TypeParameters = SiteTypeParameters(candidate.Symbol, known),
+                    TypeParameters = throwsView is null ? SiteTypeParameters(candidate.Symbol, known)
+                        : [.. WellKnown.AllTypeParameters(throwsView).Select(t => t.Name),
+                           .. candidate.Symbol.TypeParameters.Select(t => t.Name)],
                     Private = candidate.Symbol.DeclaredAccessibility == Accessibility.Private ||
+                              throwsView is not null ||
                               Borrowing.IsMember(candidate.Symbol, known),
                 });
             }
@@ -3290,12 +3378,17 @@ public static partial class FrontendPass
     {
         public ImmutableArray<IrThrows> Throws { get; init; } = [];
         public ImmutableArray<(string At, IrThrows Throws)> AtThrows { get; init; } = [];
+        public ImmutableArray<IrExpr> ProtocolRequires { get; init; } = [];
+        public ImmutableArray<IrExpr> ProtocolEnsures { get; init; } = [];
     }
 
     // R32.13. The view a clause is `At`, and the one a replica is lowered at, may be symbols
     // of different compilations (a body is bound in one of its own).
     private static bool SameView(INamedTypeSymbol a, INamedTypeSymbol b) =>
         a.OriginalDefinition.ToDisplayString() == b.OriginalDefinition.ToDisplayString();
+
+    private static string ObservationKey(IMethodSymbol symbol, INamedTypeSymbol? view, int index) =>
+        $"{Naming.Of(symbol)}_observation_{(view is null ? "" : $"at_{view.Name}_")}{index}";
 
     private static Specs ReadSpecs(
         IMethodSymbol symbol, ISymbol declaration, WellKnown known,
@@ -3320,6 +3413,7 @@ public static partial class FrontendPass
 
             var lowerer = new ExprLowerer(spec.Model, known, diagnostics, specPosition: true)
                 { ContextNames = ContextNames(symbol, spec.Model.Compilation, known), Borrow = borrow,
+                  CastParameters = EnumerableCasts.Parameters(symbol, known),
                   OpenFields = OpenFields(symbol, known),
                   SnapshotResult = RefSnapshots.IsSnapshot(symbol, spec.Model.Compilation) &&
                                    known.MapType(symbol.ReturnType) is { } resultOf ? new IrOptionType(resultOf) : null,
@@ -3334,6 +3428,37 @@ public static partial class FrontendPass
             else if (Same(cls, known.DecreasesAttribute)) decreases = expr;
         }
 
+        var observationLaws = EnumerationObservations.Laws(symbol, known);
+        for (int k = 0; k < observationLaws.Length; k++)
+        {
+            if (!bound.TryGetValue(ObservationKey(symbol, atView, k), out var law))
+            {
+                diagnostics.Error("PALCS0866", Locations.From(symbol.Locations.FirstOrDefault() ?? Location.None),
+                    "The checked enumeration observation has no bound law for this receiver representation.");
+                continue;
+            }
+            var lowerer = new ExprLowerer(law.Model, known, diagnostics, specPosition: true) {
+                ContextNames = ContextNames(symbol, law.Model.Compilation, known),
+                Borrow = borrow,
+                DeclaredResult = known.MapReturnType(symbol.ReturnType)
+            };
+            ensures.Add(lowerer.Lower(law.Expression));
+        }
+
+        var protocolLaws = EnumerationProtocols.Laws(symbol, known);
+        var protocolRequires = ImmutableArray.CreateBuilder<IrExpr>();
+        var protocolEnsures = ImmutableArray.CreateBuilder<IrExpr>();
+        for (int k = 0; k < protocolLaws.Length; k++)
+            if (bound.TryGetValue($"{Naming.Of(symbol)}_protocol_{k}", out var law))
+            {
+                var lowerer = new ExprLowerer(law.Model, known, diagnostics, specPosition: true) {
+                    ContextNames = ContextNames(symbol, law.Model.Compilation, known),
+                    Borrow = borrow,
+                    DeclaredResult = symbol.ReturnsVoid ? null : known.MapReturnType(symbol.ReturnType)
+                };
+                (protocolLaws[k].Post ? protocolEnsures : protocolRequires).Add(lowerer.Lower(law.Expression));
+            }
+
         var throws = ImmutableArray.CreateBuilder<IrThrows>();
         var atThrows = ImmutableArray.CreateBuilder<(string, IrThrows)>();
         var throwsIndex = 0;
@@ -3341,6 +3466,12 @@ public static partial class FrontendPass
         {
             if (!Same(attribute.AttributeClass, known.ThrowsAttribute)) continue;
             var k = throwsIndex++;
+            var throwsAt = attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value as INamedTypeSymbol;
+            // Filter before lowering: a base clause is not in a view's spec
+            // environment, and a view clause is bound/lowered at its replica.
+            if (atView is not null && (throwsAt is null || !SameView(throwsAt, atView)) ||
+                atView is null && AtView(attribute, symbol, known) is not null)
+                continue;
             var aloc = Locations.From(attribute.ApplicationSyntaxReference?.GetSyntax().GetLocation()
                                       ?? Location.None);
             if (attribute.ConstructorArguments is not [{ Value: ITypeSymbol t }, ..] ||
@@ -3357,7 +3488,6 @@ public static partial class FrontendPass
                 .Lower(spec.Expression);
             var clause = new IrThrows(aloc, type, when is IrLiteral { Value: true } ? null : when);
             // R27.57. A clause for the replica at a subclass is not the member's own.
-            var throwsAt = attribute.NamedArguments.FirstOrDefault(a => a.Key == "At").Value.Value as INamedTypeSymbol;
             // R32.13. At a view, only the clauses `At` it are the replica's.
             if (atView is not null)
             {
@@ -3374,6 +3504,8 @@ public static partial class FrontendPass
         {
             Throws = throws.ToImmutable(),
             AtThrows = atThrows.ToImmutable(),
+            ProtocolRequires = protocolRequires.ToImmutable(),
+            ProtocolEnsures = protocolEnsures.ToImmutable(),
         };
     }
 
@@ -3449,7 +3581,8 @@ public static partial class FrontendPass
 
                 declared = exact;
             }
-            var type = known.MapType(declared);
+            var type = known.Specialization?.NominalParameters.GetValueOrDefault(p.Name)
+                ?? EnumerableCasts.ParameterType(p, known) ?? known.MapType(declared);
             if (type is null)
             {
                 diagnostics.Unsupported(loc, $"The parameter type `{p.Type}`");

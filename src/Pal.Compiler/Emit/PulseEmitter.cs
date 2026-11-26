@@ -212,7 +212,12 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
         SlotKind.RefParam => $"R.pts_to {Binder} {Perm}{value}",
         SlotKind.Array => $"A.pts_to {Binder} {Perm}{value}",
         SlotKind.Span => $"S.pts_to {Binder} {Perm}{value}",
+        SlotKind.Enumerable when Type is IrEnumerableType { CastTarget: not null } e =>
+            EnumerableAdapter.PtsTo(e, Name, Binder, Fraction ?? "1.0R", value),
         SlotKind.Enumerable => $"Pulse.Lib.CSharp.Enumerable.pts_to {Binder} {Perm}{value}",
+        SlotKind.NominalIterator when Type is IrNominalIteratorType it =>
+            $"{EnumerableAdapter.Iterator}.at enum_contents_{it.Source} enum_iterator_{it.Source} " +
+            $"{Names.Local(it.Source)} {Binder} descriptor_{it.Source} p_{it.Source} pre_{it.Source} {value}",
         SlotKind.ArrayCell => $"Pulse.Lib.CSharp.ArrayCell.pts_to {Binder} {value}",
         // R27.23. An `[Open]` receiver is held as its record.
         SlotKind.Object when Open => $"B.pts_to {Binder} {value}",
@@ -231,11 +236,12 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     };
 
     public bool Owns => !Lent && Kind is SlotKind.Cell or SlotKind.RefParam or SlotKind.Array
-        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell;
+        or SlotKind.Span or SlotKind.Object or SlotKind.Trace or SlotKind.Enumerable or SlotKind.ArrayCell or SlotKind.NominalIterator;
 }
 
 public enum SlotKind
 {
+    NominalIterator,
     /// <summary>An immutable by-value parameter; no resource.</summary>
     Value,
     /// <summary>A local, or a by-value parameter the body assigns (R5.2, R4.2).</summary>
@@ -407,6 +413,21 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             .ToDictionary(g => g.Key, g => g.First().Fields.Where(f => f.IsOwned).ToImmutableArray());
         var exceptions = program.Declarations.OfType<IrException>().ToImmutableArray();
         if (!exceptions.IsEmpty) modules.Add(EmitExceptions(exceptions));
+        var nominalMethods = all.OfType<IrMethod>().GroupBy(m => m.Name)
+            .ToDictionary(g => g.Key, g => g.First());
+        var nominalTypes = nominalMethods.Values.SelectMany(m =>
+            m.Parameters.Select(p => p.Type).Concat(m.Body is null ? [] :
+                Passes.Check.DeepExpressions(m.Body).Select(e => e.Type).OfType<IrType>()))
+            .OfType<IrEnumerableType>().Where(e => e.Capability?.Iteration is not null)
+            .DistinctBy(e => e.CastTarget!.Name);
+        foreach (var enumerable in nominalTypes)
+            modules.Add(NominalFactsEmitter.Emit(enumerable, _classes[enumerable.CastTarget!.Name], nominalMethods, _spec));
+        foreach (var installation in program.Declarations.OfType<IrMethod>()
+            .Where(m => m.Body is not null).SelectMany(m => Passes.Check.DeepExpressions(m.Body!))
+            .OfType<IrEnumOp>().Select(op => op.Installation).Where(d => d is not null)
+            .DistinctBy(d => d!.Module))
+            modules.Add(NominalEnumerableEmitter.Emit(installation!, _spec,
+                nominalMethods, _classes));
 
         foreach (var decl in program.Declarations)
         {

@@ -56,6 +56,10 @@ public sealed class WellKnown
         SpecAttribute = Type("SpecAttribute");
         GhostFieldAttribute = Type("GhostFieldAttribute");
         ModelAttribute = Type("ModelAttribute");
+        EnumerationModelAttribute = Type("EnumerationModelAttribute");
+        EnumerationObservationAttribute = Type("EnumerationObservationAttribute");
+        EnumerationProtocolAttribute = Type("EnumerationProtocolAttribute");
+        EnumerationStateAttribute = Type("EnumerationStateAttribute");
         InvariantAttribute = Type("InvariantAttribute");
         LemmaAttribute = Type("LemmaAttribute");
         PulseBodyAttribute = Type("PulseBodyAttribute");
@@ -116,6 +120,10 @@ public sealed class WellKnown
     public INamedTypeSymbol SpecListOps { get; }
 
     public INamedTypeSymbol ModelAttribute { get; }
+    public INamedTypeSymbol EnumerationModelAttribute { get; }
+    public INamedTypeSymbol EnumerationObservationAttribute { get; }
+    public INamedTypeSymbol EnumerationProtocolAttribute { get; }
+    public INamedTypeSymbol EnumerationStateAttribute { get; }
     public INamedTypeSymbol GhostFieldAttribute { get; }
     public INamedTypeSymbol ThrowsAttribute { get; }
     public INamedTypeSymbol TranslateAnnotatedOnlyAttribute { get; }
@@ -136,9 +144,16 @@ public sealed class WellKnown
     public Queue<ReplicaRequest> ReplicaDemand { get; } = new();
     public HashSet<string> ReplicaSeen { get; } = new(StringComparer.Ordinal);
 
+    internal Queue<BorrowedOwners.Request> BorrowedOwnerDemand { get; } = new();
+    internal HashSet<string> BorrowedOwnerSeen { get; } = new(StringComparer.Ordinal);
+
     /// <summary>R35.18. A method translated at constant values of its <c>[Specialize]</c> parameters.</summary>
     public sealed record SpecializationRequest(string Source, string Name, ImmutableDictionary<string, bool> Values)
     {
+        /// <summary>Concrete parameters re-verified against retained nominal capabilities.</summary>
+        public ImmutableDictionary<string, Ir.IrEnumerableType> NominalParameters { get; init; } =
+            ImmutableDictionary<string, Ir.IrEnumerableType>.Empty;
+        public ReplicaRequest? Replica { get; init; }
         /// <summary>The first call that asked for it.</summary>
         public Ir.IrLoc? At { get; init; }
     }

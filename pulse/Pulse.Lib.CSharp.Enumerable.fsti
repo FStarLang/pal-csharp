@@ -15,8 +15,9 @@ module Pulse.Lib.CSharp.Enumerable
 /// abstract: a method that tests it is verified in both branches, and the two must
 /// meet one postcondition (R34.4).
 ///
-/// An enumerator is a *cursor*: the number of items it has yielded, held in a C#
-/// `int` cell. `MoveNext` and `Current` are `move_next` and `current` below (R34.6).
+/// An enumerator is a *cursor*: the number of items it has yielded, or -1 after
+/// exhaustion, held in a C# `int` cell. `MoveNext` and `Current` are `move_next`
+/// and `current` below (R34.6).
 ///
 /// The functions here are implemented (in the `.fst`) over a read-only array, so the
 /// interface carries no assumption of its own; what the translation trusts about a
@@ -79,9 +80,10 @@ fn copy_values (#a #b: Type0) (e: enumerable (a & b)) (dst: A.array b) (i: I32.t
   requires A.pts_to dst d
   ensures A.pts_to dst (CS.copied_at (KM.values s) 0 d (I32.v i) (Seq.length s))
 
-/// The cursor after one `MoveNext`: one further, unless every item has been yielded.
+/// The cursor after one `MoveNext`: one further, or -1 when exhausted.
+/// End must invalidate Current even for a nonempty enumeration.
 let advance (#t: Type0) (s: Seq.seq t) (k: I32.t) : I32.t =
-  if I32.v k < Seq.length s && I32.v k < 2147483647 then I32.add k 1l else k
+  if 0 <= I32.v k && I32.v k < Seq.length s && I32.v k < 2147483647 then I32.add k 1l else -1l
 
 /// `en.MoveNext()`, for the enumerator of `e` whose cursor is `r`.
 fn move_next (#t: Type0) (e: enumerable t) (r: R.ref I32.t)
@@ -89,7 +91,7 @@ fn move_next (#t: Type0) (e: enumerable t) (r: R.ref I32.t)
   preserves pts_to e #p s
   requires R.pts_to r k
   returns b: bool
-  ensures R.pts_to r (advance s k) ** pure (b == (I32.v k < Seq.length s) /\ Seq.length s < pow2 31)
+  ensures R.pts_to r (advance s k) ** pure (b == (0 <= I32.v k /\ I32.v k < Seq.length s) /\ Seq.length s < pow2 31)
 
 /// `en.Current`, defined only after a `MoveNext` that returned `true`.
 fn current (#t: Type0) (e: enumerable t) (r: R.ref I32.t)

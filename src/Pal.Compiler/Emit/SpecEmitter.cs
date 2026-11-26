@@ -13,6 +13,7 @@ namespace Pal.Compiler.Emit;
 public sealed class SpecScope
 {
     private readonly Dictionary<string, Term> _values = [];
+    private readonly Dictionary<string, IrType> _types = [];
 
     public SpecScope? Pre { get; init; }
     public string? ResultTerm { get; init; }
@@ -43,6 +44,7 @@ public sealed class SpecScope
     public SpecScope(SpecScope other)
     {
         _values = new Dictionary<string, Term>(other._values);
+        _types = new Dictionary<string, IrType>(other._types);
         Pre = other.Pre;
         ResultTerm = other.ResultTerm;
         DefiningClass = other.DefiningClass;
@@ -51,6 +53,16 @@ public sealed class SpecScope
     }
 
     public void Bind(string name, Term term) => _values[name] = term;
+    public void BindType(string name, IrType type) => _types[name] = type;
+    public IrType Instantiate(IrType type) => type switch {
+        IrTypeParamType p when _types.TryGetValue(p.Name, out var actual) => actual,
+        IrNamedType n => n with { TypeArguments = [.. n.TypeArguments.Select(Instantiate)] },
+        IrClassType c => c with { TypeArguments = [.. c.TypeArguments.Select(Instantiate)] },
+        IrSeqType s => s with { Element = Instantiate(s.Element) },
+        IrArrayType a => a with { Element = Instantiate(a.Element) },
+        IrOptionType o => o with { Inner = Instantiate(o.Inner) },
+        _ => type
+    };
 
     public bool TryGet(string name, out Term term) => _values.TryGetValue(name, out term);
 
@@ -163,6 +175,9 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             // machinery: it is this same case emitted in the pre-state scope.
             case IrObserve ob:
             {
+                if (ob.Receiver is IrVar { Name: Names.This } &&
+                    scope.TryGet("$projection:" + ob.Class + ":" + ob.Member, out var projected))
+                    return projected;
                 var receiver = Emit(ob.Receiver, scope);
                 // R3.7's rule about field qualifiers applies to observations too: inside
                 // the class's own module the qualifier is not merely redundant, it makes
@@ -340,7 +355,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // IR call node and has no reason to differ.
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
-                    string.Join(" ", call.TypeArguments.Select(Types.Atom)
+                    string.Join(" ", call.TypeArguments.Select(scope.Instantiate).Select(Types.Atom)
                         .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
@@ -789,10 +804,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// its arguments. There is nothing to decide — the name came from the user's
     /// <c>[SpecOp]</c> or <c>[SpecCtor]</c> and is emitted verbatim.
     ///
-    /// <para>Every argument goes through <see cref="AsMath"/>, which is a no-op except on
+    /// <para>Numeric specification arguments go through <see cref="AsMath"/>, a no-op except on
     /// a machine integer: a specification type's arguments are mathematical, so an
     /// <c>Int32.t</c> in argument position needs <c>.v</c>. This is the same coercion the
-    /// built-in operations applied, stated once.</para>
+    /// built-in operations applied, stated once. A polymorphic element argument
+    /// retains its substituted program type; T=int is I32.t, not Prims.int.</para>
     ///
     /// <para>The result's <see cref="TermKind"/> is read off the member's C# return type
     /// rather than declared, because C# already says whether it is a number, a
@@ -800,7 +816,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     /// </summary>
     private Term SpecOp(IrSpecOp op, SpecScope scope)
     {
-        var operands = op.TypeArgs.Select(Types.Atom)
+        var operands = op.TypeArgs.Select(scope.Instantiate).Select(Types.Atom)
             .Concat(op.Args.Select((a, i) =>
                 // R31.5. A method body's `this` is its model (R4.2); a region operation over
                 // heaps asks about the reference, which is the receiver itself -- the owner a
@@ -815,7 +831,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     : i < op.ParamTypes.Length && op.ParamTypes[i] is IrPrim { Kind: PrimKind.Bool } &&
                       a is IrLiteral { Value: bool pb }
                         ? (pb ? "true" : "false")
-                    : op.MachineArgs
+                    : op.MachineArgs || op.GenericValueArgs.Contains(i)
                         ? a is IrLiteral { Value: not (null or string or decimal) } l
                             ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)
                             : DecidedEquality(a, scope) ?? Emit(a, scope).Text
@@ -875,7 +891,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
             var name = Names.Local(b.Name);
             // Quantifier binders range over the mathematical values a spec talks about
             // (R4.6), so `forall (int i)` is `forall (var_i: int)`.
-            var rendered = b.Type is IrPrim { IsMachineInt: true } ? "int" : Types.Render(b.Type);
+            var rendered = b.Type is IrPrim { IsMachineInt: true } ? "int" : Types.Render(scope.Instantiate(b.Type));
             binders.Add($"({name}: {rendered})");
             var term = new Term(name, TermKind.Math, b.Type);
             inner.Bind(b.Name, term);

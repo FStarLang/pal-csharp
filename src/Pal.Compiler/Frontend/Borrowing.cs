@@ -302,6 +302,79 @@ public static class Borrowing
         return written;
     }
 
+    /// <summary>
+    /// Effects on a known view retained by a borrowing record. Follow constructor
+    /// chaining, record members, and the view's actual virtual implementations.
+    /// Receiver aliases are deliberately over-approximated: a write on any value
+    /// of the view/base type suppresses the corresponding frame.
+    /// </summary>
+    public static HashSet<string> OwnerViewWrites(SyntaxNode body, SemanticModel model,
+        INamedTypeSymbol record, INamedTypeSymbol view, WellKnown known)
+    {
+        var written = new HashSet<string>();
+        var seen = new HashSet<SyntaxNode>();
+        var vb = ViewBase(view, known)!;
+        bool Same(ITypeSymbol? a, ITypeSymbol b) =>
+            SymbolEqualityComparer.Default.Equals(a?.OriginalDefinition, b.OriginalDefinition);
+        bool ViewType(ITypeSymbol? t) => Same(t, view) || Same(t, vb);
+        bool RetainsView(ITypeSymbol? t) => ViewType(t) || Same(t, record);
+        void Unknown()
+        {
+            foreach (var f in view.GetMembers().OfType<IFieldSymbol>().Concat(InheritedState(view, known)))
+                if (!f.IsReadOnly) written.Add(f.Name);
+            foreach (var p in InheritedGhostState(view, known)) written.Add(p.Name);
+        }
+        void Visit(SyntaxNode syntax, SemanticModel sm)
+        {
+            if (!seen.Add(syntax)) return;
+            void Into(IMethodSymbol? callee, bool viaBase = false)
+            {
+                if (callee is null) return;
+                if (!RetainsView(callee.ContainingType))
+                {
+                    // An opaque helper may receive the owner (or its retaining
+                    // record); do not manufacture a preservation guarantee.
+                    if (callee.Parameters.Any(p => RetainsView(p.Type))) Unknown();
+                    return;
+                }
+                var target = ViewType(callee.ContainingType) && !viaBase
+                    ? Subclasses.OverrideOf(view, callee) ?? callee : callee;
+                var refs = target.DeclaringSyntaxReferences
+                    .Where(r => sm.Compilation.Owns(r.SyntaxTree)).ToArray();
+                if (refs.Length == 0) { Unknown(); return; }
+                foreach (var r in refs) Visit(r.GetSyntax(), sm.Compilation.Model(r.SyntaxTree));
+            }
+            foreach (var node in syntax.DescendantNodes())
+            {
+                var target = node switch
+                {
+                    AssignmentExpressionSyntax a => a.Left,
+                    PrefixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                    PostfixUnaryExpressionSyntax p when IsStep(p) => p.Operand,
+                    ArgumentSyntax { RefKindKeyword.RawKind: not 0 } a => a.Expression,
+                    _ => null,
+                };
+                if (target is not null && sm.GetSymbolInfo(target).Symbol is { } field &&
+                    (field is IFieldSymbol { IsStatic: false } || GhostStorage.Is(field, known)) &&
+                    ViewType(field.ContainingType))
+                    written.Add(field.Name);
+                if (node is InvocationExpressionSyntax or ObjectCreationExpressionSyntax or ConstructorInitializerSyntax)
+                    Into(sm.GetSymbolInfo(node).Symbol as IMethodSymbol,
+                        node is InvocationExpressionSyntax { Expression: MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax } });
+                else if (node is ExpressionSyntax &&
+                    node is IdentifierNameSyntax or MemberAccessExpressionSyntax &&
+                    !(node.Parent is MemberAccessExpressionSyntax parent && parent.Name == node) &&
+                    sm.GetSymbolInfo(node).Symbol is IPropertySymbol prop && !GhostStorage.Is(prop, known))
+                {
+                    Into(prop.GetMethod, node is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax });
+                    Into(prop.SetMethod, node is MemberAccessExpressionSyntax { Expression: BaseExpressionSyntax });
+                }
+            }
+        }
+        Visit(body, model);
+        return written;
+    }
+
     private static void ViewWrites(SyntaxNode body, SemanticModel model, INamedTypeSymbol view, WellKnown known,
         HashSet<string> written, HashSet<SyntaxNode> seen)
     {
@@ -319,6 +392,22 @@ public static class Borrowing
         }
         foreach (var node in body.DescendantNodes())
         {
+            // A view member may retain an iterator in a local, then invoke its
+            // constructor/members on the actual view. Follow that indirection
+            // for ghost frames just as for an iterator-returning factory.
+            // Runtime fields not covered by the retaining member's readonly
+            // frame must remain unconstrained, even if its implementation
+            // happens not to write them.
+            if (node is VariableDeclaratorSyntax variable &&
+                model.GetDeclaredSymbol(variable) is ILocalSymbol
+                    { Type: INamedTypeSymbol { TypeKind: TypeKind.Struct } record } &&
+                IsBorrowing(record, known) && OwnerField(record, known) is { } retained &&
+                SymbolEqualityComparer.Default.Equals(retained.Type.OriginalDefinition, vb.OriginalDefinition))
+            {
+                written.UnionWith(OwnerViewWrites(body, model, record, view, known));
+                foreach (var field in view.GetMembers().OfType<IFieldSymbol>().Concat(InheritedState(view, known)))
+                    if (!field.IsReadOnly) written.Add(field.Name);
+            }
             var target = node switch
             {
                 AssignmentExpressionSyntax a => a.Left,

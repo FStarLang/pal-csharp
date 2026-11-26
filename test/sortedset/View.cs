@@ -14,6 +14,14 @@ public struct PileModel<T>
 
 public class Pile<T>
 {
+    [Ensures("Result == 8")]
+    public static int LocalView()
+    {
+        var source = new Pile<int>(System.Collections.Generic.Comparer<int>.Default, 10);
+        var view = source.Above(2);
+        return view.Count;
+    }
+
     internal System.Collections.Generic.IComparer<T> comparer = default!;
     internal int count;
     internal int version;

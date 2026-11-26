@@ -94,6 +94,13 @@ public static class SpecBinder
     {
         if (sites.Count == 0) return ImmutableDictionary<string, BoundSpec>.Empty;
 
+        // Synthesized protocol clauses and authored clauses share this table.
+        // A user member named, for example, Dispose_protocol must not overwrite
+        // a generated law through its ordinary numeric clause suffix.
+        foreach (var duplicate in sites.GroupBy(s => s.Key).Where(g => g.Count() > 1))
+            diagnostics.Error("PALCS0501", Locations.From(duplicate.First().Location),
+                $"Duplicate specification key `{duplicate.Key}`. Rename the colliding member.");
+
         var options = (CSharpParseOptions)compilation.SyntaxTrees[0].Options;
         var result = ImmutableDictionary.CreateBuilder<string, BoundSpec>();
 

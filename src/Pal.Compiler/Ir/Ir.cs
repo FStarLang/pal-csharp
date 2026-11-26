@@ -111,7 +111,20 @@ public sealed record IrSpanType(IrType Element) : IrType
 /// </summary>
 public sealed record IrEnumerableType(IrType Element, bool Collection) : IrType
 {
+    public IrEnumerationSchema? Capability { get; init; }
+    /// <summary>A target-relative, source-owning loan for one nominal model class.</summary>
+    public IrClassType? CastTarget { get; init; }
+    /// <summary>Declared pure [Spec] enumeration projection; null is the identity
+    /// projection when the complete model itself is a sequence.</summary>
+    public string? CastProjection { get; init; }
     protected override string Describe() => Collection ? $"ICollection<{Element}>" : $"IEnumerable<{Element}>";
+}
+
+/// <summary>A linear, source-retaining nominal iterator, never a concrete struct alias.</summary>
+public sealed record IrNominalIteratorType(IrType Element, string Source,
+    IrIterationSchema Protocol) : IrType
+{
+    protected override string Describe() => $"nominal iterator of {Source}";
 }
 
 /// <summary>The spec-only ghost box <c>Ghost&lt;T&gt;</c>.</summary>
@@ -310,6 +323,13 @@ public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr>
     /// `I32.t` <c>i</c>, not about <c>I32.v i</c>.
     /// </summary>
     public bool MachineArgs { get; init; }
+
+    /// <summary>
+    /// Arguments declared as a type parameter and instantiated at a machine
+    /// integer. Substitution preserves the element type: T=int is I32.t, not
+    /// the mathematical int used by explicitly numeric specification parameters.
+    /// </summary>
+    public ImmutableArray<int> GenericValueArgs { get; init; } = [];
 
     /// <summary>
     /// R11.3. When this is a <c>[SpecCtor]</c>, the F* name of its type's <em>empty</em>
@@ -837,9 +857,51 @@ public sealed record IrArrayBinarySearch(IrLoc Loc, IrExpr Array, IrExpr Start, 
 /// statement's call (an <see cref="IrEnumerableType"/> of the node's type), and taken back after it.</item>
 /// </list>
 /// </summary>
-public enum EnumOpKind { Count, Start, MoveNext, Current, Lend }
+public sealed record IrEnumerationSchema(string LengthGetter, string Items, string ScalarGetter,
+    string Scalar, IrType ScalarType)
+{
+    public IrIterationSchema? Iteration { get; init; }
+}
 
-public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc);
+public sealed record IrIterationSchema(string Factory, string Ready, string Pending,
+    string CurrentItems, string Valid)
+{
+    public string? Evidence { get; init; }
+}
+
+/// <summary>Checked installer inputs. Projections are spec IR, not user-provided Pulse.</summary>
+public sealed record IrEnumerationInstallation(string Module, ImmutableArray<string> TypeParameters,
+    IrEnumerableType Enumerable, IrClassType Owner, IrNamedType? View, string? OwnerField,
+    IrExpr Items, IrExpr Scalar, string LengthMethod, string ScalarMethod,
+    ImmutableArray<IrType> LengthTypeArguments, ImmutableArray<IrType> ScalarTypeArguments)
+{
+    // False only with exact-source nominal disjointness evidence. Missing
+    // observations or enumeration evidence never authorize an absent API.
+    public bool Matches { get; init; } = true;
+    public IrEnumerationCursor? Cursor { get; init; }
+    public ImmutableArray<string> DefaultedTypes { get; init; } = [];
+}
+
+public sealed record IrEnumerationCursor(IrNamedType Type, string OwnerField,
+    IrExpr Ready, IrExpr Pending, IrExpr Current, IrExpr Valid,
+    IrCall Factory, IrCall Next, IrCall Value, IrCall Dispose,
+    ImmutableArray<(string Field, string Local, IrClassType Type)> Owned)
+{
+    public ImmutableDictionary<string, IrType> SpecTypes { get; init; } = ImmutableDictionary<string, IrType>.Empty;
+}
+
+public enum EnumOpKind { Count, Start, MoveNext, Current, Lend, Matches, OpenMatch, CloseMatch, Forward, Observation,
+    IteratorStart, IteratorNext, IteratorValue, IteratorDispose }
+
+public sealed record IrEnumOp(IrLoc Loc, EnumOpKind Op, IrExpr Source, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
+{
+    /// <summary>Nominal CLR classification established at a sealed source call site,
+    /// never inferred by the emitter from representation or generated names.</summary>
+    public bool? CastMatch { get; init; }
+    public string? SourceProjection { get; init; }
+    public IrEnumerationInstallation? Installation { get; init; }
+    public bool ScalarObservation { get; init; }
+}
 
 public sealed record IrBreak(IrLoc Loc) : IrStmt(Loc)
 {

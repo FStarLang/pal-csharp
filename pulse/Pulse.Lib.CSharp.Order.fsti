@@ -35,3 +35,11 @@ val compare_trans (#t: Type) (c: comparer t) (x y z: t)
   : Lemma (requires compare c x y <= 0 /\ compare c y z <= 0)
           (ensures compare c x z <= 0 /\
                    ((compare c x y < 0 \/ compare c y z < 0) ==> compare c x z < 0))
+
+/// MODELING AXIOM (R22.30): the default Int32 comparer delegates to Int32.CompareTo,
+/// whose sign is numeric order, including at the integer bounds. This does not
+/// constrain custom comparers or the default comparer of any other type.
+val default_int32_order (x y: FStar.Int32.t)
+  : Lemma ((compare (default_comparer FStar.Int32.t) x y < 0 <==> FStar.Int32.v x < FStar.Int32.v y) /\
+           (compare (default_comparer FStar.Int32.t) x y == 0 <==> FStar.Int32.v x == FStar.Int32.v y))
+          [SMTPat (compare (default_comparer FStar.Int32.t) x y)]

@@ -461,6 +461,11 @@ public static class Types
         // whole array.
         IrSpanType s => $"Span.span {Atom(s.Element)}",
         // R34.1. An enumerable argument is the abstract `enumerable`, lent read-only.
+        IrNominalIteratorType => "FStar.Dyn.dyn",
+        IrEnumerableType { Capability: not null } e =>
+            $"{EnumerableAdapter.Capability}.enumerable {Atom(e.Element)}",
+        IrEnumerableType { CastTarget: { } c } e =>
+            $"{EnumerableAdapter.Module}.enumerable {Atom(c)} ({EnumerableAdapter.ModelType(c)}) {Atom(e.Element)}",
         IrEnumerableType e => $"Pulse.Lib.CSharp.Enumerable.enumerable {Atom(e.Element)}",
         IrSeqType s => $"Seq.seq {Atom(s.Element)}",
         IrGhostType g => Render(g.Inner),

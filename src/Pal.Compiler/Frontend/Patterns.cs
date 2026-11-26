@@ -199,6 +199,8 @@ public sealed partial class ExprLowerer
         if (mapped is IrClassType { Nullable: true } nullableClass)
         {
             var exactSubject = PatternSubject(node.Left, prelude);
+            if (RefuseEnumerableClassTest(node, target, exactSubject.Value!))
+                return WithPrelude(loc, prelude, new IrNull(loc) { Type = nullableClass });
             if (ExactClassType(exactSubject.Type) is null) return Unsupported(node, loc);
             var test = TypeTest(node, target, exactSubject, out var same);
             return WithPrelude(loc, prelude, IsFalse(test)
@@ -417,9 +419,25 @@ public sealed partial class ExprLowerer
         // `is_collection`, which the fast path's `Count` and `CopyTo` require.
         if (value is IrVar { Type: IrEnumerableType } && WellKnown.IsCollectionInterface(target))
         {
+            if (value.Type is IrEnumerableType { CastTarget: not null })
+                diagnostics.Error("PALCS0866", loc,
+                    "Combining a source-owning class cast with an ICollection capability cast is not yet supported.");
             narrowed = value;
-            return new IrSpecOp(loc, "Pulse.Lib.CSharp.Enumerable.is_collection", [value]) { Type = Bool };
+            return new IrSpecOp(loc, value.Type is IrEnumerableType { CastTarget: not null }
+                ? "Pulse.Lib.CSharp.Enumerable.Source.is_collection"
+                : "Pulse.Lib.CSharp.Enumerable.is_collection", [value]) { Type = Bool };
         }
+
+        if (SpecPosition && value is IrVar { Type: IrEnumerableType { CastTarget: { } castTarget } } ev &&
+            known.MapType(target) is IrClassType tc && tc.Name == castTarget.Name &&
+            tc.TypeArguments.SequenceEqual(castTarget.TypeArguments))
+            return value.Type is IrEnumerableType { Capability: not null }
+                ? new IrSpecOp(loc, "Pulse.Lib.CSharp.Capability.supports",
+                    [new IrVar(loc, "$descriptor:" + ev.Name)]) { Type = Bool }
+                : new IrSpecOp(loc, "Pulse.Lib.CSharp.Enumerable.Cast.matches",
+                [new IrRefOf(loc, ev.Name) { Type = value.Type }]) { Type = Bool };
+
+        if (RefuseEnumerableClassTest(at, target, value)) return cond;
 
         if (known.CaseConstructor(target) is { } ctor)
             return Conj(loc, cond, new IrSpecOp(loc, ctor + "?", [narrowed]) { Type = Bool });

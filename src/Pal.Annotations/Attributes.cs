@@ -274,6 +274,54 @@ public sealed class RefineAlwaysAttribute(string predicate) : Attribute
 public sealed class ModelAttribute : Attribute;
 
 /// <summary>
+/// Marks a pure [Spec] property as the enumeration projection of a class model.
+/// Adapters must prove that Count, CopyTo and the actual iterator agree with it.
+/// This attribute asserts no correspondence and does not make runtime methods pure.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class EnumerationModelAttribute : Attribute;
+
+/// <summary>
+/// Requests a checked observation slot for an enumerable capability. The named
+/// property must be a pure [Spec] observation. The getter must return that
+/// observation (or its sequence length), and preserve it on its original domain.
+/// This is a proof obligation, not a dispatch or purity assumption. It does not
+/// by itself authorize installing a descriptor for an unknown runtime subclass.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property)]
+public sealed class EnumerationObservationAttribute(string property) : Attribute
+{
+    public string Property { get; } = property;
+    public bool Length { get; init; }
+}
+
+/// <summary>
+/// Marks a checked, complete traversal used to establish an ordinary enumerator's
+/// correspondence to the enumeration model. Its body must create the nominal
+/// interface factory's borrowing struct, loop on its MoveNext, yield its Current,
+/// and finally call Dispose. Loop invariants and a decreases clause are proofs,
+/// not trusted protocol declarations.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class EnumerationProtocolAttribute : Attribute;
+
+/// <summary>
+/// Declares the logical state of a borrowing IEnumerator&lt;T&gt;. The named [Spec]
+/// properties are a validity invariant, remaining sequence, current value, and
+/// current-position validity. The compiler CHECKS universal transition laws on
+/// the nominal MoveNext/Current/Dispose implementations. In particular Dispose
+/// must preserve this state at every valid position, not just at the end.
+/// </summary>
+[AttributeUsage(AttributeTargets.Struct)]
+public sealed class EnumerationStateAttribute(string ready, string remaining, string value, string valid) : Attribute
+{
+    public string Ready { get; } = ready;
+    public string Remaining { get; } = remaining;
+    public string Value { get; } = value;
+    public string Valid { get; } = valid;
+}
+
+/// <summary>
 /// A predicate relating an object's fields, which every method may assume on entry and
 /// must re-establish on exit (translation.md R3.10).
 /// </summary>

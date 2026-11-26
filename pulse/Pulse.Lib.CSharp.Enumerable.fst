@@ -118,16 +118,17 @@ fn move_next (#t: Type0) (e: enumerable t) (r: R.ref I32.t)
   preserves pts_to e #p s
   requires R.pts_to r k
   returns b: bool
-  ensures R.pts_to r (advance s k) ** pure (b == (I32.v k < Seq.length s) /\ Seq.length s < pow2 31)
+  ensures R.pts_to r (advance s k) ** pure (b == (0 <= I32.v k /\ I32.v k < Seq.length s) /\ Seq.length s < pow2 31)
 {
   unfold (pts_to e #p s);
   let n = CA.length_i32 e.items;
   fold (pts_to e #p s);
   let vk = !r;
-  if (I32.lt vk n) {
+  if (I32.gte vk 0l && I32.lt vk n) {
     r := I32.add vk 1l;
     true
   } else {
+    r := -1l;
     false
   }
 }

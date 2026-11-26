@@ -18,7 +18,7 @@ public static class Declarations
     public static ImmutableArray<IrType?> ParamTypes(
         IMethodSymbol method, WellKnown known, bool receiver)
     {
-        var declared = method.Parameters.Select(p => known.MapType(p.Type));
+        var declared = method.Parameters.Select(p => EnumerableCasts.ParameterType(p, known) ?? known.MapType(p.Type));
         return receiver ? [null, .. declared] : [.. declared];
     }
 
@@ -314,10 +314,33 @@ public static class Declarations
                     (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
                      Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
                     continue;
+                var bulkCopy = model.GetSymbolInfo(call).Symbol is IMethodSymbol {
+                    IsStatic: true, Name: "Copy",
+                    ContainingType.SpecialType: SpecialType.System_Array
+                } copy && copy.Parameters.Length is 3 or 5 &&
+                    copy.Parameters.Where(p => p.Ordinal != 0 &&
+                        p.Ordinal != (copy.Parameters.Length == 3 ? 1 : 2))
+                        .All(p => p.Type.SpecialType == SpecialType.System_Int32)
+                    ? copy : null;
                 foreach (var argument in call.ArgumentList.Arguments)
                 {
+                    // The checked Array.Copy primitive preserves its source.
+                    // Keep checking the destination, including aliases through
+                    // locals; a copy within an owned array is still a write.
+                    var ordinal = argument.NameColon is { } name
+                        ? bulkCopy?.Parameters.FirstOrDefault(p =>
+                            p.Name == name.Name.Identifier.ValueText)?.Ordinal
+                        : call.ArgumentList.Arguments.IndexOf(argument);
+                    if (bulkCopy is not null && ordinal == 0)
+                        continue;
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
                             is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
+                        return true;
+                    if (bulkCopy is not null &&
+                        ordinal == (bulkCopy.Parameters.Length == 3 ? 1 : 2) &&
+                        model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
+                            is ILocalSymbol { Type: IArrayTypeSymbol } copyDestination &&
+                        !AlwaysFresh(copyDestination, syntax, model))
                         return true;
                     // R33.24. A `ref` argument the callee may write through: a `ref` local
                     // (R33.16's `ref entry` into a field's array) or a field itself.

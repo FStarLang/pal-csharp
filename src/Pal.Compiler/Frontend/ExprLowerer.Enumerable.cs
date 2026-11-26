@@ -12,6 +12,32 @@ namespace Pal.Compiler.Frontend;
 /// </summary>
 public sealed partial class ExprLowerer
 {
+    public System.Collections.Immutable.ImmutableDictionary<string, IrEnumerableType> CastParameters { get; init; } =
+        System.Collections.Immutable.ImmutableDictionary<string, IrEnumerableType>.Empty;
+
+    /// <summary>
+    /// The snapshot representation cannot answer a CLR class test: it has neither
+    /// the source descriptor nor the resource needed to use a successful cast.
+    /// In particular assignability to a base class is not an exact-type test.
+    /// The scoped sealed-class adapter handles its supported form before this
+    /// fallback; all other casts retain an explicit diagnostic.
+    /// </summary>
+    private bool RefuseEnumerableClassTest(SyntaxNode at, ITypeSymbol target, IrExpr subject)
+    {
+        if (subject.Type is not IrEnumerableType ||
+            target is not { TypeKind: TypeKind.Class, SpecialType: not SpecialType.System_Object })
+            return false;
+        diagnostics.Error("PALCS0865", Locations.From(at),
+            $"A runtime class test or cast from an enumerable to `{target}` needs the source " +
+            "object's runtime descriptor and ownership. The enumerable snapshot retains only " +
+            "its items and collection flag; it cannot establish either a failed cast or the " +
+            "resource and dispatch of a successful one. A borrowing subclass must retain its " +
+            "own view resource, not the base class's invariant (doc/translation.md R34.26). " +
+            "The supported sealed adapter needs a sequence model or a pure [EnumerationModel] [Spec] property, " +
+            "and a scoped declaration pattern or as/null-check.");
+        return true;
+    }
+
     // R34.6. The enumerator locals in scope, by name, with the enumerable each enumerates.
     private readonly Dictionary<string, IrExpr> _cursors = [];
 
@@ -49,6 +75,10 @@ public sealed partial class ExprLowerer
     /// <summary>R34.20. <paramref name="local"/> is <paramref name="source"/> as an <c>ICollection&lt;T&gt;</c>, or null.</summary>
     public void CollectionAlias(ILocalSymbol local, IrExpr source)
     {
+        if (source.Type is IrEnumerableType { CastTarget: not null })
+            diagnostics.Error("PALCS0866", source.Loc,
+                "An ICollection alias of a source-owning enumerable needs a collection-capability adapter; " +
+                "the initial sealed-class adapter supports enumeration and its scoped class pattern only.");
         _collectionAliases[local] = source;
         Alias(local, source);
     }
@@ -115,6 +145,8 @@ public sealed partial class ExprLowerer
         if (method is { Name: "GetEnumerator", IsStatic: false, Parameters.IsEmpty: true } &&
             IsEnumerableArgument(access.Expression))
         {
+            if (Lower(access.Expression).Type is IrEnumerableType { Capability: not null })
+                diagnostics.Error("PALCS0866", loc, "Iterator slots on nominal observation capabilities are not installed in this milestone.");
             diagnostics.Error("PALCS0860", loc,
                 $"`{node}` outside a `using` declaration. An enumerator of an enumerable argument is " +
                 "translated when a `using` declares it, as `using (IEnumerator<T> en = e.GetEnumerator())` " +
