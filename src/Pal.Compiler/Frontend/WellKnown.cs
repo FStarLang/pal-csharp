@@ -615,7 +615,6 @@ public sealed class WellKnown
         if (all.IsEmpty) return ImmutableArray<IrType>.Empty;
         var classArgs = method.ContainingType is { } c && !IsPlainLike(c)
             ? OuterAndOwnTypeArguments(c).Count() : 0;
-        var mapped = ImmutableArray.CreateBuilder<IrType>();
         return MapTypeArguments(all, classArgs);
     }
 
@@ -627,6 +626,7 @@ public sealed class WellKnown
 
     private ImmutableArray<IrType> MapTypeArguments(IEnumerable<ITypeSymbol> all, int classArgs)
     {
+        var mapped = ImmutableArray.CreateBuilder<IrType>();
         foreach (var a in all)
         {
             if (MapType(a) is not { } t) return ImmutableArray<IrType>.Empty;
@@ -915,8 +915,8 @@ public sealed class WellKnown
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {
                     Plain = IsPlainLike(named.OriginalDefinition),
-                    TypeArguments = classArgs.ToImmutable(),
                     EqualityStorage = NeedsEqualityStorage(named),
+                    TypeArguments = classArgs.ToImmutable(),
                 };
             }
         }

@@ -5829,6 +5829,7 @@ public sealed class CodeEmitter(
     {
         // R14.5 / R30.31: type arguments precede values; no explicit arguments means ().
         var args = call.TypeArguments.Select(Types.Atom)
+            .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
             .Concat(call.Args.Select((a, i) => SpecArgument(a, SpecEmitter.ParamType(call, i), scope)))
             .ToList();
         if (args.Count == 0) args.Add("()");
@@ -5894,7 +5895,6 @@ public sealed class CodeEmitter(
                  $"{Expr(fresh.Length)} {Default(fresh.Element)};");
             return target;
         }
-            .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
         var source = Expr(create.Source);
         if (create.Origin is SpanOrigin.Array)
         {
@@ -6162,6 +6162,7 @@ public sealed class CodeEmitter(
             case IrSpecOp so:
             {
                 var operands = so.TypeArgs.Select(Types.Atom)
+                    .Concat(Enumerable.Repeat("#_", so.ImplicitArguments))
                     .Concat(so.Args.Select(a => Atom(Expr(a)))).ToList();
                 return operands.Count == 0
                     ? so.Function
@@ -6241,7 +6242,6 @@ public sealed class CodeEmitter(
                 }
                 if (eo.Op == EnumOpKind.Matches)
                     return $"{EnumerableAdapter.Module}.matches {source}";
-                    .Concat(Enumerable.Repeat("#_", so.ImplicitArguments))
                 if (eo.Op == EnumOpKind.CloseMatch &&
                     eo.Source is IrVar ev && eo.Source.Type is IrEnumerableType { CastTarget: { } ct } et &&
                     eo.Args is [IrVar captured])

@@ -608,10 +608,10 @@ internal readonly record struct TypeBinders(ImmutableArray<string> Parameters, b
 
     /// <summary>The parameters as arguments, with a leading space: <c> ty_T</c>.</summary>
     public string Arguments => Render(p => p);
+    public string ImplicitArguments => Render(p => "#" + p);
 
     /// <summary>
     /// A head applied to the parameters, parenthesised. The parentheses matter: the
-    public string ImplicitArguments => Render(p => "#" + p);
     /// result appears in argument position (<c>B.box (class_C__raw ty_T)</c>).
     /// </summary>
     public string App(string head) => IsEmpty ? head :

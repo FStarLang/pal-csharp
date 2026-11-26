@@ -2202,9 +2202,9 @@ public static partial class FrontendPass
             {
                 IsPlain = true,
                 IsRegion = c.IsRegion,
+                IsCyclic = c.IsCyclic,
                 HasReferenceDefaultEquality = DefaultEquality.IsReferenceIdentity(c.Symbol, known),
                 EqualityStorage = known.NeedsEqualityStorage(c.Symbol),
-                IsCyclic = c.IsCyclic,
                 TypeParameters = [.. WellKnown.OuterAndOwnTypeParameters(c.Symbol).Select(t => t.Name)],
             };
 

@@ -184,13 +184,13 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 // F*'s dependency scan read the module as depending on itself.
                 var qualifier = scope.DefiningClass == ob.Class
                     ? "" : Names.ClassModule(ob.Class) + ".";
+                var typeArguments = receiver.Type is IrClassType observed && observed.Name == ob.Class
+                    ? string.Concat(observed.TypeArguments.Select(t => $" #{Types.Atom(t)}"))
+                    : "";
                 return new Term(
                     $"({qualifier}{Names.Observation(ob.Class, ob.Member)}{typeArguments} {Forget(ob, receiver, scope)})",
                     MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
             }
-                var typeArguments = receiver.Type is IrClassType observed && observed.Name == ob.Class
-                    ? string.Concat(observed.TypeArguments.Select(t => $" #{Types.Atom(t)}"))
-                    : "";
 
             case IrOld o when scope.Pre is { } pre:
                 return Emit(o.Operand, pre);
@@ -359,11 +359,11 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 return new Term(
                     $"({Names.SpecFunction(call.Callee)} " +
                     string.Join(" ", call.TypeArguments.Select(scope.Instantiate).Select(Types.Atom)
+                        .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
                         .Concat(call.Args.Select((a, i) => Argument(a, ParamType(call, i), scope)))) + ")",
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
 
-                        .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
             case IrConvert cv:
                 // R13.2. A conversion is the identity on mathematical values exactly when
                 // every value of the source type is a value of the target — which is a
@@ -821,6 +821,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
     private Term SpecOp(IrSpecOp op, SpecScope scope)
     {
         var operands = op.TypeArgs.Select(scope.Instantiate).Select(Types.Atom)
+            .Concat(Enumerable.Repeat("#_", op.ImplicitArguments))
             .Concat(op.Args.Select((a, i) =>
                 // R31.5. A method body's `this` is its model (R4.2); a region operation over
                 // heaps asks about the reference, which is the receiver itself -- the owner a
@@ -840,7 +841,6 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                             ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)
                             : DecidedEquality(a, scope) ?? Emit(a, scope).Text
                         : AsMath(Emit(a, scope)))).ToList();
-            .Concat(Enumerable.Repeat("#_", op.ImplicitArguments))
         var text = operands.Count == 0
             ? op.Function
             : $"({op.Function} {string.Join(" ", operands)})";
