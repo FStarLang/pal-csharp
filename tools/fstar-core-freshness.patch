@@ -1,0 +1,187 @@
+--- a/src/typechecker/FStarC.TypeChecker.Core.fst
++++ b/src/typechecker/FStarC.TypeChecker.Core.fst
+@@ -139,7 +139,12 @@
+ 
+ let fresh_binder (g:env) (old:binder)
+   : ML (env & binder)
+-  = let ctr = g.max_binder_index + 1 in
++  = // Core environments also reach helpers which freshen through GenSym
++    // (e.g. TcTerm.universe_of). Reserve our IDs in that same namespace.
++    // The environment may contain IDs beyond the current global cursor.
++    if FStarC.GenSym.get_gensym_state () <= g.max_binder_index
++    then FStarC.GenSym.set_gensym_state (g.max_binder_index + 1);
++    let ctr = FStarC.GenSym.next_id () in
+     let bv = { old.binder_bv with index = ctr } in
+     let b = S.mk_binder_with_attrs bv old.binder_qual old.binder_positivity old.binder_attrs in
+     push_binder g b, b
+--- /dev/null
++++ b/pulse/test/CoreFreshness.Support.fsti
+@@ -0,0 +1,46 @@
++module CoreFreshness.Support
++#lang-pulse
++open Pulse
++module Seq = FStar.Seq
++module I32 = FStar.Int32
++
++// A dependent implementation dictionary, with no external runtime assumptions.
++noeq type descriptor (m:Type0)
++  (api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0) = {
++  impl:Type0;
++  owns:impl -> perm -> m -> slprop;
++  value:impl;
++  base:option (api impl owns);
++}
++let supports (#m:Type0) (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (w:descriptor m api) = Some? w.base
++let reader (m r:Type0)
++  (api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (post:m -> r -> prop) =
++  i:Type0 -> owns:(i -> perm -> m -> slprop) -> api i owns ->
++    x:i -> #p:perm -> #model:erased m ->
++      stt r (owns x p model)
++        (fun result -> owns x p model ** pure (post model result))
++
++noeq type model (t r:Type0) = { items:Seq.seq t; scalar:r }
++val slots (t r i:Type0) (owns:i -> perm -> model t r -> slprop) : Type0
++let contents (#t #r:Type0) (m:model t r) = m.items
++let scalar (#t #r:Type0) (m:model t r) = m.scalar
++val select_length (#t #r:Type0) :
++  reader (model t r) I32.t (slots t r)
++    (fun m n -> I32.v n == Seq.length (contents m))
++val select_scalar (#t #r:Type0) :
++  reader (model t r) r (slots t r) (fun m n -> n == scalar m)
++
++val pts_to (#t #m:Type0)
++  (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (contents:m -> Seq.seq t) (flag:bool)
++  (w:erased (descriptor m api)) (p:perm) (state:erased m) : slprop
++
++fn matches (#t #m:Type0)
++  (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (contents:m -> Seq.seq t) (flag:bool)
++  (#w:erased (descriptor m api)) (#p:perm) (#state:erased m)
++  preserves pts_to contents flag w p state
++  returns result:bool
++  ensures pure (result == supports w)
+--- /dev/null
++++ b/pulse/test/CoreFreshness.Support.fst
+@@ -0,0 +1,40 @@
++module CoreFreshness.Support
++#lang-pulse
++open Pulse
++module Seq = FStar.Seq
++module I32 = FStar.Int32
++
++#set-options "--z3rlimit 10"
++
++noeq type slots (t r i:Type0) (owns:i -> perm -> model t r -> slprop) = {
++  length:x:i -> #p:perm -> #m:erased (model t r) ->
++    stt I32.t (owns x p m)
++      (fun result -> owns x p m **
++        pure (I32.v result == Seq.length (reveal m).items));
++  observation:x:i -> #p:perm -> #m:erased (model t r) ->
++    stt r (owns x p m)
++      (fun result -> owns x p m ** pure (result == (reveal m).scalar));
++}
++let select_length (#t #r:Type0) (i:Type0)
++  (owns:i -> perm -> model t r -> slprop) (s:slots t r i owns) = s.length
++let select_scalar (#t #r:Type0) (i:Type0)
++  (owns:i -> perm -> model t r -> slprop) (s:slots t r i owns) = s.observation
++
++let pts_to (#t #m:Type0)
++  (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (contents:m -> Seq.seq t) (flag:bool)
++  (w:erased (descriptor m api)) (p:perm) (state:erased m) : slprop =
++  (reveal w).owns (reveal w).value p state ** pure (flag == supports w)
++
++fn matches (#t #m:Type0)
++  (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (contents:m -> Seq.seq t) (flag:bool)
++  (#w:erased (descriptor m api)) (#p:perm) (#state:erased m)
++  preserves pts_to contents flag w p state
++  returns result:bool
++  ensures pure (result == supports w)
++{
++  unfold (pts_to contents flag w p state);
++  fold (pts_to contents flag w p state);
++  flag
++}
+--- /dev/null
++++ b/pulse/test/CoreFreshness.fst
+@@ -0,0 +1,76 @@
++module CoreFreshness
++#lang-pulse
++open Pulse
++module R = Pulse.Lib.Reference
++module C = CoreFreshness.Support
++module I32 = FStar.Int32
++module Seq = FStar.Seq
++
++#set-options "--z3rlimit 10"
++
++// Core-local binder IDs must not collide with GenSym IDs allocated when
++// universe inference opens the dependent `owns` type in the API below.
++noeq type view (t r:Type0) = {
++  source:R.ref t;
++  selected:r;
++  cache:I32.t;
++  item:t;
++  order:r;
++}
++
++fn consumer (t r:Type0) (owner:R.ref t) (v:R.ref (view t r))
++  (#m:Type0) (#api:(i:Type0) -> (i -> perm -> m -> slprop) -> Type0)
++  (contents:m -> Seq.seq t) (scalar:m -> r)
++  (lr:C.reader m I32.t api (fun m n -> I32.v n == Seq.length (contents m)))
++  (sr:C.reader m r api (fun m n -> n == scalar m))
++  (flag:bool)
++  (#owner_state:erased t) (#owner_perm:perm) (#before:erased (view t r))
++  (#state:erased m) (#p:perm) (#w:erased (C.descriptor m api))
++  requires R.pts_to owner #owner_perm owner_state **
++    R.pts_to v before ** C.pts_to contents flag w p state **
++    pure ((reveal before).source == owner)
++  returns result:bool
++  ensures exists* after.
++    R.pts_to owner #owner_perm owner_state ** R.pts_to v after **
++    C.pts_to contents flag w p state **
++    pure (after.source == owner /\ after == before /\
++      after.selected == (reveal before).selected /\
++      I32.v after.cache == I32.v (reveal before).cache /\
++      after.item == (reveal before).item /\ after.order == (reveal before).order /\
++      ((reveal before).source == owner ==> result == C.supports w))
++{
++  C.matches contents flag
++}
++
++fn parameterized (t r:Type0) (owner:R.ref t) (v:R.ref (view t r))
++  (flag:bool)
++  (#owner_state:erased t) (#before:erased (view t r))
++  (#state:erased (C.model t r)) (#p:perm)
++  (#w:erased (C.descriptor (C.model t r) (C.slots t r)))
++  preserves R.pts_to owner owner_state ** R.pts_to v before **
++    C.pts_to C.contents flag w p state
++  requires pure ((reveal before).source == owner)
++  returns result:bool
++  ensures pure (result == C.supports w)
++{
++  consumer t r owner v #(C.model t r) #(C.slots t r)
++    (C.contents #t #r) (C.scalar #t #r)
++    (C.select_length #t #r) (C.select_scalar #t #r) flag
++    #owner_state #1.0R #before #state #p #w
++}
++
++fn allocated (t r:Type0) (owner:R.ref t) (initial:view t r)
++  (flag:bool)
++  (#owner_state:erased t) (#state:erased (C.model t r)) (#p:perm)
++  (#w:erased (C.descriptor (C.model t r) (C.slots t r)))
++  preserves R.pts_to owner owner_state ** C.pts_to C.contents flag w p state
++  requires pure (initial.source == owner)
++  returns result:bool
++  ensures pure (result == C.supports w)
++{
++  let mut v = initial;
++  consumer t r owner v #(C.model t r) #(C.slots t r)
++    (C.contents #t #r) (C.scalar #t #r)
++    (C.select_length #t #r) (C.select_scalar #t #r) flag
++    #owner_state #1.0R #(hide initial) #state #p #w
++}

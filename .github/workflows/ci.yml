@@ -153,12 +153,19 @@ jobs:
       # The pin is the reason this repository can reproduce a proof at all, so CI asserts
       # it instead of assuming it. This also catches a cache entry that was restored under
       # the right key but holds the wrong build. A source pin (tools/fstar-source.txt)
-      # names the merged commit install-fstar.sh recorded in tools/fstar/version.txt; otherwise the nightly's version string is
+      # names the merged commit and optional patch digest recorded in tools/fstar/version.txt; otherwise the nightly's version string is
       # compared with tools/fstar-version.txt.
       - name: Check the toolchain matches the pin
         run: |
           if [ -f tools/fstar-source.txt ]; then
             pinned="$(sed -n 's/^result=//p' tools/fstar-source.txt | tr -d '[:space:]')"
+            patch="$(sed -n 's/^patch=//p' tools/fstar-source.txt | tr -d '[:space:]')"
+            patch_sha="$(sed -n 's/^patch_sha256=//p' tools/fstar-source.txt | tr -d '[:space:]')"
+            if [ -n "$patch" ] || [ -n "$patch_sha" ]; then
+              test -n "$patch" && test -n "$patch_sha"
+              printf '%s  tools/%s\n' "$patch_sha" "$patch" | sha256sum --check -
+              pinned="$pinned-patch-$patch_sha"
+            fi
             actual="$(tr -d '[:space:]' < tools/fstar/version.txt)"
           else
             pinned="nightly-$(tr -d '[:space:]' < tools/fstar-version.txt)"

@@ -4,7 +4,8 @@
 # There are two kinds of pin, so that the local toolchain and CI cannot drift:
 #
 #  * tools/fstar-source.txt, if it exists: F* built from source at a fixed commit,
-#    optionally with a second fixed commit merged in. This is how the repository
+#    optionally with a second fixed commit merged in and a digest-pinned local patch.
+#    This is how the repository
 #    tracks an F* pull request that has no nightly yet.
 #  * otherwise tools/fstar-version.txt: a nightly binary release.
 #
@@ -37,12 +38,25 @@ fi
 pin() { sed -n "s/^$1=//p" "$SOURCE_PIN" | tr -d '[:space:]'; }
 REPO="$(pin repo)"; PR="$(pin pr)"; COMMIT="$(pin commit)"
 MERGE="$(pin merge)"; Z3="$(pin z3)"
+RESULT="$(pin result)"
+PATCH="$(pin patch)"; PATCH_SHA="$(pin patch_sha256)"
+if [[ -n "$PATCH" || -n "$PATCH_SHA" ]]; then
+  if [[ -z "$PATCH" || -z "$PATCH_SHA" ]]; then
+    echo "error: a source patch requires both patch and patch_sha256 in $SOURCE_PIN" >&2
+    exit 1
+  fi
+  if ! printf '%s  %s\n' "$PATCH_SHA" "$TOOLS_DIR/$PATCH" | sha256sum --check --status; then
+    echo "error: source patch does not match patch_sha256 in $SOURCE_PIN" >&2
+    exit 1
+  fi
+fi
+TOOLCHAIN_VERSION="${RESULT}${PATCH_SHA:+-patch-$PATCH_SHA}"
 SRC="${FSTAR_SRC:-$TOOLS_DIR/fstar-src}"
 
 # Already installed at the pinned tree: nothing to do. `make` decides by timestamps, and
 # a checkout or merge that rewrites the pin file must not cost a full F* rebuild.
-if [[ -n "$(pin result)" && -x "$TOOLS_DIR/fstar/bin/fstar.exe" &&
-      "$(cat "$TOOLS_DIR/fstar/version.txt" 2>/dev/null)" == "$(pin result)" ]]; then
+if [[ -n "$RESULT" && -x "$TOOLS_DIR/fstar/bin/fstar.exe" &&
+      "$(cat "$TOOLS_DIR/fstar/version.txt" 2>/dev/null)" == "$TOOLCHAIN_VERSION" ]]; then
   touch "$TOOLS_DIR/fstar/bin/fstar.exe"
   exit 0
 fi
@@ -66,10 +80,13 @@ if [[ -n "$MERGE" ]]; then
     git -c user.name=pal-csharp -c user.email=pal-csharp@invalid \
       merge --quiet --no-edit --no-ff "$MERGE"
 fi
-RESULT="$(pin result)"
 if [[ -n "$RESULT" && "$(git rev-parse HEAD)" != "$RESULT" ]]; then
   echo "error: built tree is $(git rev-parse HEAD), but $SOURCE_PIN pins result=$RESULT" >&2
   exit 1
+fi
+if [[ -n "$PATCH" ]]; then
+  git apply --check "$TOOLS_DIR/$PATCH"
+  git apply "$TOOLS_DIR/$PATCH"
 fi
 git submodule update --init --quiet karamel
 if [[ "${FSTAR_OPAM_DEPS:-0}" == 1 ]]; then
@@ -98,4 +115,4 @@ fi
 # Only the pinned solver is kept: F* chooses its solver by version, and a stray one
 # would be a second, unpinned way for a proof to pass.
 find "$TOOLS_DIR/fstar/lib/fstar" -maxdepth 1 -name 'z3-*' ! -name "z3-$Z3" -exec rm -rf {} +
-git rev-parse HEAD > "$TOOLS_DIR/fstar/version.txt"
+printf '%s%s\n' "$(git rev-parse HEAD)" "${PATCH_SHA:+-patch-$PATCH_SHA}" > "$TOOLS_DIR/fstar/version.txt"
