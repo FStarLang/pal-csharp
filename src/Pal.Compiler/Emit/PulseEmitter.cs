@@ -98,8 +98,8 @@ public sealed record Slot(string Name, IrType Type, SlotKind Kind, string Binder
     public string? ViewBase { get; init; }
 
     /// <summary>
-    /// R4.9c. True when the caller gave this object away: the method's postcondition owns
-    /// nothing of it, and R10.7's null case must therefore consume rather than preserve.
+    /// R4.9c. True when the caller gave this object or array away: the method's postcondition
+    /// owns nothing of it, and R10.7's null case must therefore consume rather than preserve.
     /// </summary>
     public bool Consumed { get; init; }
 

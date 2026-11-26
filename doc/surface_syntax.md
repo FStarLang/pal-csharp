@@ -320,6 +320,11 @@ The residue is attributes:
 | `[Plain]` | suppress the resource the type would otherwise imply |
 | `[NonNull]` | the reference is known non-null |
 
+`[Consumes]` also applies to array parameters. A constructor declared as
+`Buffer([Consumes] int[] data)` can store the array directly in an owned field without
+copying. The caller gives up array ownership and cannot use that array variable after
+the call. Without `[Consumes]`, an array parameter's ownership must be returned.
+
 `[Frac]` is the one with real consequences. Because the permission is exactly the right to
 read, the contents cannot change: the same binder stands for the argument's contents before
 and after, so postconditions about it need no existential, and — the point — the **same

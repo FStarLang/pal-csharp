@@ -1442,12 +1442,25 @@ own the same object twice. R27.45 narrows this to a body that may *store* the re
 one that uses it other than as the receiver of a field read or a method call, or in a null
 test. A copy constructor that only reads from the object it is given hands it back.
 
+**Explicit array consumption.** `[Consumes] T[] a` likewise requires the array's
+`A.pts_to` on entry but does not return it. A constructor can therefore store `a` in an
+array field and fold the new object's invariant without also owing the same array back
+to its caller. Array consumption is explicit, not inferred from a field store; unannotated
+array parameters and `[Frac]` observations retain their existing return obligations.
+As with consumed object parameters, the consumed parameter denotes its entry contents in
+the postcondition; use `Old(Contents(a))` when specifying the transferred initial state.
+The body materialises `A.pts_to_len a` before transfer so that folding the array into the
+object retains the CLR length bound required by R3.10a.
+
 **R4.9c/R4.12b on the calling side.** The two ends have to agree, or the resource is owned
 twice or not at all, so consumption is one predicate over `(method, parameter)` consulted by
 both. At a call site, an argument at a consumed position stops being owned: it is not folded
 back by R4.14, and it may not be handed to anything else. C# would leave the name usable —
 the reference is still there — so a later use is **PALCS0550**, reported against the second
 use rather than left to surface as an unprovable resource in generated Pulse.
+This applies equally to consumed arrays, whether supplied by a parameter or allocated
+locally: they leave the caller's owned-resource set, so ghost naming, loop framing and
+local cleanup do not ask for their transferred `A.pts_to` again.
 
 **R4.14 (the garbage collector).** An object whose reference does not leave the method is
 **dropped at every exit**:
