@@ -681,7 +681,9 @@ namespace System.Collections.Generic
 
             [Requires("@this.SpecCoherent")]
             [Ensures("(Result != null) == (SpecSearchTree.InRange(@this._underlying.SpecComparer, @this._min, @this._max, @this._lBoundActive, @this._uBoundActive, item) && Pal.KeyIndex(@this._underlying.SpecComparer, @this._underlying.SpecItems, item) >= 0)")]
+            [Ensures("Result == null || SortedSetOwnership.Member(@this._underlying.SpecLabels, Result) && Pal.Compare(@this._underlying.SpecComparer, SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this._underlying.SpecLabels, Result), item), item) == 0")]
             [Ensures("@this.SpecCoherent")]
+            [Ensures("Pal.Implies(Pal.Old(@this.SpecCountOk), @this.SpecCountOk)")]
             [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))")]
             internal override SortedSet<T>.Node? FindNode(T item)
             {

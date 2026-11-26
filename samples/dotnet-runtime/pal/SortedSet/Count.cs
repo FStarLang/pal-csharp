@@ -3,6 +3,7 @@ using PalLang;
 // Lemmas for SortedSet<T>.CheckUniqueAndUnfoundElements as dotnet/runtime#133116 rewrites it
 // (doc/translation.md §37).
 [assembly: IncludePulseFile("SortedSetCount.fst")]
+[assembly: IncludePulseFile("SortedSetInductive.Fallback.fst")]
 
 // R37.3. Called only in the growth branch, which the proof shows dead.
 [assembly: SpecBinding("M:System.Numerics.BitOperations.RoundUpToPowerOf2(System.UInt32)", "SortedSetCount.round_up_pow2")]
@@ -13,6 +14,10 @@ namespace System.Collections.Generic
     {
         private static Exception Ghost() => new InvalidOperationException(
             "SortedSetCount is a specification-only construct and has no runtime meaning.");
+
+        [System.Diagnostics.Conditional("PAL")]
+        [SpecOp("SortedSetInductive.Fallback.find_equivalent")]
+        internal static void FindEquivalent<T, TTag>(IComparer<T> comparer, Ghost<SpecTree<(T, TTag)>> tree, T item) { }
 
         // What the method is to count: the distinct keys of `ks` that `s` holds, and the items
         // of `s` that are not keys. A set admits every key; a view, the keys within its range.

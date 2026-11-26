@@ -1697,11 +1697,13 @@ namespace System.Collections.Generic
 
         [Ensures("(Result != null) == (Pal.KeyIndex(@this.SpecComparer, @this.SpecItems, item) >= 0)")]
         [Ensures("Result == null || SortedSetOwnership.Member(@this.SpecLabels, Result) && Pal.Same(SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this.SpecLabels, Result), item), SpecSearchTree.Find(@this.SpecComparer, @this.SpecNodes, item, item))")]
+        [Ensures("Result == null || Pal.Compare(@this.SpecComparer, SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this.SpecLabels, Result), item), item) == 0")]
         [Ensures("@this.SpecNodes == Pal.Old(@this.SpecNodes)")]
         [Ensures("@this.SpecComparer == Pal.Old(@this.SpecComparer)")]
         [Requires("@this.root == null || SortedSetOwnership.Member(@this._underlying.SpecLabels, @this.root)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("(Result != null) == SpecSearchTree.Contains(@this.comparer, SortedSetOwnership.Lookup(@this._underlying.SpecLabels, @this.root), item)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Result == null || SortedSetOwnership.Member(@this._underlying.SpecLabels, Result) && Pal.Same(SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this._underlying.SpecLabels, Result), item), SpecSearchTree.Find(@this.comparer, SortedSetOwnership.Lookup(@this._underlying.SpecLabels, @this.root), item, item))", At = typeof(SortedSet<>.TreeSubSet))]
+        [Ensures("Result == null || Pal.Compare(@this.comparer, SpecSearchTree.RootKey(SortedSetOwnership.Lookup(@this._underlying.SpecLabels, Result), item), item) == 0", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("@this.root == Pal.Old(@this.root) && @this.comparer == Pal.Old(@this.comparer)", At = typeof(SortedSet<>.TreeSubSet))]
         [Ensures("Pal.Same(@this._min, Pal.Old(@this._min)) && Pal.Same(@this._max, Pal.Old(@this._max))", At = typeof(SortedSet<>.TreeSubSet))]
         [Frac("p")]
@@ -1712,6 +1714,7 @@ namespace System.Collections.Generic
             SortedSetOwnershipProof.RootFacts(labels);
             Ghost<SpecTree<(T, bool)>> searched = default;
             Pal.Capture(ref searched, SortedSetOwnership.Lookup(labels.Value, root));
+            SortedSetCount.FindEquivalent<T, bool>(comparer, searched, item);
             if (this is TreeSubSet)
                 SortedSetOwnershipProof.ReadSet(labels, Pal.Permission());
             else
@@ -1721,6 +1724,7 @@ namespace System.Collections.Generic
             {
                 Pal.Decreases(SortedSetOwnership.Lookup(labels.Value, current).Size);
                 Pal.Invariant(SortedSetOwnership.Owns(labels.Value, Pal.Permission()));
+                Pal.Invariant(Pal.Compare(comparer, SpecSearchTree.Find(comparer, searched.Value, item, item), item) == 0);
                 Pal.Invariant(Pal.Implies(!Pal.Returned(),
                               SpecSearchTree.Contains(comparer, SortedSetOwnership.Lookup(labels.Value, current), item!) ==
                               SpecSearchTree.Contains(comparer, searched.Value, item!) &&
