@@ -51,6 +51,7 @@ public sealed partial class RbTree<T>
         [Ensures("Pal.Tree<(T, bool)>(Result) == SpecSearchTree.RotateRightLeft(Pal.Old(Pal.Tree<(T, bool)>(@this)))")]
         [Ensures("SpecTopDown.Rotated<RbTree<T>.Node, T>(Pal.Old(Pal.Heap<RbTree<T>.Node>()), Pal.Heap<RbTree<T>.Node>(), @this, Result, false, true)")]
         [Rlimit(10)]
+        [Fuel(0, 0)]
         public Node RotateRightLeft()
         {
             Node child = Right!;

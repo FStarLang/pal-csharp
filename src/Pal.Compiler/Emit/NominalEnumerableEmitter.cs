@@ -16,7 +16,7 @@ internal static class NominalEnumerableEmitter
         var e = d.Enumerable;
         var sb = new StringBuilder();
         void L(string s = "") => sb.AppendLine(s);
-        var binders = string.Join(" ", d.TypeParameters.Select(t => $"(#{Names.TypeParam(t)}:Type0)"));
+        var binders = new TypeBinders(d.TypeParameters, true).Implicit;
         var typeArgs = string.Join(" ", d.TypeParameters.Select(t => "#" + Names.TypeParam(t)));
         var logical = EnumerableAdapter.Logical(e);
         var savedType = EnumerableAdapter.ModelType(d.Owner);

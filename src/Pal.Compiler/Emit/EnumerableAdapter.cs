@@ -25,7 +25,7 @@ internal static class EnumerableAdapter
         $"(fun m -> {Fact(e, $"(enum_contents_{name} m)", $"(enum_scalar_{name} m)")})";
     public static string Misses(string name) => "misses_" + name;
     public static string ModelType(IrClassType c) =>
-        Types.Applied($"{Names.ClassModule(c.Name)}.{Names.ClassModel(c.Name)}", c.TypeArguments);
+        Types.Applied($"{Names.ClassModule(c.Name)}.{Names.ClassModel(c.Name)}", c.TypeArguments, !c.Plain);
     public static string RevealModel(IrClassType c, string name) =>
         $"(FStar.Ghost.reveal #({ModelType(c)}) {name})";
     public static string Owns(IrClassType c) =>

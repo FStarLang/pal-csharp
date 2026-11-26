@@ -14,7 +14,7 @@ internal static class NominalIteratorEmitter
         var e = d.Enumerable;
         var text = new StringBuilder();
         void L(string line = "") => text.AppendLine(line);
-        var types = string.Join(" ", d.TypeParameters.Select(t => $"(#{Names.TypeParam(t)}:Type0)"));
+        var types = new TypeBinders(d.TypeParameters, true).Implicit;
         var args = string.Join(" ", d.TypeParameters.Select(t => "#" + Names.TypeParam(t)));
         var defaults = string.Join(" ", d.DefaultedTypes.Select(t =>
             $"{{| _:Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(t)} |}}"));
@@ -98,7 +98,7 @@ internal static class NominalIteratorEmitter
                 pre.Bind(vp.Name, new Term("v", TermKind.Other, vp.Type));
                 pre.Bind(SpecEmitter.ReferenceKey(vp.Name), new Term("cell", TermKind.Other, vp.Type));
             }
-            var ts = string.Join(" ", method.TypeParameters.Select(t => $"({Names.TypeParam(t)}:Type0)"));
+            var ts = new TypeBinders(method.TypeParameters, true).Explicit;
             var ds = string.Join(" ", method.DefaultedTypeParameters.Select(t =>
                 $"{{| _:Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(t)} |}}"));
             L($"let needs_{obligation.Name} {ts} {ds} (x:{Types.Render(owner)}) (p:perm)");

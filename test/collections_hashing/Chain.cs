@@ -14,6 +14,7 @@ using PalLang;
 [assembly: SpecBinding("M:System.Collections.Generic.IEqualityComparer`1.GetHashCode(`0)", "Pulse.Lib.CSharp.Equality.get_hash_code")]
 [assembly: SpecBinding("T:System.Collections.Generic.EqualityComparer`1", "Pulse.Lib.CSharp.Equality.comparer")]
 [assembly: SpecBinding("P:System.Collections.Generic.EqualityComparer`1.Default", "Pulse.Lib.CSharp.Equality.default_comparer")]
+[assembly: SpecBinding("implicit:P:System.Collections.Generic.EqualityComparer`1.Default", "1")]
 [assembly: SpecBinding("M:System.Collections.Generic.EqualityComparer`1.Equals(`0,`0)", "Pulse.Lib.CSharp.Equality.equals")]
 
 [Spec]

@@ -140,6 +140,7 @@ public sealed record IrGhostType(IrType Inner) : IrType
 /// </summary>
 public sealed record IrClassType(string Name, bool Nullable = false) : IrType
 {
+    public bool EqualityStorage { get; init; }
     protected override string Describe()
     {
         var head = TypeArguments.IsEmpty
@@ -185,12 +186,15 @@ public sealed record IrSpecListType(IrType Element) : IrType
 /// </summary>
 public sealed record IrUserSpecType(string Name, string FStar, ImmutableArray<IrType> Args) : IrType
 {
+    public string? BoxFunction { get; init; }
+    public string? OptionalBoxFunction { get; init; }
     protected override string Describe() =>
         Args.IsEmpty ? Name : $"{Name}<{string.Join(", ", Args)}>";
 }
 
 public sealed record IrNamedType(string Name) : IrType
 {
+    public bool EqualityStorage { get; init; }
     protected override string Describe() =>
         TypeArguments.IsEmpty ? Name : $"{Name}<{string.Join(", ", TypeArguments)}>";
 
@@ -296,6 +300,10 @@ public sealed record IrListOp(IrLoc Loc, ListOpKind Op, ImmutableArray<IrExpr> A
 /// </summary>
 public sealed record IrSpecOp(IrLoc Loc, string Function, ImmutableArray<IrExpr> Args) : IrExpr(Loc)
 {
+    /// <summary>Bound implicit operands after explicit type arguments, before values.</summary>
+    public int ImplicitArguments { get; init; }
+    /// <summary>A model-specific conversion to object, including a custom boxing binding.</summary>
+    public bool IsObjectBox { get; init; }
     /// <summary>
     /// The declared type of each argument's parameter, positionally, or empty when the
     /// operation is not a method (a property has no parameters to declare). R10.2b/R10.2c
@@ -1237,6 +1245,8 @@ public sealed record IrClass(
     ImmutableArray<IrExpr> Invariants,
     ImmutableArray<IrObservation> Observations) : IrDecl(Loc, Name)
 {
+    /// <summary>Plain storage can itself contain an evidence-indexed owner.</summary>
+    public bool EqualityStorage { get; init; }
     /// <summary>R15.1. The class's own type parameters, in declaration order.</summary>
     public ImmutableArray<string> TypeParameters { get; init; } = [];
 
@@ -1247,6 +1257,13 @@ public sealed record IrClass(
     /// said by the user, in a predicate the user also wrote.
     /// </summary>
     public bool IsPlain { get; init; }
+
+    /// <summary>
+    /// The source type is a sealed plain reference class directly inheriting object,
+    /// without an Equals override or IEquatable implementation. This is nominal
+    /// evidence, never inferred from the class's Box storage representation.
+    /// </summary>
+    public bool HasReferenceDefaultEquality { get; init; }
 
     /// <summary>
     /// R27.3. <c>[Region]</c>: a plain class whose objects an owner holds as one region.

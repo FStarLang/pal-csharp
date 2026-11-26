@@ -152,6 +152,8 @@ public sealed class MethodPlan
         // so no F* inference is relied on.
         foreach (var tp in method.TypeParameters)
             binders.Add($"({Names.TypeParam(tp)}: Type0)");
+        foreach (var tp in method.TypeParameters)
+            binders.Add($"{{| equality_{Names.TypeParam(tp)}: Pulse.Lib.CSharp.EqualityModel.has_equality {Names.TypeParam(tp)} |}}");
         // R14.2a. A type parameter the body takes `default` at needs its default supplied.
         foreach (var tp in method.DefaultedTypeParameters)
             binders.Add($"{{| _: Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(tp)} |}}");
@@ -407,7 +409,7 @@ public sealed class MethodPlan
                         // (R4.2), holding the *nullable* pointer as R27.23's `ref` does: C# lets
                         // the body store `null` through a `!`, and the runtime does.
                         var source = Names.Argument(p.Name);
-                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments)})";
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments, !klass.Plain)})";
                         binders.Add($"({source}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
                         prologue.Add(($"{name} : {(klass.Plain ? Types.Render(klass with { Nullable = true }) : rawType)}", source));
                         slots[p.Name] = new Slot(p.Name, p.Type, SlotKind.Cell, name) { RawReference = true };
@@ -417,7 +419,7 @@ public sealed class MethodPlan
                     }
                     if (p.Plain)
                     {
-                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments)})";
+                        var rawType = $"B.box ({Types.Applied($"{Names.ClassModule(klass.Name)}.{Names.ClassRaw(klass.Name)}", klass.TypeArguments, !klass.Plain)})";
                         binders.Add($"({name}: {(klass.Nullable && !klass.Plain ? rawType : Types.Render(p.Type))})");
                         // An ordinary immutable binder: the reference is a value like any
                         // other. What is *owned* through it is not the slot's business,
@@ -795,10 +797,10 @@ public sealed class MethodPlan
             ResultOwned = owned.ToImmutable();
         }
 
-        // F12: a Pulse `fn` must have at least one binder, so a parameterless C# method
-        // takes the unit argument its Pulse counterpart is called with.
-        Binders = binders.Count == 0 && ghostBinders.Count == 0
-            ? ["()"]
+        // A value argument also forces elaboration of trailing implicit evidence:
+        // applying only the explicit type arguments otherwise leaves a function.
+        Binders = method.Parameters.IsEmpty
+            ? [.. binders, "()", .. ghostBinders]
             : [.. binders, .. ghostBinders];
         Prologue = prologue.ToImmutable();
         if (slots.TryGetValue(Names.This, out var owner))

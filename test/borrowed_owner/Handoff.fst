@@ -10,15 +10,15 @@ module M = Struct_OwnerModel
 
 let identity (b: bool) = b
 
-unfold let inv (#a: Type0) (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm) =
+unfold let inv (#a: Type0) {| Pulse.Lib.CSharp.Equality.has_equality a |} (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm) =
   C.class_Owner__inv source #p m
 
-unfold let window (#a: Type0) (source alias: C.class_Owner a) (m: C.class_Owner__model a) (p: perm) =
+unfold let window (#a: Type0) {| Pulse.Lib.CSharp.Equality.has_equality a |} (source alias: C.class_Owner a) (m: C.class_Owner__model a) (p: perm) =
   exists* (r: C.class_Owner__raw a).
     B.pts_to alias #p r ** (B.pts_to alias #p r @==> inv source m p) **
     pure (m == { M.fld_Value = FStar.Int32.v r.C.fld_value; M.fld_Comparer = r.C.fld_comparer })
 
-ghost fn open_window (#a: Type0) (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
+ghost fn open_window (#a: Type0) {| Pulse.Lib.CSharp.Equality.has_equality a |} (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
   requires inv source m p
   ensures window source source m p
 {
@@ -31,7 +31,7 @@ ghost fn open_window (#a: Type0) (source: C.class_Owner a) (m: C.class_Owner__mo
   };
 }
 
-ghost fn open_alias (#a: Type0) (source alias: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
+ghost fn open_alias (#a: Type0) {| Pulse.Lib.CSharp.Equality.has_equality a |} (source alias: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
   requires inv source m p ** pure (source == alias)
   ensures window source alias m p
 {
@@ -47,7 +47,7 @@ ghost fn open_alias (#a: Type0) (source alias: C.class_Owner a) (m: C.class_Owne
 }
 
 [@@pulse_intro]
-ghost fn close_window (#a: Type0) (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
+ghost fn close_window (#a: Type0) (#d: Pulse.Lib.CSharp.Equality.has_equality a) (source: C.class_Owner a) (m: C.class_Owner__model a) (p: perm)
   requires exists* (alias: C.class_Owner a) (r: C.class_Owner__raw a).
     B.pts_to alias #p r ** (B.pts_to alias #p r @==> inv source m p)
   ensures C.class_Owner__inv source #p m

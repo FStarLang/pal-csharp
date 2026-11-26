@@ -185,9 +185,12 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                 var qualifier = scope.DefiningClass == ob.Class
                     ? "" : Names.ClassModule(ob.Class) + ".";
                 return new Term(
-                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)} {Forget(ob, receiver, scope)})",
+                    $"({qualifier}{Names.Observation(ob.Class, ob.Member)}{typeArguments} {Forget(ob, receiver, scope)})",
                     MethodPlan.KindOf(ob.Type ?? IrPrim.Bool), ob.Type);
             }
+                var typeArguments = receiver.Type is IrClassType observed && observed.Name == ob.Class
+                    ? string.Concat(observed.TypeArguments.Select(t => $" #{Types.Atom(t)}"))
+                    : "";
 
             case IrOld o when scope.Pre is { } pre:
                 return Emit(o.Operand, pre);
@@ -360,6 +363,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                     call.ResultType is IrPrim { IsMachineInt: true } ? TermKind.Math : TermKind.Prop,
                     call.ResultType);
 
+                        .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
             case IrConvert cv:
                 // R13.2. A conversion is the identity on mathematical values exactly when
                 // every value of the source type is a value of the target — which is a
@@ -836,6 +840,7 @@ public sealed class SpecEmitter(DiagnosticBag diagnostics)
                             ? l.Value is bool lb ? (lb ? "true" : "false") : Types.Literal(l.Value, l.Type)
                             : DecidedEquality(a, scope) ?? Emit(a, scope).Text
                         : AsMath(Emit(a, scope)))).ToList();
+            .Concat(Enumerable.Repeat("#_", op.ImplicitArguments))
         var text = operands.Count == 0
             ? op.Function
             : $"({op.Function} {string.Join(" ", operands)})";

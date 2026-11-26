@@ -316,11 +316,21 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
 
     /// <summary>R29.4. What C# converted to <c>object</c>, when the conversion is not translated.</summary>
     public static IrExpr Unboxed(IrExpr e) =>
-        e is IrSpecOp { Function: WellKnown.BoxFunction, Args: [var inner] } ? inner : e;
+        e is IrSpecOp { Args: [var inner] } op &&
+        (op.IsObjectBox || op.Function == WellKnown.BoxFunction) ? inner : e;
 
     /// <summary>R29.4. <c>Obj.box v</c>, at <c>v</c>'s machine type.</summary>
-    private static IrExpr Box(IrLoc loc, IrExpr value) =>
-        new IrSpecOp(loc, WellKnown.BoxFunction, [value]) { Type = WellKnown.Obj, MachineArgs = true };
+    private static IrExpr Box(IrLoc loc, IrExpr value)
+    {
+        var function = value.Type switch
+        {
+            IrUserSpecType s => s.BoxFunction,
+            IrOptionType { Inner: IrUserSpecType s } => s.OptionalBoxFunction,
+            _ => null,
+        };
+        return new IrSpecOp(loc, function ?? WellKnown.BoxFunction, [value])
+        { Type = WellKnown.Obj, MachineArgs = true, IsObjectBox = true };
+    }
 
     /// <summary>
     /// R29.4. An <c>object</c> is held, returned and passed on. Comparing one, testing it
@@ -509,7 +519,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             TypeOfExpressionSyntax typeOf when known.MapType(model.GetTypeInfo(typeOf.Type).Type) is { } denoted &&
                                           known.MapType(info.Type) is { } typeHandle
                 => new IrSpecOp(loc, "Pulse.Lib.CSharp.Equality.type_of", [])
-                    { TypeArgs = [denoted], Type = typeHandle is IrOptionType { Inner: var h } ? h : typeHandle, MachineArgs = true },
+                    { TypeArgs = [denoted], ImplicitArguments = 1, Type = typeHandle is IrOptionType { Inner: var h } ? h : typeHandle, MachineArgs = true },
             // R10.5. `e!` is C#'s null-forgiving operator: it changes what the *C#*
             // compiler's flow analysis believes and nothing else. It is how a model
             // expression says that reading through a nullable reference is deliberate —
@@ -1406,6 +1416,7 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         if (known.SpecOpName(symbol) is { } op)
             return new IrSpecOp(loc, op, args)
             {
+                ImplicitArguments = known.BindingImplicitArguments(symbol),
                 ParamTypes = SpecParamTypes(symbol, args),
                 GenericValueArgs = SpecValueArgs(symbol, args),
                 MachineValue = symbol is IMethodSymbol { OriginalDefinition.ReturnType: ITypeParameterSymbol } m &&
@@ -1840,9 +1851,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
         // R25.1. `Comparer<T>.Default` is the default comparer at `T`.
         if (symbol is IPropertySymbol { IsStatic: true, Name: "Default" } dp &&
             Sorted.IsComparerSymbol(dp.ContainingType) &&
-            known.MapType(dp.ContainingType.TypeArguments[0]) is { } dt)
+            known.TypeArguments(dp.ContainingType) is { Length: 1 } comparerArgs)
             return new IrSpecOp(loc, Sorted.Order + ".default_comparer", [])
-                { TypeArgs = [dt], Type = known.MapType(dp.Type) };
+                { TypeArgs = comparerArgs, Type = known.MapType(dp.Type) };
         // R26.8. A component of a pair, by name or as `Item1`/`Item2`, is a projection.
         if (symbol is IFieldSymbol { ContainingType.IsTupleType: true } component &&
             (component.CorrespondingTupleField ?? component).Name is "Item1" or "Item2" &&
@@ -1865,10 +1876,9 @@ public sealed partial class ExprLowerer(SemanticModel model, WellKnown known, Di
             // depends on the type's arguments, which are the term's leading arguments.
             return new IrSpecOp(loc, staticOp, [])
             {
-                TypeArgs = symbol.ContainingType is { IsGenericType: true } boundOwner &&
-                           WellKnown.AllTypeArguments(boundOwner).Select(known.MapType).ToImmutableArray() is var targs &&
-                           targs.All(t => t is not null)
-                    ? [.. targs.Select(t => t!)] : [],
+                ImplicitArguments = known.BindingImplicitArguments(symbol),
+                TypeArgs = symbol.ContainingType is { IsGenericType: true } boundOwner
+                    ? known.TypeArguments(boundOwner) : [],
                 // R33.4. A bound member of a machine-integer type (`IntPtr.Size`) is a
                 // machine integer, which a specification reads through `.v`.
                 Type = known.MapType(symbol is IPropertySymbol bp ? bp.Type : ((IFieldSymbol)symbol).Type) is IrPrim { IsMachineInt: true } bt

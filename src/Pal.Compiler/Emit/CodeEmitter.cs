@@ -809,7 +809,7 @@ public sealed class CodeEmitter(
                        + " = " + value);
         }
 
-        Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
+        Line($"let {Names.Result} = B.alloc #{PulseEmitter.RegionRaw(alloc)} ({{ {string.Join("; ", fields)} }});");
         // R10.6b. `new` never returns null in C#, and under R10.2 that is a *typing*
         // obligation rather than a fact about the encoding: the constructor returns
         // `class_C`, the non-null refinement, while `B.alloc` returns `class_C__opt`.
@@ -1136,7 +1136,7 @@ public sealed class CodeEmitter(
             fields.Add((i == 0 ? Names.ClassProjection(decl.Name, field.Name) : Names.Field(field.Name))
                        + " = " + value);
         }
-        Line($"let {Names.Result} = B.alloc ({{ {string.Join("; ", fields)} }});");
+        Line($"let {Names.Result} = B.alloc #{PulseEmitter.RegionRaw(alloc)} ({{ {string.Join("; ", fields)} }});");
         Line($"B.pts_to_not_null {Names.Result};");
         foreach (var k in RegionsOf(decl))
             Line($"{Frontend.Region.Module}.empty #{PulseEmitter.RegionRaw(k)} ();");
@@ -1823,7 +1823,7 @@ public sealed class CodeEmitter(
             {
                 var index = existentials.IndexOf(record);
                 if (index >= 0)
-                    existentials[index] = $"({record}: {Types.Applied($"{prefix}{Names.ClassRaw(klass.Name)}", klass.TypeArguments)}" +
+                    existentials[index] = $"({record}: {Types.Applied($"{prefix}{Names.ClassRaw(klass.Name)}", klass.TypeArguments, !klass.Plain)}" +
                         $"{{{prefix}{Names.ClassAbsRep(klass.Name)}_current_model {self}{record}}})";
                 else
                 {
@@ -3008,7 +3008,7 @@ public sealed class CodeEmitter(
         if (view is not null)
         {
             x = Fresh();
-            Line($"let {x} : {d.Module}.handle {string.Join(" ", d.TypeParameters.Select(Names.TypeParam))} = {{ {d.Module}.owner = {owner}; {d.Module}.state = {cell} }};");
+            Line($"let {x} : {new TypeBinders(d.TypeParameters, true).App(d.Module + ".handle")} = {{ {d.Module}.owner = {owner}; {d.Module}.state = {cell} }};");
         }
         Line($"let {m}: erased ({EnumerableAdapter.Logical(d.Enumerable)}) = hide ({Fn("project")} {saved}{(view is null ? "" : " " + state)});");
         var items = $"(reveal {m}).{EnumerableAdapter.Observation}.items";
@@ -5894,6 +5894,7 @@ public sealed class CodeEmitter(
                  $"{Expr(fresh.Length)} {Default(fresh.Element)};");
             return target;
         }
+            .Concat(Enumerable.Repeat("#_", call.TypeArguments.Length))
         var source = Expr(create.Source);
         if (create.Origin is SpanOrigin.Array)
         {
@@ -6240,6 +6241,7 @@ public sealed class CodeEmitter(
                 }
                 if (eo.Op == EnumOpKind.Matches)
                     return $"{EnumerableAdapter.Module}.matches {source}";
+                    .Concat(Enumerable.Repeat("#_", so.ImplicitArguments))
                 if (eo.Op == EnumOpKind.CloseMatch &&
                     eo.Source is IrVar ev && eo.Source.Type is IrEnumerableType { CastTarget: { } ct } et &&
                     eo.Args is [IrVar captured])
@@ -6574,7 +6576,10 @@ public sealed class CodeEmitter(
             case IrLambdaRef lr:
             {
                 var caps = lr.Captures.Select(Expr).ToList();
-                var applied = string.Join(" ", lr.TypeArguments.Select(Types.Atom).Concat(caps));
+                var defaults = (Methods ?? methods)?.TryGetValue(lr.Method, out var lifted) == true
+                    ? lifted.DefaultedTypeParameters.Length : 0;
+                var applied = string.Join(" ", lr.TypeArguments.Select(Types.Atom)
+                    .Concat(Enumerable.Repeat("#_", lr.TypeArguments.Length + defaults)).Concat(caps));
                 var protocol = $"({Names.LambdaProtocol(lr.Method)} {applied})".Replace(" )", ")");
                 var e = Types.Atom(new IrUserSpecType("ValueTuple", Frontend.WellKnown.TupleType,
                     [lr.Callback.View, lr.Callback.Result]));
@@ -6729,13 +6734,19 @@ public sealed class CodeEmitter(
         // not a proof step but the rendering of "this reference is being used as a B".
         var view = Bracket(owner is null ? call : null, raw);
 
-        // R14.5. Type arguments apply first, positionally, in declaration order. A generic
-        // method with no value parameters still applies them, so the `()` below is reached
-        // only by a call that is nullary in both senses.
+        // R14.5. A nullary generic method still takes unit after its type arguments,
+        // forcing the trailing implicit evidence to elaborate before invocation.
         var tyArgs = call.TypeArguments.Select(Types.Atom).ToImmutableArray();
-        var applied = args.Length == 0 && tyArgs.Length == 0
-            ? "()"
-            : string.Join(" ", tyArgs.Concat(args));
+        if (args.Length > 0 && args[0].StartsWith("#", StringComparison.Ordinal))
+        {
+            // Capability arguments can explicitly instantiate their ghost model
+            // types. First consume the evidence binders, or those model types
+            // would be supplied in the dictionaries' positions.
+            var defaults = (Methods ?? methods)?.TryGetValue(call.Callee, out var called) == true
+                ? called.DefaultedTypeParameters.Length : 0;
+            tyArgs = tyArgs.AddRange(Enumerable.Repeat("#_", call.TypeArguments.Length + defaults));
+        }
+        var applied = string.Join(" ", tyArgs.Concat(args.Length == 0 ? ["()"] : args));
 
         // R22.15. A call on the receiver from inside one of its own methods, with the
         // receiver open: the callee's contract asks for the invariant, so the bracket is

@@ -284,6 +284,11 @@ public sealed class WellKnown
         symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
         bindings.TryGetValue(id, out var term) ? term : null;
 
+    public int BindingImplicitArguments(ISymbol? symbol) =>
+        symbol?.OriginalDefinition.GetDocumentationCommentId() is { } id &&
+        bindings.TryGetValue("implicit:" + id, out var count) &&
+        int.TryParse(count, out var n) && n >= 0 ? n : 0;
+
     /// <summary>
     /// R30.6. The F* predicate a type test against a library class is bound to: the binding
     /// of <c>"is:"</c> followed by the class's documentation-comment ID.
@@ -582,16 +587,16 @@ public sealed class WellKnown
         !tp.HasUnmanagedTypeConstraint;
 
     /// <summary>
-    /// R27.35. A region class as the type argument of another class (<c>Stack&lt;Node&gt;</c>)
+    /// R27.35. A plain or region pointer as the type argument of another class
     /// is its nullable pointer: the elements are plain boxes, and <c>default</c> -- what
     /// <c>new T[n]</c> fills an array with -- is null.
     /// </summary>
-    private IrType RegionArgument(ITypeSymbol argument, IrType mapped) =>
-        mapped is IrClassType { Nullable: false } k && IsRegionClass(argument) ? k with { Nullable = true } : mapped;
+    private IrType ReferenceArgument(ITypeSymbol argument, IrType mapped) =>
+        mapped is IrClassType { Nullable: false } k && (k.Plain || IsRegionClass(argument)) ? k with { Nullable = true } : mapped;
 
     /// <summary>A pair's pointer component is nullable, including Plain pointers, so the pair has C#'s default.</summary>
     private IrType PairComponent(ITypeSymbol argument, IrType mapped) =>
-        mapped is IrClassType { Nullable: false } k && (k.Plain || IsRingOwner(argument)) ? k with { Nullable = true } : RegionArgument(argument, mapped);
+        mapped is IrClassType { Nullable: false } k && (k.Plain || IsRingOwner(argument)) ? k with { Nullable = true } : ReferenceArgument(argument, mapped);
 
     /// <summary>
     /// R14.5. A call's resolved type arguments, in declaration order. Roslyn has already
@@ -611,10 +616,21 @@ public sealed class WellKnown
         var classArgs = method.ContainingType is { } c && !IsPlainLike(c)
             ? OuterAndOwnTypeArguments(c).Count() : 0;
         var mapped = ImmutableArray.CreateBuilder<IrType>();
+        return MapTypeArguments(all, classArgs);
+    }
+
+    public ImmutableArray<IrType> TypeArguments(INamedTypeSymbol owner)
+    {
+        var all = OuterAndOwnTypeArguments(owner).ToImmutableArray();
+        return MapTypeArguments(all, IsPlainLike(owner) ? 0 : all.Length);
+    }
+
+    private ImmutableArray<IrType> MapTypeArguments(IEnumerable<ITypeSymbol> all, int classArgs)
+    {
         foreach (var a in all)
         {
             if (MapType(a) is not { } t) return ImmutableArray<IrType>.Empty;
-            mapped.Add(mapped.Count < classArgs ? RegionArgument(a, t) : t);
+            mapped.Add(mapped.Count < classArgs ? ReferenceArgument(a, t) : t);
         }
         return mapped.ToImmutable();
     }
@@ -821,7 +837,7 @@ public sealed class WellKnown
             // R27.35. A sequence of region pointers is a sequence of nullable boxes, as the
             // model of a `Stack<Node>` is.
             case INamedTypeSymbol named when IsSeq(named) && MapType(named.TypeArguments[0]) is { } se:
-                return new IrSeqType(RegionArgument(named.TypeArguments[0], se));
+                return new IrSeqType(ReferenceArgument(named.TypeArguments[0], se));
             case INamedTypeSymbol named when IsGhost(named) && MapType(named.TypeArguments[0]) is { } ge:
                 return new IrGhostType(ge);
             case INamedTypeSymbol named when IsSpecList(named) && MapType(named.TypeArguments[0]) is { } le:
@@ -841,15 +857,21 @@ public sealed class WellKnown
                 var args = ImmutableArray.CreateBuilder<IrType>();
                 // R27.58. A bound class nested in a generic class is applied to the type
                 // arguments of the classes it is nested in, then its own (R24.6).
-                var applied = Binding(named) is not null
+                var libraryBinding = Binding(named) is not null;
+                var applied = libraryBinding
                     ? AllTypeArguments(named)
                     : named.TypeArguments;
                 foreach (var a in applied)
                 {
                     if (MapType(a) is not { } mapped) return null;
-                    args.Add(mapped);
+                    args.Add(libraryBinding ? ReferenceArgument(a, mapped) : mapped);
                 }
-                var spec = new IrUserSpecType((CaseBase(named) ?? named).Name, fstar, args.ToImmutable());
+                var id = (CaseBase(named) ?? named).OriginalDefinition.GetDocumentationCommentId();
+                var spec = new IrUserSpecType((CaseBase(named) ?? named).Name, fstar, args.ToImmutable())
+                {
+                    BoxFunction = id is not null && bindings.TryGetValue("box:" + id, out var box) ? box : null,
+                    OptionalBoxFunction = id is not null && bindings.TryGetValue("box?:" + id, out var optionalBox) ? optionalBox : null,
+                };
                 // R20.11. A nullable specification type is an `option` of its F* type,
                 // except where `#nullable enable` says this occurrence is not null.
                 return IsNullableSpecType(named) &&
@@ -888,12 +910,13 @@ public sealed class WellKnown
                     // R27.35. A region class as the argument of another class (`Stack<Node>`)
                     // is its nullable pointer: the elements are plain boxes, and `default` --
                     // what `new T[n]` fills an array with -- is null.
-                    classArgs.Add(IsPlainLike(named.OriginalDefinition) ? mapped : RegionArgument(a, mapped));
+                    classArgs.Add(IsPlainLike(named.OriginalDefinition) ? mapped : ReferenceArgument(a, mapped));
                 }
                 return new IrClassType(named.Name, named.NullableAnnotation == NullableAnnotation.Annotated)
                 {
                     Plain = IsPlainLike(named.OriginalDefinition),
                     TypeArguments = classArgs.ToImmutable(),
+                    EqualityStorage = NeedsEqualityStorage(named),
                 };
             }
         }
@@ -944,7 +967,36 @@ public sealed class WellKnown
             if (MapType(a) is not { } mapped) return null;
             args.Add(mapped);
         }
-        return new IrNamedType(StructName(named)) { TypeArguments = args.ToImmutable() };
+        return new IrNamedType(StructName(named)) {
+            TypeArguments = args.ToImmutable(), EqualityStorage = NeedsEqualityStorage(named)
+        };
+    }
+
+    /// <summary>Evidence needed by storage, including plain nodes with owner back-pointers.</summary>
+    public bool NeedsEqualityStorage(ITypeSymbol type) =>
+        type is INamedTypeSymbol named &&
+        NeedsEqualityDeclaration(named.OriginalDefinition, new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default));
+
+    private bool NeedsEqualityStorage(ITypeSymbol type, HashSet<ITypeSymbol> seen)
+    {
+        if (type is IArrayTypeSymbol array) return NeedsEqualityStorage(array.ElementType, seen);
+        if (type is not INamedTypeSymbol named || named.SpecialType != SpecialType.None) return false;
+        if (SpecTypeName(named) is not null)
+            return named.TypeArguments.Any(t => NeedsEqualityStorage(t, seen));
+        return NeedsEqualityDeclaration(named.OriginalDefinition, seen) ||
+            AllTypeArguments(named).Any(t => NeedsEqualityStorage(t, seen));
+    }
+
+    private bool NeedsEqualityDeclaration(INamedTypeSymbol named, HashSet<ITypeSymbol> seen)
+    {
+        if (named.SpecialType != SpecialType.None || !seen.Add(named)) return false;
+        if (named.TypeKind == TypeKind.Class && HasModel(named) && !IsPlainLike(named.OriginalDefinition))
+            return true;
+        var fields = named.GetMembers().OfType<IFieldSymbol>().Where(f => !f.IsStatic).ToArray();
+        static bool Refined(ISymbol s) => s.GetAttributes().Any(a =>
+            a.AttributeClass?.Name is "RefineAttribute" or "RefineAlwaysAttribute");
+        return named.TypeKind == TypeKind.Struct && (Refined(named) || fields.Any(Refined)) ||
+            fields.Any(f => NeedsEqualityStorage(f.Type, seen));
     }
 
     /// <summary>

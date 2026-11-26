@@ -294,6 +294,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// <c>class_C__inv</c> (see <c>MethodPlan</c>), so a caller naming it directly — which
     /// is what a call at the leaf's own static type is — has to present the receiver the
     /// same way.
+    private Dictionary<string, IrStruct> _structs = [];
     /// </summary>
     private Dictionary<string, string> _overrides = [];
 
@@ -365,6 +366,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         _spec.Bases = bases;
         _hierarchy.Bases = bases;
         _virtuals = all.OfType<IrMethod>()
+        _structs = all.OfType<IrStruct>()
+            .GroupBy(s => s.Name).ToDictionary(g => g.Key, g => g.First());
             .Where(m => m is { IsAbstract: true, DeclaringClass: not null })
             .ToLookup(m => m.DeclaringClass!);
         _slots = [.. all.OfType<IrMethod>()
@@ -419,13 +422,13 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             m.Parameters.Select(p => p.Type).Concat(m.Body is null ? [] :
                 Passes.Check.DeepExpressions(m.Body).Select(e => e.Type).OfType<IrType>()))
             .OfType<IrEnumerableType>().Where(e => e.Capability?.Iteration is not null)
-            .DistinctBy(e => e.CastTarget!.Name);
+            .GroupBy(e => e.CastTarget!.Name).Select(g => g.First());
         foreach (var enumerable in nominalTypes)
             modules.Add(NominalFactsEmitter.Emit(enumerable, _classes[enumerable.CastTarget!.Name], nominalMethods, _spec));
         foreach (var installation in program.Declarations.OfType<IrMethod>()
             .Where(m => m.Body is not null).SelectMany(m => Passes.Check.DeepExpressions(m.Body!))
             .OfType<IrEnumOp>().Select(op => op.Installation).Where(d => d is not null)
-            .DistinctBy(d => d!.Module))
+            .GroupBy(d => d!.Module).Select(g => g.First()))
             modules.Add(NominalEnumerableEmitter.Emit(installation!, _spec,
                 nominalMethods, _classes));
 
@@ -710,6 +713,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     binders.Add($"({name}: Seq.seq {Types.Atom(a.Element)})");
                     scope.Bind(p.Name, new Term(name, TermKind.Seq, p.Type));
                     break;
+        foreach (var t in fn.TypeParameters)
+            binders.Add($"{{| equality_{Names.TypeParam(t)}: Pulse.Lib.CSharp.EqualityModel.has_equality {Names.TypeParam(t)} |}}");
                 // R17.6. A span parameter of a [Spec] method is its contents, exactly
                 // as an array parameter is: a pure function has no resources to hold.
                 case IrSpanType a:
@@ -730,7 +735,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         // R4.6: the [Requires] clauses refine the last binder, so that the body
         // type-checks under them.
-        if (fn.Requires.Length > 0 && binders.Count > fn.TypeParameters.Length)
+        if (fn.Requires.Length > 0 && binders.Count > 2 * fn.TypeParameters.Length)
         {
             var refinement = SpecEmitter.Conjunction(fn.Requires.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
             var last = binders[^1];
@@ -820,6 +825,8 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                 IrSpanType a => ($"Seq.seq {Types.Atom(a.Element)}", TermKind.Seq),
                 IrSeqType s => ($"Seq.seq {Types.Atom(s.Element)}", TermKind.Seq),
                 IrGhostType g => (Types.Render(g.Inner), MethodPlan.KindOf(g.Inner)),
+        foreach (var t in lemma.TypeParameters)
+            binders.Add($"{{| equality_{Names.TypeParam(t)}: Pulse.Lib.CSharp.EqualityModel.has_equality {Names.TypeParam(t)} |}}");
                 _ => (Types.Render(p.Type), MethodPlan.KindOf(p.Type)),
             };
             binders.Add($"({(p.InferredGhost ? "#" : "")}{name}: {rendered})");
@@ -1045,6 +1052,24 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             scope.Bind(f.Name, new Term(
                 $"this.{Names.Field(f.Name)}", MethodPlan.KindOf(f.Type), f.Type));
 
+    private bool NeedsEquality(IrStruct s, HashSet<string> seen) =>
+        seen.Add(s.Name) && (s.Refinements.Length != 0 ||
+            s.Fields.Any(f => NeedsEquality(f.Type, seen)));
+
+    private bool NeedsEquality(IrType t, HashSet<string> seen) => t switch
+    {
+        IrClassType c => !c.Plain || c.EqualityStorage || c.TypeArguments.Any(a => NeedsEquality(a, seen)),
+        IrNamedType n when _structs.TryGetValue(n.Name, out var s) =>
+            NeedsEquality(s, seen) || n.TypeArguments.Any(a => NeedsEquality(a, seen)),
+        IrUserSpecType u => u.Args.Any(a => NeedsEquality(a, seen)),
+        IrArrayType a => NeedsEquality(a.Element, seen),
+        IrSeqType s => NeedsEquality(s.Element, seen),
+        IrOptionType o => NeedsEquality(o.Inner, seen),
+        IrGhostType g => NeedsEquality(g.Inner, seen),
+        IrPulseType => true,
+        _ => false,
+    };
+
         var predicate = s.Refinements.Length == 0
             ? "True"
             : SpecEmitter.Conjunction(s.Refinements.Select(r => _spec.AsProp(_spec.Emit(r, scope))));
@@ -1056,7 +1081,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         sb.AppendLine();
         // R22.6. A generic `[Spec]` struct's parameters are explicit on the two types and
         // implicit on the predicate, as R15.2 has them for a class.
-        var binders = new TypeBinders(s.TypeParameters);
+        var binders = new TypeBinders(s.TypeParameters, NeedsEquality(s, []));
         GhostStorageEmitter.Checks(sb, s.Name, s.Fields, s.TypeParameters);
         sb.Append("noeq type ").Append(Names.StructRaw(s.Name)).Append(binders.Explicit).AppendLine(" = {");
         foreach (var f in s.Fields)
@@ -1080,6 +1105,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             // R37.8. Only a type parameter a field holds needs a default of its own.
             var needs = string.Concat(s.TypeParameters
                 .Where(p => s.Fields.Any(f => f.Type is IrTypeParamType { Name: var n } && n == p))
+        sb.AppendLine($"instance {Names.StructType(s.Name)}__equality{binders.Implicit} : " +
+                      $"Pulse.Lib.CSharp.EqualityModel.has_equality {binders.App(Names.StructType(s.Name))} = " +
+                      $"Pulse.Lib.CSharp.EqualityModel.opaque_equality {binders.App(Names.StructType(s.Name))}");
                 .Select(p => $" {{| Pulse.Lib.CSharp.Inhabited.has_default {Names.TypeParam(p)} |}}"));
             sb.AppendLine();
             sb.AppendLine($"instance {Names.StructType(s.Name)}__has_default{binders.Implicit}{needs} : " +
@@ -1212,6 +1240,16 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     /// </summary>
     internal static bool InvariantNamesThis(IrClass c) =>
         c.Invariants.Concat(c.ModelBody is null ? [] : [c.ModelBody])
+        // Equality evidence is nominal. In particular, there is no global
+        // reference-equality instance for Box, and casts never retag comparer
+        // handles. Generic clients must eventually receive this same dictionary
+        // in both their executable signatures and persistent heap invariants.
+        const string equality = "Pulse.Lib.CSharp.EqualityModel";
+        sb.AppendLine();
+        sb.AppendLine($"instance {Names.ClassType(c.Name)}__default_equality{tb.Implicit} : {equality}.has_equality {opt} =");
+        sb.AppendLine(c.HasReferenceDefaultEquality
+            ? $"  {equality}.reference_equality {raw}"
+            : $"  {equality}.opaque_equality {opt}");
             .SelectMany(Passes.Check.Subexpressions).OfType<IrVar>().Any(v => v.Name == Names.This);
 
     /// <summary>
@@ -1569,7 +1607,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
     /// <summary>R27.4. The record type a region class's heap maps its boxes to.</summary>
     internal static string RegionRaw(IrClassType k) =>
-        Types.Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments);
+        Types.Applied($"{Names.ClassModule(k.Name)}.{Names.ClassRaw(k.Name)}", k.TypeArguments, !k.Plain);
 
     /// <summary>R27.4. The region resource, at a permission and a heap.</summary>
     internal static string RegionAt(IrClassType k, string perm, string heap) =>
@@ -1729,6 +1767,9 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         // R3.10: the invariant is indexed by the model. An un-indexed `inv (x: C)` puts
         // the object's whole state under an existential, so no postcondition could relate
         // the post-state to the pre-state — memory safety and nothing more.
+        sb.AppendLine($"instance {Names.ClassType(c.Name)}__equality{tb.Implicit} : " +
+                      $"Pulse.Lib.CSharp.EqualityModel.has_equality {tb.App(Names.ClassType(c.Name))} = " +
+                      $"Pulse.Lib.CSharp.EqualityModel.opaque_equality {tb.App(Names.ClassType(c.Name))}");
         //
         // R3.10c: it is also indexed by a *permission*, which propagates to every resource
         // conjunct. The binder is meta-argument-defaulted (F21), so `class_C__inv x m`
@@ -1783,7 +1824,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
             sb.AppendLine($"  {abstraction}");
             var complete = valid + "_model";
             sb.AppendLine($"let {complete}{tb.Implicit} {thisParam}(r: {tb.App(Names.ClassRaw(c.Name))}) : prop =");
-            sb.AppendLine($"  ({pureRep}) /\\ {Names.ClassModelPred(c.Name)} ({abstraction})");
+            sb.AppendLine($"  ({pureRep}) /\\ {Names.ClassModelPred(c.Name)}{tb.ImplicitArguments} ({abstraction})");
             sb.AppendLine($"ghost fn {current}_now{tb.Implicit} " +
                 $"(this: {tb.App(Names.ClassType(c.Name))}) (p: perm) " +
                 $"(#r: erased (r: {tb.App(Names.ClassRaw(c.Name))}{{{complete} {(InvariantNamesThis(c) ? "this " : "")}r}}))");
@@ -2161,7 +2202,12 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         var nominal = Types.Render(t);
         var raw = Types.Applied($"{Names.StructModule(t.Name)}.{Names.StructRaw(t.Name)}", t.TypeArguments);
         var refined = $"(pal_v: {raw} {{ {Names.StructModule(t.Name)}.{Names.StructPred(t.Name)} pal_v }})";
-        var binders = string.Concat(typeParameters.Select(p => $" ({Names.TypeParam(p)}: Type0)"));
+        bool Mentions(string identifier) => System.Text.RegularExpressions.Regex.IsMatch(
+            nominal, $@"(?<![\w']){System.Text.RegularExpressions.Regex.Escape(identifier)}(?![\w'])");
+        // Every quantified binder must occur in the trigger. Composite instances can
+        // synthesize their own equality evidence without using the enclosing dictionaries.
+        var binders = new TypeBinders([.. typeParameters.Where(p => Mentions(Names.TypeParam(p)))]).Explicit +
+            new TypeBinders([.. typeParameters.Where(p => Mentions("equality_" + Names.TypeParam(p)))]).Equality;
         var eq = $"reveal #({nominal}) x == reveal #{refined} x";
         return $"let {name}{binders} (x: erased {refined})\n" +
                $"  : Lemma ({eq})\n" +
@@ -2324,9 +2370,10 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
     {
         static string BinderName(string b) =>
             System.Text.RegularExpressions.Regex.Match(b, @"^[\(\{]\|?\s*#?([^:\s]+)").Groups[1].Value;
-        var tyCount = method.TypeParameters.Length + method.DefaultedTypeParameters.Length;
+        var tyCount = 2 * method.TypeParameters.Length + method.DefaultedTypeParameters.Length;
         var tys = plan.ParamBinders.Take(tyCount).ToList();
-        var tyNames = tys.Select(BinderName).Where(n => n != "_").ToList();
+        var tyNames = tys.Select(b =>
+            b.StartsWith("{|", StringComparison.Ordinal) ? "#" + BinderName(b) : BinderName(b)).ToList();
         var own = plan.ParamBinders.Skip(tyCount).ToList();
         // The trace leads and the node closes the lifted method's parameters.
         var traceBinder = own[0];
@@ -2344,7 +2391,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
                     ghosts.Add($"(pre_{p.Name}: erased ({Types.Render(t)}))"); break;
                 // R27.40. A captured object is owned at its model, like an array at its contents.
                 case IrClassType { Plain: false } c when p.Fraction is null && !c.Nullable:
-                    ghosts.Add($"(pre_{p.Name}: erased ({Types.Applied($"{Names.ClassModule(c.Name)}.{Names.ClassModel(c.Name)}", c.TypeArguments)}))");
+                    ghosts.Add($"(pre_{p.Name}: erased ({Types.Applied($"{Names.ClassModule(c.Name)}.{Names.ClassModel(c.Name)}", c.TypeArguments, !c.Plain)}))");
                     break;
                 case IrClassType { Plain: false }:
                     diagnostics.Error("PALCS0709", p.Loc,
@@ -2370,7 +2417,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
 
         sb.AppendLine();
         sb.Append($"let {protocol}");
-        foreach (var b in tys.Where(b => !b.StartsWith("{|"))) sb.Append(' ').Append(b);
+        foreach (var b in tys) sb.Append(' ').Append(b);
         foreach (var b in captures) sb.Append(' ').Append(b);
         sb.AppendLine($" (tr_raw: Seq.seq {entry}) : slprop =");
         sb.AppendLine($"  let {traceName} : erased (Seq.seq {entry}) = hide tr_raw in");
@@ -2386,7 +2433,7 @@ public sealed class PulseEmitter(DiagnosticBag diagnostics)
         {
             bound = $"({Names.LambdaBound(method.Name)} {applied})".Replace(" )", ")");
             sb.Append($"let {Names.LambdaBound(method.Name)}");
-            foreach (var b in tys.Where(b => !b.StartsWith("{|"))) sb.Append(' ').Append(b);
+            foreach (var b in tys) sb.Append(' ').Append(b);
             foreach (var b in captures) sb.Append(' ').Append(b);
             sb.AppendLine(" : erased int =");
             sb.AppendLine($"  hide ({_spec.Emit(lb, plan.PreScope).Text})");

@@ -43,7 +43,7 @@ internal static class NominalFactsEmitter
         var name = "NominalFacts_" + cls.Name;
         var text = $"module {name}\nmodule Seq = FStar.Seq\nmodule I32 = FStar.Int32\n" +
             "module CS = Pulse.Lib.CSharp.Seq\nmodule CA = Pulse.Lib.CSharp.Arith\n" +
-            $"let fact {string.Join(" ", cls.TypeParameters.Select(t => $"({Names.TypeParam(t)}:Type0)"))} " +
+            $"let fact {new TypeBinders(cls.TypeParameters, true).Explicit} " +
             $"(items:Seq.seq {Types.Atom(itemType.Element)}) (scalar:{Types.Render(scalarType)}) : prop =\n  {body}\n";
         return new EmittedModule(name, text) {
             Origin = [new Provenance("*", cls.Loc)], Origins = [new LineOrigin(1, cls.Loc)]
