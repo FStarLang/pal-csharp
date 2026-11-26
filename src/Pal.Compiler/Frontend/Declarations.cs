@@ -270,9 +270,8 @@ public static class Declarations
                     !IsReadOnly(callee, model.Compilation, visiting, known))
                     return true;
 
-                // An owned array handed to a callee may come back written. Assuming it
-                // does is the strict direction, and the strict direction costs a caller an
-                // existential; the permissive one would be a lie.
+                // An owned array handed to a callee may come back written, unless the
+                // corresponding by-value parameter only borrows a fraction.
                 // R22.25. Except where R22.25 models the callee as a search, which takes
                 // the array read-only; and R25.5's binary search.
                 if (model.GetSymbolInfo(call).Symbol is IMethodSymbol
@@ -287,10 +286,17 @@ public static class Declarations
                     (SymbolEqualityComparer.Default.Equals(ghost.ContainingType, known.Pal) ||
                      Has(ghost, known.SpecAttribute) || Has(ghost, known.LemmaAttribute)))
                     continue;
+                var invocation = model.GetOperation(call) as Microsoft.CodeAnalysis.Operations.IInvocationOperation;
                 foreach (var argument in call.ArgumentList.Arguments)
                 {
+                    // Roslyn may attach a parenthesized argument to its inner expression.
+                    var parameter = invocation?.Arguments
+                        .FirstOrDefault(a => argument.Span.Contains(a.Syntax.Span))?.Parameter;
                     if (model.GetSymbolInfo(RootOf(argument.Expression)).Symbol
-                            is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol })
+                            is IFieldSymbol { IsStatic: false, Type: IArrayTypeSymbol } &&
+                        !(known is not null &&
+                          parameter is { RefKind: RefKind.None, Type: IArrayTypeSymbol } &&
+                          Has(parameter, known.FracAttribute)))
                         return true;
                     // R33.24. A `ref` argument the callee may write through: a `ref` local
                     // (R33.16's `ref entry` into a field's array) or a field itself.
