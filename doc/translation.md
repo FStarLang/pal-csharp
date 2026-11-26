@@ -4472,8 +4472,10 @@ public static SpecAssoc<K, V> Entry<K, V>(K key, V value, SpecAssoc<K, V> rest) 
 ```
 
 **R11.1a.** A *specification-type declaration* — a type carrying `[SpecType]`, **or** a
-type declaring any `[SpecOp]` or `[SpecCtor]` member — is skipped wholesale by the
-frontend, along with every member of it.
+type declaring any `[SpecOp]` or `[SpecCtor]` member — has no translated runtime
+representation. Members bound to F* are skipped. A binding container without
+`[SpecType]` may also contain annotated static methods or lemmas with checked bodies;
+these are collected normally. Adding a binding sibling must not suppress them.
 
 This is not an optimisation, it is what lets a user write a specification type in an
 ordinary source file beside the code that uses it. Such a declaration is not a program and
@@ -6050,6 +6052,23 @@ also when the method has only Plain pointers or primitive values, not just
 automatically owned objects or wrapped calls. An effectful condition is evaluated
 once, with the original exception and cleanup behavior. Explicit `Pal.Join`
 annotations are still handled explicitly, not discarded by this guard lowering.
+
+Direct raising calls with live local ownership or enumerable loans use a checked
+`__outcome` adapter. Its precondition is the callee's, and its postcondition selects
+the original normal or exceptional resources according to the returned `either`.
+It catches the original exception without weakening either contract. The caller
+eliminates that outcome with a checked constructor rewrite, restores pending
+enumerable loans, performs its ordinary exceptional cleanup, and re-raises the
+same exception. Thus a live iterator restores its source and a temporary snapshot
+is reclaimed before the enclosing `raises` is required. No exception is assumed
+impossible; even an impossible path must discharge the enclosing exception contract.
+
+Pulse does not yet support exception jumps in loop conditions. A direct raising
+call there uses a checked `__nothrow` adapter: it retains the callee's normal
+contract and additionally requires the negation of every declared exception
+case. The call site must prove that requirement from its invariant; a genuinely
+throwing condition is not accepted. This does not narrow the enclosing method's
+declared input domain or silently discard an exception.
 
 ### R19.3 `[Throws]` is the `raises` clause
 
@@ -9914,6 +9933,40 @@ only new trust: each says the read or call is pure and does not throw.
 
 ## 30. `Dictionary<TKey,TValue>` and the rest of `HashSet<T>`
 
+### Default-equality evidence
+
+The public equality model now carries a `has_equality T` dictionary through generic
+methods and specifications. Owned generic storage types retain that dictionary as
+an inductive parameter, so a container cannot change its equality interpretation
+merely by refolding an empty invariant. Recursive storage uses the same named
+dictionary at every recursive occurrence.
+This storage requirement propagates through structs and plain classes containing
+owned references, including cyclic nodes with owner back-pointers. Lifted callback
+protocols and nullary ghost calls also retain and saturate their evidence arguments.
+
+The compiler constructs reference-identity evidence only for sealed plain classes
+whose direct base is `object`, with no `Equals` override and no `IEquatable<U>`
+implementation. Other types retain opaque default behavior. This is a general
+nominal classification, not a rule about any collection or node name. The reference
+interpretation uses the existing `RefEq.ref_eq`; its equal-hash property is proved
+by substitution, without a new equality or algorithm axiom.
+
+`EqualityModel`'s comparer handles have canonical opaque/reference-default
+categories. Casts preserve the complete handle; checked string wrappers preserve
+opaque runtime identity tokens. General `box:T:...` and `box?:T:...` bindings
+describe conversion of a bound representation to `object`. An
+`implicit:P:...` binding supplies the number of implicit operands following a
+bound property's explicit type arguments, avoiding partial dictionary application.
+
+The original trusted equality/string interfaces are retained as `*Opaque`.
+The public randomized-comparer factory exposes an effectful relational contract:
+two calls are not identified, and equality preservation is used after the call.
+Its implementation and wrapper laws are checked against the existing model.
+`test/equality_evidence` checks nominal positive/negative controls, actual generated
+storage coherence, and rejection of repeat-factory identity. The actual CoreLib
+HashSet clients in `pal/HashSet/ReferenceKeys.cs` prove duplicate-reference rejection
+and distinct-reference insertion.
+
 §24 verified `HashSet<T>`'s lookups and removal. §30 adds the members that grow, fill and
 rebuild the table (`AddIfNotPresent`, `Resize`, `EnsureCapacity`, `TrimExcess`,
 `Initialize`), and the same for `Dictionary<TKey,TValue>` (`TryInsert` and its wrappers,
@@ -9959,12 +10012,24 @@ Both are proved and fire by pattern.
 
 ### R30.5 Static helpers of bound static classes read only their arguments
 
-A static method of a static class bound by R21.5 (`HashHelpers.GetPrime`) reads no state,
+A static method of a static class bound by R21.5 (`HashHelpers.GetPrimeAtLeast`) reads no state,
 like a method outside the sources. Its binding is `Pulse.Lib.CSharp.HashSize`:
 `get_prime`, `get_prime_at_least` and `is_prime`, which are **trusted** (`HashHelpers`
 trial-divides upward without a bound). They state only that the result is at least the
 request and at least 3, prime, and at most `MaxPrimeArrayLength` (`0x7FFFFFC3`) when the
 request is.
+
+`HashCommon` connects the executable `GetPrime` call to the checked
+`HashSize.Checked.get_prime` wrapper through `[Implements]`, with an explicit
+`[Throws(ArgumentException, "min < 0")]` contract. This is effect-aware rather than a
+pure `SpecBinding`: callers must preserve their owned resources on exceptional exits,
+including `EnsureCapacity`'s closed receiver invariant. The wrapper implements the
+source's negative-size guard and uses the existing trusted search only for nonnegative
+sizes. The unchanged C# search still has the same runtime/model correspondence trust
+as the former binding; no new prime-search assumption is introduced. The wrapper
+accepts every signed input, and the nonnegative regression has no upper-bound
+precondition. `EnsureCapacity` retains its pre-existing `capacity <= MaxPrimeArrayLength`
+allocation restriction.
 
 ### R30.6 A type test against a bound library class
 
@@ -10558,9 +10623,14 @@ the sequences before and after.
 
 ### Findings
 
-* **Capacity bound.** Inserting into a table of `MaxPrimeArrayLength` (`0x7FFFFFC3`)
-  slots throws `OutOfMemoryException` from `Resize`; the inserting members require fewer
-  slots than that.
+* **Capacity exhaustion.** For nonnegative input, `ExpandPrime` throws
+  `ArgumentException` once `oldSize >= MaxPrimeArrayLength` (`0x7FFFFFC3`): doubling
+  wraps negative and `GetPrime` rejects it. This exceptional path is checked.
+  `HashSet.Add`, `AddIfNotPresent`, and their resizing helper admit this outcome
+  explicitly, rather than requiring spare capacity. A successful insertion grows
+  the slot count by at most one. Other inserting contracts still impose their
+  existing capacity bounds. `HashCommon/CapacityRegression.cs` checks growth to the
+  maximum and the absence of a normal return when growing from it.
 * **Non-null keys.** `Resize(forceNewHashCodes: true)` stores
   `comparer.GetHashCode(entry.key)` without the null case `Equality.hash` has; it is correct
   only because no key is null. That is now part of the invariant.
@@ -11104,7 +11174,9 @@ leads to one borrowing struct, its *core*.
   refinement. F* gives the two refinements distinct SMT symbols, so nothing links the copy
   to the result. The module gets a *reveal bridge* for each such type: a lemma, proved by
   `trefl`, that the two `reveal`s of the same erased value are equal, triggered on the
-  nominal one.
+  nominal one. Only type and equality-evidence binders occurring in that trigger
+  are quantified: a compound instance can synthesize its own evidence, and an unused
+  enclosing dictionary would make the SMT pattern invalid.
 
 ### R32.13 Views
 
@@ -11722,6 +11794,32 @@ array of length `n` holding the old prefix, with the rest at the default), assig
 fresh `new T[n]`, and returning it are translated; any other use of it is reported
 (PALCS0863). The old array is dropped on a resize or a reassignment, as the garbage
 collector would.
+
+**R34.10a. Optional owned-object locals.** A nullable, nonrecursive owned-class local
+initialized to `null`, or initialized by a producing call and subsequently reassigned,
+uses `ObjectCell.pts_to inv cell model`. Its model is `None` for null or `Some m` for an
+owned object at model `m`. The checked support module owns both the lexical reference
+cell and the current object's invariant. Replacement and scope exit leave unreachable
+objects to the CLR garbage collector, as R34.10 does for arrays.
+
+`x ??= e` becomes an actual null test with `e` evaluated only in the null branch.
+Assignments accept object-producing calls. A receiver call temporarily extracts the
+object's invariant and returns it to the cell afterward. A raising call with a primitive
+result, non-owning named or literal arguments, and no consumed arguments catches its
+outcome in a local function, restating the callee's normal and exceptional contracts.
+It restores cell ownership before returning or running the existing throw epilogue.
+Other uses, including escaping or aliasing the cell, are reported rather than translated
+as immutable references. Existing `Pal.Join` and loop invariants describe branch and loop
+state; observations project the non-null model and null tests inspect the option tag.
+`test/ordereddict` checks lazy and already-initialized locals, repeated initialization,
+loops, and calls that mutate and then throw, both propagated and caught.
+
+An explicit resource join naming a closed readonly owner through a `[Plain]`
+reference replaces that owner's automatic class-invariant frame. The resource
+predicate must account for its permissions, including any trade restoring them.
+An opaque handle alone does not expose this footprint: name the owner in the
+predicate, as the breadth-first view walk does with `HandleOrClosed`. Pulse still
+checks both branches and rejects missing or duplicate ownership.
 
 **R34.11. Arms that a join would lose.** An `if` in a loop body, followed by more of the
 body, whose arm declares a local (a Pulse `let mut`, which needs a known post-condition) or
@@ -12684,9 +12782,27 @@ with `indexLimit <= 32 * intArrayLength`; `zero_bits`, `set_bits` and `marked_bi
 the words to the bits. The unannotated `Span` property is used by the specification and
 by the dead growth branch (R37.4) only.
 
-**R37.3. The trusted fallback.** `CheckUniqueAndUnfoundElementsFallback` is `[Admit]`: its
-`HashSet<Node>` uses reference equality on nodes, which is not modelled. Its contract
-states the same counts as the main method. `BitOperations.RoundUpToPowerOf2` is bound to
+**R37.3. The checked fallback.** `CheckUniqueAndUnfoundElementsFallback` has no
+`[Admit]`. Both ordinary and view implementations prove the same counting contract
+as the bitmap path, using the actual lazy `HashSet<Node>` allocation and `Add`.
+`SortedSetInductive.Fallback` proves node/key injectivity, range-filtered seen-node
+insertion and miss invariants, counting induction, and early-exit correctness.
+Its reference adapter connects these predicates to HashSet membership, including
+insertion at an arbitrary position and duplicate insertion. `ObjectCell` (R34.10a)
+retains ownership across `??=`, calls, loop joins, exceptions, and scope exit.
+Ordinary and view `FindNode` expose the returned node's membership and
+comparer-equivalent key; the view preserves conditional count validity and any
+initial root-validity fact. The fallback preserves view coherence and count
+validity without a small-tree restriction.
+
+The loop bounds HashSet slots by the processed input prefix. Capacity exhaustion
+can therefore raise `ArgumentException` only when the input length exceeds
+`0x7FFFFFC3`; this is an exception contract, not a new smaller input precondition.
+Public SetEquals excludes its equal-comparer SortedSet fast path from that
+exception allowance. Proof snapshots in HashSet's insertion and resizing paths
+use conditional `Pal.Capture`, so evaluating specification-only expressions is
+also erased by the stock C# compiler.
+`BitOperations.RoundUpToPowerOf2` is bound to
 `SortedSetCount.round_up_pow2`, which only the dead growth branch calls.
 
 **R37.4. The growth branch is dead.** Every position below a tree of height `h` is below
@@ -12841,11 +12957,11 @@ validity through all three loops.
 `SortedSetInductive.RangeCounts` proves equality of range-restricted counts and
 ordinary counts over the filtered sequence, without new assumptions. This bridges
 the helper's actual counting contract to public logical equality.
-The new view SetEquals contract requires at most 126 underlying items, ensuring
-the height bound is at most 12 and the checked bitmap path is used. The constructed
-regression satisfies this bound. The admitted large-tree fallback's contract has
-not been strengthened to promise cache coherence; the helper's added
-cache-preservation guarantee is conditional on the small-tree bound.
+The view SetEquals contract has no 126-item restriction. Both counting paths
+preserve view coherence and conditional count-cache validity. Additional public
+clients construct 256-element sets and prove List-backed equality true and
+view equality false; runtime checks explicitly demand a height bound above 12
+and exercise duplicate insertion, HashSet growth, misses, and empty input.
 Active SetEquals now accepts a general enumerable with checked source evidence;
 the other three comparisons retain Exactly. The persistent
 `PublicRegression.ViewSetEqualsListFalse` client constructs the ten-item set,
@@ -12869,6 +12985,16 @@ installed locally and reproducibly pinned by the SHA256 of
 `tools/fstar-core-freshness.patch`; the original compiler remains available for
 the before/after experiment. This is not a contract or allocation workaround.
 
+The same pinned patch also repairs two Pulse freshness checks. Stack-local
+cleanup posts can retain solved annotation unification nodes, which reflection's
+free-variable approximation conservatively treats as containing every variable.
+The return and bind-continuation checks now deep-compress their posts before
+examining free variables; neither freshness check is removed. Unsolved nodes
+retain conservative treatment. `ReturnPostCompression.fst` in the patch and
+`GenericRow.LazyGenericOwner` exercise inferred dictionaries in local annotations.
+The installed compiler must contain both this repair and the earlier Core
+binder repair, together with matching native compiler artifacts.
+
 **R20.2 and R28.7, extended.**
 * An `[Admit]`ted member's body is not lowered on the borrowing path either (R20.2).
 * R28.7's check that a borrowing struct's member does not write the borrowed object skips
@@ -12887,7 +13013,6 @@ the before/after experiment. This is not a contract or allocation workaround.
 
 ### Trusted (§37)
 
-* `CheckUniqueAndUnfoundElementsFallback`'s contract (R37.3).
 * The `BitOperations.Log2` binding (R21.5), now used for `GetApproximateMaxHeight`, and the
   `RoundUpToPowerOf2` binding, used only in dead code (R37.3).
 
